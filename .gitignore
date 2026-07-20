@@ -3,7 +3,8 @@ dist/
 build/
 artifacts/
 .native/
-native/whalehall-core/target/
+whalehall-local/target/
+native/**/target/
 
 .DS_Store
 *.log

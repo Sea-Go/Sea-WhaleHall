@@ -25,5 +25,5 @@
 		"src/**/*.tsx",
 		"tests/**/*.ts"
 	],
-	"exclude": ["build", "artifacts", "dist", "node_modules", "native/**/target"]
+	"exclude": ["build", "artifacts", "dist", "node_modules", "whalehall-local/target"]
 }

@@ -6,7 +6,7 @@ type TargetOS = "macos" | "linux" | "win";
 type TargetArch = "arm64" | "x64";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const manifestPath = resolve(projectRoot, "native/whalehall-core/Cargo.toml");
+const manifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
 
 function hostOS(): TargetOS {
 	if (process.platform === "darwin") return "macos";
@@ -46,10 +46,12 @@ export function buildNative(): string {
 		"--locked",
 		"--manifest-path",
 		manifestPath,
+		"--package",
+		"whalehall-local-server",
 	]);
 
-	const binaryName = os === "win" ? "whalehall-core.exe" : "whalehall-core";
-	const source = resolve(projectRoot, "native/whalehall-core/target/release", binaryName);
+	const binaryName = os === "win" ? "whalehall-local.exe" : "whalehall-local";
+	const source = resolve(projectRoot, "whalehall-local/target/release", binaryName);
 	const destination = resolve(projectRoot, `.native/${os}-${arch}`, binaryName);
 	mkdirSync(dirname(destination), { recursive: true });
 	copyFileSync(source, destination);

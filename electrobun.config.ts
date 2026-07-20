@@ -12,7 +12,7 @@ function currentTarget(): { os: "macos" | "linux" | "win"; arch: "arm64" | "x64"
 }
 
 const target = currentTarget();
-const nativeBinary = target.os === "win" ? "whalehall-core.exe" : "whalehall-core";
+const nativeBinary = target.os === "win" ? "whalehall-local.exe" : "whalehall-local";
 const nativeSource = `.native/${target.os}-${target.arch}/${nativeBinary}`;
 
 export default {
@@ -32,8 +32,15 @@ export default {
 			"dist/views": "views",
 			[nativeSource]: `native/${nativeBinary}`,
 		},
-		watch: ["src/views", "native/whalehall-core/src", "scripts"],
-		watchIgnore: ["dist/**", ".native/**", "native/whalehall-core/target/**"],
+		watch: [
+			"src/views",
+			"src/agent",
+			"whalehall-local/protocol/src",
+			"whalehall-local/core/src",
+			"whalehall-local/server/src",
+			"scripts",
+		],
+		watchIgnore: ["dist/**", ".native/**", "whalehall-local/target/**"],
 		mac: {
 			bundleCEF: false,
 			codesign: false,

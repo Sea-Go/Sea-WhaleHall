@@ -6,47 +6,68 @@ import {
 	Screen,
 	Updater,
 } from "electrobun/bun";
-import { AgentService } from "./agent/agent-service";
-import { RustBridge } from "./agent/rust-bridge";
+import { AgentRuntime } from "../agent/agent-runtime";
+import { LocalToolClient } from "../agent/local-tool-client";
+import type {
+	LocalRuntimeStatus,
+	LocalToolEvent,
+} from "../agent/local-protocol";
 import type {
 	ClientRPC,
 	PetRPC,
 	PetState,
-	RuntimeStatus,
 } from "../shared/contracts";
 
 const HMR_ORIGIN = "http://127.0.0.1:5173";
-const nativeBinary = process.platform === "win32" ? "whalehall-core.exe" : "whalehall-core";
+const nativeBinary = process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local";
 const nativePath = join(PATHS.RESOURCES_FOLDER, "app", "native", nativeBinary);
 
-const agent = new AgentService(new RustBridge(nativePath));
+const agent = new AgentRuntime(new LocalToolClient(nativePath));
 let petVisible = true;
 let shuttingDown = false;
 
 let clientWindow: BrowserWindow;
 let petWindow: BrowserWindow;
 
-function petStateFor(status: RuntimeStatus): PetState {
-	if (status.state === "ready") return { mood: "idle", message: "Rust agent ready" };
-	if (status.state === "starting") return { mood: "busy", message: "Starting agent…" };
-	if (status.state === "degraded") {
-		return { mood: "error", message: status.lastError ?? "Agent unavailable" };
+function petStateFor(status: LocalRuntimeStatus): PetState {
+	if (status.activeCalls > 0) {
+		return { mood: "busy", message: `${status.activeCalls} local tool running…` };
 	}
-	return { mood: "idle", message: "Agent stopped" };
+	if (status.state === "ready") return { mood: "idle", message: "Rust agent ready" };
+	if (status.state === "starting") return { mood: "busy", message: "Starting local tools…" };
+	if (status.state === "degraded") {
+		return { mood: "error", message: status.lastError ?? "Local tools unavailable" };
+	}
+	return { mood: "idle", message: "Local tools stopped" };
 }
 
-function sendRuntimeStatus(status = agent.getStatus()): void {
-	clientRPC.send.runtimeStatusChanged(status);
+function sendLocalStatus(status = agent.getLocalStatus()): void {
+	clientRPC.send.localStatusChanged(status);
 	petRPC.send.setPetState(petStateFor(status));
 }
 
+function sendToolEvent(event: LocalToolEvent): void {
+	clientRPC.send.localToolEvent(event);
+	const name = typeof event.data.name === "string" ? event.data.name : "local tool";
+	if (event.event === "tool.started" || event.event === "tool.progress") {
+		petRPC.send.setPetState({ mood: "busy", message: `Running ${name}…` });
+	} else if (event.event === "tool.completed") {
+		petRPC.send.setPetState({ mood: "happy", message: `${name} completed` });
+	} else if (event.event === "tool.failed") {
+		petRPC.send.setPetState({ mood: "error", message: `${name} failed` });
+	} else {
+		petRPC.send.setPetState({ mood: "idle", message: `${name} cancelled` });
+	}
+}
+
 const clientRPC = BrowserView.defineRPC<ClientRPC>({
-	maxRequestTime: 6000,
+	maxRequestTime: 35_000,
 	handlers: {
 		requests: {
-			getRuntimeStatus: () => agent.getStatus(),
-			healthCheck: () => agent.healthCheck(),
-			echo: ({ message }) => agent.echo(message),
+			getLocalStatus: () => agent.getLocalStatus(),
+			listLocalTools: async () => ({ tools: await agent.listLocalTools() }),
+			callLocalTool: (call) => agent.callLocalTool(call),
+			cancelLocalTool: ({ callId }) => agent.cancelLocalTool(callId),
 			setPetVisible: ({ visible }): { visible: boolean } => {
 				petVisible = visible;
 				if (visible) petWindow.showInactive();
@@ -66,14 +87,14 @@ const petRPC = BrowserView.defineRPC<PetRPC>({
 		messages: {
 			ready: () => {
 				console.log("[pet] React renderer ready");
-				petRPC.send.setPetState(petStateFor(agent.getStatus()));
+				petRPC.send.setPetState(petStateFor(agent.getLocalStatus()));
 			},
 			interacted: () => {
 				petRPC.send.setPetState({
 					mood: "happy",
 					message: "Hello from WhaleHall!",
 				});
-				setTimeout(() => sendRuntimeStatus(), 900);
+				setTimeout(() => sendLocalStatus(), 900);
 			},
 		},
 	},
@@ -143,14 +164,15 @@ petWindow = new BrowserWindow({
 petWindow.setAlwaysOnTop(true);
 petWindow.setVisibleOnAllWorkspaces(true);
 
-agent.onStatusChange(sendRuntimeStatus);
+agent.onStatusChange(sendLocalStatus);
+agent.onToolEvent(sendToolEvent);
 clientWindow.webview.on("dom-ready", () => {
-	sendRuntimeStatus();
+	sendLocalStatus();
 	clientRPC.send.petVisibilityChanged({ visible: petVisible });
 });
 petWindow.webview.on("dom-ready", () => {
 	console.log("[pet] DOM ready");
-	sendRuntimeStatus();
+	sendLocalStatus();
 });
 
 function shutdown(): void {
@@ -174,4 +196,4 @@ process.once("SIGTERM", () => {
 });
 
 void agent.start();
-console.log(`WhaleHall started; native agent: ${nativePath}`);
+console.log(`WhaleHall started; local tool host: ${nativePath}`);

@@ -1,0 +1,5 @@
+{"event":"tool.started","callId":"call-1","data":{"name":"demo.wait"}}
+{"event":"tool.progress","callId":"call-1","data":{"progress":50,"message":"Waiting"}}
+{"event":"tool.completed","callId":"call-1","data":{"name":"demo.wait"}}
+{"event":"tool.failed","callId":"call-2","data":{"name":"demo.wait","code":"INTERNAL_ERROR","message":"failed"}}
+{"event":"tool.cancelled","callId":"call-3","data":{"name":"demo.wait","message":"cancelled"}}

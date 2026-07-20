@@ -1,12 +1,20 @@
 import type { RPCSchema } from "electrobun/bun";
-import type { EchoResult, HealthResult } from "./protocol";
+import type {
+	LocalRuntimeStatus,
+	LocalToolCall,
+	LocalToolCallResult,
+	LocalToolCancelResult,
+	LocalToolDescriptor,
+	LocalToolEvent,
+} from "../agent/local-protocol";
 
-export type AgentState = "starting" | "ready" | "degraded" | "stopped";
-
-export type RuntimeStatus = {
-	state: AgentState;
-	pid: number | null;
-	lastError: string | null;
+export type {
+	LocalRuntimeStatus,
+	LocalToolCall,
+	LocalToolCallResult,
+	LocalToolCancelResult,
+	LocalToolDescriptor,
+	LocalToolEvent,
 };
 
 export type PetMood = "idle" | "happy" | "busy" | "error";
@@ -19,17 +27,21 @@ export type PetState = {
 export type ClientRPC = {
 	bun: RPCSchema<{
 		requests: {
-			getRuntimeStatus: {
+			getLocalStatus: {
 				params: Record<string, never>;
-				response: RuntimeStatus;
+				response: LocalRuntimeStatus;
 			};
-			healthCheck: {
+			listLocalTools: {
 				params: Record<string, never>;
-				response: HealthResult;
+				response: { tools: LocalToolDescriptor[] };
 			};
-			echo: {
-				params: { message: string };
-				response: EchoResult;
+			callLocalTool: {
+				params: LocalToolCall;
+				response: LocalToolCallResult;
+			};
+			cancelLocalTool: {
+				params: { callId: string };
+				response: LocalToolCancelResult;
 			};
 			setPetVisible: {
 				params: { visible: boolean };
@@ -41,7 +53,8 @@ export type ClientRPC = {
 	webview: RPCSchema<{
 		requests: Record<never, never>;
 		messages: {
-			runtimeStatusChanged: RuntimeStatus;
+			localStatusChanged: LocalRuntimeStatus;
+			localToolEvent: LocalToolEvent;
 			petVisibilityChanged: { visible: boolean };
 		};
 	}>;
