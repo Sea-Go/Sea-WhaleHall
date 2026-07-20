@@ -1,0 +1,19 @@
+import { buildNative } from "./build-native";
+import { stageViewAssets } from "./stage-view-assets";
+
+function run(command: string[]): void {
+	const result = Bun.spawnSync(command, {
+		cwd: process.cwd(),
+		stdout: "inherit",
+		stderr: "inherit",
+	});
+	if (result.exitCode !== 0) {
+		throw new Error(`Command failed (${result.exitCode}): ${command.join(" ")}`);
+	}
+}
+
+console.log("[prebuild] building React views");
+run(["bun", "x", "vite", "build"]);
+stageViewAssets();
+console.log("[prebuild] building Rust child process");
+buildNative();

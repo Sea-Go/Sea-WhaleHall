@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+artifacts/
+.native/
+native/whalehall-core/target/
+
+.DS_Store
+*.log
+.idea/
+.vscode/
