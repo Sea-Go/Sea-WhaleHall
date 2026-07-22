@@ -48,7 +48,10 @@ export type ChildTransport = {
 	kill(signal?: number | NodeJS.Signals): void;
 };
 
-export type SpawnLocalProcess = (binaryPath: string) => ChildTransport;
+export type SpawnLocalProcess = (
+	binaryPath: string,
+	environment?: Readonly<Record<string, string>>,
+) => ChildTransport;
 
 export interface LocalToolProcess {
 	readonly pid: number | null;
@@ -58,7 +61,7 @@ export interface LocalToolProcess {
 	listTools(): Promise<LocalToolDescriptor[]>;
 	callTool(call: LocalToolCall): Promise<LocalToolCallResult>;
 	cancelTool(callId: string): Promise<LocalToolCancelResult>;
-	stop(): void;
+	stop(): Promise<void>;
 	onEvent(listener: (event: LocalToolEvent) => void): () => void;
 	onFailure(listener: (error: LocalClientError) => void): () => void;
 }
@@ -70,9 +73,13 @@ type PendingRequest = {
 	timeout: ReturnType<typeof setTimeout>;
 };
 
-function spawnLocal(binaryPath: string): ChildTransport {
+function spawnLocal(
+	binaryPath: string,
+	environment: Readonly<Record<string, string>> = {},
+): ChildTransport {
 	return Bun.spawn({
 		cmd: [binaryPath],
+		env: { ...process.env, ...environment },
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -90,6 +97,7 @@ export class LocalToolClient implements LocalToolProcess {
 		private readonly binaryPath: string,
 		private readonly options: {
 			spawn?: SpawnLocalProcess;
+			environment?: Readonly<Record<string, string>>;
 			controlTimeoutMs?: number;
 			toolTimeoutMs?: number;
 			maxLineBytes?: number;
@@ -109,7 +117,10 @@ export class LocalToolClient implements LocalToolProcess {
 		this.stopping = false;
 		let child: ChildTransport;
 		try {
-			child = (this.options.spawn ?? spawnLocal)(this.binaryPath);
+			child = (this.options.spawn ?? spawnLocal)(
+				this.binaryPath,
+				this.options.environment,
+			);
 		} catch (error) {
 			const clientError = new LocalClientError(
 				"SPAWN_FAILED",
@@ -171,18 +182,13 @@ export class LocalToolClient implements LocalToolProcess {
 		return result as LocalToolCancelResult;
 	}
 
-	stop(): void {
+	async stop(): Promise<void> {
 		this.stopping = true;
 		const child = this.child;
 		this.child = null;
 		this.rejectPending(new LocalClientError("STOPPED", "whalehall-local was stopped."));
 		if (!child) return;
-		try {
-			void child.stdin.end();
-		} catch {}
-		try {
-			child.kill();
-		} catch {}
+		await closeGracefully(child);
 	}
 
 	onEvent(listener: (event: LocalToolEvent) => void): () => void {
@@ -366,6 +372,20 @@ export class LocalToolClient implements LocalToolProcess {
 			void child.stdin.flush();
 		} catch {}
 	}
+}
+
+async function closeGracefully(child: ChildTransport): Promise<void> {
+	try {
+		void child.stdin.end();
+	} catch {}
+	const exited = await Promise.race([
+		child.exited.then(() => true),
+		Bun.sleep(1000).then(() => false),
+	]);
+	if (exited) return;
+	try {
+		child.kill();
+	} catch {}
 }
 
 export class JsonlProtocolError extends Error {

@@ -77,9 +77,9 @@ export class AgentRuntime {
 		return this.local.cancelTool(callId);
 	}
 
-	stop(): void {
+	async stop(): Promise<void> {
 		this.activeCalls.clear();
-		this.local.stop();
+		await this.local.stop();
 		this.setStatus("stopped", null);
 	}
 

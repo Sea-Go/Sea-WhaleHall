@@ -18,6 +18,8 @@ class FakeChild implements ChildTransport {
 	private stderrController!: ReadableStreamDefaultController<Uint8Array>;
 	private resolveExit!: (code: number) => void;
 	private closed = false;
+	endCalled = false;
+	killCalled = false;
 
 	constructor(private readonly onWrite: (value: string, child: FakeChild) => void = () => {}) {
 		this.stdout = new ReadableStream({
@@ -41,6 +43,7 @@ class FakeChild implements ChildTransport {
 			},
 			flush: () => 0,
 			end: () => {
+				this.endCalled = true;
 				this.exit(0);
 				return 0;
 			},
@@ -64,6 +67,7 @@ class FakeChild implements ChildTransport {
 	}
 
 	kill(): void {
+		this.killCalled = true;
 		this.exit(143);
 	}
 }
@@ -95,6 +99,25 @@ describe("JsonlParser", () => {
 });
 
 describe("LocalToolClient", () => {
+	test("passes the isolated activity data directory to the Rust process", async () => {
+		const child = new FakeChild();
+		let receivedEnvironment: Readonly<Record<string, string>> | undefined;
+		const client = new LocalToolClient("fake", {
+			environment: { WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data" },
+			spawn: (_binaryPath, environment) => {
+				receivedEnvironment = environment;
+				return child;
+			},
+		});
+		await client.start();
+		expect(receivedEnvironment).toEqual({
+			WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data",
+		});
+		await client.stop();
+		expect(child.endCalled).toBe(true);
+		expect(child.killCalled).toBe(false);
+	});
+
 	test("correlates responses and routes streamed events", async () => {
 		const child = new FakeChild((line, process) => {
 			const request = JSON.parse(line) as { id: string; method: string };
@@ -130,7 +153,7 @@ describe("LocalToolClient", () => {
 			client.callTool({ callId: "call-1", name: "system.info", arguments: {} }),
 		).resolves.toEqual({ callId: "call-1", output: { os: "macos" } });
 		expect(events).toEqual(["tool.progress"]);
-		client.stop();
+		await client.stop();
 	});
 
 	test("times out a tool call and sends a best-effort cancellation", async () => {
@@ -148,7 +171,7 @@ describe("LocalToolClient", () => {
 		).rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
 		expect(methods).toEqual(["tool.call", "tool.cancel"]);
 		expect(client.isRunning).toBe(true);
-		client.stop();
+		await client.stop();
 	});
 
 	test("rejects pending requests when the process exits", async () => {

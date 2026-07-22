@@ -60,7 +60,7 @@ class FakeLocalProcess implements LocalToolProcess {
 		return { callId, cancelled: true };
 	}
 
-	stop(): void {
+	async stop(): Promise<void> {
 		this.pid = null;
 		this.isRunning = false;
 	}
