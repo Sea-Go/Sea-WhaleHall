@@ -1,0 +1,14 @@
+self-hosted-runner:
+  labels:
+    - interactive-desktop
+    - whalehall-windows-10-ltsc-x64
+    - whalehall-windows-11-x64
+    - whalehall-ubuntu-gnome-wayland-x64
+    - whalehall-fedora-gnome-wayland-x64
+    - whalehall-arch-kde-wayland-x64
+    - whalehall-debian-xfce-x11-x64
+    - whalehall-macos-14-x64
+    - whalehall-macos-15-arm64
+
+config-variables:
+  - WHALEHALL_ENABLE_DESKTOP_RUNNERS

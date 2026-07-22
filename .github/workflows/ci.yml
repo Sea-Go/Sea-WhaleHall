@@ -13,41 +13,44 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  RUST_TOOLCHAIN: 1.97.1
+  BUN_VERSION: 1.3.14
 
 permissions:
   contents: read
 
 jobs:
-  check-and-build:
-    name: Verify and package · ${{ matrix.name }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macos-arm64
-            os: macos-15
-          - name: windows-x64
-            os: windows-latest
-          - name: linux-x64
-            os: ubuntu-22.04
-    runs-on: ${{ matrix.os }}
+  quality:
+    name: Quality and complete test suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      WHALEHALL_CI_DISPLAY_MODE: degraded
+      WHALEHALL_CI_FOREGROUND_MODE: degraded
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Lint workflow definitions
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Validate CI support scripts
+        run: bash -n scripts/ci/install-linux-dependencies.sh
+
+      - name: Install Linux sensor dependencies
+        run: scripts/ci/install-linux-dependencies.sh debian sensor
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install Rust toolchain
-        shell: bash
         run: |
           rustup set profile minimal
-          rustup toolchain install 1.97.1 --component clippy --component rustfmt
-          rustup default 1.97.1
+          rustup toolchain install "$RUST_TOOLCHAIN" --component clippy --component rustfmt
+          rustup default "$RUST_TOOLCHAIN"
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -55,33 +58,287 @@ jobs:
           workspaces: whalehall-local -> target
           cache-on-failure: true
 
-      - name: Install Linux desktop dependencies
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run complete checks
+        run: bun run check
+
+  hosted-sensors:
+    name: Hosted sensor · ${{ matrix.name }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-22.04
+            os: ubuntu-22.04
+            display_mode: degraded
+            foreground_mode: degraded
+          - name: ubuntu-24.04
+            os: ubuntu-24.04
+            display_mode: degraded
+            foreground_mode: degraded
+          - name: windows-server-2022
+            os: windows-2022
+            display_mode: required
+            foreground_mode: required
+          - name: windows-server-2025
+            os: windows-2025
+            display_mode: required
+            foreground_mode: required
+          - name: macos-14
+            os: macos-14
+            display_mode: required
+            foreground_mode: required
+          - name: macos-15
+            os: macos-15
+            display_mode: required
+            foreground_mode: required
+    runs-on: ${{ matrix.os }}
+    env:
+      WHALEHALL_CI_DISPLAY_MODE: ${{ matrix.display_mode }}
+      WHALEHALL_CI_FOREGROUND_MODE: ${{ matrix.foreground_mode }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Linux sensor dependencies
         if: runner.os == 'Linux'
+        run: scripts/ci/install-linux-dependencies.sh debian sensor
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Rust toolchain
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config libdbus-1-dev libxcb-ewmh-dev libxcb-randr0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+          rustup set profile minimal
+          rustup toolchain install "$RUST_TOOLCHAIN"
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: whalehall-local -> target
+          cache-on-failure: true
+          key: hosted-${{ matrix.name }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Typecheck
-        run: bun run typecheck
+      - name: Test Rust workspace
+        run: bun run test:rust
 
-      - name: Verify Rust sensors and Local Tools
-        run: bun run check:rust
+      - name: Open a deterministic Windows foreground application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $probe = Start-Process notepad.exe -PassThru
+          Start-Sleep -Seconds 2
+          $activated = (New-Object -ComObject WScript.Shell).AppActivate($probe.Id)
+          if (-not $activated) {
+            throw "Unable to activate the Notepad sensor probe window."
+          }
 
-      - name: Enforce native CI probe for every sensor
+      - name: Open a deterministic macOS foreground application
+        if: runner.os == 'macOS'
+        run: |
+          open -a TextEdit
+          osascript -e 'tell application "TextEdit" to activate'
+          sleep 2
+
+      - name: Probe every sensor through the native process
         run: bun run test:sensors:ci
 
-      - name: Test complete TypeScript and process integration suite
-        run: bun test
+  linux-distros:
+    name: Linux distro sensor · ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-22.04
+            image: ubuntu:22.04
+            family: debian
+          - name: ubuntu-24.04
+            image: ubuntu:24.04
+            family: debian
+          - name: debian-12
+            image: debian:12
+            family: debian
+          - name: debian-13
+            image: debian:13
+            family: debian
+          - name: fedora-43
+            image: fedora:43
+            family: fedora
+          - name: fedora-44
+            image: fedora:44
+            family: fedora
+          - name: arch-rolling
+            image: archlinux:base
+            family: arch
+          - name: rocky-9
+            image: rockylinux:9
+            family: rhel
+          - name: alma-9
+            image: almalinux:9
+            family: rhel
+          - name: centos-stream-9
+            image: quay.io/centos/centos:stream9
+            family: rhel
+          - name: centos-stream-10
+            image: quay.io/centos/centos:stream10
+            family: rhel
+          - name: opensuse-leap-16.0
+            image: opensuse/leap:16.0
+            family: suse
+    container:
+      image: ${{ matrix.image }}
+    env:
+      LANG: C.UTF-8
+      WHALEHALL_CI_DISPLAY_MODE: degraded
+      WHALEHALL_CI_FOREGROUND_MODE: degraded
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install distribution dependencies
+        run: scripts/ci/install-linux-dependencies.sh "${{ matrix.family }}" sensor
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test Rust workspace
+        run: cargo test --locked --manifest-path whalehall-local/Cargo.toml --workspace
+
+      - name: Probe every sensor in the distribution
+        run: bun run test:sensors:ci
+
+  virtual-x11:
+    name: Linux virtual desktop · X11/Openbox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DISPLAY: :99
+      WHALEHALL_CI_DISPLAY_MODE: required
+      WHALEHALL_CI_FOREGROUND_MODE: required
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install X11 sensor dependencies
+        run: scripts/ci/install-linux-dependencies.sh debian x11
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup toolchain install "$RUST_TOOLCHAIN"
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: whalehall-local -> target
+          cache-on-failure: true
+          key: virtual-x11
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Start a deterministic X11 desktop
+        run: |
+          nohup Xvfb "$DISPLAY" -screen 0 1280x720x24 > /tmp/whalehall-xvfb.log 2>&1 &
+          for attempt in {1..20}; do
+            if xdpyinfo >/dev/null 2>&1; then break; fi
+            sleep 0.25
+          done
+          xdpyinfo >/dev/null
+          nohup openbox > /tmp/whalehall-openbox.log 2>&1 &
+          nohup xterm -T WhaleHallSensorProbe > /tmp/whalehall-xterm.log 2>&1 &
+          for attempt in {1..20}; do
+            if xdotool search --name WhaleHallSensorProbe windowactivate --sync >/dev/null 2>&1; then break; fi
+            sleep 0.25
+          done
+          xdotool search --name WhaleHallSensorProbe windowactivate --sync >/dev/null
+
+      - name: Probe screen resolution and foreground usage
+        run: bun run test:sensors:ci
+
+  package:
+    name: Package · ${{ matrix.name }}
+    needs: [quality, hosted-sensors, linux-distros, virtual-x11]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-15
+            os: macos-15
+          - name: windows-2025
+            os: windows-2025
+          - name: ubuntu-24.04
+            os: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: scripts/ci/install-linux-dependencies.sh debian desktop
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup toolchain install "$RUST_TOOLCHAIN"
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: whalehall-local -> target
+          cache-on-failure: true
+          key: package-${{ matrix.name }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
       - name: Build Electrobun canary
         run: bun run build:canary
 
       - name: Upload unsigned build artifacts
-        if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: whalehall-${{ matrix.name }}
           path: artifacts/**
