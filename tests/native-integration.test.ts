@@ -199,7 +199,33 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	);
 	for (const probe of sensorCiProbes) {
 		if (probe.sourceFile === "activity.rs" && context.foregroundMode !== "auto") {
-			await Bun.sleep(500);
+			let readinessOutput: unknown;
+			let readinessReached = false;
+			for (let attempt = 0; attempt < 60; attempt += 1) {
+				const readinessCallId = `sensor-activity-readiness-${attempt}`;
+				const readinessCompleted = deferred();
+				sensorCompleted.set(readinessCallId, readinessCompleted);
+				child.stdin.write(
+					`${JSON.stringify({
+						id: readinessCallId,
+						method: "tool.call",
+						params: { name: probe.toolName, arguments: probe.arguments },
+					})}\n`,
+				);
+				await child.stdin.flush();
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
+				readinessOutput = successfulToolOutput(messages, readinessCallId);
+				if (activityCapabilityReady(readinessOutput, context.foregroundMode)) {
+					readinessReached = true;
+					break;
+				}
+				await Bun.sleep(250);
+			}
+			if (!readinessReached) {
+				throw new Error(
+					`Activity sensor did not reach ${context.foregroundMode} capability: ${JSON.stringify(readinessOutput)}`,
+				);
+			}
 		}
 		child.stdin.write(
 			`${JSON.stringify({
@@ -313,10 +339,33 @@ function expectation<const T extends string>(name: string, allowed: readonly T[]
 function toolOutput(messages: LocalMessage[], callId: string): unknown {
 	const response = messages.find((message) => "id" in message && message.id === callId);
 	expect(response).toMatchObject({ ok: true, result: { callId } });
+	return successfulToolOutput(messages, callId);
+}
+
+function successfulToolOutput(messages: LocalMessage[], callId: string): unknown {
+	const response = messages.find((message) => "id" in message && message.id === callId);
 	if (!response || !("ok" in response) || !response.ok) {
 		throw new Error(`Missing successful sensor response for ${callId}`);
 	}
 	return (response.result as { output: unknown }).output;
+}
+
+function activityCapabilityReady(
+	output: unknown,
+	mode: SensorCiContext["foregroundMode"],
+): boolean {
+	const status = output as {
+		state: string;
+		currentSession: unknown | null;
+		lastError: string | null;
+	};
+	if (mode === "required") {
+		return status.state === "running" && status.currentSession !== null;
+	}
+	if (mode === "degraded") {
+		return status.state === "degraded" && typeof status.lastError === "string";
+	}
+	return true;
 }
 
 async function withTimeout(

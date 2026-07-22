@@ -218,9 +218,10 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install Rust toolchain
-        shell: bash
+        shell: sh
         run: |
-          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/whalehall-rustup-init.sh
+          sh /tmp/whalehall-rustup-init.sh -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies

@@ -46,7 +46,7 @@ case "$family" in
   suse)
     as_root zypper --non-interactive refresh
     as_root zypper --non-interactive install --no-recommends \
-      bash ca-certificates cmake curl dbus-1-devel gcc gcc-c++ git libxcb-devel make \
+      ca-certificates cmake curl dbus-1-devel gcc gcc-c++ git libxcb-devel make \
       pkg-config unzip xcb-util-wm-devel
     ;;
   *)
