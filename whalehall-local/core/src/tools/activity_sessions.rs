@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use whalehall_local_protocol::{ToolDescriptor, ToolRisk};
 
-use crate::activity::{ActivityQuery, ActivityService};
+use crate::sensors::activity::{ActivityQuery, ActivityService};
 use crate::{LocalTool, ToolContext, ToolError};
 
 pub(crate) struct ActivitySessionsTool {

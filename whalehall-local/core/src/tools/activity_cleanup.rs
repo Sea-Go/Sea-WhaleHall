@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use whalehall_local_protocol::{ToolDescriptor, ToolRisk};
 
-use crate::activity::{ActivityCacheScope, ActivityService};
+use crate::sensors::activity::{ActivityCacheScope, ActivityService};
 use crate::{LocalTool, ToolContext, ToolError};
 
 pub(crate) struct ActivityCleanupTool {
