@@ -1,4 +1,5 @@
-import type { RPCSchema } from "electrobun/bun";
+import type { RPCSchema } from 'electrobun/bun';
+import type { PetActionId } from './pet-actions';
 import type {
 	LocalRuntimeStatus,
 	LocalToolCall,
@@ -6,7 +7,7 @@ import type {
 	LocalToolCancelResult,
 	LocalToolDescriptor,
 	LocalToolEvent,
-} from "../agent/local-protocol";
+} from '../agent/local-protocol';
 
 export type {
 	LocalRuntimeStatus,
@@ -17,11 +18,50 @@ export type {
 	LocalToolEvent,
 };
 
-export type PetMood = "idle" | "happy" | "busy" | "error";
+export type PetMood = 'idle' | 'happy' | 'busy' | 'error';
+
+/** Canonical, model-independent action identifier shared by every pet surface. */
+export type PetAnimationId = PetActionId;
 
 export type PetState = {
 	mood: PetMood;
 	message: string;
+	action?: PetAnimationId;
+	/** Registry id resolved by the renderer; unknown ids safely fall back to whale. */
+	modelId?: string;
+	environment?: {
+		weather?: 'clear' | 'cloudy' | 'rain' | 'snow';
+		temperatureC?: number;
+		holiday?: string;
+		/** Local calendar day in MM-DD form. */
+		birthday?: string;
+	};
+	/** @deprecated Use action. Kept while older renderer/backend callers migrate. */
+	animation?: PetAnimationId;
+};
+
+export type PetInteractionMessage = {
+	kind:
+		| 'hover'
+		| 'hoverEnd'
+		| 'click'
+		| 'doubleClick'
+		| 'rapidClick'
+		| 'pet'
+		| 'petEnd'
+		| 'poke'
+		| 'dragStart'
+		| 'dragEnd';
+	action: PetAnimationId;
+	modelId: string;
+	zone?: 'head' | 'face' | 'body' | 'tail' | 'limb' | null;
+	pointerId?: number;
+	dragDelta?: { x: number; y: number };
+};
+
+export type NativePetDragState = {
+	dragging: boolean;
+	reason?: 'pointerup' | 'webview' | 'hidden' | 'disposed';
 };
 
 export type ClientRPC = {
@@ -65,13 +105,14 @@ export type PetRPC = {
 		requests: Record<never, never>;
 		messages: {
 			ready: void;
-			interacted: { kind: "click" };
+			interacted: PetInteractionMessage;
 		};
 	}>;
 	webview: RPCSchema<{
 		requests: Record<never, never>;
 		messages: {
 			setPetState: PetState;
+			nativeDragChanged: NativePetDragState;
 		};
 	}>;
 };
