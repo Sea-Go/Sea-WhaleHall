@@ -6,6 +6,9 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use whalehall_local_core::ToolHost;
+use whalehall_local_core::activity::{
+    ActivityConfig, ActivityService, SystemForegroundAppProvider,
+};
 use whalehall_local_protocol::{
     MAX_JSONL_LINE_BYTES, OutboundMessage, Request, Response, RuntimeHealth, ToolCallParams,
     ToolCallResult, ToolCancelParams, ToolCancelResult, ToolListResult,
@@ -16,7 +19,23 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let host = Arc::new(ToolHost::new());
+    let config = ActivityConfig::from_environment().map_err(io::Error::other)?;
+    let activity = ActivityService::start(config, Arc::new(SystemForegroundAppProvider))
+        .map_err(io::Error::other)?;
+    eprintln!("activity database: {}", activity.database_path().display());
+    serve_with_activity(reader, writer, activity).await
+}
+
+pub async fn serve_with_activity<R, W>(
+    reader: R,
+    writer: W,
+    activity: ActivityService,
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let host = Arc::new(ToolHost::with_activity(activity.clone()));
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_output = output_tx.clone();
@@ -103,6 +122,7 @@ where
     }
 
     while calls.join_next().await.is_some() {}
+    activity.shutdown().await;
     drop(event_tx);
     let _ = event_forwarder.await;
     drop(output_tx);
@@ -220,15 +240,49 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tempfile::TempDir;
     use tokio::io::{AsyncWriteExt, BufReader, duplex};
+    use whalehall_local_core::activity::{
+        ActivityConfig, ActivityError, ActivityService, ForegroundApp, ForegroundAppProvider,
+    };
 
     use super::*;
+
+    struct NoForegroundApp;
+
+    impl ForegroundAppProvider for NoForegroundApp {
+        fn foreground_app(&self) -> Result<Option<ForegroundApp>, ActivityError> {
+            Ok(None)
+        }
+    }
+
+    fn test_activity() -> (TempDir, ActivityService) {
+        let directory = tempfile::tempdir().expect("create activity test directory");
+        let activity = ActivityService::start(
+            ActivityConfig {
+                database_path: directory.path().join("usage.sqlite3"),
+                poll_interval: Duration::from_millis(50),
+                heartbeat_interval: Duration::from_millis(100),
+            },
+            Arc::new(NoForegroundApp),
+        )
+        .expect("start test activity service");
+        (directory, activity)
+    }
 
     #[tokio::test]
     async fn handles_health_list_malformed_and_multiple_requests() {
         let (mut input, server_input) = duplex(16 * 1024);
         let (server_output, output) = duplex(16 * 1024);
-        let server = tokio::spawn(serve(BufReader::new(server_input), server_output));
+        let (_directory, activity) = test_activity();
+        let server = tokio::spawn(serve_with_activity(
+            BufReader::new(server_input),
+            server_output,
+            activity,
+        ));
 
         input
             .write_all(b"not-json\n")
@@ -242,6 +296,10 @@ mod tests {
             .write_all(b"{\"id\":\"list\",\"method\":\"tool.list\",\"params\":{}}\n")
             .await
             .expect("write list");
+        input
+            .write_all(b"{\"id\":\"activity\",\"method\":\"tool.call\",\"params\":{\"name\":\"activity.status\",\"arguments\":{}}}\n")
+            .await
+            .expect("write activity status");
         input.shutdown().await.expect("close input");
 
         let mut output = BufReader::new(output);
@@ -254,18 +312,26 @@ mod tests {
             lines.push(line);
         }
         server.await.expect("server join").expect("server result");
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 6);
         assert!(lines[0].contains("INVALID_REQUEST"));
         assert!(lines[1].contains("whalehall-local"));
         assert!(lines[2].contains("system.info"));
         assert!(lines[2].contains("demo.wait"));
+        assert!(lines[2].contains("activity.sessions"));
+        assert!(lines[2].contains("activity.status"));
+        assert!(lines.iter().any(|line| line.contains("usage.sqlite3")));
     }
 
     #[tokio::test]
     async fn rejects_lines_over_one_mebibyte() {
         let (mut input, server_input) = duplex(MAX_JSONL_LINE_BYTES + 1024);
         let (server_output, output) = duplex(4096);
-        let server = tokio::spawn(serve(BufReader::new(server_input), server_output));
+        let (_directory, activity) = test_activity();
+        let server = tokio::spawn(serve_with_activity(
+            BufReader::new(server_input),
+            server_output,
+            activity,
+        ));
         let mut oversized = vec![b'x'; MAX_JSONL_LINE_BYTES + 1];
         oversized.push(b'\n');
         input

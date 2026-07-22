@@ -17,3 +17,6 @@ serde_json.workspace = true
 tokio.workspace = true
 whalehall-local-core.workspace = true
 whalehall-local-protocol.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
