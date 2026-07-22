@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use whalehall_local_core::ToolHost;
-use whalehall_local_core::activity::{
+use whalehall_local_core::sensors::activity::{
     ActivityConfig, ActivityService, SystemForegroundAppProvider,
 };
 use whalehall_local_protocol::{
@@ -245,7 +245,7 @@ mod tests {
 
     use tempfile::TempDir;
     use tokio::io::{AsyncWriteExt, BufReader, duplex};
-    use whalehall_local_core::activity::{
+    use whalehall_local_core::sensors::activity::{
         ActivityConfig, ActivityError, ActivityService, ForegroundApp, ForegroundAppProvider,
     };
 
@@ -319,6 +319,7 @@ mod tests {
         assert!(lines[2].contains("demo.wait"));
         assert!(lines[2].contains("activity.sessions"));
         assert!(lines[2].contains("activity.status"));
+        assert!(lines[2].contains("device.environment"));
         assert!(lines.iter().any(|line| line.contains("usage.sqlite3")));
     }
 

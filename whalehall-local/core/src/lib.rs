@@ -1,4 +1,5 @@
-pub mod activity;
+mod activity;
+pub mod sensors;
 mod tools;
 
 use std::collections::HashMap;
@@ -11,9 +12,11 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use whalehall_local_protocol::{ToolDescriptor, ToolEvent, ToolEventKind};
 
-use activity::ActivityService;
+use sensors::activity::ActivityService;
+use sensors::device_environment::DeviceEnvironmentSensor;
 use tools::{
-    ActivityCleanupTool, ActivitySessionsTool, ActivityStatusTool, DemoWaitTool, SystemInfoTool,
+    ActivityCleanupTool, ActivitySessionsTool, ActivityStatusTool, DemoWaitTool,
+    DeviceEnvironmentTool, SystemInfoTool,
 };
 
 pub const MAX_CONCURRENT_TOOLS: usize = 4;
@@ -85,7 +88,11 @@ impl Default for ToolHost {
 
 impl ToolHost {
     pub fn new() -> Self {
-        let tools: Vec<Arc<dyn LocalTool>> = vec![Arc::new(SystemInfoTool), Arc::new(DemoWaitTool)];
+        let tools: Vec<Arc<dyn LocalTool>> = vec![
+            Arc::new(SystemInfoTool),
+            Arc::new(DemoWaitTool),
+            Arc::new(DeviceEnvironmentTool::new(DeviceEnvironmentSensor)),
+        ];
         Self::with_tools(tools)
     }
 
@@ -93,6 +100,7 @@ impl ToolHost {
         let tools: Vec<Arc<dyn LocalTool>> = vec![
             Arc::new(SystemInfoTool),
             Arc::new(DemoWaitTool),
+            Arc::new(DeviceEnvironmentTool::new(DeviceEnvironmentSensor)),
             Arc::new(ActivityCleanupTool::new(activity.clone())),
             Arc::new(ActivityStatusTool::new(activity.clone())),
             Arc::new(ActivitySessionsTool::new(activity)),
@@ -236,13 +244,13 @@ mod tests {
                 .iter()
                 .map(|descriptor| descriptor.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["demo.wait", "system.info"]
+            vec!["demo.wait", "device.environment", "system.info"]
         );
         assert!(descriptors[0].supports_cancellation);
-        assert!(
-            descriptors
-                .iter()
-                .all(|tool| tool.required_permissions.is_empty())
+        assert!(descriptors[0].required_permissions.is_empty());
+        assert_eq!(
+            descriptors[1].required_permissions,
+            vec!["device.environment.read"]
         );
     }
 
@@ -279,6 +287,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn returns_device_environment_information() {
+        let host = ToolHost::new();
+        let (events, _) = mpsc::unbounded_channel();
+        let result = host
+            .call(
+                "device-1".to_owned(),
+                "device.environment".to_owned(),
+                json!({}),
+                events,
+            )
+            .await
+            .expect("device.environment should succeed");
+
+        assert!(result["operatingSystem"]["name"].is_string());
+        assert!(result["operatingSystem"]["architecture"].is_string());
+        assert!(result["timezone"]["utcOffsetMinutes"].is_number());
+        assert!(result["screenCount"].is_number());
+        assert!(result["screens"].is_array());
+        assert!(result["cpu"]["logicalCores"].is_number());
+        assert!(result["memory"]["totalBytes"].as_u64().unwrap_or_default() > 0);
+        assert!(result["batteries"].is_array());
+        assert!(result["networkInterfaces"].is_array());
+    }
+
+    #[tokio::test]
     async fn rejects_unknown_tools_and_invalid_arguments() {
         let host = ToolHost::new();
         let (events, _) = mpsc::unbounded_channel();
@@ -303,6 +336,17 @@ mod tests {
             .await
             .expect_err("out of range duration should fail");
         assert_eq!(invalid.code, "INVALID_ARGUMENTS");
+
+        let invalid_device = host
+            .call(
+                "device-invalid".to_owned(),
+                "device.environment".to_owned(),
+                json!({ "unexpected": true }),
+                mpsc::unbounded_channel().0,
+            )
+            .await
+            .expect_err("device.environment must reject unknown arguments");
+        assert_eq!(invalid_device.code, "INVALID_ARGUMENTS");
     }
 
     #[tokio::test]
