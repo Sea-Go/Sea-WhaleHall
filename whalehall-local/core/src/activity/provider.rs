@@ -115,13 +115,13 @@ impl ForegroundAppProvider for SystemForegroundAppProvider {
                 "the active window did not expose an application identity".to_owned(),
             ));
         }
-        let mut app_id = if executable_path.is_empty() {
+        let app_id = if executable_path.is_empty() {
             app_name.clone()
         } else {
             executable_path.clone()
         };
         #[cfg(target_os = "windows")]
-        app_id.make_ascii_lowercase();
+        let app_id = app_id.to_ascii_lowercase();
 
         Ok(Some(ForegroundApp {
             app_id,
