@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import type { LocalMessage } from "../src/agent/local-protocol";
 
 test("whalehall-local lists, calls, streams, and cancels tools over JSONL", async () => {
@@ -24,8 +26,14 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		"whalehall-local/target/debug",
 		process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local",
 	);
+	const dataDirectory = mkdtempSync(join(tmpdir(), "whalehall-activity-integration-"));
 	const child = Bun.spawn({
 		cmd: [binary],
+		env: {
+			...process.env,
+			WHALEHALL_DATA_DIR: dataDirectory,
+			WHALEHALL_ACTIVITY_POLL_MS: "50",
+		},
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -46,6 +54,15 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		'{"id":"system","method":"tool.call","params":{"name":"system.info","arguments":{}}}\n',
 	);
 	child.stdin.write(
+		'{"id":"activity-status","method":"tool.call","params":{"name":"activity.status","arguments":{}}}\n',
+	);
+	child.stdin.write(
+		'{"id":"activity-sessions","method":"tool.call","params":{"name":"activity.sessions","arguments":{"limit":10}}}\n',
+	);
+	child.stdin.write(
+		'{"id":"activity-cleanup","method":"tool.call","params":{"name":"activity.cleanup","arguments":{"scope":"shortTerm"}}}\n',
+	);
+	child.stdin.write(
 		'{"id":"wait","method":"tool.call","params":{"name":"demo.wait","arguments":{"durationMs":2000}}}\n',
 	);
 	await child.stdin.flush();
@@ -60,13 +77,54 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	const exitCode = await child.exited;
 	expect(exitCode).toBe(0);
 
-	expect(messages.find((message) => "id" in message && message.id === "list")).toMatchObject({
-		ok: true,
-		result: { tools: [{ name: "demo.wait" }, { name: "system.info" }] },
-	});
+	const listResponse = messages.find(
+		(message) => "id" in message && message.id === "list" && message.ok,
+	) as { result: { tools: Array<{ name: string }> } } | undefined;
+	expect(listResponse?.result.tools.map((tool) => tool.name)).toEqual([
+		"activity.cleanup",
+		"activity.sessions",
+		"activity.status",
+		"demo.wait",
+		"system.info",
+	]);
 	expect(messages.find((message) => "id" in message && message.id === "system")).toMatchObject({
 		ok: true,
 		result: { callId: "system", output: { pid: expect.any(Number) } },
+	});
+	expect(
+		messages.find((message) => "id" in message && message.id === "activity-status"),
+	).toMatchObject({
+		ok: true,
+		result: {
+			callId: "activity-status",
+			output: {
+				databasePath: join(dataDirectory, "usage.sqlite3"),
+				pollIntervalMs: 50,
+			},
+		},
+	});
+	expect(
+		messages.find((message) => "id" in message && message.id === "activity-sessions"),
+	).toMatchObject({
+		ok: true,
+		result: {
+			callId: "activity-sessions",
+			output: { count: expect.any(Number), sessions: expect.any(Array) },
+		},
+	});
+	expect(
+		messages.find((message) => "id" in message && message.id === "activity-cleanup"),
+	).toMatchObject({
+		ok: true,
+		result: {
+			callId: "activity-cleanup",
+			output: {
+				scope: "shortTerm",
+				deletedSessions: expect.any(Number),
+				retentionDays: 7,
+				cutoffAtMs: expect.any(Number),
+			},
+		},
 	});
 	expect(messages.some((message) => "event" in message && message.event === "tool.started")).toBe(
 		true,
@@ -85,6 +143,8 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		ok: false,
 		error: { code: "CANCELLED" },
 	});
+	expect(existsSync(join(dataDirectory, "usage.sqlite3"))).toBe(true);
+	rmSync(dataDirectory, { recursive: true, force: true });
 });
 
 function deferred() {
