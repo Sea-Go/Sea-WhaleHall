@@ -1,3 +1,4 @@
+pub mod activity;
 mod tools;
 
 use std::collections::HashMap;
@@ -10,7 +11,10 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use whalehall_local_protocol::{ToolDescriptor, ToolEvent, ToolEventKind};
 
-use tools::{DemoWaitTool, SystemInfoTool};
+use activity::ActivityService;
+use tools::{
+    ActivityCleanupTool, ActivitySessionsTool, ActivityStatusTool, DemoWaitTool, SystemInfoTool,
+};
 
 pub const MAX_CONCURRENT_TOOLS: usize = 4;
 
@@ -82,6 +86,17 @@ impl Default for ToolHost {
 impl ToolHost {
     pub fn new() -> Self {
         let tools: Vec<Arc<dyn LocalTool>> = vec![Arc::new(SystemInfoTool), Arc::new(DemoWaitTool)];
+        Self::with_tools(tools)
+    }
+
+    pub fn with_activity(activity: ActivityService) -> Self {
+        let tools: Vec<Arc<dyn LocalTool>> = vec![
+            Arc::new(SystemInfoTool),
+            Arc::new(DemoWaitTool),
+            Arc::new(ActivityCleanupTool::new(activity.clone())),
+            Arc::new(ActivityStatusTool::new(activity.clone())),
+            Arc::new(ActivitySessionsTool::new(activity)),
+        ];
         Self::with_tools(tools)
     }
 
