@@ -96,6 +96,20 @@ bun run dev
 
 The pre-build hook compiles `whalehall-local-server` in release mode and stages `whalehall-local(.exe)` under `.native/` for the current native platform.
 
+## Desktop pet / 桌宠
+
+The desktop pet ships with 133 canonical actions across idle, movement, pointer interaction, emotion, daily life, assistant functions, time/environment events, and transitions. Hover, click, double-click, rapid click, petting, poking, and native window dragging all feed the same production interaction state machine.
+
+Run `bun run dev:hmr`, then open `http://127.0.0.1:5173/pet/demo.html` to use the Action Lab. It can search and play every action, switch between the whale and cat models, inspect semantic frames, and exercise the same `CanvasPetRenderer` used by the transparent desktop window.
+
+Animations emit model-independent `PetFrame` values. To add or replace a pet, implement the `PetModel` contract under [`src/views/pet/models`](src/views/pet/models) and register it in [`registry.ts`](src/views/pet/models/registry.ts); the action engine and RPC contracts do not need model-specific branches.
+
+Validate the complete action catalog and finite frame output with:
+
+```bash
+bun run scripts/verify-pet-animations.ts
+```
+
 ## Validation and builds
 
 ```bash

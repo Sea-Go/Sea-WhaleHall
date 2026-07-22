@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vite",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "dev:hmr"],
+      "port": 5173
+    },
+    {
+      "name": "vite-only",
+      "runtimeExecutable": "bunx",
+      "runtimeArgs": ["vite", "--host", "127.0.0.1", "--port", "5173"],
+      "port": 5173
+    }
+  ]
+}
