@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { CanvasWhaleRenderer } from "./PetRenderer";
+import { CanvasPetRenderer } from "./CanvasPetRenderer";
+import { PetBehaviorController } from "./behavior";
 import { petApi } from "./rpc";
 
 export function PetApp() {
@@ -8,15 +9,38 @@ export function PetApp() {
 	useEffect(() => {
 		const canvas = canvasRef.current;
 		if (!canvas) return;
-		const renderer = new CanvasWhaleRenderer(() => petApi.interacted());
+		let behavior: PetBehaviorController;
+		const renderer = new CanvasPetRenderer({
+			model: "whale",
+			onInteract: (event) => {
+				behavior.markInteraction();
+				petApi.interacted(event);
+			},
+		});
+		behavior = new PetBehaviorController({ play: (action) => renderer.play(action) });
+		behavior.setEnabled(false);
 		renderer.mount(canvas);
-		const unsubscribe = petApi.onState((state) => renderer.setState(state));
+		const unsubscribeState = petApi.onState((state) => {
+			renderer.setState(state);
+			behavior.setEnabled(state.mood === "idle");
+			if (state.environment) behavior.setEnvironment(state.environment);
+		});
+		const unsubscribeNativeDrag = petApi.onNativeDrag((state) => {
+			if (!state.dragging) renderer.play("drop");
+		});
+		const handleVisibility = () => behavior.setPresent(!document.hidden);
+		document.addEventListener("visibilitychange", handleVisibility);
+		const behaviorTimer = window.setTimeout(() => behavior.start(true), 900);
 		petApi.ready();
 		return () => {
-			unsubscribe();
+			window.clearTimeout(behaviorTimer);
+			document.removeEventListener("visibilitychange", handleVisibility);
+			unsubscribeState();
+			unsubscribeNativeDrag();
+			behavior.dispose();
 			renderer.dispose();
 		};
 	}, []);
 
-	return <canvas ref={canvasRef} aria-label="Animated WhaleHall desktop companion" />;
+	return <canvas ref={canvasRef} aria-label="WhaleHall 可交互桌面伙伴" />;
 }

@@ -18,6 +18,7 @@ export default defineConfig({
 			input: {
 				client: resolve(viewsRoot, "client/index.html"),
 				pet: resolve(viewsRoot, "pet/index.html"),
+				"pet-demo": resolve(viewsRoot, "pet/demo.html"),
 			},
 		},
 	},

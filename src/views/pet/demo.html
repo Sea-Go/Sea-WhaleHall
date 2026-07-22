@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="color-scheme" content="dark" />
+		<title>WhaleHall 桌宠动作实验室</title>
+		<style>
+			:root {
+				font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+				color: #eaf9ff;
+				background: #07141f;
+				font-synthesis: none;
+			}
+			* { box-sizing: border-box; }
+			html, body {
+				width: 100%;
+				height: 100%;
+				min-width: 880px;
+				min-height: 680px;
+				margin: 0;
+				overflow: hidden;
+			}
+			body {
+				min-height: 100vh;
+				background:
+					radial-gradient(circle at 74% 12%, rgba(58, 189, 212, .12), transparent 30%),
+					radial-gradient(circle at 20% 90%, rgba(52, 110, 190, .15), transparent 34%),
+					#07141f;
+			}
+			button, input, select { font: inherit; }
+			button { color: inherit; }
+			.app-shell { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100vh; min-height: 680px; overflow: hidden; }
+			.topbar {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 20px;
+				padding: 15px 20px;
+				border-bottom: 1px solid rgba(137, 210, 231, .13);
+				background: rgba(8, 23, 35, .78);
+				backdrop-filter: blur(18px);
+			}
+			.brand { display: flex; align-items: center; gap: 11px; min-width: 260px; }
+			.brand-mark {
+				display: grid;
+				place-items: center;
+				width: 38px;
+				height: 38px;
+				border-radius: 13px;
+				background: linear-gradient(145deg, #61d4e8, #277caa);
+				box-shadow: 0 8px 24px rgba(28, 156, 194, .3), inset 0 1px rgba(255,255,255,.35);
+				font-size: 21px;
+			}
+			.brand h1 { margin: 0; font-size: 15px; letter-spacing: .01em; }
+			.brand p { margin: 3px 0 0; color: #7697a8; font-size: 11px; }
+			.top-status { display: flex; align-items: center; gap: 8px; color: #8eaebb; font-size: 11px; }
+			.status-dot { width: 7px; height: 7px; border-radius: 50%; background: #64e6b1; box-shadow: 0 0 0 4px rgba(100,230,177,.1); }
+			.content { display: grid; grid-template-columns: 308px minmax(520px, 1fr); min-height: 0; overflow: hidden; }
+			.sidebar {
+				min-height: 0;
+				padding: 16px;
+				border-right: 1px solid rgba(137, 210, 231, .12);
+				background: rgba(7, 20, 31, .72);
+				overflow-y: auto;
+			}
+			.search-wrap { position: sticky; top: -16px; z-index: 3; padding: 16px 0 11px; background: linear-gradient(#07141f 82%, transparent); }
+			.search {
+				width: 100%;
+				border: 1px solid rgba(139, 207, 226, .18);
+				border-radius: 11px;
+				outline: none;
+				padding: 10px 12px;
+				color: #eaf9ff;
+				background: rgba(18, 43, 57, .74);
+			}
+			.search:focus { border-color: #53c4df; box-shadow: 0 0 0 3px rgba(83,196,223,.1); }
+			.coverage {
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
+				margin: 4px 2px 10px;
+				color: #7595a6;
+				font-size: 10px;
+				text-transform: uppercase;
+				letter-spacing: .08em;
+			}
+			.category-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 13px; }
+			.category-tab {
+				border: 1px solid rgba(135, 205, 225, .14);
+				border-radius: 999px;
+				padding: 5px 8px;
+				background: rgba(17, 42, 56, .66);
+				color: #8cabb9;
+				font-size: 10px;
+				cursor: pointer;
+			}
+			.category-tab:hover, .category-tab.active { color: #eaffff; border-color: rgba(91,211,233,.55); background: rgba(45,130,156,.35); }
+			.action-list { display: grid; gap: 6px; }
+			.action-button {
+				display: grid;
+				grid-template-columns: 30px minmax(0, 1fr) auto;
+				align-items: center;
+				gap: 9px;
+				width: 100%;
+				border: 1px solid transparent;
+				border-radius: 10px;
+				padding: 7px 9px 7px 7px;
+				text-align: left;
+				background: transparent;
+				cursor: pointer;
+				transition: 120ms ease;
+			}
+			.action-button:hover { background: rgba(28, 64, 81, .58); border-color: rgba(125,197,218,.12); transform: translateX(2px); }
+			.action-button.active { background: linear-gradient(90deg, rgba(35,145,173,.32), rgba(24,69,88,.45)); border-color: rgba(90,211,235,.45); }
+			.action-icon { display: grid; place-items: center; height: 30px; border-radius: 9px; background: rgba(62,127,149,.16); font-size: 15px; }
+			.action-copy { min-width: 0; }
+			.action-label { display: block; color: #dff7ff; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+			.action-id { display: block; margin-top: 2px; color: #628191; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+			.action-duration { color: #5e7d8d; font-size: 9px; }
+			.workspace { display: grid; grid-template-rows: auto minmax(400px, 1fr) auto; gap: 12px; min-height: 0; padding: 16px; overflow: hidden; }
+			.toolbar, .inspector {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 12px;
+				padding: 10px 12px;
+				border: 1px solid rgba(137, 210, 231, .12);
+				border-radius: 13px;
+				background: rgba(13, 34, 47, .7);
+			}
+			.control-group { display: flex; align-items: center; gap: 7px; }
+			.control-label { margin-right: 2px; color: #6f8f9e; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+			.segmented { display: flex; padding: 3px; border-radius: 10px; background: rgba(3,15,24,.55); }
+			.model-button, .utility-button {
+				border: 0;
+				border-radius: 8px;
+				padding: 6px 10px;
+				background: transparent;
+				color: #7899a9;
+				font-size: 10px;
+				cursor: pointer;
+			}
+			.model-button:hover, .model-button.active, .utility-button:hover { color: #f0fdff; background: rgba(52,137,161,.32); }
+			.stage {
+				position: relative;
+				min-height: 400px;
+				isolation: isolate;
+				overflow: hidden;
+				border: 1px solid rgba(143, 215, 234, .18);
+				border-radius: 18px;
+				background:
+					radial-gradient(circle at 50% 30%, rgba(166,231,241,.2), transparent 33%),
+					linear-gradient(180deg, #16364a 0%, #102c40 57%, #0c2130 100%);
+				box-shadow: inset 0 1px rgba(255,255,255,.05), 0 18px 60px rgba(0,0,0,.22);
+			}
+			.stage::before {
+				content: "";
+				position: absolute;
+				inset: 0;
+				z-index: -2;
+				background-image: radial-gradient(circle, rgba(205,246,255,.32) 1px, transparent 1px);
+				background-size: 28px 28px;
+				mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent 68%);
+			}
+			.stage::after {
+				content: "";
+				position: absolute;
+				left: 8%; right: 8%; bottom: 18%; height: 1px;
+				z-index: -1;
+				background: linear-gradient(90deg, transparent, rgba(159,225,239,.23), transparent);
+				box-shadow: 0 18px 40px rgba(0,0,0,.22);
+			}
+			.stage canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; user-select: none; }
+			.stage-tip {
+				position: absolute;
+				left: 14px;
+				bottom: 12px;
+				z-index: 2;
+				padding: 6px 9px;
+				border: 1px solid rgba(153,217,234,.12);
+				border-radius: 8px;
+				background: rgba(4,18,28,.45);
+				color: #7e9dac;
+				font-size: 9px;
+				pointer-events: none;
+				backdrop-filter: blur(8px);
+			}
+			.current { min-width: 0; }
+			.current-label { display: flex; align-items: center; gap: 7px; font-size: 11px; }
+			.current-label strong { color: #eaffff; font-weight: 600; }
+			.current-id { margin-top: 3px; color: #5f8292; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+			.frame-info { color: #7392a1; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+			.event-log { max-width: 45%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #86a6b5; font-size: 10px; }
+			.empty { padding: 30px 8px; color: #678695; font-size: 11px; text-align: center; }
+			@media (max-width: 1040px) {
+				.content { grid-template-columns: 270px minmax(520px, 1fr); }
+				.sidebar { padding: 12px; }
+				.search-wrap { top: -12px; padding-top: 12px; }
+			}
+		</style>
+	</head>
+	<body>
+		<div class="app-shell">
+			<header class="topbar">
+				<div class="brand">
+					<div class="brand-mark" aria-hidden="true">◡</div>
+					<div>
+						<h1>WhaleHall · 桌宠动作实验室</h1>
+						<p>生产渲染器、完整动作目录与替换模型的统一验证页</p>
+					</div>
+				</div>
+				<div class="top-status"><span class="status-dot"></span><span id="coverage-count">正在载入动作目录…</span></div>
+			</header>
+			<div class="content">
+				<aside class="sidebar">
+					<div class="search-wrap">
+						<input class="search" id="action-search" type="search" placeholder="搜索动作名称或 ID…" autocomplete="off" />
+					</div>
+					<div class="coverage"><span>动作目录</span><span id="filtered-count">—</span></div>
+					<div class="category-tabs" id="action-categories" aria-label="动作分类"></div>
+					<div class="action-list" id="action-buttons"></div>
+				</aside>
+				<main class="workspace">
+					<div class="toolbar">
+						<div class="control-group">
+							<span class="control-label">模型</span>
+							<div class="segmented" id="model-buttons">
+								<button class="model-button active" type="button" data-model="whale">鲸鱼</button>
+								<button class="model-button" type="button" data-model="cat">猫咪</button>
+							</div>
+						</div>
+						<div class="control-group">
+							<button class="utility-button" id="random-action" type="button">随机动作</button>
+							<button class="utility-button" id="play-sequence" type="button">首发序列</button>
+						</div>
+					</div>
+					<section class="stage" id="stage-shell" aria-label="桌宠交互舞台">
+						<canvas id="stage" aria-label="可交互桌宠"></canvas>
+						<div class="stage-tip">悬停看向光标 · 单击/双击 · 连续点击 · 头部横向抚摸 · 拖拽</div>
+					</section>
+					<div class="inspector">
+						<div class="current">
+							<div class="current-label"><span id="action-icon">●</span><strong id="current-action">待机</strong></div>
+							<div class="current-id" id="current-action-id">idle</div>
+						</div>
+						<div class="event-log" id="event-log">等待交互…</div>
+						<div class="frame-info" id="frame-info">frame —</div>
+					</div>
+				</main>
+			</div>
+		</div>
+		<script type="module" src="./demo-main.ts"></script>
+	</body>
+</html>
