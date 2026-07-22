@@ -205,6 +205,7 @@ jobs:
       image: ${{ matrix.image }}
     env:
       LANG: C.UTF-8
+      PATH: /github/home/.bun/bin:/github/home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       WHALEHALL_CI_DISPLAY_MODE: degraded
       WHALEHALL_CI_FOREGROUND_MODE: degraded
 

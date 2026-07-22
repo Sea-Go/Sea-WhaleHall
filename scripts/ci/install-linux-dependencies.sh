@@ -24,7 +24,7 @@ case "$family" in
     fi
     if [[ "$profile" == "x11" ]]; then
       as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        openbox x11-utils xdotool xfonts-base xterm xvfb
+        openbox wmctrl x11-utils xdotool xfonts-base xterm xvfb
     fi
     ;;
   fedora)
