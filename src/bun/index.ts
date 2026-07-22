@@ -5,59 +5,46 @@ import {
 	PATHS,
 	Screen,
 	Updater,
+	Utils,
 } from "electrobun/bun";
 import { AgentRuntime } from "../agent/agent-runtime";
 import { LocalToolClient } from "../agent/local-tool-client";
+import {
+	PetStateArbiter,
+} from "./pet-state";
+import { PetWindowController } from "./pet-window-controller";
 import type {
 	LocalRuntimeStatus,
 	LocalToolEvent,
 } from "../agent/local-protocol";
-import type {
-	ClientRPC,
-	PetRPC,
-	PetState,
-} from "../shared/contracts";
+import type { ClientRPC, PetRPC } from "../shared/contracts";
 
 const HMR_ORIGIN = "http://127.0.0.1:5173";
 const nativeBinary = process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local";
 const nativePath = join(PATHS.RESOURCES_FOLDER, "app", "native", nativeBinary);
+const localDataPath = join(Utils.paths.userData, "local");
 
-const agent = new AgentRuntime(new LocalToolClient(nativePath));
+const agent = new AgentRuntime(
+	new LocalToolClient(nativePath, {
+		environment: { WHALEHALL_DATA_DIR: localDataPath },
+	}),
+);
 let petVisible = true;
-let shuttingDown = false;
+let shutdownPromise: Promise<void> | null = null;
 
 let clientWindow: BrowserWindow;
 let petWindow: BrowserWindow;
-
-function petStateFor(status: LocalRuntimeStatus): PetState {
-	if (status.activeCalls > 0) {
-		return { mood: "busy", message: `${status.activeCalls} local tool running…` };
-	}
-	if (status.state === "ready") return { mood: "idle", message: "Rust agent ready" };
-	if (status.state === "starting") return { mood: "busy", message: "Starting local tools…" };
-	if (status.state === "degraded") {
-		return { mood: "error", message: status.lastError ?? "Local tools unavailable" };
-	}
-	return { mood: "idle", message: "Local tools stopped" };
-}
+let petWindowController: PetWindowController;
+let petStateArbiter: PetStateArbiter;
 
 function sendLocalStatus(status = agent.getLocalStatus()): void {
 	clientRPC.send.localStatusChanged(status);
-	petRPC.send.setPetState(petStateFor(status));
+	petStateArbiter.updateRuntime(status);
 }
 
 function sendToolEvent(event: LocalToolEvent): void {
 	clientRPC.send.localToolEvent(event);
-	const name = typeof event.data.name === "string" ? event.data.name : "local tool";
-	if (event.event === "tool.started" || event.event === "tool.progress") {
-		petRPC.send.setPetState({ mood: "busy", message: `Running ${name}…` });
-	} else if (event.event === "tool.completed") {
-		petRPC.send.setPetState({ mood: "happy", message: `${name} completed` });
-	} else if (event.event === "tool.failed") {
-		petRPC.send.setPetState({ mood: "error", message: `${name} failed` });
-	} else {
-		petRPC.send.setPetState({ mood: "idle", message: `${name} cancelled` });
-	}
+	petStateArbiter.showToolEvent(event);
 }
 
 const clientRPC = BrowserView.defineRPC<ClientRPC>({
@@ -70,8 +57,8 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 			cancelLocalTool: ({ callId }) => agent.cancelLocalTool(callId),
 			setPetVisible: ({ visible }): { visible: boolean } => {
 				petVisible = visible;
-				if (visible) petWindow.showInactive();
-				else petWindow.hide();
+				if (!visible) petStateArbiter.resetToRuntime(agent.getLocalStatus());
+				petWindowController.setVisible(visible);
 				clientRPC.send.petVisibilityChanged({ visible });
 				return { visible };
 			},
@@ -87,18 +74,23 @@ const petRPC = BrowserView.defineRPC<PetRPC>({
 		messages: {
 			ready: () => {
 				console.log("[pet] React renderer ready");
-				petRPC.send.setPetState(petStateFor(agent.getLocalStatus()));
+				// A remounted/reloaded WebView cannot still own an old pointer capture.
+				petStateArbiter.resetToRuntime(agent.getLocalStatus());
 			},
-			interacted: () => {
-				petRPC.send.setPetState({
-					mood: "happy",
-					message: "Hello from WhaleHall!",
-				});
-				setTimeout(() => sendLocalStatus(), 900);
+			interacted: (event) => {
+				if (event.kind === "dragStart") {
+					petWindowController.beginDrag(event.dragDelta);
+				}
+				if (event.kind === "dragEnd") {
+					petWindowController.endDrag("webview");
+				}
+				petStateArbiter.showInteraction(event);
 			},
 		},
 	},
 });
+
+petStateArbiter = new PetStateArbiter((state) => petRPC.send.setPetState(state));
 
 const hmrAvailable = (async (): Promise<boolean> => {
 	if ((await Updater.localInfo.channel()) !== "dev") return false;
@@ -150,7 +142,9 @@ petWindow = new BrowserWindow({
 	rpc: petRPC,
 	titleBarStyle: "hidden",
 	transparent: true,
-	passthrough: true,
+	// Electrobun 1.18 applies passthrough to the whole WebView, so interactive pets
+	// must keep it disabled in order to receive hover and click pointer events.
+	passthrough: false,
 	renderer: process.platform === "linux" ? "cef" : "native",
 	activate: false,
 	frame: {
@@ -163,6 +157,13 @@ petWindow = new BrowserWindow({
 
 petWindow.setAlwaysOnTop(true);
 petWindow.setVisibleOnAllWorkspaces(true);
+petWindowController = new PetWindowController(petWindow, Screen, {
+	onDragStateChange: ({ dragging, reason }) => {
+		console.log(`[pet] native drag ${dragging ? "started" : `ended (${reason ?? "unknown"})`}`);
+		petRPC.send.nativeDragChanged({ dragging, reason });
+		if (!dragging && reason !== "disposed") petStateArbiter.finishNativeDrag();
+	},
+});
 
 agent.onStatusChange(sendLocalStatus);
 agent.onToolEvent(sendToolEvent);
@@ -175,24 +176,27 @@ petWindow.webview.on("dom-ready", () => {
 	sendLocalStatus();
 });
 
-function shutdown(): void {
-	if (shuttingDown) return;
-	shuttingDown = true;
-	agent.stop();
-	try {
-		petWindow.close();
-	} catch {}
+function shutdown(): Promise<void> {
+	if (shutdownPromise) return shutdownPromise;
+	shutdownPromise = (async () => {
+		await agent.stop();
+		petStateArbiter.dispose();
+		petWindowController.dispose();
+		try {
+			petWindow.close();
+		} catch {}
+	})();
+	return shutdownPromise;
 }
 
-clientWindow.on("close", shutdown);
-process.once("exit", () => agent.stop());
+clientWindow.on("close", () => {
+	void shutdown();
+});
 process.once("SIGINT", () => {
-	shutdown();
-	process.exit(0);
+	void shutdown().finally(() => process.exit(0));
 });
 process.once("SIGTERM", () => {
-	shutdown();
-	process.exit(0);
+	void shutdown().finally(() => process.exit(0));
 });
 
 void agent.start();
