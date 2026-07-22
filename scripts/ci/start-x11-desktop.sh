@@ -57,7 +57,7 @@ for _ in {1..40}; do
   xdotool windowactivate "$probe_window" >/dev/null 2>&1 || true
   xdotool windowfocus "$probe_window" >/dev/null 2>&1 || true
   xprop -root -f _NET_ACTIVE_WINDOW 32x -set _NET_ACTIVE_WINDOW "$probe_window_hex"
-  if [[ "$(xdotool getactivewindow getwindowname 2>/dev/null || true)" == "$window_title" ]]; then
+  if xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | grep -Fqi "$probe_window_hex"; then
     desktop_ready=true
     break
   fi

@@ -224,11 +224,16 @@ jobs:
       - name: Install Rust toolchain
         run: |
           if [[ -x /usr/bin/curl ]]; then
-            /usr/bin/curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/whalehall-rustup-init.sh
+            /usr/bin/curl --proto '=https' --tlsv1.2 -fsSL \
+              https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init \
+              -o /tmp/whalehall-rustup-init
           else
-            /usr/bin/wget --https-only --quiet --output-document=/tmp/whalehall-rustup-init.sh https://sh.rustup.rs
+            /usr/bin/wget --https-only --quiet \
+              --output-document=/tmp/whalehall-rustup-init \
+              https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
           fi
-          /usr/bin/bash /tmp/whalehall-rustup-init.sh -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+          chmod +x /tmp/whalehall-rustup-init
+          /tmp/whalehall-rustup-init -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
