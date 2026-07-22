@@ -269,21 +269,30 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Test Rust workspace
+        run: bun run test:rust
+
       - name: Start a deterministic X11 desktop
         run: |
           nohup Xvfb "$DISPLAY" -screen 0 1280x720x24 > /tmp/whalehall-xvfb.log 2>&1 &
-          for attempt in {1..20}; do
+          for _ in {1..20}; do
             if xdpyinfo >/dev/null 2>&1; then break; fi
             sleep 0.25
           done
           xdpyinfo >/dev/null
           nohup openbox > /tmp/whalehall-openbox.log 2>&1 &
           nohup xterm -T WhaleHallSensorProbe > /tmp/whalehall-xterm.log 2>&1 &
-          for attempt in {1..20}; do
-            if xdotool search --name WhaleHallSensorProbe windowactivate --sync >/dev/null 2>&1; then break; fi
+          probe_window=$(xdotool search --sync --limit 1 --name WhaleHallSensorProbe)
+          desktop_ready=false
+          for _ in {1..20}; do
+            xdotool windowactivate --sync "$probe_window" >/dev/null 2>&1 || true
+            if [[ "$(xdotool getactivewindow getwindowname 2>/dev/null)" == "WhaleHallSensorProbe" ]]; then
+              desktop_ready=true
+              break
+            fi
             sleep 0.25
           done
-          xdotool search --name WhaleHallSensorProbe windowactivate --sync >/dev/null
+          [[ "$desktop_ready" == "true" ]]
 
       - name: Probe screen resolution and foreground usage
         run: bun run test:sensors:ci

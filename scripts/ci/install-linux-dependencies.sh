@@ -36,7 +36,7 @@ case "$family" in
     as_root dnf install -y dnf-plugins-core
     as_root dnf config-manager --set-enabled crb || true
     as_root dnf install -y \
-      ca-certificates cmake curl dbus-devel gcc gcc-c++ git libxcb-devel make \
+      ca-certificates cmake dbus-devel gcc gcc-c++ git libxcb-devel make \
       pkgconf-pkg-config unzip xcb-util-wm-devel
     ;;
   arch)
@@ -46,7 +46,7 @@ case "$family" in
   suse)
     as_root zypper --non-interactive refresh
     as_root zypper --non-interactive install --no-recommends \
-      ca-certificates cmake curl dbus-1-devel gcc gcc-c++ git libxcb-devel make \
+      bash ca-certificates cmake curl dbus-1-devel gcc gcc-c++ git libxcb-devel make \
       pkg-config unzip xcb-util-wm-devel
     ;;
   *)
