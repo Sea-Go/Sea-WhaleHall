@@ -69,7 +69,8 @@ brew install bun rust
 Linux builds require GTK/WebKit development packages even though the pet window uses bundled CEF:
 
 ```bash
-sudo apt install build-essential cmake pkg-config libdbus-1-dev libxcb1-dev libgtk-3-dev \
+sudo apt install build-essential cmake pkg-config libdbus-1-dev libxcb-ewmh-dev \
+  libxcb-randr0-dev libgtk-3-dev \
   libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
