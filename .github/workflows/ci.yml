@@ -210,7 +210,7 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: /usr/bin/gcc
       LANG: C.UTF-8
       PATH: /github/home/.bun/bin:/github/home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      PKG_CONFIG: /usr/bin/pkg-config
+      PKG_CONFIG: ${{ matrix.family == 'suse' && '/usr/bin/pkgconf' || '/usr/bin/pkg-config' }}
       WHALEHALL_CI_DISPLAY_MODE: degraded
       WHALEHALL_CI_FOREGROUND_MODE: degraded
 

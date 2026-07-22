@@ -48,7 +48,7 @@ case "$family" in
     as_root zypper --non-interactive install --no-recommends \
       binutils ca-certificates cmake curl dbus-1-devel gcc gcc-c++ git libxcb-devel make \
       pkg-config unzip wget xcb-util-wm-devel
-    /usr/bin/pkg-config --exists dbus-1 xcb
+    /usr/bin/pkgconf --exists dbus-1 xcb
     ;;
   *)
     echo "unsupported Linux package family: $family" >&2
