@@ -36,10 +36,11 @@ if [[ "$window_manager_ready" != "true" ]]; then
 fi
 
 nohup xterm -T "$window_title" >"$xterm_log" 2>&1 &
+xterm_pid=$!
 
 probe_window=""
 for _ in {1..40}; do
-  probe_window=$(xdotool search --limit 1 --name "$window_title" 2>/dev/null || true)
+  probe_window=$(xdotool search --limit 1 --pid "$xterm_pid" 2>/dev/null || true)
   if [[ -n "$probe_window" ]]; then
     break
   fi
@@ -52,7 +53,7 @@ fi
 
 desktop_ready=false
 for _ in {1..40}; do
-  wmctrl -a "$window_title" >/dev/null 2>&1 || true
+  wmctrl -i -a "$probe_window" >/dev/null 2>&1 || true
   xdotool windowactivate "$probe_window" >/dev/null 2>&1 || true
   xdotool windowfocus "$probe_window" >/dev/null 2>&1 || true
   if [[ "$(xdotool getactivewindow 2>/dev/null || true)" == "$probe_window" ]]; then
