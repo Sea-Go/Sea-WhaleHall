@@ -87,22 +87,23 @@ Tests cover exact switch boundaries, zero-duration switches, heartbeat recovery,
 
 ## GitHub Actions CI/CD
 
-`.github/workflows/ci.yml` performs validation and packaging entirely on GitHub-hosted virtual machines, so developers do not need to spend local CPU time on the full cross-platform matrix.
+`.github/workflows/ci.yml` performs blocking validation and packaging on GitHub-hosted virtual machines and Linux containers, so developers do not need to spend local CPU time on the full cross-platform matrix.
 
-The matrix currently runs on:
+The blocking matrix covers:
 
-- `macos-15` for macOS ARM64;
-- `windows-latest` for Windows x64;
-- `ubuntu-22.04` for Linux x64.
+- hosted macOS 14/15 and Windows Server 2022/2025 with a deterministic foreground application;
+- hosted Ubuntu 22.04/24.04 in its expected headless mode;
+- Ubuntu, Debian, Fedora, Arch, Rocky, Alma, CentOS Stream, and openSUSE containers;
+- Ubuntu 24.04 with Xvfb, Openbox, and an active xterm to exercise a deterministic X11 desktop.
 
-Each runner checks out a clean copy, installs the pinned Bun `1.3.14` and Rust `1.97.1` toolchains, restores a platform-specific Cargo cache, installs locked dependencies, then runs:
+Across these jobs, the pipeline checks out a clean copy, installs the pinned Bun `1.3.14` and Rust `1.97.1` toolchains, restores platform-specific Cargo caches where useful, installs locked dependencies, then runs:
 
 1. TypeScript type checking;
 2. Rust formatting, Clippy with warnings denied, and all Rust tests;
-3. all Bun tests, including the integration test that builds and starts the real `whalehall-local` process in an isolated temporary data directory;
+3. all Bun tests, including the integration test that builds and starts the real `whalehall-local` process in an isolated temporary data directory and probes every registered sensor;
 4. Electrobun canary packaging after every preceding check passes;
 5. upload of unsigned platform artifacts with seven-day retention.
 
-Pushes to `main`, pull requests, and manual `workflow_dispatch` runs trigger the pipeline. A newer commit on the same branch cancels an obsolete in-progress run, and each platform has a 45-minute timeout.
+Pushes to `main`, pull requests, and manual `workflow_dispatch` runs trigger the pipeline. A newer commit on the same branch cancels an obsolete in-progress run, and every job has a bounded timeout.
 
-GitHub-hosted runners do not expose a normal interactive desktop session. Therefore CI verifies the platform code compiles and that a missing foreground window produces a safe degraded state, while deterministic fake providers verify recording behavior. It does not prove that every desktop shell reports its real foreground window. Release qualification should still include one short manual foreground-switch check on each supported OS.
+Hosted and container jobs verify both explicit headless degradation and deterministic foreground collection on the three platform families. `.github/workflows/desktop-compatibility.yml` separately defines real Windows client, Wayland/X11 Linux desktop, and macOS release-certification runners. See [`.github/CI_COMPATIBILITY.md`](../.github/CI_COMPATIBILITY.md) for the exact environments, capability contracts, and self-hosted runner requirements.

@@ -125,7 +125,7 @@ bun run build:native
 bun run build:canary
 ```
 
-GitHub Actions repeats these checks natively on macOS ARM64, Windows x64, and Linux x64, then retains unsigned artifacts for seven days.
+GitHub Actions repeats these checks across hosted macOS and Windows, multiple Ubuntu versions, mainstream Linux distribution containers, and a virtual X11 desktop before retaining unsigned artifacts for seven days. The real desktop certification matrix and its runner requirements are documented in [`.github/CI_COMPATIBILITY.md`](.github/CI_COMPATIBILITY.md).
 
 ## Local Tool protocol
 
