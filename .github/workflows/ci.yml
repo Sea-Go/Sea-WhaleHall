@@ -36,7 +36,7 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
       - name: Validate CI support scripts
-        run: bash -n scripts/ci/install-linux-dependencies.sh
+        run: bash -n scripts/ci/*.sh
 
       - name: Install Linux sensor dependencies
         run: scripts/ci/install-linux-dependencies.sh debian sensor
@@ -218,7 +218,6 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install Rust toolchain
-        shell: sh
         run: |
           curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/whalehall-rustup-init.sh
           sh /tmp/whalehall-rustup-init.sh -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
@@ -274,26 +273,7 @@ jobs:
         run: bun run test:rust
 
       - name: Start a deterministic X11 desktop
-        run: |
-          nohup Xvfb "$DISPLAY" -screen 0 1280x720x24 > /tmp/whalehall-xvfb.log 2>&1 &
-          for _ in {1..20}; do
-            if xdpyinfo >/dev/null 2>&1; then break; fi
-            sleep 0.25
-          done
-          xdpyinfo >/dev/null
-          nohup openbox > /tmp/whalehall-openbox.log 2>&1 &
-          nohup xterm -T WhaleHallSensorProbe > /tmp/whalehall-xterm.log 2>&1 &
-          probe_window=$(xdotool search --sync --limit 1 --name WhaleHallSensorProbe)
-          desktop_ready=false
-          for _ in {1..20}; do
-            xdotool windowactivate --sync "$probe_window" >/dev/null 2>&1 || true
-            if [[ "$(xdotool getactivewindow getwindowname 2>/dev/null)" == "WhaleHallSensorProbe" ]]; then
-              desktop_ready=true
-              break
-            fi
-            sleep 0.25
-          done
-          [[ "$desktop_ready" == "true" ]]
+        run: scripts/ci/start-x11-desktop.sh
 
       - name: Probe screen resolution and foreground usage
         run: bun run test:sensors:ci
