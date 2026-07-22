@@ -171,7 +171,7 @@ impl DeviceEnvironmentSensor {
                 kernel_version: System::kernel_version(),
                 architecture: System::cpu_arch(),
             },
-            device_name: optional_identity(whoami::devicename(), "deviceName", &mut warnings),
+            device_name: collect_device_name(&mut warnings),
             local_username: optional_identity(whoami::username(), "localUsername", &mut warnings),
             languages,
             timezone: TimezoneInfo {
@@ -315,6 +315,29 @@ fn collect_network_interfaces(warnings: &mut Vec<SensorWarning>) -> Vec<NetworkI
     interfaces
 }
 
+fn collect_device_name(warnings: &mut Vec<SensorWarning>) -> Option<String> {
+    let pretty_name = whoami::devicename().ok();
+    let hostname = whoami::hostname().ok();
+    let system_hostname = System::host_name();
+    let device_name = select_device_name([pretty_name, hostname, system_hostname]);
+
+    if device_name.is_none() {
+        warnings.push(SensorWarning {
+            component: "deviceName".to_owned(),
+            message: "the operating system returned no non-empty device or host name".to_owned(),
+        });
+    }
+
+    device_name
+}
+
+fn select_device_name(candidates: [Option<String>; 3]) -> Option<String> {
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| non_empty(&candidate))
+}
+
 fn optional_identity<E: std::fmt::Display>(
     result: Result<String, E>,
     component: &str,
@@ -380,5 +403,22 @@ mod tests {
         assert_eq!(non_empty(" value "), Some("value".to_owned()));
         assert_eq!(normalize_language("zh/CN.UTF-8"), "zh-CN");
         assert_eq!(normalize_language("en_US"), "en-US");
+    }
+
+    #[test]
+    fn falls_back_from_pretty_device_name_to_host_names() {
+        assert_eq!(
+            select_device_name([
+                Some("  ".to_owned()),
+                Some("runner-host".to_owned()),
+                Some("system-host".to_owned()),
+            ]),
+            Some("runner-host".to_owned())
+        );
+        assert_eq!(
+            select_device_name([None, None, Some(" system-host ".to_owned())]),
+            Some("system-host".to_owned())
+        );
+        assert_eq!(select_device_name([None, None, None]), None);
     }
 }

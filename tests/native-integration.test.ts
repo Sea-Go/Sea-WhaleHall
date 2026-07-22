@@ -12,7 +12,19 @@ type SensorCiProbe = {
 	callId: string;
 	toolName: string;
 	arguments: Record<string, unknown>;
-	verify: (output: unknown, dataDirectory: string) => void;
+	verify: (output: unknown, context: SensorCiContext) => void;
+};
+
+type SensorCiContext = {
+	dataDirectory: string;
+	displayMode: "auto" | "degraded" | "required";
+	foregroundMode: "auto" | "degraded" | "required";
+};
+
+const sensorCiContext: SensorCiContext = {
+	dataDirectory: "",
+	displayMode: expectation("WHALEHALL_CI_DISPLAY_MODE", ["auto", "degraded", "required"]),
+	foregroundMode: expectation("WHALEHALL_CI_FOREGROUND_MODE", ["auto", "degraded", "required"]),
 };
 
 const sensorCiProbes: SensorCiProbe[] = [
@@ -21,10 +33,27 @@ const sensorCiProbes: SensorCiProbe[] = [
 		callId: "sensor-activity",
 		toolName: "activity.status",
 		arguments: {},
-		verify: (output, dataDirectory) => {
+		verify: (output, context) => {
+			const status = output as {
+				state: string;
+				currentSession: unknown | null;
+				lastError: string | null;
+			};
+			console.info(
+				`[sensor-ci] activity state=${status.state} currentSession=${status.currentSession !== null}`,
+			);
+			if (context.foregroundMode === "required") {
+				expect(status.state).toBe("running");
+				expect(status.currentSession).not.toBeNull();
+			}
+			if (context.foregroundMode === "degraded") {
+				expect(status.state).toBe("degraded");
+				expect(typeof status.lastError).toBe("string");
+			}
+
 			expect(output).toMatchObject({
 				state: expect.stringMatching(/^(starting|running|degraded|stopped)$/),
-				databasePath: join(dataDirectory, "usage.sqlite3"),
+				databasePath: join(context.dataDirectory, "usage.sqlite3"),
 				pollIntervalMs: 50,
 			});
 		},
@@ -34,22 +63,50 @@ const sensorCiProbes: SensorCiProbe[] = [
 		callId: "sensor-device-environment",
 		toolName: "device.environment",
 		arguments: {},
-		verify: (output) => {
+		verify: (output, context) => {
 			const snapshot = output as {
+				operatingSystem: { name: string; version: string };
 				deviceName: string;
 				localUsername: string;
 				languages: unknown[];
 				screenCount: number;
-				screens: unknown[];
+				screens: Array<{ widthPx: number; heightPx: number }>;
 				cpu: { logicalCores: number };
 				memory: { totalBytes: number };
+				networkInterfaces: unknown[];
+				warnings: Array<{ component: string; message: string }>;
 			};
+			const resolutions =
+				snapshot.screens.map((screen) => `${screen.widthPx}x${screen.heightPx}`).join(",") || "none";
+			console.info(
+				[
+					`[sensor-ci] device os=${snapshot.operatingSystem.name} ${snapshot.operatingSystem.version}`,
+					`screens=${resolutions}`,
+					`cpuCores=${snapshot.cpu.logicalCores}`,
+					`networkInterfaces=${snapshot.networkInterfaces.length}`,
+					`warnings=${snapshot.warnings.length}`,
+				].join(" "),
+			);
 			expect(snapshot.deviceName.length > 0).toBe(true);
 			expect(snapshot.localUsername.length > 0).toBe(true);
 			expect(snapshot.languages.length > 0).toBe(true);
 			expect(snapshot.screenCount).toBe(snapshot.screens.length);
 			expect(snapshot.cpu.logicalCores > 0).toBe(true);
 			expect(snapshot.memory.totalBytes > 0).toBe(true);
+			expect(snapshot.networkInterfaces.length > 0).toBe(true);
+			for (const screen of snapshot.screens) {
+				expect(screen.widthPx > 0).toBe(true);
+				expect(screen.heightPx > 0).toBe(true);
+			}
+			if (context.displayMode === "required") {
+				expect(snapshot.screenCount > 0).toBe(true);
+			}
+			if (snapshot.screenCount === 0) {
+				expect(snapshot.warnings.some((warning) => warning.component === "screens")).toBe(true);
+			}
+			if (context.displayMode === "degraded") {
+				expect(snapshot.screenCount).toBe(0);
+			}
 
 			expect(output).toMatchObject({
 				operatingSystem: {
@@ -107,6 +164,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local",
 	);
 	const dataDirectory = mkdtempSync(join(tmpdir(), "whalehall-activity-integration-"));
+	const context = { ...sensorCiContext, dataDirectory };
 	const child = Bun.spawn({
 		cmd: [binary],
 		env: {
@@ -140,6 +198,9 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		'{"id":"system","method":"tool.call","params":{"name":"system.info","arguments":{}}}\n',
 	);
 	for (const probe of sensorCiProbes) {
+		if (probe.sourceFile === "activity.rs" && context.foregroundMode !== "auto") {
+			await Bun.sleep(500);
+		}
 		child.stdin.write(
 			`${JSON.stringify({
 				id: probe.callId,
@@ -187,7 +248,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		result: { callId: "system", output: { pid: expect.any(Number) } },
 	});
 	for (const probe of sensorCiProbes) {
-		probe.verify(toolOutput(messages, probe.callId), dataDirectory);
+		probe.verify(toolOutput(messages, probe.callId), context);
 	}
 	expect(
 		messages.find((message) => "id" in message && message.id === "activity-sessions"),
@@ -231,7 +292,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	});
 	expect(existsSync(join(dataDirectory, "usage.sqlite3"))).toBe(true);
 	rmSync(dataDirectory, { recursive: true, force: true });
-});
+}, 30_000);
 
 function deferred() {
 	let resolve!: () => void;
@@ -239,6 +300,14 @@ function deferred() {
 		resolve = resolvePromise;
 	});
 	return { promise, resolve };
+}
+
+function expectation<const T extends string>(name: string, allowed: readonly T[]): T {
+	const value = process.env[name] ?? allowed[0];
+	if (!allowed.includes(value as T)) {
+		throw new Error(`${name} must be one of: ${allowed.join(", ")}`);
+	}
+	return value as T;
 }
 
 function toolOutput(messages: LocalMessage[], callId: string): unknown {

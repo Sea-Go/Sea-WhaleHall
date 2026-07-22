@@ -10,14 +10,14 @@ pub struct SystemForegroundAppProvider;
 #[cfg(target_os = "macos")]
 impl ForegroundAppProvider for SystemForegroundAppProvider {
     fn foreground_app(&self) -> Result<Option<ForegroundApp>, ActivityError> {
-        use objc2_app_kit::NSRunningApplication;
+        use objc2_app_kit::NSWorkspace;
 
-        let process_id = frontmost_process_id()?;
-        let Some(application) =
-            NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
-        else {
-            return Ok(None);
+        let Some(application) = NSWorkspace::sharedWorkspace().frontmostApplication() else {
+            return Err(ActivityError::Foreground(
+                "macOS did not expose a frontmost application".to_owned(),
+            ));
         };
+        let process_id = application.processIdentifier();
         let app_name = application
             .localizedName()
             .map(|name| name.to_string())
@@ -54,42 +54,6 @@ impl ForegroundAppProvider for SystemForegroundAppProvider {
             window_title: String::new(),
         }))
     }
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct ProcessSerialNumber {
-    high_long_of_psn: u32,
-    low_long_of_psn: u32,
-}
-
-#[cfg(target_os = "macos")]
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    fn GetFrontProcess(process: *mut ProcessSerialNumber) -> i16;
-    fn GetProcessPID(process: *const ProcessSerialNumber, process_id: *mut i32) -> i16;
-}
-
-#[cfg(target_os = "macos")]
-fn frontmost_process_id() -> Result<i32, ActivityError> {
-    let mut process = ProcessSerialNumber {
-        high_long_of_psn: 0,
-        low_long_of_psn: 0,
-    };
-    let front_status = unsafe { GetFrontProcess(&mut process) };
-    if front_status != 0 {
-        return Err(ActivityError::Foreground(format!(
-            "GetFrontProcess failed with OSStatus {front_status}"
-        )));
-    }
-    let mut process_id = 0;
-    let pid_status = unsafe { GetProcessPID(&process, &mut process_id) };
-    if pid_status != 0 || process_id <= 0 {
-        return Err(ActivityError::Foreground(format!(
-            "GetProcessPID failed with OSStatus {pid_status}"
-        )));
-    }
-    Ok(process_id)
 }
 
 #[cfg(not(target_os = "macos"))]
