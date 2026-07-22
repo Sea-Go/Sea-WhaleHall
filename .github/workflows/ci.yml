@@ -158,6 +158,9 @@ jobs:
     name: Linux distro sensor · ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    defaults:
+      run:
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
     strategy:
       fail-fast: false
       matrix:
