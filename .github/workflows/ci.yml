@@ -232,7 +232,7 @@ jobs:
               --output-document=/tmp/whalehall-rustup-init \
               https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
           fi
-          chmod +x /tmp/whalehall-rustup-init
+          /usr/bin/chmod +x /tmp/whalehall-rustup-init
           /tmp/whalehall-rustup-init -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 

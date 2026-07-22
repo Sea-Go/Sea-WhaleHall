@@ -49,15 +49,13 @@ if [[ -z "$probe_window" ]]; then
   cat "$openbox_log" "$xterm_log" >&2
   exit 1
 fi
-printf -v probe_window_hex "0x%x" "$probe_window"
 
 desktop_ready=false
 for _ in {1..40}; do
   wmctrl -a "$window_title" >/dev/null 2>&1 || true
   xdotool windowactivate "$probe_window" >/dev/null 2>&1 || true
   xdotool windowfocus "$probe_window" >/dev/null 2>&1 || true
-  xprop -root -f _NET_ACTIVE_WINDOW 32x -set _NET_ACTIVE_WINDOW "$probe_window_hex"
-  if xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | grep -Fqi "$probe_window_hex"; then
+  if [[ "$(xdotool getactivewindow 2>/dev/null || true)" == "$probe_window" ]]; then
     desktop_ready=true
     break
   fi
