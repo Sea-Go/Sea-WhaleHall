@@ -6,6 +6,7 @@ This document defines the Rust-owned client sensor for foreground application us
 
 The sensor belongs entirely to the `whalehall-local` Rust workspace:
 
+- `core/src/sensors/activity.rs` is the single public sensor entry file.
 - `core/src/activity/provider.rs` reads the current foreground application from the OS.
 - `core/src/activity/tracker.rs` owns the resident sampling loop, session state machine, shutdown, query API, and serialized cleanup commands.
 - `core/src/activity/store.rs` owns SQLite schema, transactions, filtering, retention, and crash recovery.

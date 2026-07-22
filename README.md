@@ -17,7 +17,8 @@ flowchart TB
     Agent --> LocalClient["LocalToolClient"]
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
     Server --> Core["Local Tool core"]
-    Core --> Tools["system.info · activity.status · activity.sessions · activity.cleanup"]
+    Core --> Tools["system.info · device.environment · activity.*"]
+    Core --> DeviceSensor["Device and environment sensor"]
     Core --> Tracker["Foreground app tracker"]
     Tracker --> SQLite["Local SQLite · usage_sessions"]
   end
@@ -35,10 +36,10 @@ The TypeScript Agent is deliberately small: it exposes a stable orchestration bo
 | Electrobun main process | [`src/bun/index.ts`](src/bun/index.ts) | Window creation, Typed RPC routing, lifecycle, and Agent composition |
 | Shared frontend contracts | [`src/shared`](src/shared) | Electrobun Typed RPC schemas shared with both WebViews |
 | Rust Local protocol | [`whalehall-local/protocol`](whalehall-local/protocol) | JSONL requests, responses, tool descriptors, events, and errors |
-| Rust Local core | [`whalehall-local/core`](whalehall-local/core) | Tool registry plus foreground-application tracking and SQLite persistence |
+| Rust Local core | [`whalehall-local/core`](whalehall-local/core) | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence |
 | Rust Local server | [`whalehall-local/server`](whalehall-local/server) | Concurrent stdin/stdout JSONL server and packaged executable |
 
-Foreground application tracking lives under `whalehall-local/core/src/activity/`; read-only Agent-facing access lives under `whalehall-local/core/src/tools/`. Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. LLM providers, task planning, and conversation orchestration belong under `src/agent/`.
+Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout and device snapshot contract are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. LLM providers, task planning, and conversation orchestration belong under `src/agent/`.
 
 Generated files stay outside source areas:
 
@@ -160,6 +161,7 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 
 - `system.info` returns OS, architecture, Local Tool Host version, and process ID. It does not read the user or host name.
 - `demo.wait` accepts `durationMs` from 100 to 5000, emits progress, and supports cancellation.
+- `device.environment` returns OS version, device name, local username, language preferences, timezone, displays and resolutions, CPU, memory, batteries, and network interfaces. Because it exposes local identity and addresses, it declares the `device.environment.read` permission.
 - `activity.status` returns monitor state, current foreground session, sampling interval, and the exact database path.
 - `activity.sessions` reads raw sessions with `limit`, `fromMs`, `toMs`, `appId`, and `includeOpen` filters. Its descriptor declares the `activity.read` permission because usage history is sensitive local data.
 - `activity.cleanup` deletes local history with `scope: "longTerm" | "shortTerm" | "all"`. It is a write-risk Tool and declares the `activity.delete` permission.
