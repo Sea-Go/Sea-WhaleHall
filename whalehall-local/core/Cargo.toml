@@ -6,15 +6,22 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+battery.workspace = true
 chrono.workspace = true
 directories.workspace = true
+display-info.workspace = true
+iana-time-zone.workspace = true
+network-interface.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sysinfo.workspace = true
+sys-locale.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 whalehall-local-protocol.workspace = true
+whoami.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit.workspace = true
