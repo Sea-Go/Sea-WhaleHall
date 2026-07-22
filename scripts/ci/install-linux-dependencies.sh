@@ -47,7 +47,7 @@ case "$family" in
     as_root zypper --non-interactive refresh
     as_root zypper --non-interactive install --no-recommends \
       ca-certificates cmake curl dbus-1-devel gcc gcc-c++ git libxcb-devel make \
-      pkg-config unzip xcb-util-wm-devel
+      pkg-config unzip wget xcb-util-wm-devel
     ;;
   *)
     echo "unsupported Linux package family: $family" >&2

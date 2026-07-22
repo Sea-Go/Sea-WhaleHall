@@ -25,7 +25,7 @@ fi
 nohup openbox >"$openbox_log" 2>&1 &
 window_manager_ready=false
 for _ in {1..40}; do
-  if xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
+  if wmctrl -m 2>/dev/null | grep -q "^Name: Openbox$"; then
     window_manager_ready=true
     break
   fi
@@ -33,7 +33,6 @@ for _ in {1..40}; do
 done
 if [[ "$window_manager_ready" != "true" ]]; then
   cat "$openbox_log" >&2
-  exit 1
 fi
 
 nohup xterm -T "$window_title" >"$xterm_log" 2>&1 &
@@ -50,11 +49,14 @@ if [[ -z "$probe_window" ]]; then
   cat "$openbox_log" "$xterm_log" >&2
   exit 1
 fi
+printf -v probe_window_hex "0x%x" "$probe_window"
 
 desktop_ready=false
 for _ in {1..40}; do
   wmctrl -a "$window_title" >/dev/null 2>&1 || true
   xdotool windowactivate "$probe_window" >/dev/null 2>&1 || true
+  xdotool windowfocus "$probe_window" >/dev/null 2>&1 || true
+  xprop -root -f _NET_ACTIVE_WINDOW 32x -set _NET_ACTIVE_WINDOW "$probe_window_hex"
   if [[ "$(xdotool getactivewindow getwindowname 2>/dev/null || true)" == "$window_title" ]]; then
     desktop_ready=true
     break
