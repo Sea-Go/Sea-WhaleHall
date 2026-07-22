@@ -67,10 +67,13 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Verify Rust activity sensor and Local Tools
+      - name: Verify Rust sensors and Local Tools
         run: bun run check:rust
 
-      - name: Test TypeScript and real JSONL process integration
+      - name: Enforce native CI probe for every sensor
+        run: bun run test:sensors:ci
+
+      - name: Test complete TypeScript and process integration suite
         run: bun test
 
       - name: Build Electrobun canary
