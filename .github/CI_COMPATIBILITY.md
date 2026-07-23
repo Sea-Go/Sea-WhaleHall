@@ -65,5 +65,8 @@ Native Tool responses have a 15-second per-call budget so rolling-distribution
 containers can finish cold-start work without introducing timing flakes. Resident
 service tests wait for observable persisted state rather than assuming a fixed
 scheduler delay; exhausting either bounded wait remains a blocking failure.
-The cancellation probe flushes its request and observes the cancellation event,
-failed call response, and cancellation acknowledgement before closing stdin.
+The protocol probe validates progress with a completed short call, then cancels a
+separate five-second call immediately after its started event. It flushes the
+request and observes the cancellation event, failed call response, and cancellation
+acknowledgement before closing stdin, so pipe batching cannot turn cancellation
+into a scheduler race.

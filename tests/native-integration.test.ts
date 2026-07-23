@@ -363,8 +363,21 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		stderr: "pipe",
 	});
 	const messages: LocalMessage[] = [];
+	const queryCallIds = [
+		"activity-sessions",
+		"activity-cleanup",
+		"installed-applications",
+		"application-processes",
+		"presence-events",
+		"browser-tabs",
+		"browser-history",
+		"browser-searches",
+		"browser-downloads",
+	];
+	const queryCompleted = new Map(queryCallIds.map((callId) => [callId, deferred()] as const));
+	const progressObserved = deferred();
+	const progressCompleted = deferred();
 	const waitStarted = deferred();
-	const waitProgress = deferred();
 	const waitCancelled = deferred();
 	const waitCompleted = deferred();
 	const cancelCompleted = deferred();
@@ -378,14 +391,18 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		if ("event" in message && message.callId === "wait" && message.event === "tool.started") {
 			waitStarted.resolve();
 		}
-		if ("event" in message && message.callId === "wait" && message.event === "tool.progress") {
-			waitProgress.resolve();
+		if ("event" in message && message.callId === "progress" && message.event === "tool.progress") {
+			progressObserved.resolve();
 		}
 		if ("event" in message && message.callId === "wait" && message.event === "tool.cancelled") {
 			waitCancelled.resolve();
 		}
+		if ("id" in message && message.id === "progress") progressCompleted.resolve();
 		if ("id" in message && message.id === "wait") waitCompleted.resolve();
 		if ("id" in message && message.id === "cancel") cancelCompleted.resolve();
+		if ("id" in message && typeof message.id === "string") {
+			queryCompleted.get(message.id)?.resolve();
+		}
 	});
 	child.stdin.write('{"id":"list","method":"tool.list","params":{}}\n');
 	child.stdin.write(
@@ -545,24 +562,31 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	child.stdin.write(
 		'{"id":"browser-downloads","method":"tool.call","params":{"name":"browser.downloads","arguments":{"limit":10,"state":"complete"}}}\n',
 	);
+	await child.stdin.flush();
+	await withTimeout(
+		Promise.all(Array.from(queryCompleted.values(), (completed) => completed.promise)).then(
+			() => undefined,
+		),
+		"sensor query responses",
+	);
 	child.stdin.write(
-		'{"id":"wait","method":"tool.call","params":{"name":"demo.wait","arguments":{"durationMs":2000}}}\n',
+		'{"id":"progress","method":"tool.call","params":{"name":"demo.wait","arguments":{"durationMs":500}}}\n',
+	);
+	await child.stdin.flush();
+	await withTimeout(progressObserved.promise, "tool.progress");
+	await withTimeout(progressCompleted.promise, "progress call response");
+	child.stdin.write(
+		'{"id":"wait","method":"tool.call","params":{"name":"demo.wait","arguments":{"durationMs":5000}}}\n',
 	);
 	await child.stdin.flush();
 	await withTimeout(waitStarted.promise, "tool.started");
-	await withTimeout(waitProgress.promise, "tool.progress");
 	child.stdin.write(
 		'{"id":"cancel","method":"tool.cancel","params":{"callId":"wait"}}\n',
 	);
 	await child.stdin.flush();
-	await withTimeout(
-		Promise.all([
-			waitCancelled.promise,
-			waitCompleted.promise,
-			cancelCompleted.promise,
-		]).then(() => undefined),
-		"tool cancellation lifecycle",
-	);
+	await withTimeout(cancelCompleted.promise, "tool.cancel response");
+	await withTimeout(waitCancelled.promise, "tool.cancelled event");
+	await withTimeout(waitCompleted.promise, "cancelled tool response");
 	child.stdin.end();
 
 	await outputComplete;
@@ -725,6 +749,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	expect(messages.some((message) => "event" in message && message.event === "tool.progress")).toBe(
 		true,
 	);
+	expect(toolOutput(messages, "progress")).toMatchObject({ waitedMs: 500 });
 	expect(
 		messages.some((message) => "event" in message && message.event === "tool.cancelled"),
 	).toBe(true);
