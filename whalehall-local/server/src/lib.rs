@@ -9,6 +9,15 @@ use whalehall_local_core::ToolHost;
 use whalehall_local_core::sensors::activity::{
     ActivityConfig, ActivityService, SystemForegroundAppProvider,
 };
+use whalehall_local_core::sensors::application_inventory::{
+    ApplicationInventoryConfig, ApplicationInventoryService, SystemApplicationInventoryProvider,
+};
+use whalehall_local_core::sensors::browser_activity::{
+    BrowserActivityConfig, BrowserActivityService, SystemBrowserActivityProvider,
+};
+use whalehall_local_core::sensors::presence::{
+    PresenceConfig, PresenceService, SystemPresenceProvider,
+};
 use whalehall_local_protocol::{
     MAX_JSONL_LINE_BYTES, OutboundMessage, Request, Response, RuntimeHealth, ToolCallParams,
     ToolCallResult, ToolCancelParams, ToolCancelResult, ToolListResult,
@@ -20,10 +29,50 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let config = ActivityConfig::from_environment().map_err(io::Error::other)?;
+    let inventory_config =
+        ApplicationInventoryConfig::from_environment().map_err(io::Error::other)?;
+    let presence_config = PresenceConfig::from_environment().map_err(io::Error::other)?;
+    let browser_config = BrowserActivityConfig::from_environment().map_err(io::Error::other)?;
     let activity = ActivityService::start(config, Arc::new(SystemForegroundAppProvider))
         .map_err(io::Error::other)?;
+    let inventory = match ApplicationInventoryService::start(
+        inventory_config,
+        Arc::new(SystemApplicationInventoryProvider::default()),
+    ) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            activity.shutdown().await;
+            return Err(io::Error::other(error));
+        }
+    };
+    let presence = match PresenceService::start(presence_config, Arc::new(SystemPresenceProvider)) {
+        Ok(presence) => presence,
+        Err(error) => {
+            inventory.shutdown().await;
+            activity.shutdown().await;
+            return Err(io::Error::other(error));
+        }
+    };
+    let browser = match BrowserActivityService::start(
+        browser_config.clone(),
+        Arc::new(SystemBrowserActivityProvider::new(browser_config)),
+    ) {
+        Ok(browser) => browser,
+        Err(error) => {
+            presence.shutdown().await;
+            inventory.shutdown().await;
+            activity.shutdown().await;
+            return Err(io::Error::other(error));
+        }
+    };
     eprintln!("activity database: {}", activity.database_path().display());
-    serve_with_activity(reader, writer, activity).await
+    eprintln!(
+        "application inventory database: {}",
+        inventory.database_path().display()
+    );
+    eprintln!("presence database: {}", presence.database_path().display());
+    eprintln!("browser database: {}", browser.database_path().display());
+    serve_with_services(reader, writer, activity, inventory, presence, browser).await
 }
 
 pub async fn serve_with_activity<R, W>(
@@ -36,6 +85,52 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let host = Arc::new(ToolHost::with_activity(activity.clone()));
+    serve_session(reader, writer, host, activity, None, None, None).await
+}
+
+pub async fn serve_with_services<R, W>(
+    reader: R,
+    writer: W,
+    activity: ActivityService,
+    inventory: ApplicationInventoryService,
+    presence: PresenceService,
+    browser: BrowserActivityService,
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let host = Arc::new(ToolHost::with_services(
+        activity.clone(),
+        inventory.clone(),
+        presence.clone(),
+        browser.clone(),
+    ));
+    serve_session(
+        reader,
+        writer,
+        host,
+        activity,
+        Some(inventory),
+        Some(presence),
+        Some(browser),
+    )
+    .await
+}
+
+async fn serve_session<R, W>(
+    reader: R,
+    writer: W,
+    host: Arc<ToolHost>,
+    activity: ActivityService,
+    inventory: Option<ApplicationInventoryService>,
+    presence: Option<PresenceService>,
+    browser: Option<BrowserActivityService>,
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_output = output_tx.clone();
@@ -122,6 +217,15 @@ where
     }
 
     while calls.join_next().await.is_some() {}
+    if let Some(browser) = browser {
+        browser.shutdown().await;
+    }
+    if let Some(presence) = presence {
+        presence.shutdown().await;
+    }
+    if let Some(inventory) = inventory {
+        inventory.shutdown().await;
+    }
     activity.shutdown().await;
     drop(event_tx);
     let _ = event_forwarder.await;
