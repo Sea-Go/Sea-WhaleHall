@@ -1,3 +1,4 @@
+pub mod accessibility_tree;
 pub mod activity;
 pub mod application_inventory;
 pub mod browser_activity;

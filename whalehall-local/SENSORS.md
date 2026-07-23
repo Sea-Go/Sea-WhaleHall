@@ -4,6 +4,7 @@ Every client sensor has exactly one public entry file under `core/src/sensors/`:
 
 | Sensor file | Collection model | Agent Tools |
 | --- | --- | --- |
+| `accessibility_tree.rs` | Resident foreground accessibility-tree monitor | `accessibility.status`, `accessibility.tree` |
 | `activity.rs` | Resident foreground-application monitor | `activity.status`, `activity.sessions`, `activity.cleanup` |
 | `application_inventory.rs` | Resident installed-application and process monitor | `applications.status`, `applications.installed`, `applications.processes` |
 | `browser_activity.rs` | Resident tab, history, search, and download monitor | `browser.status`, `browser.tabs`, `browser.history`, `browser.searches`, `browser.downloads` |
@@ -13,6 +14,20 @@ Every client sensor has exactly one public entry file under `core/src/sensors/`:
 `sensors/mod.rs` is only the registry. A new sensor is added as one sibling `.rs` file and exported there. Tool protocol adaptation stays under `core/src/tools/`, so sensor APIs remain usable directly from Rust without JSON.
 
 The activity entry file delegates to a private multi-file SQLite engine because it owns a long-running state machine, schema, crash recovery, and retention. Those files are implementation support rather than separately registered sensors.
+
+## Accessibility tree
+
+`accessibility_tree.rs` owns the resident foreground UI accessibility monitor
+and `accessibility.sqlite3`. It stores bounded changed snapshots containing
+roles, control names, focus, selection, optional values, and optional document
+excerpts. Protected/password values are always removed, while ordinary values
+and document text remain opt-in in Agent responses.
+
+The system provider supports Windows UI Automation, macOS System Events with
+Accessibility permission, and Linux AT-SPI. A fresh atomic bridge can supply
+the same platform-neutral tree contract. Full schema, limits, permissions,
+privacy, Tool, and CI details are in
+[`ACCESSIBILITY_TREE_SENSOR.md`](ACCESSIBILITY_TREE_SENSOR.md).
 
 ## Application inventory
 
