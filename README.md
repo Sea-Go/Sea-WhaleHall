@@ -17,7 +17,8 @@ flowchart TB
     Agent --> LocalClient["LocalToolClient"]
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
     Server --> Core["Local Tool core"]
-    Core --> Tools["system.info · device.environment · activity.* · applications.* · presence.* · browser.*"]
+    Core --> Tools["system.info · device.environment · accessibility.* · activity.* · applications.* · presence.* · browser.*"]
+    Core --> Accessibility["Foreground accessibility-tree sensor"]
     Core --> DeviceSensor["Device and environment sensor"]
     Core --> Tracker["Foreground app tracker"]
     Core --> Presence["Idle, AFK, lock, and sleep sensor"]
@@ -25,6 +26,7 @@ flowchart TB
     Tracker --> SQLite["Local SQLite · usage_sessions"]
     Presence --> PresenceSQLite["Local SQLite · presence events"]
     Browser --> BrowserSQLite["Local SQLite · tabs, history, searches, downloads"]
+    Accessibility --> AccessibilitySQLite["Local SQLite · UI tree snapshots"]
   end
 ```
 
@@ -43,7 +45,7 @@ The TypeScript Agent is deliberately small: it exposes a stable orchestration bo
 | Rust Local core | [`whalehall-local/core`](whalehall-local/core) | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence |
 | Rust Local server | [`whalehall-local/server`](whalehall-local/server) | Concurrent stdin/stdout JSONL server and packaged executable |
 
-Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. LLM providers, task planning, and conversation orchestration belong under `src/agent/`.
+Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. LLM providers, task planning, and conversation orchestration belong under `src/agent/`.
 
 Generated files stay outside source areas:
 
@@ -166,6 +168,8 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 - `system.info` returns OS, architecture, Local Tool Host version, and process ID. It does not read the user or host name.
 - `demo.wait` accepts `durationMs` from 100 to 5000, emits progress, and supports cancellation.
 - `device.environment` returns OS version, device name, local username, language preferences, timezone, displays and resolutions, CPU, memory, batteries, and network interfaces. Because it exposes local identity and addresses, it declares the `device.environment.read` permission.
+- `accessibility.status` returns foreground accessibility capabilities and a value-free focused-control summary.
+- `accessibility.tree` queries buttons, menus, text boxes, selection, and bounded document excerpts from `accessibility.sqlite3`. Values and document text require explicit flags, protected input is always redacted, and both Tools require `accessibility.read`.
 - `activity.status` returns monitor state, current foreground session, sampling interval, and the exact database path.
 - `activity.sessions` reads raw sessions with `limit`, `fromMs`, `toMs`, `appId`, and `includeOpen` filters. Its descriptor declares the `activity.read` permission because usage history is sensitive local data.
 - `activity.cleanup` deletes local history with `scope: "longTerm" | "shortTerm" | "all"`. It is a write-risk Tool and declares the `activity.delete` permission.

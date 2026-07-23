@@ -6,6 +6,9 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use whalehall_local_core::ToolHost;
+use whalehall_local_core::sensors::accessibility_tree::{
+    AccessibilityConfig, AccessibilityService, SystemAccessibilityProvider,
+};
 use whalehall_local_core::sensors::activity::{
     ActivityConfig, ActivityService, SystemForegroundAppProvider,
 };
@@ -33,6 +36,7 @@ where
         ApplicationInventoryConfig::from_environment().map_err(io::Error::other)?;
     let presence_config = PresenceConfig::from_environment().map_err(io::Error::other)?;
     let browser_config = BrowserActivityConfig::from_environment().map_err(io::Error::other)?;
+    let accessibility_config = AccessibilityConfig::from_environment().map_err(io::Error::other)?;
     let activity = ActivityService::start(config, Arc::new(SystemForegroundAppProvider))
         .map_err(io::Error::other)?;
     let inventory = match ApplicationInventoryService::start(
@@ -65,6 +69,19 @@ where
             return Err(io::Error::other(error));
         }
     };
+    let accessibility = match AccessibilityService::start(
+        accessibility_config,
+        Arc::new(SystemAccessibilityProvider),
+    ) {
+        Ok(accessibility) => accessibility,
+        Err(error) => {
+            browser.shutdown().await;
+            presence.shutdown().await;
+            inventory.shutdown().await;
+            activity.shutdown().await;
+            return Err(io::Error::other(error));
+        }
+    };
     eprintln!("activity database: {}", activity.database_path().display());
     eprintln!(
         "application inventory database: {}",
@@ -72,7 +89,20 @@ where
     );
     eprintln!("presence database: {}", presence.database_path().display());
     eprintln!("browser database: {}", browser.database_path().display());
-    serve_with_services(reader, writer, activity, inventory, presence, browser).await
+    eprintln!(
+        "accessibility database: {}",
+        accessibility.database_path().display()
+    );
+    serve_with_all_services(
+        reader,
+        writer,
+        activity,
+        inventory,
+        presence,
+        browser,
+        accessibility,
+    )
+    .await
 }
 
 pub async fn serve_with_activity<R, W>(
@@ -85,7 +115,13 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let host = Arc::new(ToolHost::with_activity(activity.clone()));
-    serve_session(reader, writer, host, activity, None, None, None).await
+    serve_session(
+        reader,
+        writer,
+        host,
+        ResidentServices::activity_only(activity),
+    )
+    .await
 }
 
 pub async fn serve_with_services<R, W>(
@@ -110,22 +146,93 @@ where
         reader,
         writer,
         host,
-        activity,
-        Some(inventory),
-        Some(presence),
-        Some(browser),
+        ResidentServices {
+            activity,
+            inventory: Some(inventory),
+            presence: Some(presence),
+            browser: Some(browser),
+            accessibility: None,
+        },
     )
     .await
+}
+
+pub async fn serve_with_all_services<R, W>(
+    reader: R,
+    writer: W,
+    activity: ActivityService,
+    inventory: ApplicationInventoryService,
+    presence: PresenceService,
+    browser: BrowserActivityService,
+    accessibility: AccessibilityService,
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let host = Arc::new(ToolHost::with_all_services(
+        activity.clone(),
+        inventory.clone(),
+        presence.clone(),
+        browser.clone(),
+        accessibility.clone(),
+    ));
+    serve_session(
+        reader,
+        writer,
+        host,
+        ResidentServices {
+            activity,
+            inventory: Some(inventory),
+            presence: Some(presence),
+            browser: Some(browser),
+            accessibility: Some(accessibility),
+        },
+    )
+    .await
+}
+
+struct ResidentServices {
+    activity: ActivityService,
+    inventory: Option<ApplicationInventoryService>,
+    presence: Option<PresenceService>,
+    browser: Option<BrowserActivityService>,
+    accessibility: Option<AccessibilityService>,
+}
+
+impl ResidentServices {
+    fn activity_only(activity: ActivityService) -> Self {
+        Self {
+            activity,
+            inventory: None,
+            presence: None,
+            browser: None,
+            accessibility: None,
+        }
+    }
+
+    async fn shutdown(self) {
+        if let Some(accessibility) = self.accessibility {
+            accessibility.shutdown().await;
+        }
+        if let Some(browser) = self.browser {
+            browser.shutdown().await;
+        }
+        if let Some(presence) = self.presence {
+            presence.shutdown().await;
+        }
+        if let Some(inventory) = self.inventory {
+            inventory.shutdown().await;
+        }
+        self.activity.shutdown().await;
+    }
 }
 
 async fn serve_session<R, W>(
     reader: R,
     writer: W,
     host: Arc<ToolHost>,
-    activity: ActivityService,
-    inventory: Option<ApplicationInventoryService>,
-    presence: Option<PresenceService>,
-    browser: Option<BrowserActivityService>,
+    services: ResidentServices,
 ) -> io::Result<()>
 where
     R: AsyncBufRead + Unpin,
@@ -217,16 +324,7 @@ where
     }
 
     while calls.join_next().await.is_some() {}
-    if let Some(browser) = browser {
-        browser.shutdown().await;
-    }
-    if let Some(presence) = presence {
-        presence.shutdown().await;
-    }
-    if let Some(inventory) = inventory {
-        inventory.shutdown().await;
-    }
-    activity.shutdown().await;
+    services.shutdown().await;
     drop(event_tx);
     let _ = event_forwarder.await;
     drop(output_tx);
