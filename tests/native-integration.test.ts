@@ -365,6 +365,9 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	const messages: LocalMessage[] = [];
 	const waitStarted = deferred();
 	const waitProgress = deferred();
+	const waitCancelled = deferred();
+	const waitCompleted = deferred();
+	const cancelCompleted = deferred();
 	const sensorCompleted = new Map(
 		sensorCiProbes.map((probe) => [probe.callId, deferred()] as const),
 	);
@@ -378,6 +381,11 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		if ("event" in message && message.callId === "wait" && message.event === "tool.progress") {
 			waitProgress.resolve();
 		}
+		if ("event" in message && message.callId === "wait" && message.event === "tool.cancelled") {
+			waitCancelled.resolve();
+		}
+		if ("id" in message && message.id === "wait") waitCompleted.resolve();
+		if ("id" in message && message.id === "cancel") cancelCompleted.resolve();
 	});
 	child.stdin.write('{"id":"list","method":"tool.list","params":{}}\n');
 	child.stdin.write(
@@ -545,6 +553,15 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	await withTimeout(waitProgress.promise, "tool.progress");
 	child.stdin.write(
 		'{"id":"cancel","method":"tool.cancel","params":{"callId":"wait"}}\n',
+	);
+	await child.stdin.flush();
+	await withTimeout(
+		Promise.all([
+			waitCancelled.promise,
+			waitCompleted.promise,
+			cancelCompleted.promise,
+		]).then(() => undefined),
+		"tool cancellation lifecycle",
 	);
 	child.stdin.end();
 
