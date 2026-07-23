@@ -38,6 +38,73 @@ const sensorCiContext: SensorCiContext = {
 
 const sensorCiProbes: SensorCiProbe[] = [
 	{
+		sourceFile: "accessibility_tree.rs",
+		callId: "sensor-accessibility",
+		toolName: "accessibility.status",
+		arguments: {},
+		verify: (output, context) => {
+			const status = output as {
+				state: string;
+				applicationName: string | null;
+				windowTitle: string | null;
+				nodeCount: number;
+				snapshotCount: number;
+				currentControl: {
+					nodeId: string;
+					role: string;
+					name: string;
+					selected: boolean | null;
+					protected: boolean;
+				} | null;
+				capabilities: {
+					tree: boolean;
+					focusedControl: boolean;
+					selection: boolean;
+					documentText: boolean;
+				};
+				warnings: string[];
+				lastError: string | null;
+			};
+			console.info(
+				[
+					`[sensor-ci] accessibility state=${status.state}`,
+					`nodes=${status.nodeCount}`,
+					`focused=${status.currentControl?.role ?? "none"}`,
+					`documentText=${status.capabilities.documentText}`,
+				].join(" "),
+			);
+			expect(status.state).toBe("running");
+			expect(status.applicationName).toBe("WhaleHall Accessibility Probe");
+			expect(status.windowTitle).toBe("Accessibility Fixture");
+			expect(status.nodeCount).toBe(7);
+			expect(status.snapshotCount).toBe(1);
+			expect(status.currentControl).toMatchObject({
+				nodeId: "title-input",
+				role: "textBox",
+				name: "Title",
+				selected: false,
+				protected: false,
+			});
+			expect(status.capabilities).toEqual({
+				tree: true,
+				focusedControl: true,
+				selection: true,
+				documentText: true,
+			});
+			expect(status.warnings).toEqual([]);
+			expect(status.lastError).toBeNull();
+			expect(output).toMatchObject({
+				databasePath: join(context.dataDirectory, "accessibility.sqlite3"),
+				bridgePath: join(context.dataDirectory, "accessibility-current-tree.json"),
+				pollIntervalMs: 50,
+				bridgeMaxAgeMs: 60000,
+				maxNodes: 300,
+				documentTextLimit: 4096,
+				retentionDays: 7,
+			});
+		},
+	},
+	{
 		sourceFile: "activity.rs",
 		callId: "sensor-activity",
 		toolName: "activity.status",
@@ -342,6 +409,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	);
 	const dataDirectory = mkdtempSync(join(tmpdir(), "whalehall-activity-integration-"));
 	const browserProfileRoot = createBrowserFixture(dataDirectory);
+	createAccessibilityFixture(dataDirectory);
 	const context = { ...sensorCiContext, dataDirectory };
 	const child = Bun.spawn({
 		cmd: [binary],
@@ -357,6 +425,8 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 			WHALEHALL_BROWSER_TAB_POLL_MS: "50",
 			WHALEHALL_BROWSER_HISTORY_REFRESH_MS: "1000",
 			WHALEHALL_BROWSER_BRIDGE_MAX_AGE_MS: "60000",
+			WHALEHALL_ACCESSIBILITY_POLL_MS: "50",
+			WHALEHALL_ACCESSIBILITY_BRIDGE_MAX_AGE_MS: "60000",
 		},
 		stdin: "pipe",
 		stdout: "pipe",
@@ -373,6 +443,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		"browser-history",
 		"browser-searches",
 		"browser-downloads",
+		"accessibility-tree",
 	];
 	const queryCompleted = new Map(queryCallIds.map((callId) => [callId, deferred()] as const));
 	const progressObserved = deferred();
@@ -409,6 +480,35 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		'{"id":"system","method":"tool.call","params":{"name":"system.info","arguments":{}}}\n',
 	);
 	for (const probe of sensorCiProbes) {
+		if (probe.sourceFile === "accessibility_tree.rs") {
+			let readinessOutput: unknown;
+			let readinessReached = false;
+			for (let attempt = 0; attempt < 120; attempt += 1) {
+				const readinessCallId = `sensor-accessibility-readiness-${attempt}`;
+				const readinessCompleted = deferred();
+				sensorCompleted.set(readinessCallId, readinessCompleted);
+				child.stdin.write(
+					`${JSON.stringify({
+						id: readinessCallId,
+						method: "tool.call",
+						params: { name: probe.toolName, arguments: probe.arguments },
+					})}\n`,
+				);
+				await child.stdin.flush();
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
+				readinessOutput = successfulToolOutput(messages, readinessCallId);
+				if (accessibilitySensorReady(readinessOutput)) {
+					readinessReached = true;
+					break;
+				}
+				await Bun.sleep(250);
+			}
+			if (!readinessReached) {
+				throw new Error(
+					`Accessibility sensor did not import its native fixture: ${JSON.stringify(readinessOutput)}`,
+				);
+			}
+		}
 		if (probe.sourceFile === "activity.rs" && context.foregroundMode !== "auto") {
 			let readinessOutput: unknown;
 			let readinessReached = false;
@@ -562,6 +662,9 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	child.stdin.write(
 		'{"id":"browser-downloads","method":"tool.call","params":{"name":"browser.downloads","arguments":{"limit":10,"state":"complete"}}}\n',
 	);
+	child.stdin.write(
+		'{"id":"accessibility-tree","method":"tool.call","params":{"name":"accessibility.tree","arguments":{"limit":20,"includeValues":true,"includeDocumentText":true}}}\n',
+	);
 	await child.stdin.flush();
 	await withTimeout(
 		Promise.all(Array.from(queryCompleted.values(), (completed) => completed.promise)).then(
@@ -597,6 +700,8 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		(message) => "id" in message && message.id === "list" && message.ok,
 	) as { result: { tools: Array<{ name: string }> } } | undefined;
 	expect(listResponse?.result.tools.map((tool) => tool.name)).toEqual([
+		"accessibility.status",
+		"accessibility.tree",
 		"activity.cleanup",
 		"activity.sessions",
 		"activity.status",
@@ -743,6 +848,50 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 			},
 		],
 	});
+	const accessibilityOutput = toolOutput(messages, "accessibility-tree") as {
+		count: number;
+		snapshot: { applicationName: string; windowTitle: string; nodeCount: number };
+		nodes: Array<{
+			nodeId: string;
+			role: string;
+			name: string;
+			value: string | null;
+			selected: boolean | null;
+			focused: boolean;
+			documentText: string | null;
+			protected: boolean;
+		}>;
+	};
+	expect(accessibilityOutput.count).toBe(7);
+	expect(accessibilityOutput.snapshot).toMatchObject({
+		applicationName: "WhaleHall Accessibility Probe",
+		windowTitle: "Accessibility Fixture",
+		nodeCount: 7,
+	});
+	expect(accessibilityOutput.nodes.find((node) => node.role === "button")).toMatchObject({
+		name: "Save",
+	});
+	expect(accessibilityOutput.nodes.find((node) => node.role === "menu")).toMatchObject({
+		name: "File",
+	});
+	expect(accessibilityOutput.nodes.find((node) => node.nodeId === "title-input")).toMatchObject({
+		role: "textBox",
+		name: "Title",
+		value: "WhaleHall sensor draft",
+		focused: true,
+	});
+	expect(accessibilityOutput.nodes.find((node) => node.nodeId === "selected-item")).toMatchObject({
+		name: "Second item",
+		selected: true,
+	});
+	expect(accessibilityOutput.nodes.find((node) => node.role === "document")).toMatchObject({
+		documentText: "A bounded excerpt from the current document.",
+	});
+	expect(accessibilityOutput.nodes.find((node) => node.protected)).toMatchObject({
+		role: "passwordText",
+		value: null,
+		documentText: null,
+	});
 	expect(messages.some((message) => "event" in message && message.event === "tool.started")).toBe(
 		true,
 	);
@@ -765,6 +914,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	expect(existsSync(join(dataDirectory, "applications.sqlite3"))).toBe(true);
 	expect(existsSync(join(dataDirectory, "presence.sqlite3"))).toBe(true);
 	expect(existsSync(join(dataDirectory, "browser.sqlite3"))).toBe(true);
+	expect(existsSync(join(dataDirectory, "accessibility.sqlite3"))).toBe(true);
 	rmSync(dataDirectory, { recursive: true, force: true });
 }, 60_000);
 
@@ -858,6 +1008,33 @@ function browserSensorReady(output: unknown): boolean {
 	);
 }
 
+function accessibilitySensorReady(output: unknown): boolean {
+	const status = output as {
+		state: string;
+		nodeCount: number;
+		snapshotCount: number;
+		currentControl: unknown | null;
+		capabilities: {
+			tree: boolean;
+			focusedControl: boolean;
+			selection: boolean;
+			documentText: boolean;
+		};
+		lastError: string | null;
+	};
+	return (
+		status.state === "running" &&
+		status.nodeCount === 7 &&
+		status.snapshotCount === 1 &&
+		status.currentControl !== null &&
+		status.capabilities.tree &&
+		status.capabilities.focusedControl &&
+		status.capabilities.selection &&
+		status.capabilities.documentText &&
+		status.lastError === null
+	);
+}
+
 function createBrowserFixture(dataDirectory: string): string {
 	const root = join(dataDirectory, "ci-browser-profile");
 	const profile = join(root, "Default");
@@ -925,6 +1102,98 @@ function createBrowserFixture(dataDirectory: string): string {
 		}),
 	);
 	return root;
+}
+
+function createAccessibilityFixture(dataDirectory: string): void {
+	writeFileSync(
+		join(dataDirectory, "accessibility-current-tree.json"),
+		JSON.stringify({
+			observedAtMs: Date.now(),
+			available: true,
+			applicationName: "WhaleHall Accessibility Probe",
+			processId: process.pid,
+			windowTitle: "Accessibility Fixture",
+			capabilities: {
+				tree: true,
+				focusedControl: true,
+				selection: true,
+				documentText: true,
+			},
+			nodes: [
+				{
+					nodeId: "window",
+					parentId: null,
+					depth: 0,
+					role: "window",
+					name: "Accessibility Fixture",
+					focused: false,
+					enabled: true,
+				},
+				{
+					nodeId: "save-button",
+					parentId: "window",
+					depth: 1,
+					role: "button",
+					name: "Save",
+					focused: false,
+					enabled: true,
+				},
+				{
+					nodeId: "file-menu",
+					parentId: "window",
+					depth: 1,
+					role: "menu",
+					name: "File",
+					focused: false,
+					enabled: true,
+				},
+				{
+					nodeId: "title-input",
+					parentId: "window",
+					depth: 1,
+					role: "textBox",
+					name: "Title",
+					value: "WhaleHall sensor draft",
+					selected: false,
+					focused: true,
+					enabled: true,
+				},
+				{
+					nodeId: "selected-item",
+					parentId: "window",
+					depth: 1,
+					role: "listItem",
+					name: "Second item",
+					selected: true,
+					focused: false,
+					enabled: true,
+				},
+				{
+					nodeId: "document",
+					parentId: "window",
+					depth: 1,
+					role: "document",
+					name: "Document body",
+					documentText: "A bounded excerpt from the current document.",
+					focused: false,
+					enabled: true,
+				},
+				{
+					nodeId: "password",
+					parentId: "window",
+					depth: 1,
+					role: "passwordText",
+					name: "Password",
+					value: "must-not-leak",
+					documentText: "must-not-leak",
+					protected: true,
+					focused: false,
+					enabled: true,
+				},
+			],
+			warnings: [],
+		}),
+	);
 }
 
 function presenceCapabilityReady(
