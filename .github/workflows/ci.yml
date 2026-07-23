@@ -27,6 +27,7 @@ jobs:
     env:
       WHALEHALL_CI_DISPLAY_MODE: degraded
       WHALEHALL_CI_FOREGROUND_MODE: degraded
+      WHALEHALL_CI_PRESENCE_MODE: degraded
 
     steps:
       - name: Checkout
@@ -75,30 +76,37 @@ jobs:
             os: ubuntu-22.04
             display_mode: degraded
             foreground_mode: degraded
+            presence_mode: degraded
           - name: ubuntu-24.04
             os: ubuntu-24.04
             display_mode: degraded
             foreground_mode: degraded
+            presence_mode: degraded
           - name: windows-server-2022
             os: windows-2022
             display_mode: required
             foreground_mode: required
+            presence_mode: complete
           - name: windows-server-2025
             os: windows-2025
             display_mode: required
             foreground_mode: required
+            presence_mode: complete
           - name: macos-14
             os: macos-14
             display_mode: required
             foreground_mode: required
+            presence_mode: complete
           - name: macos-15
             os: macos-15
             display_mode: required
             foreground_mode: required
+            presence_mode: complete
     runs-on: ${{ matrix.os }}
     env:
       WHALEHALL_CI_DISPLAY_MODE: ${{ matrix.display_mode }}
       WHALEHALL_CI_FOREGROUND_MODE: ${{ matrix.foreground_mode }}
+      WHALEHALL_CI_PRESENCE_MODE: ${{ matrix.presence_mode }}
 
     steps:
       - name: Checkout
@@ -213,6 +221,7 @@ jobs:
       PKG_CONFIG: ${{ matrix.family == 'suse' && '/usr/bin/pkgconf' || '/usr/bin/pkg-config' }}
       WHALEHALL_CI_DISPLAY_MODE: degraded
       WHALEHALL_CI_FOREGROUND_MODE: degraded
+      WHALEHALL_CI_PRESENCE_MODE: degraded
 
     steps:
       - name: Checkout
@@ -258,6 +267,7 @@ jobs:
       DISPLAY: :99
       WHALEHALL_CI_DISPLAY_MODE: required
       WHALEHALL_CI_FOREGROUND_MODE: required
+      WHALEHALL_CI_PRESENCE_MODE: idle
 
     steps:
       - name: Checkout

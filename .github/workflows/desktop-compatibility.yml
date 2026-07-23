@@ -68,6 +68,7 @@ jobs:
     env:
       WHALEHALL_CI_DISPLAY_MODE: required
       WHALEHALL_CI_FOREGROUND_MODE: required
+      WHALEHALL_CI_PRESENCE_MODE: complete
 
     steps:
       - name: Checkout
