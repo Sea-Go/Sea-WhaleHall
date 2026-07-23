@@ -9,12 +9,12 @@ WhaleHall validates sensors by capability, not by operating-system name alone. A
 | Gate | Environments | Contract |
 | --- | --- | --- |
 | Complete quality suite | Ubuntu 24.04 | TypeScript, formatting, Clippy, all Rust tests, all Bun tests, and native JSONL probes |
-| Hosted sensors | Ubuntu 22.04/24.04, Windows Server 2022/2025, macOS 14/15 | Native Rust build and every registered sensor probe |
+| Hosted sensors | Ubuntu 22.04/24.04, Windows Server 2022/2025, macOS 14/15 | Native Rust build and every registered sensor probe, including isolated Chromium history/tab import |
 | Linux distributions | Ubuntu 22.04/24.04, Debian 12/13, Fedora 43/44, Arch rolling, Rocky 9, Alma 9, CentOS Stream 9/10, openSUSE Leap 16.0 | Native build, Rust tests, device/environment collection, and explicit headless degradation |
 | Virtual desktop | Ubuntu 24.04 with Xvfb, Openbox, and an active xterm | A real X11 display with a 1280x720 screen and a queryable foreground application |
 | Packaging | macOS 15, Windows Server 2025, Ubuntu 24.04 | Canary packages and unsigned seven-day artifacts, only after all preceding gates pass |
 
-Linux distribution containers intentionally validate headless behavior. They must report unavailable screens and foreground applications as degraded sensor state rather than failing the process or inventing hardware.
+Linux distribution containers intentionally validate headless behavior. They must report unavailable screens, foreground applications, last-input time, and lock state as degraded sensor capabilities rather than failing the process or inventing desktop state.
 
 ## Real desktop runners
 
@@ -53,6 +53,10 @@ Every public `core/src/sensors/*.rs` file must have exactly one entry in `sensor
 
 - `degraded`: no interactive desktop is available and absence must be explicit;
 - `required`: screen resolution and foreground application data must be present;
+- presence `idle`: last-input time must be available even if lock state is not;
+- presence `complete`: last-input time and lock state must both be available;
 - `auto`: the environment may provide either capability, but empty results still require a warning.
 
 Adding a file without a probe fails the automatic discovery test. A sensor is not considered release-certified until its native Tool call passes every blocking environment and all enabled real-desktop environments.
+
+The browser probe creates a synthetic Chromium profile and fresh tab bridge inside the job's temporary data directory. It validates platform-native file paths, SQLite snapshot/import behavior, tab lifecycle, audio flags, URL/search decoding, downloads, and Tool queries without reading a runner account's personal browsing data.

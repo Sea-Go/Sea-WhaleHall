@@ -17,10 +17,14 @@ flowchart TB
     Agent --> LocalClient["LocalToolClient"]
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
     Server --> Core["Local Tool core"]
-    Core --> Tools["system.info · device.environment · activity.*"]
+    Core --> Tools["system.info · device.environment · activity.* · applications.* · presence.* · browser.*"]
     Core --> DeviceSensor["Device and environment sensor"]
     Core --> Tracker["Foreground app tracker"]
+    Core --> Presence["Idle, AFK, lock, and sleep sensor"]
+    Core --> Browser["Browser tab and history sensor"]
     Tracker --> SQLite["Local SQLite · usage_sessions"]
+    Presence --> PresenceSQLite["Local SQLite · presence events"]
+    Browser --> BrowserSQLite["Local SQLite · tabs, history, searches, downloads"]
   end
 ```
 
@@ -39,7 +43,7 @@ The TypeScript Agent is deliberately small: it exposes a stable orchestration bo
 | Rust Local core | [`whalehall-local/core`](whalehall-local/core) | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence |
 | Rust Local server | [`whalehall-local/server`](whalehall-local/server) | Concurrent stdin/stdout JSONL server and packaged executable |
 
-Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout and device snapshot contract are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. LLM providers, task planning, and conversation orchestration belong under `src/agent/`.
+Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. LLM providers, task planning, and conversation orchestration belong under `src/agent/`.
 
 Generated files stay outside source areas:
 
@@ -165,6 +169,11 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 - `activity.status` returns monitor state, current foreground session, sampling interval, and the exact database path.
 - `activity.sessions` reads raw sessions with `limit`, `fromMs`, `toMs`, `appId`, and `includeOpen` filters. Its descriptor declares the `activity.read` permission because usage history is sensitive local data.
 - `activity.cleanup` deletes local history with `scope: "longTerm" | "shortTerm" | "all"`. It is a write-risk Tool and declares the `activity.delete` permission.
+- `applications.status`, `applications.installed`, and `applications.processes` expose the resident installed-application and process inventory stored in `applications.sqlite3`.
+- `presence.status` returns last input, idle/AFK, nullable lock state, sleep/wake state, and platform capability warnings.
+- `presence.events` queries AFK, lock/unlock, and sleep/wake events from `presence.sqlite3`. Both presence Tools require `presence.read`.
+- `browser.status` and `browser.tabs` expose current tab title, URL, domain, nullable audio state, and session boundaries.
+- `browser.history`, `browser.searches`, and `browser.downloads` query the local `browser.sqlite3` import. All browser Tools require the high-impact `browser.read` permission.
 
 The initial scaffold does not call a model API or control a browser. Application usage stays local and is not exposed through a network port.
 

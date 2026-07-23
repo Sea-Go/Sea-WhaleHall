@@ -5,11 +5,34 @@ Every client sensor has exactly one public entry file under `core/src/sensors/`:
 | Sensor file | Collection model | Agent Tools |
 | --- | --- | --- |
 | `activity.rs` | Resident foreground-application monitor | `activity.status`, `activity.sessions`, `activity.cleanup` |
+| `application_inventory.rs` | Resident installed-application and process monitor | `applications.status`, `applications.installed`, `applications.processes` |
+| `browser_activity.rs` | Resident tab, history, search, and download monitor | `browser.status`, `browser.tabs`, `browser.history`, `browser.searches`, `browser.downloads` |
 | `device_environment.rs` | On-demand device snapshot | `device.environment` |
+| `presence.rs` | Resident idle, AFK, lock, and sleep/wake monitor | `presence.status`, `presence.events` |
 
 `sensors/mod.rs` is only the registry. A new sensor is added as one sibling `.rs` file and exported there. Tool protocol adaptation stays under `core/src/tools/`, so sensor APIs remain usable directly from Rust without JSON.
 
 The activity entry file delegates to a private multi-file SQLite engine because it owns a long-running state machine, schema, crash recovery, and retention. Those files are implementation support rather than separately registered sensors.
+
+## Application inventory
+
+`application_inventory.rs` owns a resident cross-platform monitor and the `applications.sqlite3` database. It refreshes running processes at a configurable interval and installed applications on a slower cadence. A process identity is the pair `(processId, startedAtMs)`, so an operating system reusing a PID does not merge two different process lifecycles.
+
+Persisted installed-application fields include name, executable or bundle path, discovery source, first discovery time, and last discovery time. Each successful installed scan replaces paths that are no longer discoverable. Persisted process fields include name, executable path, PID, operating-system start time, first and last observation time, detected exit time, latest CPU percentage, and latest resident-memory bytes. `exitedAt: null` means the process was present in the most recent snapshot. Exit time is detection time and can lag the actual exit until the next successful process scan.
+
+Installed application discovery uses Linux desktop entries, macOS application bundles, and Windows executable installation roots. A headless or minimal image can legitimately return an empty installed list, but running-process collection must still return the local server process. Full ownership, schema, query, privacy, and lifecycle details are in [`APPLICATION_INVENTORY_SENSOR.md`](APPLICATION_INVENTORY_SENSOR.md).
+
+## Presence and idle state
+
+`presence.rs` owns the resident cross-platform presence monitor and `presence.sqlite3`. It records the latest input time and derives `afkStarted`, `afkEnded`, `screenLocked`, `screenUnlocked`, `sleepStarted`, and `wokeUp` transitions. Unknown desktop capability is represented explicitly rather than being confused with an active or unlocked user.
+
+Windows uses native input-desktop APIs, macOS reads IOHID and session properties, and Linux supports X11 idle time plus systemd-logind session hints. Full state-machine, schema, query, platform, privacy, and CI details are in [`PRESENCE_SENSOR.md`](PRESENCE_SENSOR.md).
+
+## Browser activity
+
+`browser_activity.rs` owns `browser.sqlite3` and two resident collection paths. Current tab observations create sessions with title, URL, domain, nullable audio state, and start/end boundaries. Browser profile snapshots import history URLs/titles/visit times/counts, derived search terms, and download URLs/paths/times/bytes/state.
+
+Chromium-family, Firefox, and Safari history profiles are supported with documented platform differences. Exact current tab audio uses the cross-platform bridge contract; macOS also has a title/URL Apple Events fallback. Full schema, bridge, privacy, query, limitation, and CI details are in [`BROWSER_ACTIVITY_SENSOR.md`](BROWSER_ACTIVITY_SENSOR.md).
 
 ## Device and environment snapshot
 
@@ -46,7 +69,7 @@ Every public sensor file must have one native CI probe in `tests/native-integrat
 
 Each probe must call the sensor through the real packaged JSONL server and assert meaningful output, not only confirm that the Rust code compiles. Probe Tool names and call IDs must be unique. The blocking GitHub Actions matrix runs this gate on multiple hosted macOS, Windows Server, Ubuntu, distribution-container, and virtual-X11 environments before packaging or artifact upload.
 
-The probe also consumes `WHALEHALL_CI_DISPLAY_MODE` and `WHALEHALL_CI_FOREGROUND_MODE` capability contracts. `required` demands a real display/current foreground session, `degraded` demands an explicit unavailable state, and `auto` accepts either while still rejecting silent empty screen results.
+The probe also consumes `WHALEHALL_CI_DISPLAY_MODE`, `WHALEHALL_CI_FOREGROUND_MODE`, and `WHALEHALL_CI_PRESENCE_MODE` capability contracts. Display and foreground `required` demand a real desktop capability, `degraded` demands an explicit unavailable state, and `auto` accepts either. Presence additionally supports `complete` for last-input plus lock-state collection and `idle` when only last-input collection is required.
 
 To add a sensor:
 
