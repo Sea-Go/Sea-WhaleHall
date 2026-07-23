@@ -1,3 +1,5 @@
+mod accessibility_status;
+mod accessibility_tree;
 mod activity_cleanup;
 mod activity_sessions;
 mod activity_status;
@@ -15,6 +17,8 @@ mod presence_events;
 mod presence_status;
 mod system_info;
 
+pub(crate) use accessibility_status::AccessibilityStatusTool;
+pub(crate) use accessibility_tree::AccessibilityTreeTool;
 pub(crate) use activity_cleanup::ActivityCleanupTool;
 pub(crate) use activity_sessions::ActivitySessionsTool;
 pub(crate) use activity_status::ActivityStatusTool;

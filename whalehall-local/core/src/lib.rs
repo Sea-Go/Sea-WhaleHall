@@ -12,16 +12,18 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use whalehall_local_protocol::{ToolDescriptor, ToolEvent, ToolEventKind};
 
+use sensors::accessibility_tree::AccessibilityService;
 use sensors::activity::ActivityService;
 use sensors::application_inventory::ApplicationInventoryService;
 use sensors::browser_activity::BrowserActivityService;
 use sensors::device_environment::DeviceEnvironmentSensor;
 use sensors::presence::PresenceService;
 use tools::{
-    ActivityCleanupTool, ActivitySessionsTool, ActivityStatusTool, ApplicationInventoryStatusTool,
-    ApplicationProcessesTool, BrowserDownloadsTool, BrowserHistoryTool, BrowserSearchesTool,
-    BrowserStatusTool, BrowserTabsTool, DemoWaitTool, DeviceEnvironmentTool,
-    InstalledApplicationsTool, PresenceEventsTool, PresenceStatusTool, SystemInfoTool,
+    AccessibilityStatusTool, AccessibilityTreeTool, ActivityCleanupTool, ActivitySessionsTool,
+    ActivityStatusTool, ApplicationInventoryStatusTool, ApplicationProcessesTool,
+    BrowserDownloadsTool, BrowserHistoryTool, BrowserSearchesTool, BrowserStatusTool,
+    BrowserTabsTool, DemoWaitTool, DeviceEnvironmentTool, InstalledApplicationsTool,
+    PresenceEventsTool, PresenceStatusTool, SystemInfoTool,
 };
 
 pub const MAX_CONCURRENT_TOOLS: usize = 4;
@@ -123,6 +125,36 @@ impl ToolHost {
             Arc::new(SystemInfoTool),
             Arc::new(DemoWaitTool),
             Arc::new(DeviceEnvironmentTool::new(DeviceEnvironmentSensor)),
+            Arc::new(ActivityCleanupTool::new(activity.clone())),
+            Arc::new(ActivityStatusTool::new(activity.clone())),
+            Arc::new(ActivitySessionsTool::new(activity)),
+            Arc::new(ApplicationInventoryStatusTool::new(inventory.clone())),
+            Arc::new(ApplicationProcessesTool::new(inventory.clone())),
+            Arc::new(InstalledApplicationsTool::new(inventory)),
+            Arc::new(PresenceEventsTool::new(presence.clone())),
+            Arc::new(PresenceStatusTool::new(presence)),
+            Arc::new(BrowserDownloadsTool::new(browser.clone())),
+            Arc::new(BrowserHistoryTool::new(browser.clone())),
+            Arc::new(BrowserSearchesTool::new(browser.clone())),
+            Arc::new(BrowserStatusTool::new(browser.clone())),
+            Arc::new(BrowserTabsTool::new(browser)),
+        ];
+        Self::with_tools(tools)
+    }
+
+    pub fn with_all_services(
+        activity: ActivityService,
+        inventory: ApplicationInventoryService,
+        presence: PresenceService,
+        browser: BrowserActivityService,
+        accessibility: AccessibilityService,
+    ) -> Self {
+        let tools: Vec<Arc<dyn LocalTool>> = vec![
+            Arc::new(SystemInfoTool),
+            Arc::new(DemoWaitTool),
+            Arc::new(DeviceEnvironmentTool::new(DeviceEnvironmentSensor)),
+            Arc::new(AccessibilityStatusTool::new(accessibility.clone())),
+            Arc::new(AccessibilityTreeTool::new(accessibility)),
             Arc::new(ActivityCleanupTool::new(activity.clone())),
             Arc::new(ActivityStatusTool::new(activity.clone())),
             Arc::new(ActivitySessionsTool::new(activity)),
