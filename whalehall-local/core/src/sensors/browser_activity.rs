@@ -31,6 +31,7 @@ const BROWSER_SCHEMA_VERSION: i64 = 1;
 const MAX_IMPORTED_RECORDS_PER_PROFILE: usize = 100_000;
 const MAX_QUERY_LIMIT: usize = 1_000;
 const CHROMIUM_TO_UNIX_EPOCH_MICROSECONDS: i64 = 11_644_473_600_000_000;
+#[cfg(target_os = "macos")]
 const SAFARI_TO_UNIX_EPOCH_SECONDS: i64 = 978_307_200;
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -1554,6 +1555,7 @@ fn read_bridge_snapshot(
 enum BrowserProfileKind {
     Chromium,
     Firefox,
+    #[cfg(target_os = "macos")]
     Safari,
 }
 
@@ -1615,6 +1617,7 @@ fn collect_profile_records(
     let mut records = match profile.kind {
         BrowserProfileKind::Chromium => collect_chromium_records(&connection, profile)?,
         BrowserProfileKind::Firefox => collect_firefox_records(&connection, profile)?,
+        #[cfg(target_os = "macos")]
         BrowserProfileKind::Safari => collect_safari_records(&connection, profile)?,
     };
     drop(connection);
@@ -1786,6 +1789,7 @@ fn collect_firefox_records(
     Ok(snapshot)
 }
 
+#[cfg(target_os = "macos")]
 fn collect_safari_records(
     connection: &Connection,
     profile: &BrowserProfile,

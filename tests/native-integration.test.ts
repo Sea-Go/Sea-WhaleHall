@@ -7,6 +7,7 @@ import type { LocalMessage } from "../src/agent/local-protocol";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const sensorDirectory = resolve(projectRoot, "whalehall-local/core/src/sensors");
+const nativeResponseTimeoutMs = 15_000;
 
 type SensorCiProbe = {
 	sourceFile: string;
@@ -917,7 +918,7 @@ function presenceCapabilityReady(
 async function withTimeout(
 	promise: Promise<void>,
 	label: string,
-	timeoutMs = 3000,
+	timeoutMs = nativeResponseTimeoutMs,
 ): Promise<void> {
 	await Promise.race([
 		promise,

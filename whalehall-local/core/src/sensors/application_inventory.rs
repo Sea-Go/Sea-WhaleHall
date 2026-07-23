@@ -1305,7 +1305,22 @@ mod tests {
             }),
         )
         .expect("start application inventory service");
-        tokio::time::sleep(Duration::from_millis(140)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = service.status();
+                let processes = service.processes(&ProcessRunQuery::default()).unwrap();
+                if status.state == ApplicationInventoryState::Running
+                    && status.installed_application_count == 1
+                    && processes.len() == 1
+                    && processes[0].exited_at_ms.is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("inventory service should persist its snapshots");
 
         let status = service.status();
         assert_eq!(status.state, ApplicationInventoryState::Running);

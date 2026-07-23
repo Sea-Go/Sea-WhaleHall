@@ -60,3 +60,8 @@ Every public `core/src/sensors/*.rs` file must have exactly one entry in `sensor
 Adding a file without a probe fails the automatic discovery test. A sensor is not considered release-certified until its native Tool call passes every blocking environment and all enabled real-desktop environments.
 
 The browser probe creates a synthetic Chromium profile and fresh tab bridge inside the job's temporary data directory. It validates platform-native file paths, SQLite snapshot/import behavior, tab lifecycle, audio flags, URL/search decoding, downloads, and Tool queries without reading a runner account's personal browsing data.
+
+Native Tool responses have a 15-second per-call budget so rolling-distribution
+containers can finish cold-start work without introducing timing flakes. Resident
+service tests wait for observable persisted state rather than assuming a fixed
+scheduler delay; exhausting either bounded wait remains a blocking failure.
