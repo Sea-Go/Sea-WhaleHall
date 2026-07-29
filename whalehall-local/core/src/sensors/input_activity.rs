@@ -5,9 +5,12 @@
 //! coordinates. Completed non-empty buckets are persisted as DesktopEvents.
 
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::json;
 use thiserror::Error;
@@ -68,6 +71,10 @@ impl InputActivityConfig {
 pub enum InputActivityError {
     #[error("input activity sensor configuration error: {0}")]
     Configuration(String),
+    #[error("input activity sensor I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("input activity sensor SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     #[error("input activity event publication failed: {0}")]
     EventJournal(#[from] EventJournalError),
 }
@@ -186,6 +193,7 @@ struct InputActivityInner {
     config: InputActivityConfig,
     provider: Arc<dyn InputActivityProvider>,
     event_journal: EventJournal,
+    store: InputActivityStore,
     initial_revocation_pending: bool,
     status: Mutex<InputActivityStatus>,
     cancellation: CancellationToken,
@@ -199,6 +207,11 @@ impl InputActivityService {
         event_journal: EventJournal,
     ) -> Result<Self, InputActivityError> {
         config.validate()?;
+        let store = InputActivityStore::open(
+            event_journal
+                .database_path()
+                .with_file_name("input-activity.sqlite3"),
+        )?;
         let provider_status = provider.status();
         let durable_authorization = event_journal.latest_authorization_state("input.monitoring")?;
         let mut initial_revocation_pending =
@@ -221,6 +234,7 @@ impl InputActivityService {
             config,
             provider,
             event_journal,
+            store,
             initial_revocation_pending,
             status: Mutex::new(status),
             cancellation: CancellationToken::new(),
@@ -250,6 +264,9 @@ impl InputActivityService {
         if let Some(task) = task {
             let _ = task.await;
         }
+        if let Err(error) = flush_input_event_outbox(&self.inner) {
+            set_service_error(&self.inner, error.to_string());
+        }
         self.inner.provider.shutdown();
         self.inner
             .status
@@ -276,11 +293,17 @@ async fn run_input_activity(inner: Arc<InputActivityInner>) {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut permission_was_granted = inner.provider.status().permission_granted;
     let mut revocation_was_published = inner.initial_revocation_pending;
+    if let Err(error) = flush_input_event_outbox(&inner) {
+        set_service_error(&inner, error.to_string());
+    }
 
     loop {
         tokio::select! {
             () = inner.cancellation.cancelled() => break,
             _ = ticker.tick() => {
+                if let Err(error) = flush_input_event_outbox(&inner) {
+                    set_service_error(&inner, error.to_string());
+                }
                 let tick_at_ms = now_ms();
                 accumulator.align_to_latest_completed_bucket(tick_at_ms);
                 let provider_status = inner.provider.status();
@@ -341,9 +364,18 @@ async fn run_input_activity(inner: Arc<InputActivityInner>) {
                 if capture_allowed
                     && authorization_boundary_ready
                     && !aggregate.is_empty()
-                    && let Err(error) = publish_aggregate(&inner, &aggregate)
                 {
-                    set_service_error(&inner, error.to_string());
+                    match inner.store.enqueue_aggregate(&aggregate) {
+                        Ok(()) => {
+                            if let Err(error) = flush_input_event_outbox(&inner) {
+                                set_service_error(&inner, error.to_string());
+                            }
+                        }
+                        Err(error) => {
+                            accumulator.restore(aggregate);
+                            set_service_error(&inner, error.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -375,11 +407,8 @@ fn append_authorization_boundary(
     Ok(())
 }
 
-fn publish_aggregate(
-    inner: &InputActivityInner,
-    aggregate: &InputActivityAggregate,
-) -> Result<(), InputActivityError> {
-    inner.event_journal.append(DesktopEventDraft {
+fn input_aggregate_draft(aggregate: &InputActivityAggregate) -> DesktopEventDraft {
+    DesktopEventDraft {
         kind: desktop_event_kinds::INPUT_ACTIVITY_AGGREGATED.to_owned(),
         source: "input.activity.sensor".to_owned(),
         occurred_at_ms: aggregate.bucket_ended_at_ms,
@@ -398,16 +427,25 @@ fn publish_aggregate(
             "input-bucket:{}:{}",
             aggregate.bucket_started_at_ms, aggregate.bucket_ended_at_ms
         ),
-    })?;
-    let mut status = inner
-        .status
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    status.last_published_at_ms = Some(aggregate.bucket_ended_at_ms);
-    status.published_buckets = status.published_buckets.saturating_add(1);
-    status.last_aggregate = Some(aggregate.clone());
-    if status.warnings.is_empty() {
-        status.last_error = None;
+    }
+}
+
+fn flush_input_event_outbox(inner: &InputActivityInner) -> Result<(), InputActivityError> {
+    for record in inner.store.pending_aggregates(100)? {
+        inner
+            .event_journal
+            .append(input_aggregate_draft(&record.aggregate))?;
+        inner.store.delete_aggregate(record.id)?;
+        let mut status = inner
+            .status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        status.last_published_at_ms = Some(record.aggregate.bucket_ended_at_ms);
+        status.published_buckets = status.published_buckets.saturating_add(1);
+        status.last_aggregate = Some(record.aggregate);
+        if status.warnings.is_empty() {
+            status.last_error = None;
+        }
     }
     Ok(())
 }
@@ -479,6 +517,110 @@ fn set_service_error(inner: &InputActivityInner, error: String) {
 }
 
 #[derive(Clone, Debug)]
+struct InputActivityStore {
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct InputAggregateOutboxRecord {
+    id: i64,
+    aggregate: InputActivityAggregate,
+}
+
+impl InputActivityStore {
+    fn open(path: impl Into<PathBuf>) -> Result<Self, InputActivityError> {
+        let path = path.into();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        let store = Self { path };
+        let connection = store.connect()?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS input_aggregate_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_count INTEGER NOT NULL,
+                click_count INTEGER NOT NULL,
+                scroll_delta INTEGER NOT NULL,
+                mouse_distance REAL NOT NULL,
+                bucket_started_at_ms INTEGER NOT NULL,
+                bucket_ended_at_ms INTEGER NOT NULL,
+                UNIQUE(bucket_started_at_ms, bucket_ended_at_ms)
+             );
+             CREATE INDEX IF NOT EXISTS input_aggregate_outbox_order
+                ON input_aggregate_outbox(id);",
+        )?;
+        Ok(store)
+    }
+
+    fn connect(&self) -> Result<Connection, InputActivityError> {
+        let connection = Connection::open(&self.path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;",
+        )?;
+        Ok(connection)
+    }
+
+    fn enqueue_aggregate(
+        &self,
+        aggregate: &InputActivityAggregate,
+    ) -> Result<(), InputActivityError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT OR IGNORE INTO input_aggregate_outbox (
+                key_count, click_count, scroll_delta, mouse_distance,
+                bucket_started_at_ms, bucket_ended_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                i64::try_from(aggregate.key_count).unwrap_or(i64::MAX),
+                i64::try_from(aggregate.click_count).unwrap_or(i64::MAX),
+                aggregate.scroll_delta,
+                aggregate.mouse_distance,
+                aggregate.bucket_started_at_ms,
+                aggregate.bucket_ended_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn pending_aggregates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<InputAggregateOutboxRecord>, InputActivityError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id, key_count, click_count, scroll_delta, mouse_distance,
+                    bucket_started_at_ms, bucket_ended_at_ms
+             FROM input_aggregate_outbox ORDER BY id LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok(InputAggregateOutboxRecord {
+                id: row.get(0)?,
+                aggregate: InputActivityAggregate {
+                    key_count: u64::try_from(row.get::<_, i64>(1)?).unwrap_or_default(),
+                    click_count: u64::try_from(row.get::<_, i64>(2)?).unwrap_or_default(),
+                    scroll_delta: row.get(3)?,
+                    mouse_distance: row.get(4)?,
+                    bucket_started_at_ms: row.get(5)?,
+                    bucket_ended_at_ms: row.get(6)?,
+                },
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn delete_aggregate(&self, id: i64) -> Result<(), InputActivityError> {
+        let connection = self.connect()?;
+        connection.execute("DELETE FROM input_aggregate_outbox WHERE id = ?1", [id])?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
 struct InputBucketAccumulator {
     bucket_duration_ms: i64,
     bucket_started_at_ms: i64,
@@ -526,6 +668,16 @@ impl InputBucketAccumulator {
         };
         self.bucket_started_at_ms = bucket_ended_at_ms;
         aggregate
+    }
+
+    fn restore(&mut self, aggregate: InputActivityAggregate) {
+        self.bucket_started_at_ms = aggregate.bucket_started_at_ms;
+        self.delta.merge(InputActivityDelta {
+            key_count: aggregate.key_count,
+            click_count: aggregate.click_count,
+            scroll_delta: aggregate.scroll_delta,
+            mouse_distance: aggregate.mouse_distance,
+        });
     }
 }
 
