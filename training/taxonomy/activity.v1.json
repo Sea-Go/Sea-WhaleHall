@@ -1,0 +1,47 @@
+{
+  "taxonomyVersion": "activity-taxonomy.v1",
+  "activities": [
+    "development",
+    "writing",
+    "research",
+    "communication",
+    "planning",
+    "data_work",
+    "media",
+    "gaming",
+    "system_file_ops",
+    "commerce",
+    "idle_transition",
+    "other_unknown"
+  ],
+  "goalRelevance": [
+    "direct",
+    "supporting",
+    "unrelated",
+    "uncertain"
+  ],
+  "triggerReasons": [
+    "event_count",
+    "max_wait",
+    "goal_boundary",
+    "presence_boundary"
+  ],
+  "reasonCodes": [
+    "app_identity",
+    "browser_domain",
+    "browser_navigation",
+    "document_edit",
+    "editor_language",
+    "goal_term_match",
+    "goal_context_support",
+    "communication_pattern",
+    "media_pattern",
+    "file_operation",
+    "input_only",
+    "sparse_evidence",
+    "mixed_activity",
+    "unknown_application",
+    "no_goal",
+    "other"
+  ]
+}
