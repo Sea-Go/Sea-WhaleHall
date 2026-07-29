@@ -1593,12 +1593,7 @@ mod tests {
             })
             .expect("query stored metadata");
         assert!(result.nodes.iter().all(|node| node.value.is_none()));
-        assert!(
-            result
-                .nodes
-                .iter()
-                .all(|node| node.document_text.is_none())
-        );
+        assert!(result.nodes.iter().all(|node| node.document_text.is_none()));
         assert!(!observation.capabilities.document_text);
     }
 

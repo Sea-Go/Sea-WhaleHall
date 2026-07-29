@@ -1014,24 +1014,18 @@ impl BrowserActivityStore {
         let mut pending_events = Vec::new();
         for (session_key, tab) in current_tabs {
             observed_keys.insert(session_key.clone());
-            let persisted_url =
-                browser_url_for_storage(&tab.url, content_monitoring_enabled);
-            let persisted_title =
-                browser_text_for_storage(&tab.title, content_monitoring_enabled);
+            let persisted_url = browser_url_for_storage(&tab.url, content_monitoring_enabled);
+            let persisted_title = browser_text_for_storage(&tab.title, content_monitoring_enabled);
             let domain = domain_from_url(&tab.url);
             match open.remove(&session_key) {
-                Some((id, _, open_url, _, _)) if open_url == persisted_url => {
+                Some((id, _, open_url, _, _))
+                    if stored_browser_url_matches(&open_url, &tab.url, &persisted_url) =>
+                {
                     transaction.execute(
                         "UPDATE browser_tab_sessions
                          SET title = ?1, domain = ?2, audible = ?3, last_seen_at_ms = ?4
                          WHERE id = ?5",
-                        params![
-                            persisted_title,
-                            domain,
-                            tab.audible,
-                            observed_at_ms,
-                            id
-                        ],
+                        params![persisted_title, domain, tab.audible, observed_at_ms, id],
                     )?;
                 }
                 Some((id, _, _, _, _)) => {
@@ -1209,10 +1203,7 @@ impl BrowserActivityStore {
                 params![
                     record.browser,
                     record.profile,
-                    browser_text_for_storage(
-                        &record.search_term,
-                        content_monitoring_enabled
-                    ),
+                    browser_text_for_storage(&record.search_term, content_monitoring_enabled),
                     browser_url_for_storage(&record.url, content_monitoring_enabled),
                     domain,
                     browser_text_for_storage(&record.title, content_monitoring_enabled),
@@ -1241,10 +1232,7 @@ impl BrowserActivityStore {
                 params![
                     record.browser,
                     record.profile,
-                    browser_download_id_for_storage(
-                        &record.source_id,
-                        content_monitoring_enabled
-                    ),
+                    browser_download_id_for_storage(&record.source_id, content_monitoring_enabled),
                     browser_url_for_storage(&record.url, content_monitoring_enabled),
                     domain,
                     browser_text_for_storage(&record.target_path, content_monitoring_enabled),
@@ -1808,10 +1796,15 @@ fn browser_url_for_storage(url: &str, content_monitoring_enabled: bool) -> Strin
     }
 }
 
-fn browser_download_id_for_storage(
-    source_id: &str,
-    content_monitoring_enabled: bool,
-) -> String {
+fn stored_browser_url_matches(stored_url: &str, observed_url: &str, persisted_url: &str) -> bool {
+    stored_url == persisted_url
+        || stored_url == observed_url
+        || stored_url
+            .strip_prefix("redacted:")
+            .is_some_and(|stored_domain| stored_domain == domain_from_url(observed_url))
+}
+
+fn browser_download_id_for_storage(source_id: &str, content_monitoring_enabled: bool) -> String {
     if content_monitoring_enabled {
         source_id.to_owned()
     } else {
