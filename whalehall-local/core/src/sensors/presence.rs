@@ -27,7 +27,7 @@ use crate::events::{DesktopEventDraft, EventJournal, EventJournalError};
 pub const DEFAULT_PRESENCE_POLL_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_AFK_THRESHOLD_MS: u64 = 5 * 60 * 1_000;
 pub const DEFAULT_SUSPEND_GAP_THRESHOLD_MS: u64 = 15_000;
-const PRESENCE_SCHEMA_VERSION: i64 = 1;
+const PRESENCE_SCHEMA_VERSION: i64 = 2;
 const MAX_QUERY_LIMIT: usize = 1_000;
 
 #[derive(Debug, Error)]
@@ -371,6 +371,9 @@ async fn run_presence_monitor(
                 break;
             }
             _ = ticker.tick() => {
+                let pending_publication_error = event_journal
+                    .as_ref()
+                    .and_then(|journal| flush_presence_event_outbox(&inner.store, journal).err());
                 let observed_at_ms = now_ms();
                 let observation = tokio::task::spawn_blocking({
                     let provider = provider.clone();
@@ -384,24 +387,25 @@ async fn run_presence_monitor(
 
                 match observation {
                     Ok(observation) => {
-                        let events = tracker.apply(
+                        let mut candidate = tracker.clone();
+                        let events = candidate.apply(
                             &inner.config,
                             &observation,
                             observed_at_ms,
                         );
                         if let Err(error) = inner.store.record_sample(
-                            &tracker.persisted,
+                            &candidate.persisted,
                             &events,
                             observed_at_ms,
+                            event_journal.is_some(),
                         ) {
                             update_error_status(&inner, error.to_string());
                             continue;
                         }
+                        tracker = candidate;
                         let publication_error = event_journal
                             .as_ref()
-                            .and_then(|journal| {
-                                publish_presence_events(journal, &events, observed_at_ms).err()
-                            });
+                            .and_then(|journal| flush_presence_event_outbox(&inner.store, journal).err());
                         update_observation_status(
                             &inner,
                             &tracker.persisted,
@@ -411,7 +415,14 @@ async fn run_presence_monitor(
                             update_error_status(&inner, error.to_string());
                         }
                     }
-                    Err(error) => update_error_status(&inner, error.to_string()),
+                    Err(error) => {
+                        let error = pending_publication_error
+                            .map(|publication_error| {
+                                format!("{error}; pending presence event retry failed: {publication_error}")
+                            })
+                            .unwrap_or_else(|| error.to_string());
+                        update_error_status(&inner, error);
+                    }
                 }
             }
         }
@@ -424,37 +435,52 @@ fn publish_presence_events(
     observed_at_ms: i64,
 ) -> Result<(), PresenceError> {
     for event in events {
-        let kind = match event.event_type {
-            PresenceEventKind::AfkStarted => desktop_event_kinds::PRESENCE_AFK_STARTED,
-            PresenceEventKind::AfkEnded => desktop_event_kinds::PRESENCE_AFK_ENDED,
-            PresenceEventKind::ScreenLocked => desktop_event_kinds::PRESENCE_LOCKED,
-            PresenceEventKind::ScreenUnlocked => desktop_event_kinds::PRESENCE_UNLOCKED,
-            PresenceEventKind::SleepStarted => desktop_event_kinds::PRESENCE_SLEEP,
-            PresenceEventKind::WokeUp => desktop_event_kinds::PRESENCE_WAKE,
-        };
-        let payload = match event.event_type {
-            PresenceEventKind::AfkStarted | PresenceEventKind::AfkEnded => {
-                json!({ "idleForMs": event.idle_for_ms.unwrap_or_default() })
-            }
-            PresenceEventKind::ScreenLocked
-            | PresenceEventKind::ScreenUnlocked
-            | PresenceEventKind::SleepStarted
-            | PresenceEventKind::WokeUp => json!({}),
-        };
-        event_journal.append(DesktopEventDraft {
-            kind: kind.to_owned(),
-            source: "presence.sensor".to_owned(),
-            occurred_at_ms: event.occurred_at_ms,
-            observed_at_ms: observed_at_ms.max(event.occurred_at_ms),
-            goal_version: None,
-            sensitivity: DesktopEventSensitivity::Metadata,
-            payload,
-            deduplication_key: format!(
-                "presence:{}:{}",
-                event.event_type.as_database_value(),
-                event.occurred_at_ms,
-            ),
-        })?;
+        event_journal.append(presence_event_draft(event, observed_at_ms))?;
+    }
+    Ok(())
+}
+
+fn presence_event_draft(event: &PendingPresenceEvent, observed_at_ms: i64) -> DesktopEventDraft {
+    let kind = match event.event_type {
+        PresenceEventKind::AfkStarted => desktop_event_kinds::PRESENCE_AFK_STARTED,
+        PresenceEventKind::AfkEnded => desktop_event_kinds::PRESENCE_AFK_ENDED,
+        PresenceEventKind::ScreenLocked => desktop_event_kinds::PRESENCE_LOCKED,
+        PresenceEventKind::ScreenUnlocked => desktop_event_kinds::PRESENCE_UNLOCKED,
+        PresenceEventKind::SleepStarted => desktop_event_kinds::PRESENCE_SLEEP,
+        PresenceEventKind::WokeUp => desktop_event_kinds::PRESENCE_WAKE,
+    };
+    let payload = match event.event_type {
+        PresenceEventKind::AfkStarted | PresenceEventKind::AfkEnded => {
+            json!({ "idleForMs": event.idle_for_ms.unwrap_or_default() })
+        }
+        PresenceEventKind::ScreenLocked
+        | PresenceEventKind::ScreenUnlocked
+        | PresenceEventKind::SleepStarted
+        | PresenceEventKind::WokeUp => json!({}),
+    };
+    DesktopEventDraft {
+        kind: kind.to_owned(),
+        source: "presence.sensor".to_owned(),
+        occurred_at_ms: event.occurred_at_ms,
+        observed_at_ms: observed_at_ms.max(event.occurred_at_ms),
+        goal_version: None,
+        sensitivity: DesktopEventSensitivity::Metadata,
+        payload,
+        deduplication_key: format!(
+            "presence:{}:{}",
+            event.event_type.as_database_value(),
+            event.occurred_at_ms,
+        ),
+    }
+}
+
+fn flush_presence_event_outbox(
+    store: &PresenceStore,
+    event_journal: &EventJournal,
+) -> Result<(), PresenceError> {
+    for record in store.pending_desktop_events(100)? {
+        event_journal.append(presence_event_draft(&record.event, record.observed_at_ms))?;
+        store.delete_desktop_event(record.id)?;
     }
     Ok(())
 }
@@ -622,6 +648,13 @@ struct PresenceStore {
     path: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+struct PresenceEventOutboxRecord {
+    id: i64,
+    event: PendingPresenceEvent,
+    observed_at_ms: i64,
+}
+
 impl PresenceStore {
     fn open(path: impl Into<PathBuf>) -> Result<Self, PresenceError> {
         let path = path.into();
@@ -645,6 +678,7 @@ impl PresenceStore {
         state: &PersistedPresenceState,
         events: &[PendingPresenceEvent],
         observed_at_ms: i64,
+        enqueue_desktop_events: bool,
     ) -> Result<(), PresenceError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -658,6 +692,27 @@ impl PresenceStore {
                     observed_at_ms
                 ],
             )?;
+            if enqueue_desktop_events {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO presence_event_outbox (
+                        event_type, occurred_at_ms, observed_at_ms, idle_for_ms,
+                        deduplication_key
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        event.event_type.as_database_value(),
+                        event.occurred_at_ms,
+                        observed_at_ms,
+                        event
+                            .idle_for_ms
+                            .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+                        format!(
+                            "presence:{}:{}",
+                            event.event_type.as_database_value(),
+                            event.occurred_at_ms,
+                        ),
+                    ],
+                )?;
+            }
         }
         transaction.execute(
             "INSERT INTO presence_state (
@@ -687,6 +742,37 @@ impl PresenceStore {
             ],
         )?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    fn pending_desktop_events(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PresenceEventOutboxRecord>, PresenceError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id, event_type, occurred_at_ms, observed_at_ms, idle_for_ms
+             FROM presence_event_outbox ORDER BY id LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok(PresenceEventOutboxRecord {
+                id: row.get(0)?,
+                event: PendingPresenceEvent {
+                    event_type: PresenceEventKind::from_database_value(&row.get::<_, String>(1)?)?,
+                    occurred_at_ms: row.get(2)?,
+                    idle_for_ms: row
+                        .get::<_, Option<i64>>(4)?
+                        .map(|value| u64::try_from(value).unwrap_or_default()),
+                },
+                observed_at_ms: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn delete_desktop_event(&self, id: i64) -> Result<(), PresenceError> {
+        let connection = self.connect()?;
+        connection.execute("DELETE FROM presence_event_outbox WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -807,7 +893,22 @@ impl PresenceStore {
                 ON presence_events(occurred_at_ms DESC);
              CREATE INDEX IF NOT EXISTS idx_presence_events_type_occurred
                 ON presence_events(event_type, occurred_at_ms DESC);
-             PRAGMA user_version = 1;",
+             CREATE TABLE IF NOT EXISTS presence_event_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN (
+                        'afk_started', 'afk_ended', 'screen_locked',
+                        'screen_unlocked', 'sleep_started', 'woke_up'
+                    )
+                ),
+                occurred_at_ms INTEGER NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                idle_for_ms INTEGER,
+                deduplication_key TEXT NOT NULL UNIQUE
+             );
+             CREATE INDEX IF NOT EXISTS presence_event_outbox_order
+                ON presence_event_outbox(id);
+             PRAGMA user_version = 2;",
         )?;
         Ok(())
     }
@@ -1215,7 +1316,7 @@ mod tests {
         );
         assert!(first.is_empty());
         store
-            .record_sample(&tracker.persisted, &first, 10_000)
+            .record_sample(&tracker.persisted, &first, 10_000, false)
             .expect("persist first observation");
 
         let afk = tracker.apply(
@@ -1232,7 +1333,7 @@ mod tests {
         assert_eq!(afk[0].occurred_at_ms, 14_000);
         assert_eq!(afk[0].idle_for_ms, Some(5_000));
         store
-            .record_sample(&tracker.persisted, &afk, 15_000)
+            .record_sample(&tracker.persisted, &afk, 15_000, false)
             .expect("persist AFK transition");
 
         let returned_and_locked = tracker.apply(
@@ -1254,7 +1355,7 @@ mod tests {
         assert_eq!(returned_and_locked[0].idle_for_ms, Some(6_000));
         assert_eq!(returned_and_locked[1].idle_for_ms, None);
         store
-            .record_sample(&tracker.persisted, &returned_and_locked, 16_000)
+            .record_sample(&tracker.persisted, &returned_and_locked, 16_000, false)
             .expect("persist return and lock transitions");
 
         let woke_and_unlocked = tracker.apply(
@@ -1278,7 +1379,7 @@ mod tests {
             ]
         );
         store
-            .record_sample(&tracker.persisted, &woke_and_unlocked, 50_000)
+            .record_sample(&tracker.persisted, &woke_and_unlocked, 50_000, false)
             .expect("persist sleep and unlock transitions");
 
         let events = store
@@ -1366,6 +1467,7 @@ mod tests {
                     },
                 ],
                 20,
+                false,
             )
             .expect("record events");
         let events = store

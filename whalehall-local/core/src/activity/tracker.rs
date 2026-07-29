@@ -394,13 +394,8 @@ impl ActivityRecorder {
             return Ok(());
         };
         let current_id = current.id;
-        self.store.transition(
-            Some(current_id),
-            None,
-            observed_at_ms,
-            reason,
-            false,
-        )?;
+        self.store
+            .transition(Some(current_id), None, observed_at_ms, reason, false)?;
         self.current = None;
         Ok(())
     }
