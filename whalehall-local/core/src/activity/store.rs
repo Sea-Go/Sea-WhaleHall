@@ -47,6 +47,30 @@ impl ActivityStore {
         &self.path
     }
 
+    pub(crate) fn open_foreground_baseline(
+        &self,
+    ) -> Result<Option<ForegroundApp>, ActivityError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT app_id, app_name, executable_path, process_id, window_title
+             FROM usage_sessions
+             WHERE ended_at_ms IS NULL
+             ORDER BY id DESC
+             LIMIT 1",
+        )?;
+        let mut rows = statement.query([])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(ForegroundApp {
+            app_id: row.get(0)?,
+            app_name: row.get(1)?,
+            executable_path: row.get(2)?,
+            process_id: u64::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
+            window_title: row.get(4)?,
+        }))
+    }
+
     pub(crate) fn recover_open_sessions(&self) -> Result<usize, ActivityError> {
         let connection = self.connect()?;
         let changed = connection.execute(
