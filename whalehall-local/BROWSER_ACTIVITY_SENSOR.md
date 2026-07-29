@@ -2,7 +2,7 @@
 
 ## Purpose and ownership
 
-The browser activity sensor is implemented in `core/src/sensors/browser_activity.rs`. It is a resident Rust service that records current-tab sessions and imports browser history, search records, and downloads into `browser.sqlite3`.
+The browser activity sensor is implemented in `core/src/sensors/browser_activity.rs`. It is an explicitly enabled resident Rust service that records current-tab sessions and imports browser history, search records, and downloads into `browser.sqlite3`. It is fail-closed by default.
 
 Browser data is isolated from foreground application usage, process inventory, and presence data because URLs, search terms, titles, and download paths have the highest local privacy sensitivity in the client. Every Agent Tool requires `browser.read`.
 
@@ -59,9 +59,12 @@ At most 100,000 history and download rows per profile are imported on each refre
 
 ## Resident lifecycle and configuration
 
-`BrowserActivityService::start` opens and migrates SQLite, bounds tab sessions left open by an unclean shutdown, and starts two Tokio intervals:
+`BrowserActivityService::start` always opens and migrates SQLite so the
+read-only Tools can query records collected under an earlier authorization. It
+only starts its two Tokio intervals when browser event monitoring is explicitly
+enabled:
 
-- `WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED`: fail-closed switch for publishing current-tab semantic events to `EventJournal`, default `false`;
+- `WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED`: fail-closed switch for resident browser collection and metadata-only current-tab events, default `false`;
 - `WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED`: independent content switch, default `false`; it has no effect unless event monitoring is also enabled;
 - `WHALEHALL_BROWSER_TAB_POLL_MS`: current-tab polling, default 1 second, range 50 milliseconds through 60 seconds;
 - `WHALEHALL_BROWSER_HISTORY_REFRESH_MS`: profile import, default 5 minutes, range 1 second through 24 hours;
@@ -69,13 +72,21 @@ At most 100,000 history and download rows per profile are imported on each refre
 
 `WHALEHALL_BROWSER_PROFILE_ROOT` restricts discovery to a supplied Chromium-style root. It exists for isolated tests, managed deployments, and embedders that know the exact profile root. When set, ordinary user browser directories are not scanned.
 
-Both switches are reported by `browser.status`. Enabling semantic events does
-not enable URL/title content. With event monitoring on and content monitoring
-off, `browser.tabOpened`, `browser.tabNavigated`, and `browser.tabClosed`
-contain only opaque deterministic `browserId` and `tabId` values and use
-metadata sensitivity. With both switches on, opened/navigation events also
-contain the observed `title` and full `url` and use content sensitivity; closed
-events remain metadata-only.
+Both effective switches are reported by `browser.status`; its lifecycle state
+is `disabled` when collection is off. A content-only configuration remains
+disabled and reports a warning instead of implicitly enabling collection.
+Enabling metadata/event monitoring does not authorize URL/title content. In
+metadata-only mode, newly persisted tab/history/search/download rows retain
+browser/profile, domain, timestamps, state, byte/count information, and opaque
+source identity, but replace full URLs with a `redacted:<domain>` marker and
+remove titles, search terms, and download paths. Existing rows collected under
+an earlier content authorization are not rewritten and remain queryable.
+
+With event monitoring on and content monitoring off, `browser.tabOpened`,
+`browser.tabNavigated`, and `browser.tabClosed` contain only opaque
+deterministic `browserId` and `tabId` values and use metadata sensitivity. With
+both switches on, opened/navigation events also contain the observed `title`
+and full `url` and use content sensitivity; closed events remain metadata-only.
 
 Only a fresh bridge snapshot with non-empty, unique browser/window/tab
 identities is complete enough to drive semantic transitions. The macOS
@@ -97,7 +108,7 @@ are discarded before any metadata event replay.
 
 ## SQLite schema
 
-The database uses WAL mode, normal synchronization, a five-second busy timeout, and schema version `1`.
+The database uses WAL mode, normal synchronization, a five-second busy timeout, and schema version `2`.
 
 - `browser_tab_sessions`: browser/profile identity, title, URL, domain, nullable audible flag, start, last-seen, and end times.
 - `browser_history`: browser/profile, URL, domain, title, latest visit time, source visit count, and import timestamps.
@@ -140,11 +151,20 @@ Example calls:
 - creation of `browser.sqlite3`;
 - registration and successful execution of every browser Tool.
 
-The same probe runs in hosted macOS, Windows, Ubuntu, every Linux distribution container, and virtual X11. The fixture intentionally avoids reading a CI account's personal browser data. Real profile permissions and a production browser-side bridge remain deployment checks rather than safe hosted-runner fixtures.
+The same probe runs in hosted macOS, Windows, Ubuntu, every Linux distribution
+container, and virtual X11. The fixture explicitly enables both browser
+switches and intentionally avoids reading a CI account's personal browser data.
+Real profile permissions and a production browser-side bridge remain deployment
+checks rather than safe hosted-runner fixtures.
 
 ## Privacy and limitations
 
-Browser URLs, titles, search terms, download paths, and timestamps can reveal authentication tokens, private documents, health data, finances, and personal interests. The implementation keeps data local and does not expose a network server, but callers must treat `browser.read` as a high-impact permission.
+Browser URLs, titles, search terms, download paths, and timestamps can reveal
+authentication tokens, private documents, health data, finances, and personal
+interests. Resident collection is therefore disabled unless explicitly
+authorized, and full content requires the second independent switch. The
+implementation keeps data local and does not expose a network server, but
+callers must treat `browser.read` as a high-impact permission.
 
 The sensor does not read page contents, cookies, passwords, form fields, typed keystrokes, or response bodies. Private/incognito profiles are not intentionally imported, but browser-specific profile layout and extensions can vary. Protected or incompatible profiles produce warnings and do not stop other supported profiles.
 

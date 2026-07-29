@@ -3,9 +3,9 @@
 ## Purpose and ownership
 
 The accessibility-tree sensor is implemented in
-`core/src/sensors/accessibility_tree.rs`. It is a resident Rust service that
+`core/src/sensors/accessibility_tree.rs`. It is an explicitly enabled resident Rust service that
 samples the foreground application's bounded accessibility tree and stores
-changed snapshots in `accessibility.sqlite3`.
+changed snapshots in `accessibility.sqlite3`. It is fail-closed by default.
 
 The sensor covers:
 
@@ -83,6 +83,13 @@ Accessibility data can contain private messages, document contents, form
 values, filenames, and account information. The implementation applies these
 limits before writing SQLite:
 
+- resident collection requires
+  `WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED=true`;
+- values and document excerpts require the separate
+  `WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED=true` switch;
+- metadata-only collection does not ask the native platform adapters for
+  values/document text and clears those fields again at the normalization
+  boundary, including bridge-supplied fields;
 - at most 300 nodes per snapshot by default, configurable up to 1,000;
 - control names are limited to 1,024 characters;
 - ordinary values are limited to 4,096 characters;
@@ -104,6 +111,11 @@ high-impact permission and show an explicit consent surface.
 
 ## Configuration
 
+- `WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED`: fail-closed resident
+  collection switch, default `false`;
+- `WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED`: independent value and
+  document-content switch, default `false`; it is ineffective unless
+  monitoring is enabled;
 - `WHALEHALL_ACCESSIBILITY_POLL_MS`: polling interval, default 2 seconds,
   range 50 milliseconds through 60 seconds;
 - `WHALEHALL_ACCESSIBILITY_SNAPSHOT_PATH`: optional bridge path;
@@ -124,9 +136,13 @@ The database uses WAL mode and foreign keys:
   optional value, nullable selection state, focus, enabled state, optional
   document excerpt, and the protected-input marker.
 
-The service starts with `whalehall-local`, remains resident independently of
-Agent calls, and shuts down before the other desktop sensors. Callers can
-provide a custom `AccessibilityProvider` for deterministic embedding or tests.
+The service opens SQLite with `whalehall-local` so Tools can query previously
+authorized snapshots. With monitoring disabled it reports `disabled` and does
+not invoke the bridge or platform provider. When explicitly enabled it remains
+resident independently of Agent calls and shuts down before the other desktop
+sensors. A content-only configuration remains fail-closed and reports a
+warning. Callers can provide a custom `AccessibilityProvider` for deterministic
+embedding or tests.
 
 ## Agent Tools
 
@@ -149,7 +165,8 @@ Examples:
 
 `tests/native-integration.test.ts` discovers
 `accessibility_tree.rs` automatically and requires exactly one probe. The probe
-writes a fresh isolated bridge containing a window, button, menu, text box,
+explicitly enables both accessibility switches and writes a fresh isolated
+bridge containing a window, button, menu, text box,
 selected item, document excerpt, and protected password control. Through the
 real JSONL server it verifies:
 

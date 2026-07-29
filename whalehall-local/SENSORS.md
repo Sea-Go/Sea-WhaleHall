@@ -19,11 +19,15 @@ The activity entry file delegates to a private multi-file SQLite engine because 
 
 ## Accessibility tree
 
-`accessibility_tree.rs` owns the resident foreground UI accessibility monitor
+`accessibility_tree.rs` owns the opt-in foreground UI accessibility monitor
 and `accessibility.sqlite3`. It stores bounded changed snapshots containing
 roles, control names, focus, selection, optional values, and optional document
 excerpts. Protected/password values are always removed, while ordinary values
-and document text remain opt-in in Agent responses.
+and document text require both an independent capture opt-in and explicit
+fields in Agent responses. Collection defaults off via
+`WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED`; content defaults off via
+`WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED`. Disabled startup keeps
+historical Tools available without invoking a provider.
 
 The system provider supports Windows UI Automation, macOS System Events with
 Accessibility permission, and Linux AT-SPI. A fresh atomic bridge can supply
@@ -47,15 +51,21 @@ Windows uses native input-desktop APIs, macOS reads IOHID and session properties
 
 ## Browser activity
 
-`browser_activity.rs` owns `browser.sqlite3` and two resident collection paths. Current tab observations create sessions with title, URL, domain, nullable audio state, and start/end boundaries. Browser profile snapshots import history URLs/titles/visit times/counts, derived search terms, and download URLs/paths/times/bytes/state.
+`browser_activity.rs` owns `browser.sqlite3` and two explicitly enabled resident
+collection paths. Current-tab observations create sessions, and browser profile
+snapshots import history/search/download metadata. Full titles, URLs, search
+terms, and paths are only persisted under the independent content opt-in.
 
 Chromium-family, Firefox, and Safari history profiles are supported with documented platform differences. Exact current tab audio uses the cross-platform bridge contract; macOS also has a title/URL Apple Events fallback. Full schema, bridge, privacy, query, limitation, and CI details are in [`BROWSER_ACTIVITY_SENSOR.md`](BROWSER_ACTIVITY_SENSOR.md).
 
-Current-tab DesktopEvents are separately fail-closed:
-`WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED` defaults off, and the independent
-`WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED` gate is required before an
-event may contain a title or URL. The macOS single-tab fallback never drives
-semantic open/navigation/close transitions.
+All browser resident collection is fail-closed:
+`WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED` defaults off. When enabled alone,
+new database rows and DesktopEvents contain metadata-only projections. The
+independent `WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED` gate is required
+before complete titles, URLs, search terms, or download paths may be persisted
+or emitted. Disabled startup still exposes previously authorized history
+through the existing Tools. The macOS single-tab fallback never drives semantic
+open/navigation/close transitions.
 
 ## Device and environment snapshot
 
