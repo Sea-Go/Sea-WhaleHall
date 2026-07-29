@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
@@ -187,7 +187,21 @@ async fn run_monitor(
         inner.config.heartbeat_interval.as_millis() as i64,
     )
     .with_event_journal(event_journal);
-    update_status(&inner, ActivityMonitorState::Running, None, None, None);
+    let startup_error = recorder
+        .flush_foreground_events()
+        .err()
+        .map(|error| error.to_string());
+    update_status(
+        &inner,
+        if startup_error.is_some() {
+            ActivityMonitorState::Degraded
+        } else {
+            ActivityMonitorState::Running
+        },
+        None,
+        None,
+        startup_error,
+    );
     let mut ticker = interval(inner.config.poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let gap_threshold_ms = i64::try_from(inner.config.poll_interval.as_millis())
@@ -347,6 +361,7 @@ impl ActivityRecorder {
         next: Option<ForegroundApp>,
         observed_at_ms: i64,
     ) -> Result<(), ActivityError> {
+        let initial_flush = self.flush_foreground_events();
         if let (Some(current), Some(next)) = (&self.current, &next)
             && current.app.same_usage_target(next)
         {
@@ -354,24 +369,24 @@ impl ActivityRecorder {
                 self.store.touch(current.id, observed_at_ms)?;
                 self.last_heartbeat_ms = observed_at_ms;
             }
-            return Ok(());
+            return initial_flush;
         }
 
         let current_id = self.current.as_ref().map(|session| session.id);
-        let next_app = next.clone();
-        let next_id =
-            self.store
-                .transition(current_id, next.as_ref(), observed_at_ms, "app_switch")?;
+        let next_id = self.store.transition(
+            current_id,
+            next.as_ref(),
+            observed_at_ms,
+            "app_switch",
+            self.event_journal.is_some(),
+        )?;
         self.current = next_id.zip(next).map(|(id, app)| OpenSession {
             id,
             app,
             started_at_ms: observed_at_ms,
         });
         self.last_heartbeat_ms = observed_at_ms;
-        if let Some(next_app) = next_app.as_ref() {
-            self.publish_foreground_change(next_app, next_id, observed_at_ms)?;
-        }
-        Ok(())
+        self.flush_foreground_events()
     }
 
     fn stop(&mut self, observed_at_ms: i64, reason: &str) -> Result<(), ActivityError> {
@@ -379,33 +394,34 @@ impl ActivityRecorder {
             return Ok(());
         };
         let current_id = current.id;
-        self.store
-            .transition(Some(current_id), None, observed_at_ms, reason)?;
+        self.store.transition(
+            Some(current_id),
+            None,
+            observed_at_ms,
+            reason,
+            false,
+        )?;
         self.current = None;
         Ok(())
     }
 
-    fn publish_foreground_change(
-        &self,
-        current: &ForegroundApp,
-        current_session_id: Option<i64>,
-        observed_at_ms: i64,
-    ) -> Result<(), ActivityError> {
+    fn flush_foreground_events(&self) -> Result<(), ActivityError> {
         let Some(event_journal) = &self.event_journal else {
             return Ok(());
         };
-        event_journal.append(DesktopEventDraft::metadata(
-            desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED,
-            "activity.sensor",
-            observed_at_ms,
-            activity_event_payload(current),
-            format!(
-                "foreground:{observed_at_ms}:{}",
-                current_session_id
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_owned()),
-            ),
-        ))?;
+        for record in self.store.pending_foreground_events(100)? {
+            event_journal.append(DesktopEventDraft::metadata(
+                desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED,
+                "activity.sensor",
+                record.occurred_at_ms,
+                json!({
+                    "appId": record.app_id,
+                    "appName": record.app_name,
+                }),
+                record.deduplication_key,
+            ))?;
+            self.store.delete_foreground_event(record.id)?;
+        }
         Ok(())
     }
 
@@ -426,13 +442,6 @@ impl ActivityRecorder {
         self.current = None;
         self.last_heartbeat_ms = 0;
     }
-}
-
-fn activity_event_payload(app: &ForegroundApp) -> Value {
-    json!({
-        "appId": app.app_id,
-        "appName": app.app_name,
-    })
 }
 
 fn now_ms() -> i64 {
