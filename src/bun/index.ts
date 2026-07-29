@@ -34,6 +34,7 @@ const agent = new AgentRuntime(
 	new LocalToolClient(nativePath, {
 		environment: { WHALEHALL_DATA_DIR: localDataPath },
 	}),
+	{ requireStartupGoalPreparation: true },
 );
 let petVisible = true;
 let shutdownPromise: Promise<void> | null = null;
@@ -250,8 +251,6 @@ startupPromise = (async () => {
 	while (!shutdownPromise) {
 		let candidate: WhaleHallReflectionRuntime | null = null;
 		try {
-			await agent.start();
-			if (shutdownPromise) return;
 			candidate = await createWhaleHallReflectionRuntime({
 				agent,
 				dataDirectory: localDataPath,

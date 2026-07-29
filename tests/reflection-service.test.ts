@@ -19,6 +19,7 @@ import {
 import {
 	COLLECTOR_SNAPSHOT_SCHEMA_VERSION,
 	REFLECTION_SCHEMA_VERSION,
+	type ActiveGoalContextV1,
 	type DesktopEventV1,
 	type EventWindowV1,
 	type ReflectionCollectorSnapshotV1,
@@ -607,6 +608,7 @@ describe("DesktopReflectionService", () => {
 		const transport = new FakeTransport([
 			foregroundEvent(2, "Terminal", 2_000),
 		]);
+		transport.durableDuringStart = foregroundEvent(4, "Safari", 30_001);
 		const envelopes: TelemetryEnvelopeV1[] = [];
 		const service = new DesktopReflectionService({
 			transport,
@@ -625,8 +627,23 @@ describe("DesktopReflectionService", () => {
 		expect(await repository.loadCollector("collector-1")).toMatchObject({
 			activeGoal: null,
 			goalRevision: 2,
-			openWindow: null,
+			openWindow: {
+				goal: null,
+				goalVersion: null,
+				events: [
+					expect.objectContaining({
+						eventId: "event-4",
+						goalVersion: null,
+					}),
+				],
+			},
 		});
+		expect(transport.preparedStartupChanges).toHaveLength(1);
+		expect(transport.preparedStartupChanges[0]).toMatchObject({
+			previous: oldGoal,
+			next: null,
+		});
+		expect(transport.startupGoalAcknowledgements).toBe(1);
 		expect((await service.getStatus()).pendingJobs).toBe(1);
 		const results = await service.runJobsNow();
 		expect(results.map((result) => result.status)).toEqual([
@@ -645,6 +662,65 @@ describe("DesktopReflectionService", () => {
 		).toEqual([
 			["event-1", 1],
 			["event-2", 1],
+		]);
+		await service.stop();
+	});
+
+	test("startup reconciliation clears an unmaterialized goal tail before new sensors", async () => {
+		const clock = new FakeClock(30_000);
+		const repository = new InMemoryReflectionRepository();
+		const pendingGoal = {
+			goalId: "pending-goal",
+			planId: "pending-plan",
+			version: 1,
+			text: "Appended before the host crash",
+			activatedAtMs: 1_000,
+		};
+		const transport = new FakeTransport([
+			goalChangeEvent(1, null, pendingGoal, 2_000),
+		]);
+		transport.durableDuringStart = foregroundEvent(3, "Safari", 30_001);
+		const service = new DesktopReflectionService({
+			transport,
+			repository,
+			inference: { infer: async (window) => reflectionFor(window) },
+			identity: identity(),
+			clock,
+			startupGoal: null,
+			semanticEventThreshold: 64,
+			jobPollMs: 60_000,
+			eventPollMs: 60_000,
+		});
+
+		await service.start();
+		const snapshot = await repository.loadCollector("collector-1");
+		expect(snapshot).toMatchObject({
+			activeGoal: null,
+			goalRevision: 2,
+			openWindow: {
+				goal: null,
+				goalVersion: null,
+				events: [
+					expect.objectContaining({
+						eventId: "event-3",
+						goalVersion: null,
+					}),
+				],
+			},
+		});
+		expect(transport.preparedStartupChanges[0]).toMatchObject({
+			previous: null,
+			next: null,
+		});
+		expect(
+			transport.allEvents().map((event) => [
+				event.kind,
+				event.goalVersion,
+			]),
+		).toEqual([
+			["goal.contextChanged", null],
+			["goal.contextChanged", 1],
+			["application.foregroundChanged", null],
 		]);
 		await service.stop();
 	});
@@ -758,17 +834,40 @@ describe("DesktopReflectionService", () => {
 class FakeTransport implements DesktopEventTransport {
 	readonly queries: LocalEventQuery[] = [];
 	readonly commits: string[] = [];
+	readonly preparedStartupChanges: Array<LocalEventGoalChange | null> = [];
+	startupGoalAcknowledgements = 0;
 	emitDuringStart: DesktopEventV1 | null = null;
+	durableDuringStart: DesktopEventV1 | null = null;
 	failNextCommit = false;
 	beforeGoalAppend: (() => void) | null = null;
 	afterGoalAppend: (() => void) | null = null;
 	private readonly listeners = new Set<(event: DesktopEventV1) => void>();
 	private committedIndex = 0;
 	private readonly goalEvents = new Map<string, DesktopEventV1>();
+	private preparedStartupChange: LocalEventGoalChange | null | undefined;
 
 	constructor(private readonly events: DesktopEventV1[]) {}
 
+	async prepareStartupGoalChange(
+		change: LocalEventGoalChange | null,
+	): Promise<void> {
+		this.preparedStartupChanges.push(structuredClone(change));
+		this.preparedStartupChange = structuredClone(change);
+	}
+
+	async acknowledgeStartupGoalChange(): Promise<void> {
+		this.startupGoalAcknowledgements += 1;
+	}
+
 	async start(): Promise<void> {
+		if (this.preparedStartupChange) {
+			await this.reconcileStartupGoalChange(this.preparedStartupChange);
+		}
+		this.preparedStartupChange = undefined;
+		if (this.durableDuringStart) {
+			this.appendDurable(this.durableDuringStart);
+			this.emit(this.durableDuringStart);
+		}
 		if (this.emitDuringStart) this.emit(this.emitDuringStart);
 	}
 
@@ -842,6 +941,40 @@ class FakeTransport implements DesktopEventTransport {
 
 	appendDurable(event: DesktopEventV1): void {
 		this.events.push(structuredClone(event));
+	}
+
+	allEvents(): DesktopEventV1[] {
+		return structuredClone(this.events);
+	}
+
+	private async reconcileStartupGoalChange(
+		intent: LocalEventGoalChange,
+	): Promise<void> {
+		let current = structuredClone(intent.previous);
+		let revision = Math.max(
+			current?.version ?? 0,
+			(intent.next?.version ?? 1) - 1,
+		);
+		for (const event of this.events) {
+			if (event.kind !== "goal.contextChanged") continue;
+			const eventRevision =
+				event.payload.next?.version ??
+				(event.payload.previous?.version ?? -1) + 1;
+			if (eventRevision < revision) continue;
+			current = structuredClone(event.payload.next);
+			revision = eventRevision;
+		}
+		if (sameGoalTargetForTest(current, intent.next)) return;
+		await this.appendDesktopGoalChange({
+			...structuredClone(intent),
+			previous: current,
+			next: intent.next
+				? {
+						...structuredClone(intent.next),
+						version: revision + 1,
+					}
+				: null,
+		});
 	}
 }
 
@@ -932,6 +1065,46 @@ function identity() {
 		collectorId: "collector-1",
 		deviceId: "device-1",
 		sessionId: "session-1",
+	};
+}
+
+function sameGoalTargetForTest(
+	left: ActiveGoalContextV1 | null,
+	right: ActiveGoalContextV1 | null,
+): boolean {
+	return (
+		left === right ||
+		(left !== null &&
+			right !== null &&
+			left.goalId === right.goalId &&
+			left.planId === right.planId &&
+			left.text === right.text &&
+			left.activatedAtMs === right.activatedAtMs)
+	);
+}
+
+function goalChangeEvent(
+	sequence: number,
+	previous: ActiveGoalContextV1 | null,
+	next: ActiveGoalContextV1 | null,
+	atMs: number,
+): DesktopEventV1 {
+	return {
+		schemaVersion: "desktop-event.v1",
+		eventId: `goal-event-${sequence}`,
+		cursor: `ec1_${sequence.toString(16).padStart(16, "0")}`,
+		deviceId: "native-device",
+		sessionId: "native-session",
+		kind: "goal.contextChanged",
+		source: "planning.controller",
+		occurredAtMs: atMs,
+		observedAtMs: atMs,
+		goalVersion: previous?.version ?? null,
+		sensitivity: "content",
+		payload: {
+			previous: structuredClone(previous),
+			next: structuredClone(next),
+		},
 	};
 }
 

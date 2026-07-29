@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use whalehall_local_core::ToolHost;
-use whalehall_local_core::events::{EventJournal, EventJournalError};
+use whalehall_local_core::events::{EventAppendResult, EventJournal, EventJournalError};
 use whalehall_local_core::sensors::accessibility_tree::{
     AccessibilityConfig, AccessibilityService, SystemAccessibilityProvider,
 };
@@ -38,6 +38,7 @@ use whalehall_local_protocol::{
 };
 
 const EVENT_RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const STARTUP_GOAL_CHANGE_ENV: &str = "WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
 
 pub async fn serve<R, W>(reader: R, writer: W) -> io::Result<()>
 where
@@ -55,6 +56,7 @@ where
     let editor_config = VscodeEditBridgeConfig::from_environment().map_err(io::Error::other)?;
     let event_journal = EventJournal::open(config.database_path.with_file_name("events.sqlite3"))
         .map_err(io::Error::other)?;
+    append_startup_goal_change_from_environment(&event_journal)?;
     let activity = ActivityService::start_with_event_journal(
         config,
         Arc::new(SystemForegroundAppProvider),
@@ -174,6 +176,42 @@ where
         },
     )
     .await
+}
+
+fn append_startup_goal_change_from_environment(
+    event_journal: &EventJournal,
+) -> io::Result<Option<EventAppendResult>> {
+    let Some(serialized) = std::env::var_os(STARTUP_GOAL_CHANGE_ENV) else {
+        return Ok(None);
+    };
+    // Startup is still single-threaded and no resident sensor has started.
+    // Remove the one-shot payload before parsing so it cannot leak into tasks
+    // or a child process, including on a fail-closed parse/append error.
+    unsafe {
+        std::env::remove_var(STARTUP_GOAL_CHANGE_ENV);
+    }
+    let serialized = serialized.into_string().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Startup goal change environment value is not valid UTF-8.",
+        )
+    })?;
+    append_startup_goal_change_json(event_journal, &serialized)
+}
+
+fn append_startup_goal_change_json(
+    event_journal: &EventJournal,
+    serialized: &str,
+) -> io::Result<Option<EventAppendResult>> {
+    let params: EventGoalChangeParams = serde_json::from_str(serialized).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid startup goal change parameters: {error}"),
+        )
+    })?;
+    event_journal
+        .reconcile_startup_goal_change(&params)
+        .map_err(io::Error::other)
 }
 
 pub async fn serve_with_activity<R, W>(
@@ -777,7 +815,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use tempfile::TempDir;
@@ -789,6 +827,8 @@ mod tests {
     use whalehall_local_protocol::{EventCommitParams, EventQueryParams, desktop_event_kinds};
 
     use super::*;
+
+    static STARTUP_GOAL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct NoForegroundApp;
 
@@ -810,6 +850,114 @@ mod tests {
         )
         .expect("start test activity service");
         (directory, activity)
+    }
+
+    fn startup_goal_change_json() -> String {
+        serde_json::json!({
+            "previous": {
+                "goalId": "old-goal",
+                "planId": null,
+                "version": 1,
+                "text": "Old goal",
+                "activatedAtMs": 500
+            },
+            "next": null,
+            "occurredAtMs": 2_000,
+            "deduplicationKey": "startup-clear-old-goal-v1"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn startup_goal_boundary_is_one_shot_idempotent_and_precedes_new_sensor_events() {
+        let _environment_guard = STARTUP_GOAL_ENV_LOCK.lock().unwrap();
+        let directory = tempfile::tempdir().expect("create startup goal test directory");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let mut old_event = DesktopEventDraft::metadata(
+            desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED,
+            "activity.sensor",
+            1_000,
+            serde_json::json!({ "appId": "code", "appName": "Code" }),
+            "old-backlog",
+        );
+        old_event.goal_version = Some(1);
+        journal.append(old_event).expect("append old backlog");
+        let serialized = startup_goal_change_json();
+
+        unsafe {
+            std::env::set_var(STARTUP_GOAL_CHANGE_ENV, &serialized);
+        }
+        let first = append_startup_goal_change_from_environment(&journal)
+            .expect("append startup goal")
+            .expect("startup goal was present");
+        assert!(first.inserted);
+        assert!(std::env::var_os(STARTUP_GOAL_CHANGE_ENV).is_none());
+
+        unsafe {
+            std::env::set_var(STARTUP_GOAL_CHANGE_ENV, &serialized);
+        }
+        let replay =
+            append_startup_goal_change_from_environment(&journal).expect("replay startup goal");
+        assert!(
+            replay.is_none(),
+            "the durable journal already matches the startup target"
+        );
+        assert!(std::env::var_os(STARTUP_GOAL_CHANGE_ENV).is_none());
+
+        journal
+            .append(DesktopEventDraft::metadata(
+                desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED,
+                "activity.sensor",
+                3_000,
+                serde_json::json!({ "appId": "safari", "appName": "Safari" }),
+                "new-sensor-event",
+            ))
+            .expect("append new sensor event");
+        let events = journal
+            .query(&EventQueryParams::default())
+            .expect("query ordered events")
+            .events;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED,
+                desktop_event_kinds::GOAL_CONTEXT_CHANGED,
+                desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED,
+            ]
+        );
+        assert_eq!(events[0].goal_version, Some(1));
+        assert_eq!(events[1].payload["next"], Value::Null);
+        assert_eq!(events[2].goal_version, None);
+    }
+
+    #[test]
+    fn invalid_startup_goal_environment_is_removed_and_fails_closed() {
+        let _environment_guard = STARTUP_GOAL_ENV_LOCK.lock().unwrap();
+        let directory = tempfile::tempdir().expect("create invalid startup goal test directory");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        unsafe {
+            std::env::set_var(
+                STARTUP_GOAL_CHANGE_ENV,
+                r#"{"previous":null,"next":null,"occurredAtMs":1,"deduplicationKey":"x","extra":true}"#,
+            );
+        }
+
+        let error = append_startup_goal_change_from_environment(&journal)
+            .expect_err("unknown fields must fail startup");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(std::env::var_os(STARTUP_GOAL_CHANGE_ENV).is_none());
+        assert!(
+            journal
+                .query(&EventQueryParams::default())
+                .expect("query empty journal")
+                .events
+                .is_empty()
+        );
     }
 
     #[tokio::test]

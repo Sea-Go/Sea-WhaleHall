@@ -39,6 +39,8 @@ export const DEFAULT_EVENT_POLL_MS = 5_000;
 export const DEFAULT_DEADLINE_PULL_RETRY_MS = 1_000;
 
 export interface DesktopEventTransport {
+	prepareStartupGoalChange(change: LocalEventGoalChange | null): Promise<void>;
+	acknowledgeStartupGoalChange(): Promise<void>;
 	start(): Promise<void>;
 	queryDesktopEvents(query: LocalEventQuery): Promise<LocalEventQueryResult>;
 	commitDesktopEventCursor(
@@ -88,12 +90,18 @@ export type DesktopReflectionServiceOptions = {
 	semanticEventThreshold?: number;
 	maxWaitMs?: number;
 	/**
-	 * An authoritative goal known during startup. The service first materializes
-	 * the pre-crash journal tail under the recovered goal, then appends this as
-	 * a durable native boundary. `undefined` preserves recovered goal state.
+	 * An authoritative goal known during startup. The service injects its
+	 * durable boundary into the native process before any resident sensor
+	 * starts. `undefined` preserves recovered goal state.
 	 */
 	startupGoal?: Omit<ActiveGoalContextV1, "version"> | null;
 	onError?: (error: unknown) => void;
+};
+
+type ActiveGoalChangePlan = {
+	change: LocalEventGoalChange | null;
+	startupChange: LocalEventGoalChange;
+	expectedGoal: ActiveGoalContextV1 | null;
 };
 
 /**
@@ -212,15 +220,16 @@ export class DesktopReflectionService {
 
 		try {
 			await this.collector.recover({ deferDeadline: true });
-			await this.transport.start();
-			// Materialize the pre-crash journal tail under the recovered goal
-			// before writing an authoritative startup goal boundary. The native
-			// append then orders every concurrent sensor event on the correct
-			// side of that boundary.
+			let startupPlan: ActiveGoalChangePlan | null = null;
 			if (this.startupGoal !== undefined) {
-				await this.pullBacklog();
-				await this.appendActiveGoalToJournal(this.startupGoal);
+				startupPlan = await this.planActiveGoalChange(this.startupGoal);
+				await this.transport.prepareStartupGoalChange(
+					startupPlan.startupChange,
+				);
+			} else {
+				await this.transport.prepareStartupGoalChange(null);
 			}
+			await this.transport.start();
 			for (;;) {
 				const generation = this.pausedLiveGeneration;
 				await this.pullBacklog();
@@ -228,6 +237,18 @@ export class DesktopReflectionService {
 				// from the durable named consumer in cursor order.
 				if (generation === this.pausedLiveGeneration) break;
 			}
+			if (
+				startupPlan !== null &&
+				!sameGoalTarget(
+					this.collector.getSnapshot().activeGoal,
+					startupPlan.expectedGoal,
+				)
+			) {
+				throw new Error(
+					"Durable startup goal boundary did not materialize as requested.",
+				);
+			}
+			await this.transport.acknowledgeStartupGoalChange();
 			const resumeDeadlines = this.enqueue(() => this.collector.resumeDeadlines());
 			this.acceptingLiveEvents = true;
 			await resumeDeadlines;
@@ -328,62 +349,98 @@ export class DesktopReflectionService {
 	private async appendActiveGoalToJournal(
 		validatedGoal: Omit<ActiveGoalContextV1, "version"> | null,
 	): Promise<ActiveGoalContextV1 | null> {
-		const collectorSnapshot = this.collector.getSnapshot();
-		const previous = collectorSnapshot.activeGoal;
-		if (
-			validatedGoal !== null &&
-			previous !== null &&
-			validatedGoal.activatedAtMs < previous.activatedAtMs
-		) {
-			return structuredClone(previous);
-		}
-		if (
-			validatedGoal !== null &&
-			previous?.goalId === validatedGoal.goalId &&
-			previous.planId === validatedGoal.planId &&
-			previous.text === validatedGoal.text
-		) {
-			return structuredClone(previous);
-		}
-		if (validatedGoal === null && previous === null) return null;
-
-		const next = validatedGoal
-			? {
-					...structuredClone(validatedGoal),
-					version: collectorSnapshot.goalRevision + 1,
-				}
-			: null;
-		const occurredAtMs = this.clock.nowMs();
-		if (
-			next !== null &&
-			next.activatedAtMs > occurredAtMs
-		) {
-			throw new Error("Active goal activatedAtMs cannot be in the future.");
-		}
-		const digest = await this.hasher.sha256(
-			JSON.stringify({
-				collectorId: this.identity.collectorId,
-				deviceId: this.identity.deviceId,
-				revision: collectorSnapshot.goalRevision + 1,
-				previous,
-				next,
-			}),
-		);
-		await this.transport.appendDesktopGoalChange({
-			previous: structuredClone(previous),
-			next: structuredClone(next),
-			occurredAtMs,
-			deduplicationKey: `whalehall-goal-v1:${digest}`,
-		});
+		const plan = await this.planActiveGoalChange(validatedGoal);
+		if (plan.change === null) return structuredClone(plan.expectedGoal);
+		await this.transport.appendDesktopGoalChange(plan.change);
 		// The append response is not the materialization barrier. Pull through
 		// the named consumer so the boundary and surrounding sensor events are
 		// assigned strictly by their durable cursor order.
 		await this.pullBacklog();
 		const activeGoal = this.collector.getSnapshot().activeGoal;
-		if (!sameGoalContext(activeGoal, next)) {
+		if (!sameGoalContext(activeGoal, plan.expectedGoal)) {
 			throw new Error("Durable goal boundary did not materialize as requested.");
 		}
 		return structuredClone(activeGoal);
+	}
+
+	private async planActiveGoalChange(
+		validatedGoal: Omit<ActiveGoalContextV1, "version"> | null,
+	): Promise<ActiveGoalChangePlan> {
+		const collectorSnapshot = this.collector.getSnapshot();
+		const previous = collectorSnapshot.activeGoal;
+		let expectedGoal: ActiveGoalContextV1 | null;
+		let shouldAppend: boolean;
+		if (
+			validatedGoal !== null &&
+			previous !== null &&
+			validatedGoal.activatedAtMs < previous.activatedAtMs
+		) {
+			expectedGoal = structuredClone(previous);
+			shouldAppend = false;
+		} else if (
+			validatedGoal !== null &&
+			previous?.goalId === validatedGoal.goalId &&
+			previous.planId === validatedGoal.planId &&
+			previous.text === validatedGoal.text
+		) {
+			expectedGoal = structuredClone(previous);
+			shouldAppend = false;
+		} else if (validatedGoal === null && previous === null) {
+			expectedGoal = null;
+			shouldAppend = false;
+		} else {
+			expectedGoal = validatedGoal
+				? {
+						...structuredClone(validatedGoal),
+						version: collectorSnapshot.goalRevision + 1,
+					}
+				: null;
+			shouldAppend = true;
+		}
+		const occurredAtMs = this.clock.nowMs();
+		if (
+			expectedGoal !== null &&
+			expectedGoal.activatedAtMs > occurredAtMs
+		) {
+			throw new Error("Active goal activatedAtMs cannot be in the future.");
+		}
+		const change = shouldAppend
+			? {
+					previous: structuredClone(previous),
+					next: structuredClone(expectedGoal),
+					occurredAtMs,
+					deduplicationKey: `whalehall-goal-v1:${await this.hasher.sha256(
+						JSON.stringify({
+							collectorId: this.identity.collectorId,
+							deviceId: this.identity.deviceId,
+							revision: collectorSnapshot.goalRevision + 1,
+							previous,
+							next: expectedGoal,
+						}),
+					)}`,
+				}
+			: null;
+		const startupChange =
+			change ??
+			{
+				previous: structuredClone(previous),
+				next: structuredClone(expectedGoal),
+				occurredAtMs,
+				deduplicationKey: `whalehall-startup-goal-v1:${await this.hasher.sha256(
+					JSON.stringify({
+						collectorId: this.identity.collectorId,
+						deviceId: this.identity.deviceId,
+						revision: collectorSnapshot.goalRevision,
+						previous,
+						desired: expectedGoal,
+					}),
+				)}`,
+			};
+		return {
+			change,
+			startupChange,
+			expectedGoal: structuredClone(expectedGoal),
+		};
 	}
 
 	private async ingestJournalEvent(rawEvent: DesktopEventV1): Promise<void> {
@@ -642,6 +699,21 @@ function sameGoalContext(
 			left.goalId === right.goalId &&
 			left.planId === right.planId &&
 			left.version === right.version &&
+			left.text === right.text &&
+			left.activatedAtMs === right.activatedAtMs)
+	);
+}
+
+function sameGoalTarget(
+	left: ActiveGoalContextV1 | null,
+	right: ActiveGoalContextV1 | null,
+): boolean {
+	return (
+		left === right ||
+		(left !== null &&
+			right !== null &&
+			left.goalId === right.goalId &&
+			left.planId === right.planId &&
 			left.text === right.text &&
 			left.activatedAtMs === right.activatedAtMs)
 	);

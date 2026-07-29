@@ -4,9 +4,13 @@ import {
 	JsonlProtocolError,
 	LocalClientError,
 	LocalToolClient,
+	STARTUP_GOAL_CHANGE_ENV,
 	type ChildTransport,
 } from "../src/agent/local-tool-client";
-import type { LocalToolDescriptor } from "../src/agent/local-protocol";
+import type {
+	LocalEventGoalChange,
+	LocalToolDescriptor,
+} from "../src/agent/local-protocol";
 import { parseLocalMessage } from "../src/agent/local-protocol";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
 
@@ -192,7 +196,10 @@ describe("LocalToolClient", () => {
 		const child = new FakeChild();
 		let receivedEnvironment: Readonly<Record<string, string>> | undefined;
 		const client = new LocalToolClient("fake", {
-			environment: { WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data" },
+			environment: {
+				WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data",
+				[STARTUP_GOAL_CHANGE_ENV]: "stale-shell-value",
+			},
 			spawn: (_binaryPath, environment) => {
 				receivedEnvironment = environment;
 				return child;
@@ -205,6 +212,130 @@ describe("LocalToolClient", () => {
 		await client.stop();
 		expect(child.endCalled).toBe(true);
 		expect(child.killCalled).toBe(false);
+	});
+
+	test("injects only the explicitly prepared startup goal JSON", async () => {
+		const child = new FakeChild();
+		let receivedEnvironment: Readonly<Record<string, string>> | undefined;
+		const change: LocalEventGoalChange = {
+			previous: {
+				goalId: "old-goal",
+				planId: null,
+				version: 1,
+				text: "Old goal",
+				activatedAtMs: 500,
+			},
+			next: null,
+			occurredAtMs: 1_000,
+			deduplicationKey: "startup-clear-1",
+		};
+		const client = new LocalToolClient("fake", {
+			environment: { WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data" },
+			spawn: (_binaryPath, environment) => {
+				receivedEnvironment = environment;
+				return child;
+			},
+		});
+
+		await client.prepareStartupGoalChange(change);
+		await client.start();
+		expect(receivedEnvironment?.[STARTUP_GOAL_CHANGE_ENV]).toBe(
+			JSON.stringify(change),
+		);
+		await expect(client.prepareStartupGoalChange(null)).rejects.toThrow(
+			"after whalehall-local has started",
+		);
+		await client.stop();
+	});
+
+	test("replays the exact prepared JSON when the child exits before startup acknowledgement", async () => {
+		const first = new FakeChild();
+		const second = new FakeChild();
+		const environments: Array<Readonly<Record<string, string>> | undefined> = [];
+		let spawnIndex = 0;
+		const change: LocalEventGoalChange = {
+			previous: null,
+			next: {
+				goalId: "goal-1",
+				planId: null,
+				version: 1,
+				text: "Retry startup safely",
+				activatedAtMs: 1_000,
+			},
+			occurredAtMs: 1_001,
+			deduplicationKey: "startup-retry-1",
+		};
+		const client = new LocalToolClient("fake", {
+			spawn: (_binaryPath, environment) => {
+				environments.push(environment);
+				return [first, second][spawnIndex++] as FakeChild;
+			},
+		});
+
+		await client.prepareStartupGoalChange(change);
+		await client.start();
+		first.exit(1);
+		await first.exited;
+		await Bun.sleep(0);
+		await client.prepareStartupGoalChange({
+			...change,
+			occurredAtMs: 2_000,
+		});
+		await client.start();
+		expect(
+			environments.map((environment) => environment?.[STARTUP_GOAL_CHANGE_ENV]),
+		).toEqual([JSON.stringify(change), JSON.stringify(change)]);
+		await client.stop();
+	});
+
+	test("clears the one-shot startup JSON only after reflection acknowledges materialization", async () => {
+		const children = [
+			new FakeChild((line, process) => {
+				const request = JSON.parse(line) as { id: string; method: string };
+				if (request.method === "runtime.health") {
+					process.respond({
+						id: request.id,
+						ok: true,
+						result: {
+							service: "whalehall-local",
+							version: "0.1.0",
+							pid: 4242,
+							status: "ok",
+						},
+					});
+				}
+			}),
+			new FakeChild(),
+		];
+		const environments: Array<Readonly<Record<string, string>> | undefined> = [];
+		let spawnIndex = 0;
+		const client = new LocalToolClient("fake", {
+			spawn: (_binaryPath, environment) => {
+				environments.push(environment);
+				return children[spawnIndex++] as FakeChild;
+			},
+		});
+		await client.prepareStartupGoalChange({
+			previous: null,
+			next: {
+				goalId: "goal-ack",
+				planId: null,
+				version: 1,
+				text: "Acknowledge startup",
+				activatedAtMs: 1,
+			},
+			occurredAtMs: 1,
+			deduplicationKey: "acknowledged-startup",
+		});
+		await client.start();
+		await client.health();
+		await client.acknowledgeStartupGoalChange();
+		await client.stop();
+		await client.start();
+
+		expect(environments[0]?.[STARTUP_GOAL_CHANGE_ENV]).toBeDefined();
+		expect(environments[1]?.[STARTUP_GOAL_CHANGE_ENV]).toBeUndefined();
+		await client.stop();
 	});
 
 	test("correlates responses and routes streamed events", async () => {

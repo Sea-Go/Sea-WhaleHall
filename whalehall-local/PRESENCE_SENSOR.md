@@ -58,7 +58,10 @@ ordered idempotent retry, including across process restarts. The local history
 keeps the estimated sleep start time; because sleep is only discovered on the
 later wake sample, the global `presence.sleep` and `presence.wake` drafts use
 that detection time for both `occurredAtMs` and `observedAtMs`, preserving the
-EventJournal cursor as the cross-sensor total order.
+EventJournal cursor as the cross-sensor total order. Upgrade replay also
+recognizes the exact legacy timestamp representation for AFK and sleep/wake
+rows: only an exact idempotent legacy match removes the outbox row; any other
+conflict remains durable and fails closed instead of skipping later events.
 
 ## Rust and Agent APIs
 

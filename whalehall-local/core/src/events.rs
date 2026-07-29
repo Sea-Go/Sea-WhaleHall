@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -203,7 +203,7 @@ impl EventJournal {
     }
 
     pub fn append(&self, draft: DesktopEventDraft) -> Result<EventAppendResult, EventJournalError> {
-        validate_draft(&draft)?;
+        let (payload_json, event_id) = prepare_event_append(&self.inner.device_id, &draft)?;
         #[cfg(test)]
         if self
             .inner
@@ -217,17 +217,6 @@ impl EventJournal {
                 "injected event append failure",
             )));
         }
-        let payload_json = serde_json::to_string(&draft.payload)?;
-        if payload_json.len() > MAX_EVENT_PAYLOAD_BYTES {
-            return Err(EventJournalError::Configuration(format!(
-                "event payload exceeds {MAX_EVENT_PAYLOAD_BYTES} bytes"
-            )));
-        }
-        let event_id = deterministic_event_id(
-            &self.inner.device_id,
-            &draft.source,
-            &draft.deduplication_key,
-        )?;
         let _append_guard = self
             .inner
             .append_guard
@@ -235,42 +224,13 @@ impl EventJournal {
             .unwrap_or_else(|error| error.into_inner());
         let mut connection = connect(&self.inner.database_path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let inserted = transaction.execute(
-            "INSERT INTO desktop_events (
-                event_id, schema_version, device_id, session_id, kind, source,
-                occurred_at_ms, observed_at_ms, goal_version, sensitivity, payload_json,
-                deduplication_key
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(event_id) DO NOTHING",
-            params![
-                event_id,
-                DESKTOP_EVENT_SCHEMA_VERSION,
-                self.inner.device_id,
-                self.inner.session_id,
-                draft.kind,
-                draft.source,
-                draft.occurred_at_ms,
-                draft.observed_at_ms,
-                draft.goal_version,
-                sensitivity_name(&draft.sensitivity),
-                payload_json,
-                draft.deduplication_key,
-            ],
-        )? == 1;
-        let stored = select_event_by_id(&transaction, &event_id)?.ok_or_else(|| {
-            EventJournalError::Configuration(format!(
-                "event {event_id} was not readable after append"
-            ))
-        })?;
-        let event = stored.into_event()?;
-        if !inserted && !same_idempotent_event(&event, &draft) {
-            return Err(EventJournalError::IdempotencyConflict { event_id });
-        }
+        let result =
+            insert_prepared_event(&transaction, &self.inner, &draft, &payload_json, &event_id)?;
         transaction.commit()?;
-        if inserted {
-            let _ = self.inner.publisher.send(event.clone());
+        if result.inserted {
+            let _ = self.inner.publisher.send(result.event.clone());
         }
-        Ok(EventAppendResult { event, inserted })
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -283,19 +243,83 @@ impl EventJournal {
         params: &EventGoalChangeParams,
     ) -> Result<EventAppendResult, EventJournalError> {
         validate_goal_change(params)?;
-        self.append(DesktopEventDraft {
-            kind: desktop_event_kinds::GOAL_CONTEXT_CHANGED.to_owned(),
-            source: "planning.controller".to_owned(),
-            occurred_at_ms: params.occurred_at_ms,
-            observed_at_ms: params.occurred_at_ms,
-            goal_version: params.previous.as_ref().map(|goal| goal.version),
-            sensitivity: DesktopEventSensitivity::Content,
-            payload: serde_json::json!({
-                "previous": params.previous,
-                "next": params.next,
-            }),
-            deduplication_key: params.deduplication_key.clone(),
-        })
+        self.append(goal_change_draft(params))
+    }
+
+    /// Reconciles an authoritative startup target before resident sensors
+    /// begin. The latest durable goal transition and the conditional append
+    /// share one IMMEDIATE transaction, so another process cannot insert a
+    /// competing goal transition between the read and write.
+    ///
+    /// Unlike the normal RPC, the startup intent may be a no-op
+    /// (`previous == next`, including both null). Its `next` value is the
+    /// desired target. If an unmaterialized durable tail advanced the goal,
+    /// the appended boundary is rebased onto that tail and receives the next
+    /// monotonic revision.
+    pub fn reconcile_startup_goal_change(
+        &self,
+        intent: &EventGoalChangeParams,
+    ) -> Result<Option<EventAppendResult>, EventJournalError> {
+        validate_startup_goal_intent(intent)?;
+        #[cfg(test)]
+        if self
+            .inner
+            .fail_next_appends
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(EventJournalError::Io(std::io::Error::other(
+                "injected event append failure",
+            )));
+        }
+
+        let _append_guard = self
+            .inner
+            .append_guard
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut connection = connect(&self.inner.database_path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let recovered = goal_state_from_startup_intent(intent);
+        let latest = latest_goal_state(&transaction)?;
+        let current = choose_current_goal_state(recovered, latest)?;
+        if same_goal_target(current.goal.as_ref(), intent.next.as_ref()) {
+            transaction.commit()?;
+            return Ok(None);
+        }
+
+        let next_revision = current.revision.checked_add(1).ok_or_else(|| {
+            EventJournalError::Configuration(
+                "startup goal revision cannot exceed the safe integer range".to_owned(),
+            )
+        })?;
+        if next_revision > MAX_SAFE_INTEGER {
+            return Err(EventJournalError::Configuration(
+                "startup goal revision cannot exceed the safe integer range".to_owned(),
+            ));
+        }
+        let next = intent.next.clone().map(|mut goal| {
+            goal.version = next_revision;
+            goal
+        });
+        let rebased = EventGoalChangeParams {
+            previous: current.goal,
+            next,
+            occurred_at_ms: intent.occurred_at_ms,
+            deduplication_key: intent.deduplication_key.clone(),
+        };
+        validate_goal_change(&rebased)?;
+        let draft = goal_change_draft(&rebased);
+        let (payload_json, event_id) = prepare_event_append(&self.inner.device_id, &draft)?;
+        let result =
+            insert_prepared_event(&transaction, &self.inner, &draft, &payload_json, &event_id)?;
+        transaction.commit()?;
+        if result.inserted {
+            let _ = self.inner.publisher.send(result.event.clone());
+        }
+        Ok(Some(result))
     }
 
     pub fn query(&self, params: &EventQueryParams) -> Result<EventQueryResult, EventJournalError> {
@@ -534,6 +558,199 @@ impl EventJournal {
             retained_through_cursor: encode_cursor(retained_through),
             protected_by_consumer_cursor: minimum_consumer_sequence.map(encode_cursor),
         })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GoalState {
+    goal: Option<GoalContext>,
+    revision: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredGoalChangePayload {
+    previous: Option<GoalContext>,
+    next: Option<GoalContext>,
+}
+
+fn goal_change_draft(params: &EventGoalChangeParams) -> DesktopEventDraft {
+    DesktopEventDraft {
+        kind: desktop_event_kinds::GOAL_CONTEXT_CHANGED.to_owned(),
+        source: "planning.controller".to_owned(),
+        occurred_at_ms: params.occurred_at_ms,
+        observed_at_ms: params.occurred_at_ms,
+        goal_version: params.previous.as_ref().map(|goal| goal.version),
+        sensitivity: DesktopEventSensitivity::Content,
+        payload: serde_json::json!({
+            "previous": params.previous,
+            "next": params.next,
+        }),
+        deduplication_key: params.deduplication_key.clone(),
+    }
+}
+
+fn prepare_event_append(
+    device_id: &str,
+    draft: &DesktopEventDraft,
+) -> Result<(String, String), EventJournalError> {
+    validate_draft(draft)?;
+    let payload_json = serde_json::to_string(&draft.payload)?;
+    if payload_json.len() > MAX_EVENT_PAYLOAD_BYTES {
+        return Err(EventJournalError::Configuration(format!(
+            "event payload exceeds {MAX_EVENT_PAYLOAD_BYTES} bytes"
+        )));
+    }
+    let event_id = deterministic_event_id(device_id, &draft.source, &draft.deduplication_key)?;
+    Ok((payload_json, event_id))
+}
+
+fn insert_prepared_event(
+    transaction: &Transaction<'_>,
+    journal: &EventJournalInner,
+    draft: &DesktopEventDraft,
+    payload_json: &str,
+    event_id: &str,
+) -> Result<EventAppendResult, EventJournalError> {
+    let inserted = transaction.execute(
+        "INSERT INTO desktop_events (
+            event_id, schema_version, device_id, session_id, kind, source,
+            occurred_at_ms, observed_at_ms, goal_version, sensitivity, payload_json,
+            deduplication_key
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(event_id) DO NOTHING",
+        params![
+            event_id,
+            DESKTOP_EVENT_SCHEMA_VERSION,
+            journal.device_id,
+            journal.session_id,
+            draft.kind,
+            draft.source,
+            draft.occurred_at_ms,
+            draft.observed_at_ms,
+            draft.goal_version,
+            sensitivity_name(&draft.sensitivity),
+            payload_json,
+            draft.deduplication_key,
+        ],
+    )? == 1;
+    let stored = select_event_by_id(transaction, event_id)?.ok_or_else(|| {
+        EventJournalError::Configuration(format!("event {event_id} was not readable after append"))
+    })?;
+    let event = stored.into_event()?;
+    if !inserted && !same_idempotent_event(&event, draft) {
+        return Err(EventJournalError::IdempotencyConflict {
+            event_id: event_id.to_owned(),
+        });
+    }
+    Ok(EventAppendResult { event, inserted })
+}
+
+fn validate_startup_goal_intent(intent: &EventGoalChangeParams) -> Result<(), EventJournalError> {
+    if intent.occurred_at_ms < 0 || intent.occurred_at_ms > MAX_SAFE_INTEGER {
+        return Err(EventJournalError::Configuration(
+            "startup goal intent occurredAtMs must be a non-negative safe integer".to_owned(),
+        ));
+    }
+    validate_identifier(
+        "startup goal intent deduplicationKey",
+        &intent.deduplication_key,
+        512,
+    )?;
+    if let Some(previous) = &intent.previous {
+        validate_goal_context("previous", previous, intent.occurred_at_ms)?;
+    }
+    if let Some(next) = &intent.next {
+        validate_goal_context("next", next, intent.occurred_at_ms)?;
+    }
+    Ok(())
+}
+
+fn goal_state_from_startup_intent(intent: &EventGoalChangeParams) -> GoalState {
+    let previous_revision = intent.previous.as_ref().map_or(0, |goal| goal.version);
+    let inferred_no_goal_revision = intent
+        .next
+        .as_ref()
+        .map_or(0, |goal| goal.version.saturating_sub(1));
+    GoalState {
+        goal: intent.previous.clone(),
+        revision: previous_revision.max(inferred_no_goal_revision),
+    }
+}
+
+fn latest_goal_state(
+    transaction: &Transaction<'_>,
+) -> Result<Option<GoalState>, EventJournalError> {
+    let payload_json = transaction
+        .query_row(
+            "SELECT payload_json
+             FROM desktop_events
+             WHERE kind = ?1
+             ORDER BY sequence DESC
+             LIMIT 1",
+            [desktop_event_kinds::GOAL_CONTEXT_CHANGED],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(payload_json) = payload_json else {
+        return Ok(None);
+    };
+    let payload: StoredGoalChangePayload = serde_json::from_str(&payload_json)?;
+    let revision = match (&payload.previous, &payload.next) {
+        (_, Some(next)) => next.version,
+        (Some(previous), None) => previous.version.checked_add(1).ok_or_else(|| {
+            EventJournalError::Configuration(
+                "stored clear-goal revision exceeds the safe integer range".to_owned(),
+            )
+        })?,
+        (None, None) => {
+            return Err(EventJournalError::Configuration(
+                "stored goal transition cannot have null previous and next contexts".to_owned(),
+            ));
+        }
+    };
+    if revision > MAX_SAFE_INTEGER {
+        return Err(EventJournalError::Configuration(
+            "stored goal revision exceeds the safe integer range".to_owned(),
+        ));
+    }
+    Ok(Some(GoalState {
+        goal: payload.next,
+        revision,
+    }))
+}
+
+fn choose_current_goal_state(
+    recovered: GoalState,
+    latest: Option<GoalState>,
+) -> Result<GoalState, EventJournalError> {
+    let Some(latest) = latest else {
+        return Ok(recovered);
+    };
+    if latest.revision > recovered.revision {
+        return Ok(latest);
+    }
+    if latest.revision < recovered.revision {
+        return Ok(recovered);
+    }
+    if latest.goal != recovered.goal {
+        return Err(EventJournalError::Configuration(
+            "collector and event journal disagree at the same goal revision".to_owned(),
+        ));
+    }
+    Ok(latest)
+}
+
+fn same_goal_target(left: Option<&GoalContext>, right: Option<&GoalContext>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.goal_id == right.goal_id
+                && left.plan_id == right.plan_id
+                && left.text == right.text
+                && left.activated_at_ms == right.activated_at_ms
+        }
+        _ => false,
     }
 }
 
@@ -1299,6 +1516,118 @@ mod tests {
                 .unwrap()
                 .events
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn startup_reconcile_chains_after_an_unmaterialized_goal_tail() {
+        let (_directory, journal) = test_journal();
+        let old = GoalContext {
+            goal_id: "old-goal".to_owned(),
+            plan_id: Some("old-plan".to_owned()),
+            version: 1,
+            text: "Old goal".to_owned(),
+            activated_at_ms: 500,
+        };
+        let new = GoalContext {
+            goal_id: "new-goal".to_owned(),
+            plan_id: Some("new-plan".to_owned()),
+            version: 2,
+            text: "New unmaterialized goal".to_owned(),
+            activated_at_ms: 1_500,
+        };
+        journal
+            .append_goal_change(&EventGoalChangeParams {
+                previous: None,
+                next: Some(old.clone()),
+                occurred_at_ms: 1_000,
+                deduplication_key: "set-old".to_owned(),
+            })
+            .unwrap();
+        journal
+            .append_goal_change(&EventGoalChangeParams {
+                previous: Some(old.clone()),
+                next: Some(new.clone()),
+                occurred_at_ms: 2_000,
+                deduplication_key: "set-new-tail".to_owned(),
+            })
+            .unwrap();
+
+        let clear = journal
+            .reconcile_startup_goal_change(&EventGoalChangeParams {
+                // The recovered collector has not consumed old -> new yet.
+                previous: Some(old),
+                next: None,
+                occurred_at_ms: 3_000,
+                deduplication_key: "startup-clear-after-tail".to_owned(),
+            })
+            .unwrap()
+            .expect("startup must append a clear boundary");
+        assert_eq!(clear.event.goal_version, Some(2));
+        assert_eq!(clear.event.payload["previous"]["goalId"], "new-goal");
+        assert_eq!(clear.event.payload["previous"]["version"], 2);
+        assert_eq!(clear.event.payload["next"], serde_json::Value::Null);
+
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1].payload["next"]["goalId"], "new-goal");
+        assert_eq!(events[2], clear.event);
+    }
+
+    #[test]
+    fn startup_reconcile_is_cross_process_idempotent_with_a_new_timestamp() {
+        let (directory, journal) = test_journal();
+        let goal = GoalContext {
+            goal_id: "goal-1".to_owned(),
+            plan_id: None,
+            version: 1,
+            text: "Goal before crash".to_owned(),
+            activated_at_ms: 500,
+        };
+        journal
+            .append_goal_change(&EventGoalChangeParams {
+                previous: None,
+                next: Some(goal.clone()),
+                occurred_at_ms: 1_000,
+                deduplication_key: "set-before-crash".to_owned(),
+            })
+            .unwrap();
+        let first_intent = EventGoalChangeParams {
+            // The collector was still null when the set-goal RPC reached the
+            // journal and the host crashed before materialization.
+            previous: None,
+            next: None,
+            occurred_at_ms: 2_000,
+            deduplication_key: "startup-clear-cross-process".to_owned(),
+        };
+        assert!(
+            journal
+                .reconcile_startup_goal_change(&first_intent)
+                .unwrap()
+                .is_some()
+        );
+        drop(journal);
+
+        let new_process_intent = EventGoalChangeParams {
+            occurred_at_ms: 9_000,
+            ..first_intent
+        };
+        let reopened = EventJournal::open(directory.path().join("events.sqlite3"))
+            .expect("reopen event journal in a new process generation");
+        assert!(
+            reopened
+                .reconcile_startup_goal_change(&new_process_intent)
+                .unwrap()
+                .is_none(),
+            "the durable target already matches, so a new clock cannot conflict"
+        );
+        assert_eq!(
+            reopened
+                .query(&EventQueryParams::default())
+                .unwrap()
+                .events
+                .len(),
+            2
         );
     }
 

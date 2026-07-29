@@ -60,9 +60,14 @@ export type SpawnLocalProcess = (
 	environment?: Readonly<Record<string, string>>,
 ) => ChildTransport;
 
+export const STARTUP_GOAL_CHANGE_ENV =
+	"WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
+
 export interface LocalToolProcess {
 	readonly pid: number | null;
 	readonly isRunning: boolean;
+	prepareStartupGoalChange(change: LocalEventGoalChange | null): Promise<void>;
+	acknowledgeStartupGoalChange(): Promise<void>;
 	start(): Promise<void>;
 	health(): Promise<LocalRuntimeHealth>;
 	listTools(): Promise<LocalToolDescriptor[]>;
@@ -93,6 +98,10 @@ function spawnLocal(
 	// credentials in the Bun host that owns inference instead of widening
 	// their process exposure.
 	delete inheritedEnvironment.WHALEHALL_MODERNBERT_TOKEN;
+	// This value is a one-shot control-plane handoff. Never inherit a stale
+	// shell value into a sensor process; LocalToolClient adds only the payload
+	// prepared for this exact spawn.
+	delete inheritedEnvironment[STARTUP_GOAL_CHANGE_ENV];
 	return Bun.spawn({
 		cmd: [binaryPath],
 		env: { ...inheritedEnvironment, ...environment },
@@ -111,6 +120,11 @@ export class LocalToolClient implements LocalToolProcess {
 	>();
 	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
 	private stopping = false;
+	private preparedStartupGoalChange:
+		| LocalEventGoalChange
+		| null
+		| undefined;
+	private preparedStartupGoalChangeJson: string | null | undefined;
 
 	constructor(
 		private readonly binaryPath: string,
@@ -131,14 +145,72 @@ export class LocalToolClient implements LocalToolProcess {
 		return this.child !== null;
 	}
 
+	async prepareStartupGoalChange(
+		change: LocalEventGoalChange | null,
+	): Promise<void> {
+		if (this.child) {
+			throw new LocalClientError(
+				"INVALID_STATE",
+				"Cannot prepare a startup goal boundary after whalehall-local has started.",
+			);
+		}
+		if (change === null) {
+			this.preparedStartupGoalChange = null;
+			this.preparedStartupGoalChangeJson = null;
+			return;
+		}
+		if (
+			this.preparedStartupGoalChange !== null &&
+			this.preparedStartupGoalChange !== undefined &&
+			this.preparedStartupGoalChange.deduplicationKey ===
+				change.deduplicationKey
+		) {
+			if (
+				!sameGoalContext(
+					this.preparedStartupGoalChange.previous,
+					change.previous,
+				) ||
+				!sameGoalContext(
+					this.preparedStartupGoalChange.next,
+					change.next,
+				)
+			) {
+				throw new LocalClientError(
+					"INVALID_ARGUMENTS",
+					"Startup goal deduplication key was reused for different goal contexts.",
+				);
+			}
+			// A prior process may have appended this exact payload and crashed
+			// before the reflection consumer materialized it. Preserve its
+			// original occurredAtMs so native idempotency remains exact.
+			return;
+		}
+		this.preparedStartupGoalChange = structuredClone(change);
+		this.preparedStartupGoalChangeJson = JSON.stringify(change);
+	}
+
+	async acknowledgeStartupGoalChange(): Promise<void> {
+		this.preparedStartupGoalChange = undefined;
+		this.preparedStartupGoalChangeJson = undefined;
+	}
+
 	async start(): Promise<void> {
 		if (this.child) return;
 		this.stopping = false;
+		const environment = { ...this.options.environment };
+		delete environment[STARTUP_GOAL_CHANGE_ENV];
+		if (
+			this.preparedStartupGoalChangeJson !== null &&
+			this.preparedStartupGoalChangeJson !== undefined
+		) {
+			environment[STARTUP_GOAL_CHANGE_ENV] =
+				this.preparedStartupGoalChangeJson;
+		}
 		let child: ChildTransport;
 		try {
 			child = (this.options.spawn ?? spawnLocal)(
 				this.binaryPath,
-				this.options.environment,
+				environment,
 			);
 		} catch (error) {
 			const clientError = new LocalClientError(

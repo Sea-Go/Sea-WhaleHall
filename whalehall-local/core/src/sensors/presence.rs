@@ -479,12 +479,39 @@ fn presence_event_draft(event: &PendingPresenceEvent, observed_at_ms: i64) -> De
     }
 }
 
+fn legacy_presence_event_draft(
+    event: &PendingPresenceEvent,
+    observed_at_ms: i64,
+) -> DesktopEventDraft {
+    let mut draft = presence_event_draft(event, observed_at_ms);
+    draft.occurred_at_ms = event.occurred_at_ms;
+    draft.observed_at_ms = observed_at_ms.max(event.occurred_at_ms);
+    draft
+}
+
+fn append_presence_outbox_record(
+    event_journal: &EventJournal,
+    record: &PresenceEventOutboxRecord,
+) -> Result<(), PresenceError> {
+    match event_journal.append(presence_event_draft(&record.event, record.observed_at_ms)) {
+        Ok(_) => Ok(()),
+        Err(EventJournalError::IdempotencyConflict { .. }) => {
+            event_journal.append(legacy_presence_event_draft(
+                &record.event,
+                record.observed_at_ms,
+            ))?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn flush_presence_event_outbox(
     store: &PresenceStore,
     event_journal: &EventJournal,
 ) -> Result<(), PresenceError> {
     for record in store.pending_desktop_events(100)? {
-        event_journal.append(presence_event_draft(&record.event, record.observed_at_ms))?;
+        append_presence_outbox_record(event_journal, &record)?;
         store.delete_desktop_event(record.id)?;
     }
     Ok(())
@@ -1497,6 +1524,125 @@ mod tests {
         assert_eq!(draft.occurred_at_ms, 50_000);
         assert_eq!(draft.observed_at_ms, 50_000);
         assert_eq!(draft.deduplication_key, "presence:sleep_started:10000");
+    }
+
+    #[test]
+    fn upgraded_replay_accepts_legacy_sleep_event_and_continues_outbox() {
+        let directory = tempfile::tempdir().expect("create presence upgrade directory");
+        let store =
+            PresenceStore::open(directory.path().join("presence.sqlite3")).expect("open store");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let sleep = PendingPresenceEvent {
+            event_type: PresenceEventKind::SleepStarted,
+            occurred_at_ms: 10_000,
+            idle_for_ms: None,
+        };
+        let later = PendingPresenceEvent {
+            event_type: PresenceEventKind::ScreenLocked,
+            occurred_at_ms: 40_000,
+            idle_for_ms: None,
+        };
+        store
+            .record_sample(
+                &PersistedPresenceState {
+                    observed_at_ms: Some(50_000),
+                    is_locked: Some(true),
+                    last_sleep_at_ms: Some(10_000),
+                    ..PersistedPresenceState::default()
+                },
+                &[sleep, later],
+                50_000,
+                true,
+            )
+            .expect("persist state and outbox");
+
+        let pending = store.pending_desktop_events(100).unwrap();
+        assert_eq!(pending.len(), 2);
+        let legacy_append = journal
+            .append(legacy_presence_event_draft(
+                &pending[0].event,
+                pending[0].observed_at_ms,
+            ))
+            .expect("legacy version appends sleep before crashing");
+        assert!(legacy_append.inserted);
+
+        flush_presence_event_outbox(&store, &journal).expect("replay upgraded outbox");
+
+        assert!(store.pending_desktop_events(100).unwrap().is_empty());
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, desktop_event_kinds::PRESENCE_SLEEP);
+        assert_eq!(events[0].occurred_at_ms, 10_000);
+        assert_eq!(events[0].observed_at_ms, 50_000);
+        assert_eq!(events[1].kind, desktop_event_kinds::PRESENCE_LOCKED);
+    }
+
+    #[test]
+    fn upgraded_replay_accepts_legacy_afk_events_and_continues_outbox() {
+        for (index, event_type) in [PresenceEventKind::AfkStarted, PresenceEventKind::AfkEnded]
+            .into_iter()
+            .enumerate()
+        {
+            let directory = tempfile::tempdir().expect("create AFK upgrade directory");
+            let store =
+                PresenceStore::open(directory.path().join("presence.sqlite3")).expect("open store");
+            let journal =
+                EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+            let afk = PendingPresenceEvent {
+                event_type,
+                occurred_at_ms: 10_000 + i64::try_from(index).unwrap(),
+                idle_for_ms: Some(300_000),
+            };
+            let later = PendingPresenceEvent {
+                event_type: PresenceEventKind::ScreenLocked,
+                occurred_at_ms: 40_000,
+                idle_for_ms: None,
+            };
+            store
+                .record_sample(
+                    &PersistedPresenceState {
+                        observed_at_ms: Some(50_000),
+                        is_locked: Some(true),
+                        ..PersistedPresenceState::default()
+                    },
+                    &[afk, later],
+                    50_000,
+                    true,
+                )
+                .expect("persist AFK state and outbox");
+
+            let pending = store.pending_desktop_events(100).unwrap();
+            assert_eq!(pending.len(), 2);
+            journal
+                .append(legacy_presence_event_draft(
+                    &pending[0].event,
+                    pending[0].observed_at_ms,
+                ))
+                .expect("legacy version appends AFK before crashing");
+
+            flush_presence_event_outbox(&store, &journal).expect("replay upgraded AFK outbox");
+
+            assert!(store.pending_desktop_events(100).unwrap().is_empty());
+            let events = journal.query(&EventQueryParams::default()).unwrap().events;
+            assert_eq!(events.len(), 2);
+            assert_eq!(
+                events[0].kind,
+                match event_type {
+                    PresenceEventKind::AfkStarted => {
+                        desktop_event_kinds::PRESENCE_AFK_STARTED
+                    }
+                    PresenceEventKind::AfkEnded => desktop_event_kinds::PRESENCE_AFK_ENDED,
+                    _ => unreachable!(),
+                }
+            );
+            assert_eq!(
+                events[0].occurred_at_ms,
+                10_000 + i64::try_from(index).unwrap()
+            );
+            assert_eq!(events[0].observed_at_ms, 50_000);
+            assert_eq!(events[1].kind, desktop_event_kinds::PRESENCE_LOCKED);
+        }
     }
 
     #[test]

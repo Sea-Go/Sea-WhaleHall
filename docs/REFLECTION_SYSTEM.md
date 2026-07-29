@@ -156,9 +156,14 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 事务中提交，EventJournal 瞬态失败后可幂等补写。
 
 活动目标最多 1,000 个 Unicode 字符。客户端启动而计划系统没有恢复出
-当前目标时会显式同步 `null`。启动恢复先把崩溃前尚未 commit 的 journal
-tail 按旧目标物化，再追加专用、幂等的原生目标边界；因此边界前后的事件
-不会被重标或形成重叠窗口。同步采用 latest-wins 队列并持续重试到 runtime
+当前目标时会显式同步 `null`。每次 native spawn 前，Bun 都先提交一个严格
+校验的 startup goal intent；EventJournal 在同一个 SQLite `IMMEDIATE`
+事务中读取最新持久目标状态（包括尚未被 collector commit 的 tail），若已
+达到目标则 no-op，否则按最新 revision 重基并追加目标边界。该事务完成后
+才允许 resident sensors 启动，collector 随后按 cursor 补播并按目标语义
+校验结果。整个 Bun 进程崩溃后的重放、新 timestamp 和 goal RPC 响应丢失
+都不会产生重复边界或把目标回滚；生产启动 gate 也会阻止工具 RPC 抢先
+拉起未对账的传感器进程。同步采用 latest-wins 队列并持续重试到 runtime
 对同一目标返回精确 ACK。退出账号会先清空本地目标并等待 `null` ACK，再
 切换账号，避免旧目标继续影响相关性判断。
 
