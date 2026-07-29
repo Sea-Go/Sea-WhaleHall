@@ -977,7 +977,7 @@ impl AccessibilityStore {
                 let payload_json = row.get::<_, String>(4)?;
                 let payload = serde_json::from_str(&payload_json).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        payload_json.len(),
+                        4,
                         rusqlite::types::Type::Text,
                         Box::new(error),
                     )
@@ -2132,6 +2132,46 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn resident_start_flushes_recovered_outbox_without_duplicate_observation_events() {
+        let directory = tempfile::tempdir().expect("create accessibility restart directory");
+        let config = test_config(&directory);
+        let store =
+            AccessibilityStore::open(&config.database_path).expect("open accessibility store");
+        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
+            .expect("open event journal");
+        let mut baseline = sample_observation();
+        baseline.sanitize(&config);
+        store
+            .record_snapshot(&baseline, 2_000, config.retention, true, true)
+            .expect("stage pre-restart accessibility event");
+
+        let service = AccessibilityService::start_with_event_journal(
+            config.clone(),
+            Arc::new(FakeProvider {
+                calls: AtomicUsize::new(0),
+            }),
+            Some(journal.clone()),
+        )
+        .expect("restart accessibility service");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if all_events(&journal).len() == 1
+                    && service.status().state == AccessibilitySensorState::Running
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recovered outbox should flush at resident start");
+        tokio::time::sleep(config.poll_interval * 3).await;
+        assert_eq!(all_events(&journal).len(), 1);
+        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 0);
+        service.shutdown().await;
+    }
+
     #[test]
     fn metadata_only_accessibility_storage_removes_values_and_document_text() {
         let directory = tempfile::tempdir().expect("create accessibility privacy directory");
@@ -2380,19 +2420,44 @@ mod tests {
         store
             .record_snapshot(&baseline, 2_000, config.retention, true, true)
             .expect("record authorized content");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 1);
+        let mut changed = sample_observation();
+        changed.nodes[1].value = Some("new private value".to_owned());
+        changed.nodes[1].document_text = Some("new private document".to_owned());
+        changed.sanitize(&config);
+        store
+            .record_snapshot(&changed, 3_000, config.retention, true, true)
+            .expect("record changed authorized content");
+        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 3);
 
         store
             .enforce_content_policy(false)
             .expect("apply fail-closed content policy");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 1);
+        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 3);
         let pending = store
             .pending_accessibility_events(10)
-            .expect("read redacted pending event");
-        assert_eq!(pending[0].sensitivity, DesktopEventSensitivity::Metadata);
+            .expect("read redacted pending events");
+        assert!(
+            pending
+                .iter()
+                .all(|event| event.sensitivity == DesktopEventSensitivity::Metadata)
+        );
         assert_eq!(
             pending[0].payload,
             json!({"appId": "Editor", "role": "textBox"})
+        );
+        assert_eq!(
+            pending[1].payload,
+            json!({"appId": "Editor", "role": "textBox"})
+        );
+        assert_eq!(
+            pending[2].payload.get("text"),
+            None,
+            "document content must be removed"
+        );
+        assert!(
+            pending
+                .iter()
+                .all(|event| !event.payload.to_string().contains("private"))
         );
         let stored = store
             .query_tree(&AccessibilityTreeQuery {
@@ -2411,8 +2476,7 @@ mod tests {
                 |row| row.get::<_, String>(0),
             )
             .expect("read scrubbed semantic state");
-        assert!(!state_json.contains("draft body"));
-        assert!(!state_json.contains("Partial document text"));
+        assert!(!state_json.contains("private"));
     }
 
     #[tokio::test]

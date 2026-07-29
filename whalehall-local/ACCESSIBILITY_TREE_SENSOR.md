@@ -97,6 +97,9 @@ limits before writing SQLite:
   16,384;
 - roles marked password or secure, or nodes with `protected: true`, always have
   both `value` and `documentText` removed;
+- turning content monitoring off scrubs stored `value`/`documentText`, the
+  semantic comparison state, and content fields in pending events before the
+  resident loop can start;
 - only changed trees create a new SQLite snapshot;
 - snapshots older than seven days are deleted when a changed snapshot is
   stored; retention is configurable from 1 through 30 days.
@@ -105,9 +108,11 @@ limits before writing SQLite:
 `accessibility.tree` also redacts both fields unless callers explicitly set
 `includeValues` or `includeDocumentText`.
 
-Data stays in the local application-data directory and is not transmitted by
-this implementation. Deployments should treat `accessibility.read` as a
-high-impact permission and show an explicit consent surface.
+Data stays in the local application-data directory. Completed semantic
+transitions are also written to the local Desktop EventJournal for the
+reflection pipeline; no network transport is performed by this sensor.
+Deployments should treat `accessibility.read` as a high-impact permission and
+show an explicit consent surface.
 
 ## Configuration
 
@@ -135,6 +140,9 @@ The database uses WAL mode and foreign keys:
 - `accessibility_nodes` stores ordered parent/child identity, depth, role, name,
   optional value, nullable selection state, focus, enabled state, optional
   document excerpt, and the protected-input marker.
+- `accessibility_semantic_state` stores the last sanitized focus/value/document
+  projection used to suppress repeated observations.
+- `accessibility_event_outbox` durably stages completed semantic transitions.
 
 The service opens SQLite with `whalehall-local` so Tools can query previously
 authorized snapshots. With monitoring disabled it reports `disabled` and does
@@ -143,6 +151,29 @@ resident independently of Agent calls and shuts down before the other desktop
 sensors. A content-only configuration remains fail-closed and reports a
 warning. Callers can provide a custom `AccessibilityProvider` for deterministic
 embedding or tests.
+
+## Desktop events and recovery
+
+When total monitoring is enabled, the production server connects this resident
+sensor to the shared Desktop EventJournal. It emits only completed transitions:
+
+- `accessibility.focusChanged` when the sanitized application/control identity
+  changes;
+- `accessibility.valueChanged` when the same focused control's sanitized value
+  changes;
+- `accessibility.documentChanged` when the same sanitized document changes.
+
+Application/control roles and change counts are metadata. `label`, `value`, and
+`text` are emitted only with `content` sensitivity and only while the content
+switch is enabled. Metadata-only mode omits those fields. Protected controls
+never contribute a value or document body.
+
+Snapshot rows, the comparison state, and outbox rows are committed in one
+SQLite transaction. The outbox is flushed at resident start, before each poll,
+after each changed snapshot, and during orderly shutdown. Every row carries a
+stable deduplication key; therefore an EventJournal failure leaves the row for
+retry, and a crash after append but before outbox deletion replays to the same
+event id rather than creating a duplicate.
 
 ## Agent Tools
 

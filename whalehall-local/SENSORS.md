@@ -29,6 +29,16 @@ fields in Agent responses. Collection defaults off via
 `WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED`. Disabled startup keeps
 historical Tools available without invoking a provider.
 
+Changed sanitized observations produce `accessibility.focusChanged`,
+`accessibility.valueChanged`, and `accessibility.documentChanged` events for
+the local reflection pipeline. Focus/value/document comparison state and a
+durable event outbox are committed atomically with each changed snapshot.
+Startup, every resident tick, and shutdown retry the outbox with stable
+EventJournal deduplication keys, so publication failure or restart does not
+lose or duplicate a completed transition. Labels, values, and document text
+are content-sensitive and are omitted in metadata-only mode; protected values
+and document bodies are always removed.
+
 The system provider supports Windows UI Automation, macOS System Events with
 Accessibility permission, and Linux AT-SPI. A fresh atomic bridge can supply
 the same platform-neutral tree contract. Full schema, limits, permissions,
