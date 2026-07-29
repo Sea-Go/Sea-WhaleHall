@@ -1444,6 +1444,43 @@ mod tests {
     }
 
     #[test]
+    fn presence_outbox_retries_one_failed_append_exactly_once() {
+        let directory = tempfile::tempdir().expect("create presence retry directory");
+        let store =
+            PresenceStore::open(directory.path().join("presence.sqlite3")).expect("open store");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let event = PendingPresenceEvent {
+            event_type: PresenceEventKind::ScreenLocked,
+            occurred_at_ms: 10_000,
+            idle_for_ms: None,
+        };
+        store
+            .record_sample(
+                &PersistedPresenceState {
+                    observed_at_ms: Some(10_000),
+                    is_locked: Some(true),
+                    ..PersistedPresenceState::default()
+                },
+                std::slice::from_ref(&event),
+                10_000,
+                true,
+            )
+            .expect("persist state and outbox");
+
+        journal.fail_next_appends_for_test(1);
+        assert!(flush_presence_event_outbox(&store, &journal).is_err());
+        assert_eq!(store.pending_desktop_events(100).unwrap().len(), 1);
+        flush_presence_event_outbox(&store, &journal).unwrap();
+        flush_presence_event_outbox(&store, &journal).unwrap();
+
+        assert!(store.pending_desktop_events(100).unwrap().is_empty());
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, desktop_event_kinds::PRESENCE_LOCKED);
+    }
+
+    #[test]
     fn filters_events_and_rejects_invalid_ranges() {
         let directory = tempfile::tempdir().expect("create presence test directory");
         let store = PresenceStore::open(directory.path().join("presence.sqlite3"))

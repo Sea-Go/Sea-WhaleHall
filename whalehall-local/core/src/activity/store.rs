@@ -47,9 +47,7 @@ impl ActivityStore {
         &self.path
     }
 
-    pub(crate) fn open_foreground_baseline(
-        &self,
-    ) -> Result<Option<ForegroundApp>, ActivityError> {
+    pub(crate) fn open_foreground_baseline(&self) -> Result<Option<ForegroundApp>, ActivityError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "SELECT app_id, app_name, executable_path, process_id, window_title

@@ -559,9 +559,8 @@ mod tests {
         let event_journal =
             EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
         {
-            let mut first =
-                ActivityRecorder::new(store.clone(), 500)
-                    .with_event_journal(Some(event_journal.clone()));
+            let mut first = ActivityRecorder::new(store.clone(), 500)
+                .with_event_journal(Some(event_journal.clone()));
             first.observe(Some(app("editor", 10)), 1_000).unwrap();
         }
 
@@ -573,9 +572,7 @@ mod tests {
         let mut restarted = ActivityRecorder::new(store, 500)
             .with_event_journal(Some(event_journal.clone()))
             .with_startup_foreground_baseline(baseline);
-        restarted
-            .observe(Some(app("editor", 10)), 2_000)
-            .unwrap();
+        restarted.observe(Some(app("editor", 10)), 2_000).unwrap();
         assert_eq!(
             event_journal
                 .query(&EventQueryParams::default())
@@ -585,9 +582,7 @@ mod tests {
             1
         );
 
-        restarted
-            .observe(Some(app("browser", 20)), 2_500)
-            .unwrap();
+        restarted.observe(Some(app("browser", 20)), 2_500).unwrap();
         let events = event_journal
             .query(&EventQueryParams::default())
             .unwrap()
@@ -602,9 +597,8 @@ mod tests {
         let event_journal =
             EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
         event_journal.fail_next_appends_for_test(1);
-        let mut recorder =
-            ActivityRecorder::new(store.clone(), 500)
-                .with_event_journal(Some(event_journal.clone()));
+        let mut recorder = ActivityRecorder::new(store.clone(), 500)
+            .with_event_journal(Some(event_journal.clone()));
 
         assert!(recorder.observe(Some(app("editor", 10)), 1_000).is_err());
         assert_eq!(store.pending_foreground_events(100).unwrap().len(), 1);

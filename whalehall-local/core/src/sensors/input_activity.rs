@@ -1364,6 +1364,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregate_outbox_retries_one_failed_append_exactly_once() {
+        let directory = tempfile::tempdir().expect("create input retry directory");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        journal.fail_next_appends_for_test(1);
+        let provider = Arc::new(SequenceProvider {
+            status: InputActivityProviderStatus {
+                supported: true,
+                permission_granted: true,
+                available: true,
+                warnings: Vec::new(),
+            },
+            deltas: Mutex::new(VecDeque::from([InputActivityDelta {
+                key_count: 7,
+                click_count: 2,
+                ..InputActivityDelta::default()
+            }])),
+        });
+        let service = InputActivityService::start(
+            InputActivityConfig {
+                bucket_duration: Duration::from_millis(30),
+                enabled: true,
+            },
+            provider,
+            journal.clone(),
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if service.status().published_buckets == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pending aggregate should retry");
+        tokio::time::sleep(Duration::from_millis(70)).await;
+
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["keyCount"], 7);
+        assert_eq!(service.status().published_buckets, 1);
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn disabled_or_unsupported_provider_does_not_fail_startup() {
         let directory = tempfile::tempdir().unwrap();
         let journal = EventJournal::open(directory.path().join("events.sqlite3")).unwrap();
