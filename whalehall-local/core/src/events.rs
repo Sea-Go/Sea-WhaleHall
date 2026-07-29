@@ -606,7 +606,10 @@ fn validate_goal_context(
     }
     if goal.text.trim().is_empty()
         || goal.text.chars().count() > MAX_GOAL_TEXT_CHARS
-        || goal.text.chars().any(char::is_control)
+        || goal
+            .text
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
     {
         return Err(EventJournalError::Configuration(format!(
             "event.goal.change {label}.text must contain 1 to {MAX_GOAL_TEXT_CHARS} non-control characters"

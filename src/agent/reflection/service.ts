@@ -618,7 +618,13 @@ function isBoundedGoalString(value: string, maximum: number): boolean {
 }
 
 function containsControlCharacter(value: string): boolean {
-	return Array.from(value).some((character) => /\p{Cc}/u.test(character));
+	return Array.from(value).some(
+		(character) =>
+			/\p{Cc}/u.test(character) &&
+			character !== "\n" &&
+			character !== "\r" &&
+			character !== "\t",
+	);
 }
 
 function sameGoalContext(
