@@ -18,16 +18,20 @@ use directories::{BaseDirs, ProjectDirs};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
+use whalehall_local_protocol::{DesktopEventSensitivity, desktop_event_kinds};
+
+use crate::events::{DesktopEventDraft, EventJournal, EventJournalError};
 
 pub const DEFAULT_BROWSER_TAB_POLL_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_BROWSER_HISTORY_REFRESH_INTERVAL_MS: u64 = 5 * 60 * 1_000;
 pub const DEFAULT_BROWSER_BRIDGE_MAX_AGE_MS: u64 = 15_000;
-const BROWSER_SCHEMA_VERSION: i64 = 1;
+const BROWSER_SCHEMA_VERSION: i64 = 2;
 const MAX_IMPORTED_RECORDS_PER_PROFILE: usize = 100_000;
 const MAX_QUERY_LIMIT: usize = 1_000;
 const CHROMIUM_TO_UNIX_EPOCH_MICROSECONDS: i64 = 11_644_473_600_000_000;
@@ -43,8 +47,12 @@ pub enum BrowserActivityError {
     Io(#[from] std::io::Error),
     #[error("browser sensor SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("browser sensor JSON error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("browser sensor collection error: {0}")]
     Collection(String),
+    #[error("browser sensor event publication failed: {0}")]
+    EventJournal(#[from] EventJournalError),
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +64,8 @@ pub struct BrowserActivityConfig {
     pub tab_poll_interval: Duration,
     pub history_refresh_interval: Duration,
     pub bridge_max_age: Duration,
+    pub event_monitoring_enabled: bool,
+    pub content_monitoring_enabled: bool,
 }
 
 impl BrowserActivityConfig {
@@ -96,6 +106,14 @@ impl BrowserActivityConfig {
                 1_000,
                 5 * 60 * 1_000,
             )?,
+            event_monitoring_enabled: bool_from_environment(
+                "WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED",
+                false,
+            )?,
+            content_monitoring_enabled: bool_from_environment(
+                "WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED",
+                false,
+            )?,
         })
     }
 }
@@ -103,6 +121,7 @@ impl BrowserActivityConfig {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BrowserSensorState {
+    Disabled,
     Starting,
     Running,
     Degraded,
@@ -126,6 +145,8 @@ pub struct BrowserActivityStatus {
     pub tab_poll_interval_ms: u64,
     pub history_refresh_interval_ms: u64,
     pub bridge_max_age_ms: u64,
+    pub event_monitoring_enabled: bool,
+    pub content_monitoring_enabled: bool,
     pub last_tab_scan_at_ms: Option<i64>,
     pub last_tab_scan_at: Option<String>,
     pub last_history_scan_at_ms: Option<i64>,
@@ -164,8 +185,28 @@ impl ObservedBrowserTab {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BrowserTabSnapshot {
     pub available: bool,
+    /// True only for a source that represents a complete stable tab set.
+    /// The macOS single-front-tab fallback is deliberately incomplete.
+    pub complete: bool,
     pub tabs: Vec<ObservedBrowserTab>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct BrowserEventOutboxRecord {
+    id: i64,
+    kind: String,
+    occurred_at_ms: i64,
+    sensitivity: DesktopEventSensitivity,
+    deduplication_key: String,
+    payload: JsonValue,
+}
+
+#[derive(Clone, Debug)]
+struct PendingBrowserEvent {
+    kind: &'static str,
+    sensitivity: DesktopEventSensitivity,
+    payload: JsonValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -579,15 +620,41 @@ impl BrowserActivityService {
         config: BrowserActivityConfig,
         provider: Arc<dyn BrowserActivityProvider>,
     ) -> Result<Self, BrowserActivityError> {
+        Self::start_with_event_journal(config, provider, None)
+    }
+
+    pub fn start_with_event_journal(
+        config: BrowserActivityConfig,
+        provider: Arc<dyn BrowserActivityProvider>,
+        event_journal: Option<EventJournal>,
+    ) -> Result<Self, BrowserActivityError> {
         let store = BrowserActivityStore::open(&config.database_path)?;
         store.recover_open_tabs()?;
+        if !config.event_monitoring_enabled {
+            store.discard_browser_events(None)?;
+        }
+        let content_monitoring_enabled =
+            config.event_monitoring_enabled && config.content_monitoring_enabled;
+        let mut warnings = Vec::new();
+        if config.content_monitoring_enabled && !config.event_monitoring_enabled {
+            warnings.push(
+                "browser content monitoring is ignored until browser event monitoring is enabled"
+                    .to_owned(),
+            );
+        }
         let status = BrowserActivityStatus {
-            state: BrowserSensorState::Starting,
+            state: if config.event_monitoring_enabled {
+                BrowserSensorState::Starting
+            } else {
+                BrowserSensorState::Disabled
+            },
             database_path: config.database_path.to_string_lossy().into_owned(),
             bridge_path: config.bridge_path.to_string_lossy().into_owned(),
             tab_poll_interval_ms: duration_ms_u64(config.tab_poll_interval),
             history_refresh_interval_ms: duration_ms_u64(config.history_refresh_interval),
             bridge_max_age_ms: duration_ms_u64(config.bridge_max_age),
+            event_monitoring_enabled: config.event_monitoring_enabled,
+            content_monitoring_enabled,
             last_tab_scan_at_ms: None,
             last_tab_scan_at: None,
             last_history_scan_at_ms: None,
@@ -599,7 +666,7 @@ impl BrowserActivityService {
             profiles_scanned: 0,
             capabilities: BrowserCapabilities::default(),
             current_tabs: Vec::new(),
-            warnings: Vec::new(),
+            warnings,
             last_error: None,
         };
         let inner = Arc::new(BrowserActivityInner {
@@ -609,8 +676,10 @@ impl BrowserActivityService {
             cancellation: CancellationToken::new(),
             task: Mutex::new(None),
         });
-        let task = tokio::spawn(run_browser_monitor(inner.clone(), provider));
-        *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
+        if inner.config.event_monitoring_enabled {
+            let task = tokio::spawn(run_browser_monitor(inner.clone(), provider, event_journal));
+            *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
+        }
         Ok(Self { inner })
     }
 
@@ -680,12 +749,34 @@ struct BrowserRuntimeStatus {
 async fn run_browser_monitor(
     inner: Arc<BrowserActivityInner>,
     provider: Arc<dyn BrowserActivityProvider>,
+    event_journal: Option<EventJournal>,
 ) {
     let mut tab_ticker = interval(inner.config.tab_poll_interval);
     tab_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut history_ticker = interval(inner.config.history_refresh_interval);
     history_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut runtime = BrowserRuntimeStatus::default();
+    let mut event_baseline_ready = false;
+
+    let startup_outbox_result = if !inner.config.event_monitoring_enabled {
+        inner.store.discard_browser_events(None)
+    } else {
+        let content_result = if inner.config.content_monitoring_enabled {
+            Ok(())
+        } else {
+            inner.store.discard_browser_events(Some("content"))
+        };
+        content_result.and_then(|()| {
+            if let Some(journal) = &event_journal {
+                flush_browser_event_outbox(&inner.store, journal)
+            } else {
+                Ok(())
+            }
+        })
+    };
+    if let Err(error) = startup_outbox_result {
+        runtime.tab_warnings.push(error.to_string());
+    }
 
     loop {
         tokio::select! {
@@ -711,13 +802,37 @@ async fn run_browser_monitor(
                     Ok(snapshot) => {
                         runtime.capabilities.current_tabs = snapshot.available;
                         runtime.tab_warnings = snapshot.warnings.clone();
-                        if snapshot.available
-                            && let Err(error) = inner.store.record_tab_snapshot(
+                        if snapshot.available {
+                            let enqueue_events = inner.config.event_monitoring_enabled
+                                && event_journal.is_some()
+                                && snapshot.complete
+                                && event_baseline_ready;
+                            let record_result = inner.store.record_tab_snapshot(
                                 &snapshot.tabs,
                                 observed_at_ms,
-                            )
-                        {
-                            runtime.tab_warnings.push(error.to_string());
+                                enqueue_events,
+                                inner.config.content_monitoring_enabled,
+                            );
+                            match record_result {
+                                Ok(()) => {
+                                    event_baseline_ready = snapshot.complete;
+                                    if let Some(journal) = &event_journal
+                                        && let Err(error) =
+                                            flush_browser_event_outbox(&inner.store, journal)
+                                    {
+                                        runtime.tab_warnings.push(error.to_string());
+                                    }
+                                }
+                                Err(error) => {
+                                    event_baseline_ready = false;
+                                    runtime.tab_warnings.push(error.to_string());
+                                }
+                            }
+                        } else {
+                            // An unavailable observation must never imply tab
+                            // closure, and the next complete snapshot becomes
+                            // a fresh baseline.
+                            event_baseline_ready = false;
                         }
                         update_browser_status(
                             &inner,
@@ -727,6 +842,7 @@ async fn run_browser_monitor(
                         );
                     }
                     Err(error) => {
+                        event_baseline_ready = false;
                         runtime.capabilities.current_tabs = false;
                         runtime.tab_warnings = vec![error.to_string()];
                         update_browser_status(&inner, &runtime, Some(observed_at_ms), None);
@@ -750,7 +866,11 @@ async fn run_browser_monitor(
                         runtime.capabilities.downloads = snapshot.downloads_supported;
                         runtime.profiles_scanned = snapshot.profiles_scanned;
                         runtime.record_warnings = snapshot.warnings.clone();
-                        if let Err(error) = inner.store.import_records(&snapshot, observed_at_ms) {
+                        if let Err(error) = inner.store.import_records(
+                            &snapshot,
+                            observed_at_ms,
+                            inner.config.content_monitoring_enabled,
+                        ) {
                             runtime.record_warnings.push(error.to_string());
                         }
                         update_browser_status(
@@ -853,71 +973,195 @@ impl BrowserActivityStore {
         &self,
         tabs: &[ObservedBrowserTab],
         observed_at_ms: i64,
+        enqueue_events: bool,
+        content_monitoring_enabled: bool,
     ) -> Result<(), BrowserActivityError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut open = {
             let mut statement = transaction.prepare(
-                "SELECT id, session_key, url FROM browser_tab_sessions WHERE ended_at_ms IS NULL",
+                "SELECT id, session_key, url, browser, profile
+                 FROM browser_tab_sessions
+                 WHERE ended_at_ms IS NULL",
             )?;
             let rows = statement.query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })?;
             let mut open = HashMap::new();
             for row in rows {
-                let (id, session_key, url) = row?;
-                open.insert(session_key.clone(), (id, session_key, url));
+                let (id, session_key, url, browser, profile) = row?;
+                open.insert(
+                    session_key.clone(),
+                    (id, session_key, url, browser, profile),
+                );
             }
             open
         };
         let mut observed_keys = HashSet::new();
-        for tab in tabs
+        let mut current_tabs = tabs
             .iter()
             .filter(|tab| !tab.url.trim().is_empty())
             .take(MAX_QUERY_LIMIT)
-        {
-            let session_key = tab.session_key();
+            .map(|tab| (tab.session_key(), tab))
+            .collect::<Vec<_>>();
+        current_tabs.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut pending_events = Vec::new();
+        for (session_key, tab) in current_tabs {
             observed_keys.insert(session_key.clone());
+            let persisted_url =
+                browser_url_for_storage(&tab.url, content_monitoring_enabled);
+            let persisted_title =
+                browser_text_for_storage(&tab.title, content_monitoring_enabled);
+            let domain = domain_from_url(&tab.url);
             match open.remove(&session_key) {
-                Some((id, _, open_url)) if open_url == tab.url => {
+                Some((id, _, open_url, _, _)) if open_url == persisted_url => {
                     transaction.execute(
                         "UPDATE browser_tab_sessions
                          SET title = ?1, domain = ?2, audible = ?3, last_seen_at_ms = ?4
                          WHERE id = ?5",
                         params![
-                            tab.title,
-                            domain_from_url(&tab.url),
+                            persisted_title,
+                            domain,
                             tab.audible,
                             observed_at_ms,
                             id
                         ],
                     )?;
                 }
-                Some((id, _, _)) => {
+                Some((id, _, _, _, _)) => {
                     transaction.execute(
                         "UPDATE browser_tab_sessions
                          SET ended_at_ms = ?1, last_seen_at_ms = ?1 WHERE id = ?2",
                         params![observed_at_ms, id],
                     )?;
-                    insert_tab_session(&transaction, tab, &session_key, observed_at_ms)?;
+                    insert_tab_session(
+                        &transaction,
+                        tab,
+                        &session_key,
+                        observed_at_ms,
+                        content_monitoring_enabled,
+                    )?;
+                    if enqueue_events {
+                        pending_events.push(browser_tab_event(
+                            desktop_event_kinds::BROWSER_TAB_NAVIGATED,
+                            tab,
+                            &session_key,
+                            content_monitoring_enabled,
+                        ));
+                    }
                 }
-                None => insert_tab_session(&transaction, tab, &session_key, observed_at_ms)?,
+                None => {
+                    insert_tab_session(
+                        &transaction,
+                        tab,
+                        &session_key,
+                        observed_at_ms,
+                        content_monitoring_enabled,
+                    )?;
+                    if enqueue_events {
+                        pending_events.push(browser_tab_event(
+                            desktop_event_kinds::BROWSER_TAB_OPENED,
+                            tab,
+                            &session_key,
+                            content_monitoring_enabled,
+                        ));
+                    }
+                }
             }
         }
-        for (_, (id, session_key, _)) in open {
+        let mut closed_tabs = open.into_values().collect::<Vec<_>>();
+        closed_tabs.sort_by(|left, right| left.1.cmp(&right.1));
+        for (id, session_key, _, browser, profile) in closed_tabs {
             if !observed_keys.contains(&session_key) {
                 transaction.execute(
                     "UPDATE browser_tab_sessions
                      SET ended_at_ms = ?1, last_seen_at_ms = ?1 WHERE id = ?2",
                     params![observed_at_ms, id],
                 )?;
+                if enqueue_events {
+                    pending_events.push(browser_tab_closed_event(&browser, &profile, &session_key));
+                }
             }
         }
+        for event in pending_events {
+            enqueue_browser_event(&transaction, event, observed_at_ms)?;
+        }
         transaction.commit()?;
+        Ok(())
+    }
+
+    fn pending_browser_events(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<BrowserEventOutboxRecord>, BrowserActivityError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id, kind, occurred_at_ms, sensitivity, deduplication_key, payload_json
+             FROM browser_event_outbox
+             ORDER BY id
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, kind, occurred_at_ms, sensitivity, deduplication_key, payload_json) = row?;
+            let sensitivity = match sensitivity.as_str() {
+                "metadata" => DesktopEventSensitivity::Metadata,
+                "content" => DesktopEventSensitivity::Content,
+                other => {
+                    return Err(BrowserActivityError::Collection(format!(
+                        "browser event outbox has invalid sensitivity {other:?}"
+                    )));
+                }
+            };
+            Ok(BrowserEventOutboxRecord {
+                id,
+                kind,
+                occurred_at_ms,
+                sensitivity,
+                deduplication_key,
+                payload: serde_json::from_str(&payload_json)?,
+            })
+        })
+        .collect()
+    }
+
+    fn delete_browser_event(&self, id: i64) -> Result<(), BrowserActivityError> {
+        let connection = self.connect()?;
+        connection.execute("DELETE FROM browser_event_outbox WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    fn discard_browser_events(
+        &self,
+        sensitivity: Option<&str>,
+    ) -> Result<(), BrowserActivityError> {
+        let connection = self.connect()?;
+        match sensitivity {
+            Some(sensitivity) => {
+                connection.execute(
+                    "DELETE FROM browser_event_outbox WHERE sensitivity = ?1",
+                    [sensitivity],
+                )?;
+            }
+            None => {
+                connection.execute("DELETE FROM browser_event_outbox", [])?;
+            }
+        }
         Ok(())
     }
 
@@ -925,10 +1169,12 @@ impl BrowserActivityStore {
         &self,
         snapshot: &BrowserRecordsSnapshot,
         imported_at_ms: i64,
+        content_monitoring_enabled: bool,
     ) -> Result<(), BrowserActivityError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for record in &snapshot.history {
+            let domain = domain_from_url(&record.url);
             transaction.execute(
                 "INSERT INTO browser_history (
                     browser, profile, url, domain, title, last_visited_at_ms,
@@ -943,9 +1189,9 @@ impl BrowserActivityStore {
                 params![
                     record.browser,
                     record.profile,
-                    record.url,
-                    domain_from_url(&record.url),
-                    record.title,
+                    browser_url_for_storage(&record.url, content_monitoring_enabled),
+                    domain,
+                    browser_text_for_storage(&record.title, content_monitoring_enabled),
                     record.last_visited_at_ms,
                     i64::try_from(record.visit_count).unwrap_or(i64::MAX),
                     imported_at_ms,
@@ -953,6 +1199,7 @@ impl BrowserActivityStore {
             )?;
         }
         for record in &snapshot.searches {
+            let domain = domain_from_url(&record.url);
             transaction.execute(
                 "INSERT INTO browser_searches (
                     browser, profile, search_term, url, domain, title, searched_at_ms
@@ -962,15 +1209,19 @@ impl BrowserActivityStore {
                 params![
                     record.browser,
                     record.profile,
-                    record.search_term,
-                    record.url,
-                    domain_from_url(&record.url),
-                    record.title,
+                    browser_text_for_storage(
+                        &record.search_term,
+                        content_monitoring_enabled
+                    ),
+                    browser_url_for_storage(&record.url, content_monitoring_enabled),
+                    domain,
+                    browser_text_for_storage(&record.title, content_monitoring_enabled),
                     record.searched_at_ms,
                 ],
             )?;
         }
         for record in &snapshot.downloads {
+            let domain = domain_from_url(&record.url);
             transaction.execute(
                 "INSERT INTO browser_downloads (
                     browser, profile, source_id, url, domain, target_path,
@@ -990,10 +1241,13 @@ impl BrowserActivityStore {
                 params![
                     record.browser,
                     record.profile,
-                    record.source_id,
-                    record.url,
-                    domain_from_url(&record.url),
-                    record.target_path,
+                    browser_download_id_for_storage(
+                        &record.source_id,
+                        content_monitoring_enabled
+                    ),
+                    browser_url_for_storage(&record.url, content_monitoring_enabled),
+                    domain,
+                    browser_text_for_storage(&record.target_path, content_monitoring_enabled),
                     record.started_at_ms,
                     record.ended_at_ms,
                     i64::try_from(record.received_bytes).unwrap_or(i64::MAX),
@@ -1349,9 +1603,24 @@ impl BrowserActivityStore {
                 UNIQUE(browser, profile, source_id)
              );
              CREATE INDEX IF NOT EXISTS idx_browser_download_time
-                ON browser_downloads(started_at_ms DESC);
-             PRAGMA user_version = 1;",
+                ON browser_downloads(started_at_ms DESC);",
         )?;
+        if current_version < 2 {
+            connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS browser_event_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    occurred_at_ms INTEGER NOT NULL,
+                    sensitivity TEXT NOT NULL
+                        CHECK (sensitivity IN ('metadata', 'content')),
+                    deduplication_key TEXT NOT NULL UNIQUE,
+                    payload_json TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS browser_event_outbox_order
+                    ON browser_event_outbox(id);
+                 PRAGMA user_version = 2;",
+            )?;
+        }
         Ok(())
     }
 
@@ -1367,11 +1636,138 @@ impl BrowserActivityStore {
     }
 }
 
+fn browser_tab_event(
+    kind: &'static str,
+    tab: &ObservedBrowserTab,
+    session_key: &str,
+    content_monitoring_enabled: bool,
+) -> PendingBrowserEvent {
+    let mut payload = json!({
+        "browserId": stable_browser_id(&tab.browser, &tab.profile),
+        "tabId": stable_tab_id(session_key),
+    });
+    let sensitivity = if content_monitoring_enabled {
+        let payload = payload
+            .as_object_mut()
+            .expect("browser event payload is always an object");
+        if !tab.title.trim().is_empty() {
+            payload.insert("title".to_owned(), JsonValue::String(tab.title.clone()));
+        }
+        payload.insert("url".to_owned(), JsonValue::String(tab.url.clone()));
+        DesktopEventSensitivity::Content
+    } else {
+        DesktopEventSensitivity::Metadata
+    };
+    PendingBrowserEvent {
+        kind,
+        sensitivity,
+        payload,
+    }
+}
+
+fn browser_tab_closed_event(
+    browser: &str,
+    profile: &str,
+    session_key: &str,
+) -> PendingBrowserEvent {
+    PendingBrowserEvent {
+        kind: desktop_event_kinds::BROWSER_TAB_CLOSED,
+        sensitivity: DesktopEventSensitivity::Metadata,
+        payload: json!({
+            "browserId": stable_browser_id(browser, profile),
+            "tabId": stable_tab_id(session_key),
+        }),
+    }
+}
+
+fn enqueue_browser_event(
+    transaction: &Transaction<'_>,
+    event: PendingBrowserEvent,
+    observed_at_ms: i64,
+) -> Result<(), BrowserActivityError> {
+    let payload_json = serde_json::to_string(&event.payload)?;
+    let tab_id = event.payload["tabId"].as_str().unwrap_or("unknown");
+    let deduplication_key = browser_event_deduplication_key(
+        event.kind,
+        tab_id,
+        observed_at_ms,
+        payload_json.as_bytes(),
+    );
+    let sensitivity = match event.sensitivity {
+        DesktopEventSensitivity::Metadata => "metadata",
+        DesktopEventSensitivity::Content => "content",
+    };
+    transaction.execute(
+        "INSERT OR IGNORE INTO browser_event_outbox (
+            kind, occurred_at_ms, sensitivity, deduplication_key, payload_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event.kind,
+            observed_at_ms,
+            sensitivity,
+            deduplication_key,
+            payload_json,
+        ],
+    )?;
+    Ok(())
+}
+
+fn flush_browser_event_outbox(
+    store: &BrowserActivityStore,
+    event_journal: &EventJournal,
+) -> Result<(), BrowserActivityError> {
+    for record in store.pending_browser_events(100)? {
+        event_journal.append(DesktopEventDraft {
+            kind: record.kind,
+            source: "browser.activity.sensor".to_owned(),
+            occurred_at_ms: record.occurred_at_ms,
+            observed_at_ms: record.occurred_at_ms,
+            goal_version: None,
+            sensitivity: record.sensitivity,
+            payload: record.payload,
+            deduplication_key: record.deduplication_key,
+        })?;
+        store.delete_browser_event(record.id)?;
+    }
+    Ok(())
+}
+
+fn stable_browser_id(browser: &str, profile: &str) -> String {
+    stable_opaque_browser_identity("browser", &format!("{browser}\u{1f}{profile}"))
+}
+
+fn stable_tab_id(session_key: &str) -> String {
+    stable_opaque_browser_identity("tab", session_key)
+}
+
+fn stable_opaque_browser_identity(prefix: &str, material: &str) -> String {
+    let digest = Sha256::digest(material.as_bytes());
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(24);
+    for byte in digest.iter().take(12) {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    format!("{prefix}-{encoded}")
+}
+
+fn browser_event_deduplication_key(
+    kind: &str,
+    tab_id: &str,
+    observed_at_ms: i64,
+    payload: &[u8],
+) -> String {
+    let payload_identity =
+        stable_opaque_browser_identity("payload", &String::from_utf8_lossy(payload));
+    format!("browser-event:{kind}:{tab_id}:{observed_at_ms}:{payload_identity}")
+}
+
 fn insert_tab_session(
     transaction: &Transaction<'_>,
     tab: &ObservedBrowserTab,
     session_key: &str,
     observed_at_ms: i64,
+    content_monitoring_enabled: bool,
 ) -> Result<(), rusqlite::Error> {
     transaction.execute(
         "INSERT INTO browser_tab_sessions (
@@ -1382,14 +1778,45 @@ fn insert_tab_session(
             session_key,
             tab.browser,
             tab.profile,
-            tab.title,
-            tab.url,
+            browser_text_for_storage(&tab.title, content_monitoring_enabled),
+            browser_url_for_storage(&tab.url, content_monitoring_enabled),
             domain_from_url(&tab.url),
             tab.audible,
             observed_at_ms,
         ],
     )?;
     Ok(())
+}
+
+fn browser_text_for_storage(value: &str, content_monitoring_enabled: bool) -> String {
+    if content_monitoring_enabled {
+        value.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn browser_url_for_storage(url: &str, content_monitoring_enabled: bool) -> String {
+    if content_monitoring_enabled {
+        return url.to_owned();
+    }
+    let domain = domain_from_url(url);
+    if domain.is_empty() {
+        "redacted:unknown".to_owned()
+    } else {
+        format!("redacted:{domain}")
+    }
+}
+
+fn browser_download_id_for_storage(
+    source_id: &str,
+    content_monitoring_enabled: bool,
+) -> String {
+    if content_monitoring_enabled {
+        source_id.to_owned()
+    } else {
+        stable_opaque_browser_identity("download", source_id)
+    }
 }
 
 fn map_tab_row(row: &rusqlite::Row<'_>) -> Result<BrowserTabSessionRecord, rusqlite::Error> {
@@ -1523,12 +1950,24 @@ fn read_bridge_snapshot(
     if age_ms > duration_ms_i64(maximum_age) {
         return Ok(BrowserTabSnapshot {
             available: false,
+            complete: false,
             tabs: Vec::new(),
             warnings: vec![format!(
                 "browser bridge snapshot is stale by {age_ms} milliseconds"
             )],
         });
     }
+    let mut stable_identities = HashSet::new();
+    let complete = snapshot.tabs.iter().all(|tab| {
+        !tab.browser.trim().is_empty()
+            && !tab.window_id.trim().is_empty()
+            && !tab.tab_id.trim().is_empty()
+            && !tab.url.trim().is_empty()
+            && stable_identities.insert(format!(
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                tab.browser, tab.profile, tab.window_id, tab.tab_id
+            ))
+    });
     let tabs = snapshot
         .tabs
         .into_iter()
@@ -1546,6 +1985,7 @@ fn read_bridge_snapshot(
         .collect();
     Ok(BrowserTabSnapshot {
         available: true,
+        complete,
         tabs,
         warnings: Vec::new(),
     })
@@ -2284,6 +2724,7 @@ fn platform_current_tabs() -> Result<BrowserTabSnapshot, BrowserActivityError> {
     let Some(browser) = browser else {
         return Ok(BrowserTabSnapshot {
             available: true,
+            complete: false,
             tabs: Vec::new(),
             warnings: Vec::new(),
         });
@@ -2320,12 +2761,14 @@ fn platform_current_tabs() -> Result<BrowserTabSnapshot, BrowserActivityError> {
     let Some((title, url)) = value.trim().split_once('\u{1e}') else {
         return Ok(BrowserTabSnapshot {
             available: true,
+            complete: false,
             tabs: Vec::new(),
             warnings: Vec::new(),
         });
     };
     Ok(BrowserTabSnapshot {
         available: true,
+        complete: false,
         tabs: vec![ObservedBrowserTab {
             browser: browser.to_owned(),
             profile: "Default".to_owned(),
@@ -2349,6 +2792,7 @@ fn platform_current_tabs() -> Result<BrowserTabSnapshot, BrowserActivityError> {
 fn unavailable_tabs(message: impl Into<String>) -> BrowserTabSnapshot {
     BrowserTabSnapshot {
         available: false,
+        complete: false,
         tabs: Vec::new(),
         warnings: vec![message.into()],
     }
@@ -2375,6 +2819,19 @@ fn duration_from_environment(
         )));
     }
     Ok(Duration::from_millis(milliseconds))
+}
+
+fn bool_from_environment(name: &str, default: bool) -> Result<bool, BrowserActivityError> {
+    let Some(value) = env::var_os(name) else {
+        return Ok(default);
+    };
+    match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" | "" => Ok(false),
+        _ => Err(BrowserActivityError::Configuration(format!(
+            "{name} must be true/false or 1/0"
+        ))),
+    }
 }
 
 fn default_query_limit() -> usize {
@@ -2430,7 +2887,10 @@ fn parse_rfc3339_ms(value: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use tempfile::TempDir;
+    use whalehall_local_protocol::EventQueryParams;
 
     use super::*;
 
@@ -2443,6 +2903,8 @@ mod tests {
             tab_poll_interval: Duration::from_millis(50),
             history_refresh_interval: Duration::from_secs(1),
             bridge_max_age: Duration::from_secs(15),
+            event_monitoring_enabled: false,
+            content_monitoring_enabled: false,
         }
     }
 
@@ -2481,21 +2943,21 @@ mod tests {
             audible: Some(false),
         };
         store
-            .record_tab_snapshot(std::slice::from_ref(&first), 1_000)
+            .record_tab_snapshot(std::slice::from_ref(&first), 1_000, false, false)
             .expect("record first tab");
         let mut audible = first.clone();
         audible.audible = Some(true);
         store
-            .record_tab_snapshot(&[audible], 2_000)
+            .record_tab_snapshot(&[audible], 2_000, false, false)
             .expect("update audible state");
         let mut second = first;
         second.title = "Second".to_owned();
         second.url = "https://example.org/second".to_owned();
         store
-            .record_tab_snapshot(&[second], 3_000)
+            .record_tab_snapshot(&[second], 3_000, false, false)
             .expect("record navigation");
         store
-            .record_tab_snapshot(&[], 4_000)
+            .record_tab_snapshot(&[], 4_000, false, false)
             .expect("close current tab");
 
         let sessions = store
@@ -2510,6 +2972,153 @@ mod tests {
         assert_eq!(sessions[1].started_at_ms, 1_000);
         assert_eq!(sessions[1].ended_at_ms, Some(3_000));
         assert_eq!(sessions[1].audible, Some(true));
+    }
+
+    #[test]
+    fn browser_event_gates_keep_metadata_safe_and_content_explicit() {
+        let directory = tempfile::tempdir().expect("create browser event directory");
+        let store =
+            BrowserActivityStore::open(directory.path().join("browser.sqlite3")).expect("store");
+        let journal = EventJournal::open(directory.path().join("events.sqlite3")).expect("events");
+        let first = ObservedBrowserTab {
+            browser: "Test Browser".to_owned(),
+            profile: "Personal".to_owned(),
+            window_id: "window-1".to_owned(),
+            tab_id: "tab-1".to_owned(),
+            title: "Existing".to_owned(),
+            url: "https://example.com/existing".to_owned(),
+            audible: Some(false),
+        };
+        store
+            .record_tab_snapshot(std::slice::from_ref(&first), 1_000, false, false)
+            .expect("establish baseline");
+        assert!(store.pending_browser_events(100).unwrap().is_empty());
+
+        let second = ObservedBrowserTab {
+            tab_id: "tab-2".to_owned(),
+            title: "Private title".to_owned(),
+            url: "https://example.com/opened?token=secret".to_owned(),
+            ..first.clone()
+        };
+        store
+            .record_tab_snapshot(&[first.clone(), second.clone()], 2_000, true, false)
+            .expect("record metadata-only open");
+        flush_browser_event_outbox(&store, &journal).expect("flush open event");
+
+        let navigated = ObservedBrowserTab {
+            title: "Explicit content".to_owned(),
+            url: "https://example.org/next?q=allowed".to_owned(),
+            ..second
+        };
+        store
+            .record_tab_snapshot(&[first.clone(), navigated], 3_000, true, true)
+            .expect("record content-authorized navigation");
+        flush_browser_event_outbox(&store, &journal).expect("flush navigation event");
+
+        store
+            .record_tab_snapshot(std::slice::from_ref(&first), 4_000, true, false)
+            .expect("record close");
+        flush_browser_event_outbox(&store, &journal).expect("flush close event");
+
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind, desktop_event_kinds::BROWSER_TAB_OPENED);
+        assert_eq!(events[0].sensitivity, DesktopEventSensitivity::Metadata);
+        assert!(events[0].payload.get("title").is_none());
+        assert!(events[0].payload.get("url").is_none());
+        assert!(
+            events[0].payload["browserId"]
+                .as_str()
+                .unwrap()
+                .starts_with("browser-")
+        );
+        assert!(
+            events[0].payload["tabId"]
+                .as_str()
+                .unwrap()
+                .starts_with("tab-")
+        );
+        assert!(events[0].payload.get("profile").is_none());
+        assert!(events[0].payload.get("windowId").is_none());
+
+        assert_eq!(events[1].kind, desktop_event_kinds::BROWSER_TAB_NAVIGATED);
+        assert_eq!(events[1].sensitivity, DesktopEventSensitivity::Content);
+        assert_eq!(events[1].payload["title"], "Explicit content");
+        assert_eq!(
+            events[1].payload["url"],
+            "https://example.org/next?q=allowed"
+        );
+        assert_eq!(events[1].payload["tabId"], events[0].payload["tabId"]);
+
+        assert_eq!(events[2].kind, desktop_event_kinds::BROWSER_TAB_CLOSED);
+        assert_eq!(
+            events[2]
+                .payload
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["browserId", "tabId"]
+        );
+        assert!(store.pending_browser_events(100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn disabled_browser_gates_discard_undelivered_sensitive_events() {
+        let directory = tempfile::tempdir().expect("create browser gate directory");
+        let store =
+            BrowserActivityStore::open(directory.path().join("browser.sqlite3")).expect("store");
+        let first = ObservedBrowserTab {
+            browser: "Test".to_owned(),
+            profile: "Default".to_owned(),
+            window_id: "window".to_owned(),
+            tab_id: "one".to_owned(),
+            title: "One".to_owned(),
+            url: "https://example.com/one".to_owned(),
+            audible: None,
+        };
+        store
+            .record_tab_snapshot(std::slice::from_ref(&first), 1_000, false, false)
+            .unwrap();
+        let second = ObservedBrowserTab {
+            tab_id: "two".to_owned(),
+            title: "Two".to_owned(),
+            url: "https://example.com/two".to_owned(),
+            ..first.clone()
+        };
+        store
+            .record_tab_snapshot(&[first.clone(), second.clone()], 2_000, true, false)
+            .unwrap();
+        store
+            .record_tab_snapshot(
+                &[
+                    first,
+                    ObservedBrowserTab {
+                        title: "Sensitive".to_owned(),
+                        url: "https://example.com/two?token=secret".to_owned(),
+                        ..second
+                    },
+                ],
+                3_000,
+                true,
+                true,
+            )
+            .unwrap();
+        let pending = store.pending_browser_events(100).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].sensitivity, DesktopEventSensitivity::Metadata);
+        assert_eq!(pending[1].sensitivity, DesktopEventSensitivity::Content);
+
+        store.discard_browser_events(Some("content")).unwrap();
+        let metadata_only = store.pending_browser_events(100).unwrap();
+        assert_eq!(metadata_only.len(), 1);
+        assert_eq!(
+            metadata_only[0].sensitivity,
+            DesktopEventSensitivity::Metadata
+        );
+        store.discard_browser_events(None).unwrap();
+        assert!(store.pending_browser_events(100).unwrap().is_empty());
     }
 
     #[test]
@@ -2618,7 +3227,9 @@ mod tests {
             }],
             ..BrowserRecordsSnapshot::default()
         };
-        store.import_records(&snapshot, 20_000).expect("import");
+        store
+            .import_records(&snapshot, 20_000, true)
+            .expect("import");
         assert_eq!(
             store
                 .query_history(&BrowserHistoryQuery {
@@ -2666,7 +3277,21 @@ mod tests {
         let current =
             read_bridge_snapshot(&bridge, Duration::from_secs(10)).expect("read fresh bridge");
         assert!(current.available);
+        assert!(current.complete);
         assert_eq!(current.tabs[0].audible, Some(true));
+
+        fs::write(
+            &bridge,
+            format!(
+                r#"{{"observedAtMs":{},"tabs":[{{"browser":"Test","title":"Unstable","url":"https://example.com"}}]}}"#,
+                now_ms()
+            ),
+        )
+        .expect("write bridge without stable ids");
+        let unstable =
+            read_bridge_snapshot(&bridge, Duration::from_secs(10)).expect("read unstable bridge");
+        assert!(unstable.available);
+        assert!(!unstable.complete);
 
         fs::write(&bridge, r#"{"observedAtMs":1,"tabs":[]}"#).expect("write stale bridge");
         let stale =
@@ -2681,5 +3306,136 @@ mod tests {
         let config = config(&directory);
         assert!(config.database_path.starts_with(directory.path()));
         assert!(config.bridge_path.starts_with(directory.path()));
+        assert!(!config.event_monitoring_enabled);
+        assert!(!config.content_monitoring_enabled);
+    }
+
+    #[test]
+    fn metadata_only_storage_never_persists_browser_content() {
+        let directory = tempfile::tempdir().expect("create browser privacy directory");
+        let store =
+            BrowserActivityStore::open(directory.path().join("browser.sqlite3")).expect("store");
+        let tab = ObservedBrowserTab {
+            browser: "Test".to_owned(),
+            profile: "Default".to_owned(),
+            window_id: "window".to_owned(),
+            tab_id: "tab".to_owned(),
+            title: "Private title".to_owned(),
+            url: "https://example.com/private?token=secret".to_owned(),
+            audible: Some(false),
+        };
+        store
+            .record_tab_snapshot(std::slice::from_ref(&tab), 10_000, false, false)
+            .expect("record metadata tab");
+        let snapshot = BrowserRecordsSnapshot {
+            history: vec![ObservedBrowserHistory {
+                browser: "Test".to_owned(),
+                profile: "Default".to_owned(),
+                url: tab.url.clone(),
+                title: tab.title.clone(),
+                last_visited_at_ms: 9_000,
+                visit_count: 2,
+            }],
+            searches: vec![ObservedBrowserSearch {
+                browser: "Test".to_owned(),
+                profile: "Default".to_owned(),
+                search_term: "private query".to_owned(),
+                url: tab.url.clone(),
+                title: tab.title.clone(),
+                searched_at_ms: 9_000,
+            }],
+            downloads: vec![ObservedBrowserDownload {
+                browser: "Test".to_owned(),
+                profile: "Default".to_owned(),
+                source_id: "download-1".to_owned(),
+                url: "https://example.com/private-file.zip".to_owned(),
+                target_path: "/Users/test/Secret/private-file.zip".to_owned(),
+                started_at_ms: 8_000,
+                ended_at_ms: Some(8_500),
+                received_bytes: 10,
+                total_bytes: 10,
+                state: "complete".to_owned(),
+            }],
+            ..BrowserRecordsSnapshot::default()
+        };
+        store
+            .import_records(&snapshot, 11_000, false)
+            .expect("import metadata records");
+
+        let tabs = store
+            .query_tabs(&BrowserTabQuery::default())
+            .expect("query metadata tab");
+        assert_eq!(tabs[0].domain, "example.com");
+        assert_eq!(tabs[0].url, "redacted:example.com");
+        assert!(tabs[0].title.is_empty());
+        let history = store
+            .query_history(&BrowserHistoryQuery::default())
+            .expect("query metadata history");
+        assert_eq!(history[0].url, "redacted:example.com");
+        assert!(history[0].title.is_empty());
+        let searches = store
+            .query_searches(&BrowserSearchQuery::default())
+            .expect("query metadata searches");
+        assert!(searches[0].search_term.is_empty());
+        assert_eq!(searches[0].url, "redacted:example.com");
+        assert!(searches[0].title.is_empty());
+        let downloads = store
+            .query_downloads(&BrowserDownloadQuery::default())
+            .expect("query metadata downloads");
+        assert_eq!(downloads[0].url, "redacted:example.com");
+        assert!(downloads[0].target_path.is_empty());
+
+        let database = fs::read(store.path()).expect("read browser database");
+        let database = String::from_utf8_lossy(&database);
+        for secret in [
+            "Private title",
+            "token=secret",
+            "private query",
+            "private-file.zip",
+            "/Users/test/Secret",
+        ] {
+            assert!(
+                !database.contains(secret),
+                "metadata database leaked {secret:?}"
+            );
+        }
+    }
+
+    struct CountingProvider {
+        tab_calls: AtomicUsize,
+        record_calls: AtomicUsize,
+    }
+
+    impl BrowserActivityProvider for CountingProvider {
+        fn current_tabs(&self) -> Result<BrowserTabSnapshot, BrowserActivityError> {
+            self.tab_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(BrowserTabSnapshot::default())
+        }
+
+        fn browser_records(&self) -> Result<BrowserRecordsSnapshot, BrowserActivityError> {
+            self.record_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(BrowserRecordsSnapshot::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_browser_service_never_calls_resident_provider() {
+        let directory = tempfile::tempdir().expect("create browser disabled directory");
+        let provider = Arc::new(CountingProvider {
+            tab_calls: AtomicUsize::new(0),
+            record_calls: AtomicUsize::new(0),
+        });
+        let service = BrowserActivityService::start(config(&directory), provider.clone())
+            .expect("start disabled browser service");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let status = service.status();
+        assert_eq!(status.state, BrowserSensorState::Disabled);
+        assert!(!status.event_monitoring_enabled);
+        assert!(!status.content_monitoring_enabled);
+        assert_eq!(provider.tab_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.record_calls.load(Ordering::SeqCst), 0);
+        assert!(service.history(&BrowserHistoryQuery::default()).is_ok());
+        service.shutdown().await;
     }
 }

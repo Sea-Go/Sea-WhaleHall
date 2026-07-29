@@ -9,7 +9,9 @@ Every client sensor has exactly one public entry file under `core/src/sensors/`:
 | `application_inventory.rs` | Resident installed-application and process monitor | `applications.status`, `applications.installed`, `applications.processes` |
 | `browser_activity.rs` | Resident tab, history, search, and download monitor | `browser.status`, `browser.tabs`, `browser.history`, `browser.searches`, `browser.downloads` |
 | `device_environment.rs` | On-demand device snapshot | `device.environment` |
+| `input_activity.rs` | Resident privacy-safe keyboard/pointer aggregate monitor | `input.status` |
 | `presence.rs` | Resident idle, AFK, lock, and sleep/wake monitor | `presence.status`, `presence.events` |
+| `vscode_edit_bridge.rs` | Explicit-consent VS Code spool consumer and durable edit-burst monitor | `editor.status` |
 
 `sensors/mod.rs` is only the registry. A new sensor is added as one sibling `.rs` file and exported there. Tool protocol adaptation stays under `core/src/tools/`, so sensor APIs remain usable directly from Rust without JSON.
 
@@ -49,6 +51,12 @@ Windows uses native input-desktop APIs, macOS reads IOHID and session properties
 
 Chromium-family, Firefox, and Safari history profiles are supported with documented platform differences. Exact current tab audio uses the cross-platform bridge contract; macOS also has a title/URL Apple Events fallback. Full schema, bridge, privacy, query, limitation, and CI details are in [`BROWSER_ACTIVITY_SENSOR.md`](BROWSER_ACTIVITY_SENSOR.md).
 
+Current-tab DesktopEvents are separately fail-closed:
+`WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED` defaults off, and the independent
+`WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED` gate is required before an
+event may contain a title or URL. The macOS single-tab fallback never drives
+semantic open/navigation/close transitions.
+
 ## Device and environment snapshot
 
 Rust callers use:
@@ -77,6 +85,54 @@ The snapshot includes:
 - network-interface name/index, loopback state, MAC address, IP addresses, and netmasks.
 
 Collection is best-effort. Missing batteries are represented by an empty list. Components that cannot be queried add an item to `warnings` while all other fields remain available. The Tool requires `device.environment.read` because device name, username, MAC, and IP addresses are sensitive local information.
+
+## Input activity aggregation
+
+`input_activity.rs` owns the macOS-first global input-volume monitor. It keeps
+raw callbacks in memory and emits one `input.activityAggregated` DesktopEvent
+per non-empty five-second bucket. The complete payload is key count, click
+count, relative scroll delta, relative mouse distance, and the bucket start/end
+timestamps. It never reads key values, text, clipboard data, screenshots, or
+absolute coordinates.
+
+Collection is fail-closed and starts only when
+`WHALEHALL_INPUT_MONITORING_ENABLED=true` and macOS Input Monitoring
+permission is already present. `input.status` exposes the explicit `enabled`
+switch separately from operating-system `authorized` permission and
+`captureAvailable` state. The sensor performs no permission prompt; missing
+permission is an explicit degraded state, while non-macOS platforms report
+unsupported. Empty buckets are omitted and each emitted bucket counts as one
+downstream semantic event. The full lifecycle, payload, privacy, Tool, and CI
+contract is documented in
+[`INPUT_ACTIVITY_SENSOR.md`](INPUT_ACTIVITY_SENSOR.md).
+
+Sleep or a long scheduler pause realigns the next aggregate directly to the
+latest completed epoch bucket; skipped empty buckets are never replayed.
+
+Runtime permission loss emits one non-counting `authorization.revoked`
+boundary. The latest authorization state is read from the durable EventJournal,
+so permission recovery restarts the listen-only tap and emits
+`authorization.granted` before resumed aggregates even when WhaleHall restarted
+between revoke and grant. Initial authorization without a preceding durable
+revocation does not emit a synthetic grant. Conversely, if enabled startup
+finds permission already missing after an offline revoke, it immediately
+persists one revoke boundary unless the EventJournal already records it.
+
+## VS Code edit bridge
+
+`vscode_edit_bridge.rs` is disabled unless
+`WHALEHALL_VSCODE_BRIDGE_DIRECTORY` explicitly names a local absolute bridge
+root. It claims only sealed v1 JSONL segments, validates the complete segment,
+and durably coalesces per-document edit deltas. Two seconds of silence or ten
+seconds of continuous editing seals one `editor.documentChanged` event.
+
+Raw deltas never enter the Desktop EventJournal. Active raw source rows live
+only in private `0700`/`0600` editor storage and are deleted atomically when
+the immutable burst outbox is created. Filename digest validation,
+event-ID tombstones, claimed-file recovery, cross-segment ordering, and
+EventJournal deduplication make restart replay idempotent. Full enablement,
+schema, atomicity, privacy, status, and CI details are in
+[`VSCODE_EDIT_BRIDGE_SENSOR.md`](VSCODE_EDIT_BRIDGE_SENSOR.md).
 
 ## Mandatory CI/CD gate
 

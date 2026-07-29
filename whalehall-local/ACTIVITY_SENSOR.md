@@ -33,6 +33,12 @@ Set `WHALEHALL_DATA_DIR` to override the database directory and `WHALEHALL_ACTIV
 
 The sensor records application/window metadata, not screenshots, keyboard input, clipboard content, document bodies, or network traffic. The database is never exposed through a network listener.
 
+Each real transition to a known foreground application also appends one
+`application.foregroundChanged` DesktopEvent. Its metadata payload is limited
+to `appId` and `appName`; `windowTitle`, process ID, and executable path are
+not copied into EventJournal. Repeated heartbeats and transitions to an
+unknown/no-foreground state do not publish semantic events.
+
 ## Rust service APIs
 
 ```rust

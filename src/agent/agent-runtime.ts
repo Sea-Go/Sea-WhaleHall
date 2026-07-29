@@ -3,6 +3,9 @@ import type {
 	LocalToolProcess,
 } from "./local-tool-client";
 import type {
+	LocalEventCommitResult,
+	LocalEventQuery,
+	LocalEventQueryResult,
 	LocalRuntimeStatus,
 	LocalToolCall,
 	LocalToolCallResult,
@@ -10,6 +13,7 @@ import type {
 	LocalToolDescriptor,
 	LocalToolEvent,
 } from "./local-protocol";
+import type { DesktopEventV1 } from "./reflection/types";
 
 export class AgentRuntime {
 	private status: LocalRuntimeStatus = {
@@ -21,10 +25,12 @@ export class AgentRuntime {
 	private readonly activeCalls = new Set<string>();
 	private readonly statusListeners = new Set<(status: LocalRuntimeStatus) => void>();
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
+	private readonly desktopEventListeners = new Set<(event: DesktopEventV1) => void>();
 	private startPromise: Promise<void> | null = null;
 
 	constructor(private readonly local: LocalToolProcess) {
 		local.onEvent((event) => this.handleEvent(event));
+		local.onDesktopEvent((event) => this.handleDesktopEvent(event));
 		local.onFailure((error) => this.handleFailure(error));
 	}
 
@@ -40,6 +46,11 @@ export class AgentRuntime {
 	onToolEvent(listener: (event: LocalToolEvent) => void): () => void {
 		this.eventListeners.add(listener);
 		return () => this.eventListeners.delete(listener);
+	}
+
+	onDesktopEvent(listener: (event: DesktopEventV1) => void): () => void {
+		this.desktopEventListeners.add(listener);
+		return () => this.desktopEventListeners.delete(listener);
 	}
 
 	async start(): Promise<void> {
@@ -77,6 +88,19 @@ export class AgentRuntime {
 		return this.local.cancelTool(callId);
 	}
 
+	async queryDesktopEvents(query: LocalEventQuery): Promise<LocalEventQueryResult> {
+		await this.ensureStarted();
+		return this.local.queryEvents(query);
+	}
+
+	async commitDesktopEventCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalEventCommitResult> {
+		await this.ensureStarted();
+		return this.local.commitEventCursor(consumerId, cursor);
+	}
+
 	async stop(): Promise<void> {
 		this.activeCalls.clear();
 		await this.local.stop();
@@ -100,6 +124,11 @@ export class AgentRuntime {
 			this.activeCalls.delete(event.callId);
 		}
 		for (const listener of this.eventListeners) listener(event);
+		this.setStatus("ready", null);
+	}
+
+	private handleDesktopEvent(event: DesktopEventV1): void {
+		for (const listener of this.desktopEventListeners) listener(event);
 		this.setStatus("ready", null);
 	}
 

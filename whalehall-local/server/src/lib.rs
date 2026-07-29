@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use whalehall_local_core::ToolHost;
+use whalehall_local_core::events::{EventJournal, EventJournalError};
 use whalehall_local_core::sensors::accessibility_tree::{
     AccessibilityConfig, AccessibilityService, SystemAccessibilityProvider,
 };
@@ -18,12 +19,19 @@ use whalehall_local_core::sensors::application_inventory::{
 use whalehall_local_core::sensors::browser_activity::{
     BrowserActivityConfig, BrowserActivityService, SystemBrowserActivityProvider,
 };
+use whalehall_local_core::sensors::input_activity::{
+    InputActivityConfig, InputActivityService, SystemInputActivityProvider,
+};
 use whalehall_local_core::sensors::presence::{
     PresenceConfig, PresenceService, SystemPresenceProvider,
 };
+use whalehall_local_core::sensors::vscode_edit_bridge::{
+    VscodeEditBridgeConfig, VscodeEditBridgeService,
+};
 use whalehall_local_protocol::{
+    DesktopEventFrame, DesktopEventFrameKind, EventCommitParams, EventQueryParams,
     MAX_JSONL_LINE_BYTES, OutboundMessage, Request, Response, RuntimeHealth, ToolCallParams,
-    ToolCallResult, ToolCancelParams, ToolCancelResult, ToolListResult,
+    ToolCallResult, ToolCancelParams, ToolCancelResult, ToolListResult, error_codes,
 };
 
 pub async fn serve<R, W>(reader: R, writer: W) -> io::Result<()>
@@ -35,13 +43,23 @@ where
     let inventory_config =
         ApplicationInventoryConfig::from_environment().map_err(io::Error::other)?;
     let presence_config = PresenceConfig::from_environment().map_err(io::Error::other)?;
+    let input_activity_config =
+        InputActivityConfig::from_environment().map_err(io::Error::other)?;
     let browser_config = BrowserActivityConfig::from_environment().map_err(io::Error::other)?;
     let accessibility_config = AccessibilityConfig::from_environment().map_err(io::Error::other)?;
-    let activity = ActivityService::start(config, Arc::new(SystemForegroundAppProvider))
+    let editor_config = VscodeEditBridgeConfig::from_environment().map_err(io::Error::other)?;
+    let event_journal = EventJournal::open(config.database_path.with_file_name("events.sqlite3"))
         .map_err(io::Error::other)?;
-    let inventory = match ApplicationInventoryService::start(
+    let activity = ActivityService::start_with_event_journal(
+        config,
+        Arc::new(SystemForegroundAppProvider),
+        Some(event_journal.clone()),
+    )
+    .map_err(io::Error::other)?;
+    let inventory = match ApplicationInventoryService::start_with_event_journal(
         inventory_config,
         Arc::new(SystemApplicationInventoryProvider::default()),
+        Some(event_journal.clone()),
     ) {
         Ok(inventory) => inventory,
         Err(error) => {
@@ -49,7 +67,11 @@ where
             return Err(io::Error::other(error));
         }
     };
-    let presence = match PresenceService::start(presence_config, Arc::new(SystemPresenceProvider)) {
+    let presence = match PresenceService::start_with_event_journal(
+        presence_config,
+        Arc::new(SystemPresenceProvider),
+        Some(event_journal.clone()),
+    ) {
         Ok(presence) => presence,
         Err(error) => {
             inventory.shutdown().await;
@@ -57,9 +79,10 @@ where
             return Err(io::Error::other(error));
         }
     };
-    let browser = match BrowserActivityService::start(
+    let browser = match BrowserActivityService::start_with_event_journal(
         browser_config.clone(),
         Arc::new(SystemBrowserActivityProvider::new(browser_config)),
+        Some(event_journal.clone()),
     ) {
         Ok(browser) => browser,
         Err(error) => {
@@ -82,6 +105,35 @@ where
             return Err(io::Error::other(error));
         }
     };
+    let input_activity = match InputActivityService::start(
+        input_activity_config.clone(),
+        Arc::new(SystemInputActivityProvider::new(
+            input_activity_config.enabled,
+        )),
+        event_journal.clone(),
+    ) {
+        Ok(input_activity) => input_activity,
+        Err(error) => {
+            accessibility.shutdown().await;
+            browser.shutdown().await;
+            presence.shutdown().await;
+            inventory.shutdown().await;
+            activity.shutdown().await;
+            return Err(io::Error::other(error));
+        }
+    };
+    let editor = match VscodeEditBridgeService::start(editor_config, event_journal.clone()) {
+        Ok(editor) => editor,
+        Err(error) => {
+            input_activity.shutdown().await;
+            accessibility.shutdown().await;
+            browser.shutdown().await;
+            presence.shutdown().await;
+            inventory.shutdown().await;
+            activity.shutdown().await;
+            return Err(io::Error::other(error));
+        }
+    };
     eprintln!("activity database: {}", activity.database_path().display());
     eprintln!(
         "application inventory database: {}",
@@ -93,14 +145,27 @@ where
         "accessibility database: {}",
         accessibility.database_path().display()
     );
-    serve_with_all_services(
+    eprintln!(
+        "desktop event database: {}",
+        event_journal.database_path().display()
+    );
+    eprintln!(
+        "editor bridge database: {}",
+        editor.database_path().display()
+    );
+    serve_with_all_services_and_events(
         reader,
         writer,
-        activity,
-        inventory,
-        presence,
-        browser,
-        accessibility,
+        AllServicesWithEvents {
+            activity,
+            inventory,
+            presence,
+            browser,
+            accessibility,
+            input_activity,
+            editor,
+            event_journal,
+        },
     )
     .await
 }
@@ -114,12 +179,29 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let event_journal =
+        EventJournal::open(activity.database_path().with_file_name("events.sqlite3"))
+            .map_err(io::Error::other)?;
+    serve_with_activity_and_events(reader, writer, activity, event_journal).await
+}
+
+pub async fn serve_with_activity_and_events<R, W>(
+    reader: R,
+    writer: W,
+    activity: ActivityService,
+    event_journal: EventJournal,
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let host = Arc::new(ToolHost::with_activity(activity.clone()));
     serve_session(
         reader,
         writer,
         host,
         ResidentServices::activity_only(activity),
+        event_journal,
     )
     .await
 }
@@ -136,6 +218,9 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let event_journal =
+        EventJournal::open(activity.database_path().with_file_name("events.sqlite3"))
+            .map_err(io::Error::other)?;
     let host = Arc::new(ToolHost::with_services(
         activity.clone(),
         inventory.clone(),
@@ -152,7 +237,10 @@ where
             presence: Some(presence),
             browser: Some(browser),
             accessibility: None,
+            input_activity: None,
+            editor: None,
         },
+        event_journal,
     )
     .await
 }
@@ -170,12 +258,76 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let event_journal =
+        EventJournal::open(activity.database_path().with_file_name("events.sqlite3"))
+            .map_err(io::Error::other)?;
+    let input_activity_config =
+        InputActivityConfig::from_environment().map_err(io::Error::other)?;
+    let input_activity = InputActivityService::start(
+        input_activity_config.clone(),
+        Arc::new(SystemInputActivityProvider::new(
+            input_activity_config.enabled,
+        )),
+        event_journal.clone(),
+    )
+    .map_err(io::Error::other)?;
+    let editor_config = VscodeEditBridgeConfig::from_environment().map_err(io::Error::other)?;
+    let editor = match VscodeEditBridgeService::start(editor_config, event_journal.clone()) {
+        Ok(editor) => editor,
+        Err(error) => {
+            input_activity.shutdown().await;
+            accessibility.shutdown().await;
+            browser.shutdown().await;
+            presence.shutdown().await;
+            inventory.shutdown().await;
+            activity.shutdown().await;
+            return Err(io::Error::other(error));
+        }
+    };
+    serve_with_all_services_and_events(
+        reader,
+        writer,
+        AllServicesWithEvents {
+            activity,
+            inventory,
+            presence,
+            browser,
+            accessibility,
+            input_activity,
+            editor,
+            event_journal,
+        },
+    )
+    .await
+}
+
+async fn serve_with_all_services_and_events<R, W>(
+    reader: R,
+    writer: W,
+    services: AllServicesWithEvents,
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let AllServicesWithEvents {
+        activity,
+        inventory,
+        presence,
+        browser,
+        accessibility,
+        input_activity,
+        editor,
+        event_journal,
+    } = services;
     let host = Arc::new(ToolHost::with_all_services(
         activity.clone(),
         inventory.clone(),
         presence.clone(),
         browser.clone(),
         accessibility.clone(),
+        input_activity.clone(),
+        editor.clone(),
     ));
     serve_session(
         reader,
@@ -187,9 +339,23 @@ where
             presence: Some(presence),
             browser: Some(browser),
             accessibility: Some(accessibility),
+            input_activity: Some(input_activity),
+            editor: Some(editor),
         },
+        event_journal,
     )
     .await
+}
+
+struct AllServicesWithEvents {
+    activity: ActivityService,
+    inventory: ApplicationInventoryService,
+    presence: PresenceService,
+    browser: BrowserActivityService,
+    accessibility: AccessibilityService,
+    input_activity: InputActivityService,
+    editor: VscodeEditBridgeService,
+    event_journal: EventJournal,
 }
 
 struct ResidentServices {
@@ -198,6 +364,8 @@ struct ResidentServices {
     presence: Option<PresenceService>,
     browser: Option<BrowserActivityService>,
     accessibility: Option<AccessibilityService>,
+    input_activity: Option<InputActivityService>,
+    editor: Option<VscodeEditBridgeService>,
 }
 
 impl ResidentServices {
@@ -208,10 +376,18 @@ impl ResidentServices {
             presence: None,
             browser: None,
             accessibility: None,
+            input_activity: None,
+            editor: None,
         }
     }
 
     async fn shutdown(self) {
+        if let Some(editor) = self.editor {
+            editor.shutdown().await;
+        }
+        if let Some(input_activity) = self.input_activity {
+            input_activity.shutdown().await;
+        }
         if let Some(accessibility) = self.accessibility {
             accessibility.shutdown().await;
         }
@@ -233,6 +409,7 @@ async fn serve_session<R, W>(
     writer: W,
     host: Arc<ToolHost>,
     services: ResidentServices,
+    event_journal: EventJournal,
 ) -> io::Result<()>
 where
     R: AsyncBufRead + Unpin,
@@ -245,6 +422,30 @@ where
         while let Some(event) = event_rx.recv().await {
             if event_output.send(OutboundMessage::Event(event)).is_err() {
                 break;
+            }
+        }
+    });
+    let desktop_event_output = output_tx.clone();
+    let mut desktop_event_rx = event_journal.subscribe();
+    let desktop_event_forwarder = tokio::spawn(async move {
+        loop {
+            match desktop_event_rx.recv().await {
+                Ok(event) => {
+                    if desktop_event_output
+                        .send(OutboundMessage::DesktopEvent(DesktopEventFrame {
+                            event: DesktopEventFrameKind::DesktopEvent,
+                            data: event,
+                        }))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // event.query is the durable recovery path for a lagged live subscriber.
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -319,6 +520,7 @@ where
             host.clone(),
             event_tx.clone(),
             output_tx.clone(),
+            event_journal.clone(),
             &mut calls,
         );
     }
@@ -327,6 +529,8 @@ where
     services.shutdown().await;
     drop(event_tx);
     let _ = event_forwarder.await;
+    desktop_event_forwarder.abort();
+    let _ = desktop_event_forwarder.await;
     drop(output_tx);
     writer_task
         .await
@@ -339,6 +543,7 @@ fn dispatch_request(
     host: Arc<ToolHost>,
     events: mpsc::UnboundedSender<whalehall_local_protocol::ToolEvent>,
     output: mpsc::UnboundedSender<OutboundMessage>,
+    event_journal: EventJournal,
     calls: &mut JoinSet<()>,
 ) {
     match request.method.as_str() {
@@ -413,6 +618,42 @@ fn dispatch_request(
                 request.id, result,
             )));
         }
+        "event.query" => {
+            let params: EventQueryParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid event.query parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match event_journal.query(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => event_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "event.commit" => {
+            let params: EventCommitParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid event.commit parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match event_journal.commit(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => event_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
         _ => {
             let method = request.method;
             let _ = output.send(OutboundMessage::Response(Response::failure(
@@ -422,6 +663,21 @@ fn dispatch_request(
             )));
         }
     }
+}
+
+fn event_error_response(id: String, error: EventJournalError) -> Response {
+    let code = match error {
+        EventJournalError::InvalidCursor(_) => error_codes::INVALID_CURSOR,
+        EventJournalError::CursorExpired(_) => error_codes::CURSOR_EXPIRED,
+        EventJournalError::CursorRegression { .. } => error_codes::CURSOR_REGRESSION,
+        EventJournalError::Configuration(_) | EventJournalError::IdempotencyConflict { .. } => {
+            error_codes::INVALID_ARGUMENTS
+        }
+        EventJournalError::Io(_) | EventJournalError::Sqlite(_) | EventJournalError::Json(_) => {
+            error_codes::INTERNAL_ERROR
+        }
+    };
+    Response::failure(Some(id), code, error.to_string())
 }
 
 async fn write_messages<W>(
@@ -447,9 +703,11 @@ mod tests {
 
     use tempfile::TempDir;
     use tokio::io::{AsyncWriteExt, BufReader, duplex};
+    use whalehall_local_core::events::{DesktopEventDraft, EventJournal};
     use whalehall_local_core::sensors::activity::{
         ActivityConfig, ActivityError, ActivityService, ForegroundApp, ForegroundAppProvider,
     };
+    use whalehall_local_protocol::desktop_event_kinds;
 
     use super::*;
 
@@ -523,6 +781,103 @@ mod tests {
         assert!(lines[2].contains("activity.status"));
         assert!(lines[2].contains("device.environment"));
         assert!(lines.iter().any(|line| line.contains("usage.sqlite3")));
+    }
+
+    #[tokio::test]
+    async fn queries_commits_and_pushes_durable_desktop_events() {
+        let (mut input, server_input) = duplex(32 * 1024);
+        let (server_output, output) = duplex(32 * 1024);
+        let (directory, activity) = test_activity();
+        let event_journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let server_events = event_journal.clone();
+        let server = tokio::spawn(serve_with_activity_and_events(
+            BufReader::new(server_input),
+            server_output,
+            activity,
+            server_events,
+        ));
+        let mut output = BufReader::new(output);
+
+        input
+            .write_all(b"{\"id\":\"health\",\"method\":\"runtime.health\",\"params\":{}}\n")
+            .await
+            .expect("write health");
+        let mut health_line = String::new();
+        output
+            .read_line(&mut health_line)
+            .await
+            .expect("read health");
+        assert!(health_line.contains("\"id\":\"health\""));
+
+        let appended = event_journal
+            .append(DesktopEventDraft::metadata(
+                desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED,
+                "server.test",
+                1_000,
+                serde_json::json!({ "appId": "editor" }),
+                "server-publisher-test",
+            ))
+            .expect("append desktop event")
+            .event;
+        input
+            .write_all(
+                b"{\"id\":\"events\",\"method\":\"event.query\",\"params\":{\"limit\":10}}\n",
+            )
+            .await
+            .expect("write event query");
+        input
+            .write_all(
+                format!(
+                    "{{\"id\":\"commit\",\"method\":\"event.commit\",\"params\":{{\"consumerId\":\"reflection-runtime\",\"cursor\":\"{}\"}}}}\n",
+                    appended.cursor
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write event commit");
+        input
+            .write_all(
+                b"{\"id\":\"resume\",\"method\":\"event.query\",\"params\":{\"consumerId\":\"reflection-runtime\",\"limit\":10}}\n",
+            )
+            .await
+            .expect("write consumer event query");
+        input.shutdown().await.expect("close input");
+
+        let mut lines = vec![health_line];
+        loop {
+            let mut line = String::new();
+            if output.read_line(&mut line).await.expect("read output") == 0 {
+                break;
+            }
+            lines.push(line);
+        }
+        server.await.expect("server join").expect("server result");
+
+        let frames = lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid JSONL frame"))
+            .collect::<Vec<_>>();
+        assert!(frames.iter().any(|frame| {
+            frame["event"] == "desktop.event" && frame["data"]["eventId"] == appended.event_id
+        }));
+        let query = frames
+            .iter()
+            .find(|frame| frame["id"] == "events")
+            .expect("event.query response");
+        assert_eq!(query["result"]["events"][0]["eventId"], appended.event_id);
+        let commit = frames
+            .iter()
+            .find(|frame| frame["id"] == "commit")
+            .expect("event.commit response");
+        assert_eq!(commit["result"]["consumerId"], "reflection-runtime");
+        assert_eq!(commit["result"]["advanced"], true);
+        let resume = frames
+            .iter()
+            .find(|frame| frame["id"] == "resume")
+            .expect("consumer event.query response");
+        assert_eq!(resume["result"]["events"], serde_json::json!([]));
+        assert_eq!(resume["result"]["nextCursor"], appended.cursor);
     }
 
     #[tokio::test]

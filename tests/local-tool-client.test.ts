@@ -7,6 +7,8 @@ import {
 	type ChildTransport,
 } from "../src/agent/local-tool-client";
 import type { LocalToolDescriptor } from "../src/agent/local-protocol";
+import { parseLocalMessage } from "../src/agent/local-protocol";
+import type { DesktopEventV1 } from "../src/agent/reflection/types";
 
 class FakeChild implements ChildTransport {
 	pid = 4242;
@@ -96,6 +98,93 @@ describe("JsonlParser", () => {
 		const parser = new JsonlParser(() => {}, 4);
 		expect(() => parser.feed(encoder.encode("12345"))).toThrow(JsonlProtocolError);
 	});
+
+	test("rejects raw key fields and content hidden in metadata events", () => {
+		const event = desktopEvent();
+		expect(() =>
+			parseLocalMessage(
+				JSON.stringify({
+					event: "desktop.event",
+					data: { ...event, payload: { keyCount: 1, keyCode: 12 } },
+				}),
+			),
+		).toThrow("invalid shape");
+		expect(() =>
+			parseLocalMessage(
+				JSON.stringify({
+					event: "desktop.event",
+					data: {
+						...event,
+						kind: "browser.tabOpened",
+						payload: {
+							browserId: "safari",
+							tabId: "tab-1",
+							url: "https://private.example/",
+						},
+					},
+				}),
+			),
+		).toThrow("invalid shape");
+		expect(
+			parseLocalMessage(
+				JSON.stringify({
+					event: "desktop.event",
+					data: {
+						...event,
+						kind: "browser.tabOpened",
+						sensitivity: "content",
+						payload: {
+							browserId: "safari",
+							tabId: "tab-1",
+							url: "https://example.test/",
+						},
+					},
+				}),
+			),
+		).toMatchObject({ event: "desktop.event" });
+	});
+
+	test("validates each desktop payload with exact keys and sensitivity", () => {
+		const event = desktopEvent();
+		for (const payload of [
+			{ appId: "code", appName: "Code", characters: "secret" },
+			{ appId: "code", appName: "Code", sequence: ["a", "b"] },
+			{ appId: "code" },
+		]) {
+			expect(() =>
+				parseLocalMessage(
+					JSON.stringify({
+						event: "desktop.event",
+						data: { ...event, payload },
+					}),
+				),
+			).toThrow("invalid shape");
+		}
+		expect(() =>
+			parseLocalMessage(
+				JSON.stringify({
+					event: "desktop.event",
+					data: {
+						...event,
+						kind: "accessibility.focusChanged",
+						payload: { appId: "code", role: "textBox", label: "private" },
+					},
+				}),
+			),
+		).toThrow("invalid shape");
+		expect(
+			parseLocalMessage(
+				JSON.stringify({
+					event: "desktop.event",
+					data: {
+						...event,
+						kind: "authorization.granted",
+						payload: { permissions: ["input.monitoring"] },
+					},
+				}),
+			),
+		).toMatchObject({ event: "desktop.event" });
+	});
 });
 
 describe("LocalToolClient", () => {
@@ -156,6 +245,58 @@ describe("LocalToolClient", () => {
 		await client.stop();
 	});
 
+	test("pulls, commits, and proactively routes durable desktop events", async () => {
+		const event = desktopEvent();
+		const child = new FakeChild((line, process) => {
+			const request = JSON.parse(line) as {
+				id: string;
+				method: string;
+				params: Record<string, unknown>;
+			};
+			if (request.method === "event.query") {
+				process.respond({
+					id: request.id,
+					ok: true,
+					result: { events: [event], nextCursor: event.cursor, hasMore: false },
+				});
+				return;
+			}
+			if (request.method === "event.commit") {
+				process.respond({
+					id: request.id,
+					ok: true,
+					result: {
+						consumerId: request.params.consumerId,
+						cursor: request.params.cursor,
+						advanced: true,
+					},
+				});
+			}
+		});
+		const client = new LocalToolClient("fake", { spawn: () => child });
+		const pushed: DesktopEventV1[] = [];
+		client.onDesktopEvent((value) => pushed.push(value));
+		await client.start();
+		child.respond({ event: "desktop.event", data: event });
+		await Bun.sleep(0);
+		expect(pushed).toEqual([event]);
+		await expect(
+			client.queryEvents({ consumerId: "reflection-runtime", limit: 100 }),
+		).resolves.toEqual({
+			events: [event],
+			nextCursor: event.cursor,
+			hasMore: false,
+		});
+		await expect(
+			client.commitEventCursor("reflection-runtime", event.cursor),
+		).resolves.toEqual({
+			consumerId: "reflection-runtime",
+			cursor: event.cursor,
+			advanced: true,
+		});
+		await client.stop();
+	});
+
 	test("times out a tool call and sends a best-effort cancellation", async () => {
 		const methods: string[] = [];
 		const child = new FakeChild((line) => {
@@ -194,3 +335,20 @@ describe("LocalToolClient", () => {
 		expect(client.isRunning).toBe(false);
 	});
 });
+
+function desktopEvent(): DesktopEventV1 {
+	return {
+		schemaVersion: "desktop-event.v1",
+		eventId: "event-1",
+		cursor: "ec1_0000000000000001",
+		deviceId: "device-1",
+		sessionId: "session-1",
+		kind: "application.foregroundChanged",
+		source: "activity.sensor",
+		occurredAtMs: 1_000,
+		observedAtMs: 1_001,
+		goalVersion: null,
+		sensitivity: "metadata",
+		payload: { appId: "com.microsoft.VSCode", appName: "Visual Studio Code" },
+	};
+}

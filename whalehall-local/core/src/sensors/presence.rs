@@ -15,10 +15,14 @@ use directories::ProjectDirs;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
+use whalehall_local_protocol::{DesktopEventSensitivity, desktop_event_kinds};
+
+use crate::events::{DesktopEventDraft, EventJournal, EventJournalError};
 
 pub const DEFAULT_PRESENCE_POLL_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_AFK_THRESHOLD_MS: u64 = 5 * 60 * 1_000;
@@ -36,6 +40,8 @@ pub enum PresenceError {
     Sqlite(#[from] rusqlite::Error),
     #[error("presence sensor collection error: {0}")]
     Collection(String),
+    #[error("presence event publication failed: {0}")]
+    EventJournal(#[from] EventJournalError),
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +263,14 @@ impl PresenceService {
         config: PresenceConfig,
         provider: Arc<dyn PresenceProvider>,
     ) -> Result<Self, PresenceError> {
+        Self::start_with_event_journal(config, provider, None)
+    }
+
+    pub fn start_with_event_journal(
+        config: PresenceConfig,
+        provider: Arc<dyn PresenceProvider>,
+        event_journal: Option<EventJournal>,
+    ) -> Result<Self, PresenceError> {
         let store = PresenceStore::open(&config.database_path)?;
         let persisted = store.load_state()?.unwrap_or_default();
         let status = PresenceStatus {
@@ -296,7 +310,12 @@ impl PresenceService {
             cancellation: CancellationToken::new(),
             task: Mutex::new(None),
         });
-        let task = tokio::spawn(run_presence_monitor(inner.clone(), provider, tracker));
+        let task = tokio::spawn(run_presence_monitor(
+            inner.clone(),
+            provider,
+            tracker,
+            event_journal,
+        ));
         *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
         Ok(Self { inner })
     }
@@ -338,6 +357,7 @@ async fn run_presence_monitor(
     inner: Arc<PresenceInner>,
     provider: Arc<dyn PresenceProvider>,
     mut tracker: PresenceTracker,
+    event_journal: Option<EventJournal>,
 ) {
     let mut ticker = interval(inner.config.poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -377,17 +397,66 @@ async fn run_presence_monitor(
                             update_error_status(&inner, error.to_string());
                             continue;
                         }
+                        let publication_error = event_journal
+                            .as_ref()
+                            .and_then(|journal| {
+                                publish_presence_events(journal, &events, observed_at_ms).err()
+                            });
                         update_observation_status(
                             &inner,
                             &tracker.persisted,
                             observation,
                         );
+                        if let Some(error) = publication_error {
+                            update_error_status(&inner, error.to_string());
+                        }
                     }
                     Err(error) => update_error_status(&inner, error.to_string()),
                 }
             }
         }
     }
+}
+
+fn publish_presence_events(
+    event_journal: &EventJournal,
+    events: &[PendingPresenceEvent],
+    observed_at_ms: i64,
+) -> Result<(), PresenceError> {
+    for event in events {
+        let kind = match event.event_type {
+            PresenceEventKind::AfkStarted => desktop_event_kinds::PRESENCE_AFK_STARTED,
+            PresenceEventKind::AfkEnded => desktop_event_kinds::PRESENCE_AFK_ENDED,
+            PresenceEventKind::ScreenLocked => desktop_event_kinds::PRESENCE_LOCKED,
+            PresenceEventKind::ScreenUnlocked => desktop_event_kinds::PRESENCE_UNLOCKED,
+            PresenceEventKind::SleepStarted => desktop_event_kinds::PRESENCE_SLEEP,
+            PresenceEventKind::WokeUp => desktop_event_kinds::PRESENCE_WAKE,
+        };
+        let payload = match event.event_type {
+            PresenceEventKind::AfkStarted | PresenceEventKind::AfkEnded => {
+                json!({ "idleForMs": event.idle_for_ms.unwrap_or_default() })
+            }
+            PresenceEventKind::ScreenLocked
+            | PresenceEventKind::ScreenUnlocked
+            | PresenceEventKind::SleepStarted
+            | PresenceEventKind::WokeUp => json!({}),
+        };
+        event_journal.append(DesktopEventDraft {
+            kind: kind.to_owned(),
+            source: "presence.sensor".to_owned(),
+            occurred_at_ms: event.occurred_at_ms,
+            observed_at_ms: observed_at_ms.max(event.occurred_at_ms),
+            goal_version: None,
+            sensitivity: DesktopEventSensitivity::Metadata,
+            payload,
+            deduplication_key: format!(
+                "presence:{}:{}",
+                event.event_type.as_database_value(),
+                event.occurred_at_ms,
+            ),
+        })?;
+    }
+    Ok(())
 }
 
 fn update_observation_status(
@@ -455,6 +524,7 @@ struct PersistedPresenceState {
 struct PendingPresenceEvent {
     event_type: PresenceEventKind,
     occurred_at_ms: i64,
+    idle_for_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -480,10 +550,12 @@ impl PresenceTracker {
                 events.push(PendingPresenceEvent {
                     event_type: PresenceEventKind::SleepStarted,
                     occurred_at_ms: sleep_at_ms,
+                    idle_for_ms: None,
                 });
                 events.push(PendingPresenceEvent {
                     event_type: PresenceEventKind::WokeUp,
                     occurred_at_ms: observed_at_ms,
+                    idle_for_ms: None,
                 });
                 self.persisted.last_sleep_at_ms = Some(sleep_at_ms);
                 self.persisted.last_wake_at_ms = Some(observed_at_ms);
@@ -510,6 +582,11 @@ impl PresenceTracker {
                 events.push(PendingPresenceEvent {
                     event_type,
                     occurred_at_ms,
+                    idle_for_ms: Some(if now_afk {
+                        duration_ms_u64(config.afk_threshold)
+                    } else {
+                        self.persisted.idle_duration_ms.unwrap_or_default()
+                    }),
                 });
                 self.persisted.is_afk = now_afk;
                 self.persisted.afk_since_ms = now_afk.then_some(occurred_at_ms);
@@ -529,6 +606,7 @@ impl PresenceTracker {
                         PresenceEventKind::ScreenUnlocked
                     },
                     occurred_at_ms: observed_at_ms,
+                    idle_for_ms: None,
                 });
             }
             self.persisted.is_locked = Some(locked);
@@ -1103,6 +1181,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use tempfile::TempDir;
+    use whalehall_local_protocol::EventQueryParams;
 
     use super::*;
 
@@ -1151,6 +1230,7 @@ mod tests {
         assert_eq!(afk.len(), 1);
         assert_eq!(afk[0].event_type, PresenceEventKind::AfkStarted);
         assert_eq!(afk[0].occurred_at_ms, 14_000);
+        assert_eq!(afk[0].idle_for_ms, Some(5_000));
         store
             .record_sample(&tracker.persisted, &afk, 15_000)
             .expect("persist AFK transition");
@@ -1171,6 +1251,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![PresenceEventKind::AfkEnded, PresenceEventKind::ScreenLocked]
         );
+        assert_eq!(returned_and_locked[0].idle_for_ms, Some(6_000));
+        assert_eq!(returned_and_locked[1].idle_for_ms, None);
         store
             .record_sample(&tracker.persisted, &returned_and_locked, 16_000)
             .expect("persist return and lock transitions");
@@ -1216,6 +1298,50 @@ mod tests {
     }
 
     #[test]
+    fn publishes_presence_boundaries_to_the_desktop_event_journal() {
+        let directory = tempfile::tempdir().expect("create presence event directory");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let pending = [
+            PendingPresenceEvent {
+                event_type: PresenceEventKind::AfkStarted,
+                occurred_at_ms: 10_000,
+                idle_for_ms: Some(300_000),
+            },
+            PendingPresenceEvent {
+                event_type: PresenceEventKind::ScreenLocked,
+                occurred_at_ms: 11_000,
+                idle_for_ms: None,
+            },
+            PendingPresenceEvent {
+                event_type: PresenceEventKind::WokeUp,
+                occurred_at_ms: 12_000,
+                idle_for_ms: None,
+            },
+        ];
+        publish_presence_events(&journal, &pending, 12_500).unwrap();
+
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind, desktop_event_kinds::PRESENCE_AFK_STARTED);
+        assert_eq!(events[0].payload, json!({ "idleForMs": 300_000 }));
+        assert_eq!(events[1].kind, desktop_event_kinds::PRESENCE_LOCKED);
+        assert_eq!(events[1].payload, json!({}));
+        assert_eq!(events[2].kind, desktop_event_kinds::PRESENCE_WAKE);
+        assert_eq!(events[2].payload, json!({}));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.payload.get("eventType").is_none())
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.contributes_to_reflection_count())
+        );
+    }
+
+    #[test]
     fn filters_events_and_rejects_invalid_ranges() {
         let directory = tempfile::tempdir().expect("create presence test directory");
         let store = PresenceStore::open(directory.path().join("presence.sqlite3"))
@@ -1231,10 +1357,12 @@ mod tests {
                     PendingPresenceEvent {
                         event_type: PresenceEventKind::ScreenLocked,
                         occurred_at_ms: 10,
+                        idle_for_ms: None,
                     },
                     PendingPresenceEvent {
                         event_type: PresenceEventKind::ScreenUnlocked,
                         occurred_at_ms: 20,
+                        idle_for_ms: None,
                     },
                 ],
                 20,

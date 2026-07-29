@@ -2,9 +2,14 @@ import {
 	LOCAL_CONTROL_TIMEOUT_MS,
 	LOCAL_TOOL_TIMEOUT_MS,
 	MAX_JSONL_LINE_BYTES,
+	isDesktopEvent,
 	isLocalToolDescriptor,
 	isRecord,
 	parseLocalMessage,
+	type LocalDesktopEventFrame,
+	type LocalEventCommitResult,
+	type LocalEventQuery,
+	type LocalEventQueryResult,
 	type LocalMessage,
 	type LocalMethod,
 	type LocalRequest,
@@ -61,8 +66,11 @@ export interface LocalToolProcess {
 	listTools(): Promise<LocalToolDescriptor[]>;
 	callTool(call: LocalToolCall): Promise<LocalToolCallResult>;
 	cancelTool(callId: string): Promise<LocalToolCancelResult>;
+	queryEvents(query: LocalEventQuery): Promise<LocalEventQueryResult>;
+	commitEventCursor(consumerId: string, cursor: string): Promise<LocalEventCommitResult>;
 	stop(): Promise<void>;
 	onEvent(listener: (event: LocalToolEvent) => void): () => void;
+	onDesktopEvent(listener: (event: LocalDesktopEventFrame["data"]) => void): () => void;
 	onFailure(listener: (error: LocalClientError) => void): () => void;
 }
 
@@ -77,9 +85,14 @@ function spawnLocal(
 	binaryPath: string,
 	environment: Readonly<Record<string, string>> = {},
 ): ChildTransport {
+	const inheritedEnvironment = { ...process.env };
+	// The Rust sensor process never calls the model endpoint. Keep bearer
+	// credentials in the Bun host that owns inference instead of widening
+	// their process exposure.
+	delete inheritedEnvironment.WHALEHALL_MODERNBERT_TOKEN;
 	return Bun.spawn({
 		cmd: [binaryPath],
-		env: { ...process.env, ...environment },
+		env: { ...inheritedEnvironment, ...environment },
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -90,6 +103,9 @@ export class LocalToolClient implements LocalToolProcess {
 	private child: ChildTransport | null = null;
 	private readonly pending = new Map<string, PendingRequest>();
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
+	private readonly desktopEventListeners = new Set<
+		(event: LocalDesktopEventFrame["data"]) => void
+	>();
 	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
 	private stopping = false;
 
@@ -182,6 +198,42 @@ export class LocalToolClient implements LocalToolProcess {
 		return result as LocalToolCancelResult;
 	}
 
+	async queryEvents(query: LocalEventQuery): Promise<LocalEventQueryResult> {
+		if (query.afterCursor !== undefined && query.consumerId !== undefined) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"event.query accepts afterCursor or consumerId, not both.",
+			);
+		}
+		const result = await this.request<unknown>("event.query", query);
+		if (
+			!isRecord(result) ||
+			!Array.isArray(result.events) ||
+			!result.events.every(isDesktopEvent) ||
+			(result.nextCursor !== null && typeof result.nextCursor !== "string") ||
+			typeof result.hasMore !== "boolean"
+		) {
+			throw this.protocolFailure("event.query returned an invalid result.");
+		}
+		return result as LocalEventQueryResult;
+	}
+
+	async commitEventCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalEventCommitResult> {
+		const result = await this.request<unknown>("event.commit", { consumerId, cursor });
+		if (
+			!isRecord(result) ||
+			result.consumerId !== consumerId ||
+			result.cursor !== cursor ||
+			typeof result.advanced !== "boolean"
+		) {
+			throw this.protocolFailure("event.commit returned an invalid result.");
+		}
+		return result as LocalEventCommitResult;
+	}
+
 	async stop(): Promise<void> {
 		this.stopping = true;
 		const child = this.child;
@@ -194,6 +246,13 @@ export class LocalToolClient implements LocalToolProcess {
 	onEvent(listener: (event: LocalToolEvent) => void): () => void {
 		this.eventListeners.add(listener);
 		return () => this.eventListeners.delete(listener);
+	}
+
+	onDesktopEvent(
+		listener: (event: LocalDesktopEventFrame["data"]) => void,
+	): () => void {
+		this.desktopEventListeners.add(listener);
+		return () => this.desktopEventListeners.delete(listener);
 	}
 
 	onFailure(listener: (error: LocalClientError) => void): () => void {
@@ -301,6 +360,10 @@ export class LocalToolClient implements LocalToolProcess {
 	private handleLine(child: ChildTransport, line: string): void {
 		if (child !== this.child) return;
 		const message = parseLocalMessage(line);
+		if (isDesktopEventFrame(message)) {
+			for (const listener of this.desktopEventListeners) listener(message.data);
+			return;
+		}
 		if (isToolEvent(message)) {
 			for (const listener of this.eventListeners) listener(message);
 			return;
@@ -443,7 +506,11 @@ export class JsonlParser {
 }
 
 function isToolEvent(message: LocalMessage): message is LocalToolEvent {
-	return "event" in message;
+	return "event" in message && message.event !== "desktop.event";
+}
+
+function isDesktopEventFrame(message: LocalMessage): message is LocalDesktopEventFrame {
+	return "event" in message && message.event === "desktop.event";
 }
 
 function errorMessage(error: unknown): string {

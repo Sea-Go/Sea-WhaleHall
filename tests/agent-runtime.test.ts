@@ -5,6 +5,9 @@ import {
 	type LocalToolProcess,
 } from "../src/agent/local-tool-client";
 import type {
+	LocalEventCommitResult,
+	LocalEventQuery,
+	LocalEventQueryResult,
 	LocalRuntimeHealth,
 	LocalToolCall,
 	LocalToolCallResult,
@@ -12,6 +15,7 @@ import type {
 	LocalToolDescriptor,
 	LocalToolEvent,
 } from "../src/agent/local-protocol";
+import type { DesktopEventV1 } from "../src/agent/reflection/types";
 
 class FakeLocalProcess implements LocalToolProcess {
 	pid: number | null = null;
@@ -19,6 +23,7 @@ class FakeLocalProcess implements LocalToolProcess {
 	startError: Error | null = null;
 	startCount = 0;
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
+	private readonly desktopEventListeners = new Set<(event: DesktopEventV1) => void>();
 	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
 
 	async start(): Promise<void> {
@@ -60,6 +65,17 @@ class FakeLocalProcess implements LocalToolProcess {
 		return { callId, cancelled: true };
 	}
 
+	async queryEvents(_query: LocalEventQuery): Promise<LocalEventQueryResult> {
+		return { events: [], nextCursor: null, hasMore: false };
+	}
+
+	async commitEventCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalEventCommitResult> {
+		return { consumerId, cursor, advanced: true };
+	}
+
 	async stop(): Promise<void> {
 		this.pid = null;
 		this.isRunning = false;
@@ -70,6 +86,11 @@ class FakeLocalProcess implements LocalToolProcess {
 		return () => this.eventListeners.delete(listener);
 	}
 
+	onDesktopEvent(listener: (event: DesktopEventV1) => void): () => void {
+		this.desktopEventListeners.add(listener);
+		return () => this.desktopEventListeners.delete(listener);
+	}
+
 	onFailure(listener: (error: LocalClientError) => void): () => void {
 		this.failureListeners.add(listener);
 		return () => this.failureListeners.delete(listener);
@@ -77,6 +98,10 @@ class FakeLocalProcess implements LocalToolProcess {
 
 	emit(event: LocalToolEvent): void {
 		for (const listener of this.eventListeners) listener(event);
+	}
+
+	emitDesktop(event: DesktopEventV1): void {
+		for (const listener of this.desktopEventListeners) listener(event);
 	}
 
 	fail(error: LocalClientError): void {
@@ -143,4 +168,41 @@ describe("AgentRuntime", () => {
 			lastError: "local process exited",
 		});
 	});
+
+	test("forwards proactive desktop events independently from tool lifecycle events", async () => {
+		const local = new FakeLocalProcess();
+		const runtime = new AgentRuntime(local);
+		const received: DesktopEventV1[] = [];
+		runtime.onDesktopEvent((event) => received.push(event));
+		await runtime.start();
+		local.emitDesktop(desktopEvent());
+		expect(received.map((event) => event.kind)).toEqual([
+			"input.activityAggregated",
+		]);
+		expect(runtime.getLocalStatus().activeCalls).toBe(0);
+	});
 });
+
+function desktopEvent(): DesktopEventV1 {
+	return {
+		schemaVersion: "desktop-event.v1",
+		eventId: "event-1",
+		cursor: "ec1_0000000000000001",
+		deviceId: "device-1",
+		sessionId: "session-1",
+		kind: "input.activityAggregated",
+		source: "input.sensor",
+		occurredAtMs: 1_000,
+		observedAtMs: 1_001,
+		goalVersion: null,
+		sensitivity: "metadata",
+		payload: {
+			bucketStartedAtMs: 995,
+			bucketEndedAtMs: 1_000,
+			keyCount: 3,
+			clickCount: 1,
+			scrollDelta: 0,
+			mouseDistance: 0,
+		},
+	};
+}

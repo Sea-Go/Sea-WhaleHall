@@ -51,6 +51,8 @@ pub enum AccessibilityError {
 pub struct AccessibilityConfig {
     pub database_path: PathBuf,
     pub bridge_path: PathBuf,
+    pub monitoring_enabled: bool,
+    pub content_monitoring_enabled: bool,
     pub poll_interval: Duration,
     pub bridge_max_age: Duration,
     pub max_nodes: usize,
@@ -79,6 +81,14 @@ impl AccessibilityConfig {
         Ok(Self {
             database_path: data_dir.join("accessibility.sqlite3"),
             bridge_path,
+            monitoring_enabled: bool_from_environment(
+                "WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED",
+                false,
+            )?,
+            content_monitoring_enabled: bool_from_environment(
+                "WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
+                false,
+            )?,
             poll_interval: duration_from_environment(
                 "WHALEHALL_ACCESSIBILITY_POLL_MS",
                 DEFAULT_ACCESSIBILITY_POLL_INTERVAL_MS,
@@ -121,6 +131,7 @@ impl AccessibilityConfig {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AccessibilitySensorState {
+    Disabled,
     Starting,
     Running,
     Degraded,
@@ -220,6 +231,9 @@ impl AccessibilityObservation {
                 node.protected = true;
                 node.value = None;
                 node.document_text = None;
+            } else if !config.content_monitoring_enabled {
+                node.value = None;
+                node.document_text = None;
             }
         }
         self.warnings = self
@@ -232,8 +246,9 @@ impl AccessibilityObservation {
             self.capabilities.tree = true;
             self.capabilities.focused_control |= self.nodes.iter().any(|node| node.focused);
             self.capabilities.selection |= self.nodes.iter().any(|node| node.selected.is_some());
-            self.capabilities.document_text |=
-                self.nodes.iter().any(|node| node.document_text.is_some());
+            self.capabilities.document_text = config.content_monitoring_enabled
+                && (self.capabilities.document_text
+                    || self.nodes.iter().any(|node| node.document_text.is_some()));
         }
     }
 
@@ -350,6 +365,8 @@ pub struct AccessibilityStatus {
     pub state: AccessibilitySensorState,
     pub database_path: String,
     pub bridge_path: String,
+    pub monitoring_enabled: bool,
+    pub content_monitoring_enabled: bool,
     pub poll_interval_ms: u64,
     pub bridge_max_age_ms: u64,
     pub max_nodes: usize,
@@ -418,11 +435,26 @@ impl AccessibilityService {
     ) -> Result<Self, AccessibilityError> {
         let store = AccessibilityStore::open(&config.database_path)?;
         let snapshot_count = store.snapshot_count()?;
+        let content_monitoring_enabled =
+            config.monitoring_enabled && config.content_monitoring_enabled;
+        let mut warnings = Vec::new();
+        if config.content_monitoring_enabled && !config.monitoring_enabled {
+            warnings.push(
+                "accessibility content monitoring is ignored until accessibility monitoring is enabled"
+                    .to_owned(),
+            );
+        }
         let inner = Arc::new(AccessibilityInner {
             status: Mutex::new(AccessibilityStatus {
-                state: AccessibilitySensorState::Starting,
+                state: if config.monitoring_enabled {
+                    AccessibilitySensorState::Starting
+                } else {
+                    AccessibilitySensorState::Disabled
+                },
                 database_path: config.database_path.to_string_lossy().into_owned(),
                 bridge_path: config.bridge_path.to_string_lossy().into_owned(),
+                monitoring_enabled: config.monitoring_enabled,
+                content_monitoring_enabled,
                 poll_interval_ms: config.poll_interval.as_millis() as u64,
                 bridge_max_age_ms: config.bridge_max_age.as_millis() as u64,
                 max_nodes: config.max_nodes,
@@ -437,7 +469,7 @@ impl AccessibilityService {
                 snapshot_count,
                 current_control: None,
                 capabilities: AccessibilityCapabilities::default(),
-                warnings: Vec::new(),
+                warnings,
                 last_error: None,
             }),
             config,
@@ -445,8 +477,10 @@ impl AccessibilityService {
             cancellation: CancellationToken::new(),
             task: Mutex::new(None),
         });
-        let task = tokio::spawn(run_accessibility_monitor(inner.clone(), provider));
-        *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
+        if inner.config.monitoring_enabled {
+            let task = tokio::spawn(run_accessibility_monitor(inner.clone(), provider));
+            *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
+        }
         Ok(Self { inner })
     }
 
@@ -957,6 +991,22 @@ fn non_empty_option(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+fn bool_from_environment(name: &str, default: bool) -> Result<bool, AccessibilityError> {
+    match env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(AccessibilityError::Configuration(format!(
+                "{name} must be one of true, false, 1, 0, yes, no, on, or off"
+            ))),
+        },
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => Err(AccessibilityError::Configuration(format!(
+            "{name} must be valid Unicode"
+        ))),
+    }
+}
+
 fn duration_from_environment(
     name: &str,
     default_ms: u64,
@@ -1037,13 +1087,14 @@ const root = windows.length > 0 ? windows[0] : process;
 const nodes = [];
 const maxNodes = Number($.getenv("WHALEHALL_ACCESSIBILITY_MAX_NODES") || "300");
 const textLimit = Number($.getenv("WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT") || "4096");
+const captureContent = String($.getenv("WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED") || "false").toLowerCase() === "true";
 function visit(element, parentId, depth) {
   if (nodes.length >= maxNodes) return;
   const id = "node-" + nodes.length;
   const role = String(safe(() => element.role(), "unknown"));
   const subrole = String(safe(() => element.subrole(), ""));
   const protectedInput = /password|secure/i.test(role + " " + subrole);
-  let value = protectedInput ? null : safe(() => element.value(), null);
+  let value = (!captureContent || protectedInput) ? null : safe(() => element.value(), null);
   if (value !== null && typeof value !== "string") value = String(value);
   if (value !== null) value = value.slice(0, 4096);
   const documentRole = /document|text area|AXTextArea|AXDocument/i.test(role + " " + subrole);
@@ -1057,7 +1108,7 @@ function visit(element, parentId, depth) {
     selected: safe(() => Boolean(element.selected()), null),
     focused: Boolean(safe(() => element.focused(), false)),
     enabled: safe(() => Boolean(element.enabled()), null),
-    documentText: (!protectedInput && documentRole && value !== null) ? value.slice(0, textLimit) : null,
+    documentText: (captureContent && !protectedInput && documentRole && value !== null) ? value.slice(0, textLimit) : null,
     protected: protectedInput
   });
   const children = safe(() => element.uiElements(), []);
@@ -1069,7 +1120,7 @@ JSON.stringify({
   applicationName: String(safe(() => process.name(), "")),
   processId: Number(safe(() => process.unixId(), 0)) || null,
   windowTitle: windows.length > 0 ? String(safe(() => windows[0].name(), "")) : "",
-  capabilities: {tree: true, focusedControl: nodes.some(n => n.focused), selection: true, documentText: true},
+  capabilities: {tree: true, focusedControl: nodes.some(n => n.focused), selection: true, documentText: captureContent},
   nodes: nodes,
   warnings: nodes.length >= maxNodes ? ["accessibility tree was truncated at the configured node limit"] : []
 });
@@ -1088,6 +1139,10 @@ JSON.stringify({
             .env(
                 "WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT",
                 config.document_text_limit.to_string(),
+            )
+            .env(
+                "WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
+                config.content_monitoring_enabled.to_string(),
             );
         command_observation(command, "macOS")
     }
@@ -1118,6 +1173,7 @@ $textLimitValue = $env:WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT
 if ([string]::IsNullOrWhiteSpace($textLimitValue)) { $textLimitValue = "4096" }
 $script:maxNodes = [int]$maxNodesValue
 $script:textLimit = [int]$textLimitValue
+$script:captureContent = $env:WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED -eq "true"
 function Visit-Element($element, $parentId, [int]$depth) {
   if ($script:nodes.Count -ge $script:maxNodes) { return }
   $id = "node-$($script:nodes.Count)"
@@ -1125,7 +1181,7 @@ function Visit-Element($element, $parentId, [int]$depth) {
   $role = $current.ControlType.ProgrammaticName -replace "^ControlType\\.", ""
   $protectedInput = $current.IsPassword -or $role -match "Password|Secure"
   $value = $null
-  if (-not $protectedInput) {
+  if ($script:captureContent -and -not $protectedInput) {
     try {
       $pattern = $null
       if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
@@ -1141,7 +1197,7 @@ function Visit-Element($element, $parentId, [int]$depth) {
     }
   } catch {}
   $documentText = $null
-  if (-not $protectedInput -and $role -match "Document|Edit") {
+  if ($script:captureContent -and -not $protectedInput -and $role -match "Document|Edit") {
     try {
       $textPattern = $null
       if ($element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
@@ -1183,7 +1239,7 @@ $applicationName = try { (Get-Process -Id $processId).ProcessName } catch { "" }
     tree = $true
     focusedControl = [bool]($script:nodes | Where-Object focused | Select-Object -First 1)
     selection = $true
-    documentText = $true
+    documentText = [bool]$script:captureContent
   }
   nodes = $script:nodes
   warnings = @($(if ($script:nodes.Count -ge $script:maxNodes) { "accessibility tree was truncated at the configured node limit" }))
@@ -1204,6 +1260,10 @@ $applicationName = try { (Get-Process -Id $processId).ProcessName } catch { "" }
             .env(
                 "WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT",
                 config.document_text_limit.to_string(),
+            )
+            .env(
+                "WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
+                config.content_monitoring_enabled.to_string(),
             );
         command_observation(command, "Windows")
     }
@@ -1218,6 +1278,7 @@ import json, os
 import pyatspi
 max_nodes = int(os.environ.get("WHALEHALL_ACCESSIBILITY_MAX_NODES", "300"))
 text_limit = int(os.environ.get("WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT", "4096"))
+capture_content = os.environ.get("WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED", "false").lower() == "true"
 desktop = pyatspi.Registry.getDesktop(0)
 active_app = None
 for app in desktop:
@@ -1249,7 +1310,7 @@ def visit(element, parent_id, depth):
     protected = "password" in role.lower()
     value = None
     document_text = None
-    if not protected and any(token in role.lower() for token in ("text", "document", "entry")):
+    if capture_content and not protected and any(token in role.lower() for token in ("text", "document", "entry")):
         try:
             text = element.queryText()
             value = text.getText(0, min(text.characterCount, text_limit))
@@ -1286,7 +1347,7 @@ print(json.dumps({
         "tree": True,
         "focusedControl": any(node["focused"] for node in nodes),
         "selection": True,
-        "documentText": True,
+        "documentText": capture_content,
     },
     "nodes": nodes,
     "warnings": ["accessibility tree was truncated at the configured node limit"] if len(nodes) >= max_nodes else [],
@@ -1306,6 +1367,10 @@ print(json.dumps({
             .env(
                 "WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT",
                 config.document_text_limit.to_string(),
+            )
+            .env(
+                "WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
+                config.content_monitoring_enabled.to_string(),
             );
         command_observation(command, "Linux AT-SPI")
     }
@@ -1393,6 +1458,8 @@ mod tests {
         AccessibilityConfig {
             database_path: directory.path().join("accessibility.sqlite3"),
             bridge_path: directory.path().join("accessibility-current-tree.json"),
+            monitoring_enabled: true,
+            content_monitoring_enabled: true,
             poll_interval: Duration::from_millis(20),
             bridge_max_age: Duration::from_secs(60),
             max_nodes: 100,
@@ -1502,6 +1569,64 @@ mod tests {
             Some("textBox")
         );
         assert!(service.database_path().exists());
+        service.shutdown().await;
+    }
+
+    #[test]
+    fn metadata_only_accessibility_storage_removes_values_and_document_text() {
+        let directory = tempfile::tempdir().expect("create accessibility privacy directory");
+        let mut config = test_config(&directory);
+        config.content_monitoring_enabled = false;
+        let store =
+            AccessibilityStore::open(&config.database_path).expect("open accessibility store");
+        let mut observation = sample_observation();
+        observation.sanitize(&config);
+        store
+            .record_snapshot(&observation, 2_000, config.retention)
+            .expect("record metadata-only snapshot");
+
+        let result = store
+            .query_tree(&AccessibilityTreeQuery {
+                include_values: true,
+                include_document_text: true,
+                ..AccessibilityTreeQuery::default()
+            })
+            .expect("query stored metadata");
+        assert!(result.nodes.iter().all(|node| node.value.is_none()));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .all(|node| node.document_text.is_none())
+        );
+        assert!(!observation.capabilities.document_text);
+    }
+
+    #[tokio::test]
+    async fn disabled_accessibility_service_never_calls_resident_provider() {
+        let directory = tempfile::tempdir().expect("create accessibility disabled directory");
+        let mut config = test_config(&directory);
+        config.monitoring_enabled = false;
+        config.content_monitoring_enabled = false;
+        let provider = Arc::new(FakeProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let service = AccessibilityService::start(config, provider.clone())
+            .expect("start disabled accessibility service");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let status = service.status();
+        assert_eq!(status.state, AccessibilitySensorState::Disabled);
+        assert!(!status.monitoring_enabled);
+        assert!(!status.content_monitoring_enabled);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            service
+                .tree(&AccessibilityTreeQuery::default())
+                .expect("query disabled history")
+                .snapshot
+                .is_none()
+        );
         service.shutdown().await;
     }
 

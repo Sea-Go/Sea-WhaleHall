@@ -45,6 +45,12 @@ The database uses WAL mode, normal synchronization, a five-second busy timeout, 
 
 SQLite stores event names in snake case and timestamps as Unix epoch milliseconds. Tool output serializes event names in camel case and includes both Unix milliseconds and RFC 3339 UTC strings.
 
+The resident production service also writes presence boundaries to
+EventJournal. `presence.afkStarted` carries the configured threshold as
+`idleForMs`; `presence.afkEnded` carries the last idle duration proven by the
+previous sample. Lock/unlock and sleep/wake payloads are empty objects. These
+events seal reflection windows but never contribute to the 64-event count.
+
 ## Rust and Agent APIs
 
 Rust callers construct `PresenceService` with `SystemPresenceProvider` or a custom `PresenceProvider`. The provider abstraction and deterministic transition function allow AFK, lock, and sleep behavior to be tested without changing the real workstation state.

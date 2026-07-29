@@ -61,11 +61,39 @@ At most 100,000 history and download rows per profile are imported on each refre
 
 `BrowserActivityService::start` opens and migrates SQLite, bounds tab sessions left open by an unclean shutdown, and starts two Tokio intervals:
 
+- `WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED`: fail-closed switch for publishing current-tab semantic events to `EventJournal`, default `false`;
+- `WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED`: independent content switch, default `false`; it has no effect unless event monitoring is also enabled;
 - `WHALEHALL_BROWSER_TAB_POLL_MS`: current-tab polling, default 1 second, range 50 milliseconds through 60 seconds;
 - `WHALEHALL_BROWSER_HISTORY_REFRESH_MS`: profile import, default 5 minutes, range 1 second through 24 hours;
 - `WHALEHALL_BROWSER_BRIDGE_MAX_AGE_MS`: bridge freshness, default 15 seconds, range 1 second through 5 minutes.
 
 `WHALEHALL_BROWSER_PROFILE_ROOT` restricts discovery to a supplied Chromium-style root. It exists for isolated tests, managed deployments, and embedders that know the exact profile root. When set, ordinary user browser directories are not scanned.
+
+Both switches are reported by `browser.status`. Enabling semantic events does
+not enable URL/title content. With event monitoring on and content monitoring
+off, `browser.tabOpened`, `browser.tabNavigated`, and `browser.tabClosed`
+contain only opaque deterministic `browserId` and `tabId` values and use
+metadata sensitivity. With both switches on, opened/navigation events also
+contain the observed `title` and full `url` and use content sensitivity; closed
+events remain metadata-only.
+
+Only a fresh bridge snapshot with non-empty, unique browser/window/tab
+identities is complete enough to drive semantic transitions. The macOS
+single-front-tab Apple Events fallback remains available for the existing
+status/session view, but cannot distinguish tab switching from navigation and
+therefore never publishes opened/navigation/closed semantic events.
+Unavailable, stale, incomplete, or failed observations do not imply closure;
+the next complete observation establishes a fresh baseline. The initial
+complete observation after startup is also a baseline rather than a set of
+invented tab-open events.
+
+Tab transitions and a transactional outbox are written in the same
+`browser.sqlite3` transaction. After commit, the outbox is delivered
+idempotently to `events.sqlite3`; a crash before or after EventJournal append
+therefore replays without duplicating the DesktopEvent.
+If event monitoring is disabled at restart, undelivered browser events are
+discarded. If only content monitoring is disabled, undelivered content events
+are discarded before any metadata event replay.
 
 ## SQLite schema
 
@@ -119,3 +147,9 @@ The same probe runs in hosted macOS, Windows, Ubuntu, every Linux distribution c
 Browser URLs, titles, search terms, download paths, and timestamps can reveal authentication tokens, private documents, health data, finances, and personal interests. The implementation keeps data local and does not expose a network server, but callers must treat `browser.read` as a high-impact permission.
 
 The sensor does not read page contents, cookies, passwords, form fields, typed keystrokes, or response bodies. Private/incognito profiles are not intentionally imported, but browser-specific profile layout and extensions can vary. Protected or incompatible profiles produce warnings and do not stop other supported profiles.
+
+The current bridge contract does not identify private/incognito tabs or redact
+URL credentials, query parameters, or fragments. For that reason content event
+monitoring is an explicit high-impact opt-in and must remain off unless the
+device owner understands that full URLs and titles will enter the local event
+journal.

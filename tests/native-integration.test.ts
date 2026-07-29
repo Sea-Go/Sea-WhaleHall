@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { LocalMessage } from "../src/agent/local-protocol";
@@ -19,6 +28,7 @@ type SensorCiProbe = {
 
 type SensorCiContext = {
 	dataDirectory: string;
+	vscodeBridgeRoot: string;
 	displayMode: "auto" | "degraded" | "required";
 	foregroundMode: "auto" | "degraded" | "required";
 	presenceMode: "auto" | "complete" | "degraded" | "idle";
@@ -26,6 +36,7 @@ type SensorCiContext = {
 
 const sensorCiContext: SensorCiContext = {
 	dataDirectory: "",
+	vscodeBridgeRoot: "",
 	displayMode: expectation("WHALEHALL_CI_DISPLAY_MODE", ["auto", "degraded", "required"]),
 	foregroundMode: expectation("WHALEHALL_CI_FOREGROUND_MODE", ["auto", "degraded", "required"]),
 	presenceMode: expectation("WHALEHALL_CI_PRESENCE_MODE", [
@@ -159,7 +170,7 @@ const sensorCiProbes: SensorCiProbe[] = [
 			expect(status.lastError).toBeNull();
 			expect(output).toMatchObject({
 				databasePath: join(context.dataDirectory, "applications.sqlite3"),
-				processPollIntervalMs: 50,
+				processPollIntervalMs: 5000,
 			});
 		},
 	},
@@ -305,6 +316,93 @@ const sensorCiProbes: SensorCiProbe[] = [
 		},
 	},
 	{
+		sourceFile: "input_activity.rs",
+		callId: "sensor-input-activity",
+		toolName: "input.status",
+		arguments: {},
+		verify: (output) => {
+			const status = output as {
+				state: string;
+				enabled: boolean;
+				authorized: boolean;
+				supported: boolean;
+				permissionGranted: boolean;
+				captureAvailable: boolean;
+				bucketDurationMs: number;
+				warnings: string[];
+			};
+			console.info(
+				[
+					`[sensor-ci] input state=${status.state}`,
+					`enabled=${status.enabled}`,
+					`authorized=${status.authorized}`,
+					`captureAvailable=${status.captureAvailable}`,
+				].join(" "),
+			);
+			expect(status.state).toBe("disabled");
+			expect(status.enabled).toBe(false);
+			expect(status.captureAvailable).toBe(false);
+			expect(status.bucketDurationMs).toBe(5000);
+			expect(typeof status.supported).toBe("boolean");
+			expect(typeof status.authorized).toBe("boolean");
+			expect(typeof status.permissionGranted).toBe("boolean");
+			expect(status.permissionGranted).toBe(status.authorized);
+			expect(status.warnings).toEqual(expect.any(Array));
+			if (process.platform !== "darwin") {
+				expect(status.supported).toBe(false);
+				expect(status.authorized).toBe(false);
+			}
+		},
+	},
+	{
+		sourceFile: "vscode_edit_bridge.rs",
+		callId: "sensor-editor",
+		toolName: "editor.status",
+		arguments: {},
+		verify: (output, context) => {
+			const status = output as {
+				state: string;
+				enabled: boolean;
+				bridgeRoot: string | null;
+				spoolDirectory: string | null;
+				databasePath: string;
+				pollIntervalMs: number;
+				pendingSegments: number;
+				rejectedSegments: number;
+				openBursts: number;
+				pendingBursts: number;
+				lastImportedAtMs: number | null;
+				lastPublishedAtMs: number | null;
+				warnings: string[];
+				lastError: string | null;
+			};
+			console.info(
+				[
+					`[sensor-ci] editor state=${status.state}`,
+					`enabled=${status.enabled}`,
+					`segments=${status.pendingSegments}`,
+					`bursts=${status.openBursts}/${status.pendingBursts}`,
+				].join(" "),
+			);
+			expect(status).toMatchObject({
+				state: "running",
+				enabled: true,
+				bridgeRoot: context.vscodeBridgeRoot,
+				spoolDirectory: join(context.vscodeBridgeRoot, ".whalehall-vscode-spool-v1"),
+				databasePath: join(context.dataDirectory, "editor-bridge", "editor.sqlite3"),
+				pollIntervalMs: 250,
+				pendingSegments: 0,
+				rejectedSegments: 0,
+				openBursts: 0,
+				pendingBursts: 0,
+				warnings: [],
+				lastError: null,
+			});
+			expect(typeof status.lastImportedAtMs).toBe("number");
+			expect(typeof status.lastPublishedAtMs).toBe("number");
+		},
+	},
+	{
 		sourceFile: "presence.rs",
 		callId: "sensor-presence",
 		toolName: "presence.status",
@@ -410,27 +508,45 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	const dataDirectory = mkdtempSync(join(tmpdir(), "whalehall-activity-integration-"));
 	const browserProfileRoot = createBrowserFixture(dataDirectory);
 	createAccessibilityFixture(dataDirectory);
-	const context = { ...sensorCiContext, dataDirectory };
+	const vscodeBridgeRoot = createVscodeBridgeFixtureRoot(dataDirectory);
+	const context = { ...sensorCiContext, dataDirectory, vscodeBridgeRoot };
+	const nativeEnvironment = { ...process.env };
 	const child = Bun.spawn({
 		cmd: [binary],
 		env: {
-			...process.env,
+			...nativeEnvironment,
 			WHALEHALL_DATA_DIR: dataDirectory,
 			WHALEHALL_ACTIVITY_POLL_MS: "50",
-			WHALEHALL_APPLICATION_POLL_MS: "50",
+			// One immediate scan is enough for this protocol probe. A 50ms
+			// process scan creates a feedback loop with short-lived macOS
+			// helper processes and can starve control responses behind
+			// processObservedBatch frames on busy developer machines.
+			WHALEHALL_APPLICATION_POLL_MS: "5000",
 			WHALEHALL_PRESENCE_POLL_MS: "50",
 			WHALEHALL_AFK_THRESHOLD_MS: "1000",
 			WHALEHALL_SUSPEND_GAP_THRESHOLD_MS: "1000",
 			WHALEHALL_BROWSER_PROFILE_ROOT: browserProfileRoot,
+			WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED: "true",
+			WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED: "true",
 			WHALEHALL_BROWSER_TAB_POLL_MS: "50",
 			WHALEHALL_BROWSER_HISTORY_REFRESH_MS: "1000",
 			WHALEHALL_BROWSER_BRIDGE_MAX_AGE_MS: "60000",
 			WHALEHALL_ACCESSIBILITY_POLL_MS: "50",
 			WHALEHALL_ACCESSIBILITY_BRIDGE_MAX_AGE_MS: "60000",
+			WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED: "true",
+			WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED: "true",
+			WHALEHALL_VSCODE_BRIDGE_DIRECTORY: vscodeBridgeRoot,
+			// Native CI must never inherit a developer shell opt-in and start a
+			// global event tap while exercising the protocol.
+			WHALEHALL_INPUT_MONITORING_ENABLED: "false",
 		},
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
+	});
+	const serverReady = deferred();
+	const stderrComplete = collectServerStderr(child.stderr, (line) => {
+		if (line.startsWith("editor bridge database:")) serverReady.resolve();
 	});
 	const messages: LocalMessage[] = [];
 	const queryCallIds = [
@@ -459,13 +575,28 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		if ("id" in message && typeof message.id === "string") {
 			sensorCompleted.get(message.id)?.resolve();
 		}
-		if ("event" in message && message.callId === "wait" && message.event === "tool.started") {
+		if (
+			"event" in message &&
+			message.event !== "desktop.event" &&
+			message.callId === "wait" &&
+			message.event === "tool.started"
+		) {
 			waitStarted.resolve();
 		}
-		if ("event" in message && message.callId === "progress" && message.event === "tool.progress") {
+		if (
+			"event" in message &&
+			message.event !== "desktop.event" &&
+			message.callId === "progress" &&
+			message.event === "tool.progress"
+		) {
 			progressObserved.resolve();
 		}
-		if ("event" in message && message.callId === "wait" && message.event === "tool.cancelled") {
+		if (
+			"event" in message &&
+			message.event !== "desktop.event" &&
+			message.callId === "wait" &&
+			message.event === "tool.cancelled"
+		) {
 			waitCancelled.resolve();
 		}
 		if ("id" in message && message.id === "progress") progressCompleted.resolve();
@@ -475,6 +606,8 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 			queryCompleted.get(message.id)?.resolve();
 		}
 	});
+	await withTimeout(serverReady.promise, "native server startup", 30_000);
+	publishVscodeEditFixture(vscodeBridgeRoot);
 	child.stdin.write('{"id":"list","method":"tool.list","params":{}}\n');
 	child.stdin.write(
 		'{"id":"system","method":"tool.call","params":{"name":"system.info","arguments":{}}}\n',
@@ -625,6 +758,35 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 				);
 			}
 		}
+		if (probe.sourceFile === "vscode_edit_bridge.rs") {
+			let readinessOutput: unknown;
+			let readinessReached = false;
+			for (let attempt = 0; attempt < 40; attempt += 1) {
+				const readinessCallId = `sensor-editor-readiness-${attempt}`;
+				const readinessCompleted = deferred();
+				sensorCompleted.set(readinessCallId, readinessCompleted);
+				child.stdin.write(
+					`${JSON.stringify({
+						id: readinessCallId,
+						method: "tool.call",
+						params: { name: probe.toolName, arguments: probe.arguments },
+					})}\n`,
+				);
+				await child.stdin.flush();
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
+				readinessOutput = successfulToolOutput(messages, readinessCallId);
+				if (editorSensorReady(readinessOutput)) {
+					readinessReached = true;
+					break;
+				}
+				await Bun.sleep(250);
+			}
+			if (!readinessReached) {
+				throw new Error(
+					`Editor sensor did not publish its native fixture: ${JSON.stringify(readinessOutput)}`,
+				);
+			}
+		}
 		child.stdin.write(
 			`${JSON.stringify({
 				id: probe.callId,
@@ -693,6 +855,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	child.stdin.end();
 
 	await outputComplete;
+	await stderrComplete;
 	const exitCode = await child.exited;
 	expect(exitCode).toBe(0);
 
@@ -715,6 +878,8 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		"browser.tabs",
 		"demo.wait",
 		"device.environment",
+		"editor.status",
+		"input.status",
 		"presence.events",
 		"presence.status",
 		"system.info",
@@ -910,13 +1075,36 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		ok: false,
 		error: { code: "CANCELLED" },
 	});
+	const editorEvent = messages.find(
+		(message) =>
+			"event" in message &&
+			message.event === "desktop.event" &&
+			message.data.kind === "editor.documentChanged",
+	);
+	expect(editorEvent).toMatchObject({
+		event: "desktop.event",
+		data: {
+			kind: "editor.documentChanged",
+			source: "vscode.extension",
+			sensitivity: "content",
+			payload: {
+				relativePath: "src/native-probe.ts",
+				language: "typescript",
+				insertedChars: 5,
+				deletedChars: 0,
+				text: "probe",
+				burstStartedAtMs: expect.any(Number),
+				burstEndedAtMs: expect.any(Number),
+			},
+		},
+	});
 	expect(existsSync(join(dataDirectory, "usage.sqlite3"))).toBe(true);
 	expect(existsSync(join(dataDirectory, "applications.sqlite3"))).toBe(true);
 	expect(existsSync(join(dataDirectory, "presence.sqlite3"))).toBe(true);
 	expect(existsSync(join(dataDirectory, "browser.sqlite3"))).toBe(true);
 	expect(existsSync(join(dataDirectory, "accessibility.sqlite3"))).toBe(true);
 	rmSync(dataDirectory, { recursive: true, force: true });
-}, 60_000);
+}, 120_000);
 
 function deferred() {
 	let resolve!: () => void;
@@ -1005,6 +1193,31 @@ function browserSensorReady(output: unknown): boolean {
 		status.capabilities.currentTabs &&
 		status.capabilities.history &&
 		status.capabilities.downloads
+	);
+}
+
+function editorSensorReady(output: unknown): boolean {
+	const status = output as {
+		state: string;
+		enabled: boolean;
+		pendingSegments: number;
+		rejectedSegments: number;
+		openBursts: number;
+		pendingBursts: number;
+		lastImportedAtMs: number | null;
+		lastPublishedAtMs: number | null;
+		lastError: string | null;
+	};
+	return (
+		status.state === "running" &&
+		status.enabled &&
+		status.pendingSegments === 0 &&
+		status.rejectedSegments === 0 &&
+		status.openBursts === 0 &&
+		status.pendingBursts === 0 &&
+		typeof status.lastImportedAtMs === "number" &&
+		typeof status.lastPublishedAtMs === "number" &&
+		status.lastError === null
 	);
 }
 
@@ -1102,6 +1315,49 @@ function createBrowserFixture(dataDirectory: string): string {
 		}),
 	);
 	return root;
+}
+
+function createVscodeBridgeFixtureRoot(dataDirectory: string): string {
+	const configuredRoot = join(dataDirectory, "ci-vscode-bridge");
+	const spool = join(configuredRoot, ".whalehall-vscode-spool-v1");
+	mkdirSync(spool, { recursive: true });
+	return realpathSync(configuredRoot);
+}
+
+function publishVscodeEditFixture(root: string): void {
+	const spool = join(root, ".whalehall-vscode-spool-v1");
+	const occurredAtMs = Date.now();
+	const record = {
+		schemaVersion: "whalehall-vscode-edit.v1",
+		eventId: "vse1_00000000000000000000000000000001",
+		kind: "editor.documentChanged",
+		source: "vscode.extension",
+		occurredAtMs,
+		observedAtMs: occurredAtMs,
+		sensitivity: "content",
+		payload: {
+			workspaceId: "wsp1_0123456789abcdef0123456789abcdef",
+			document: {
+				relativePath: "src/native-probe.ts",
+				languageId: "typescript",
+				version: 1,
+			},
+			changeCount: 1,
+			emittedChangeCount: 1,
+			changesTruncated: false,
+			changes: [
+				{
+					rangeOffset: 0,
+					deletedChars: 0,
+					insertedChars: 5,
+					insertedText: "probe",
+				},
+			],
+		},
+	};
+	const data = `${JSON.stringify(record)}\n`;
+	const digest = createHash("sha256").update(data).digest("hex").slice(0, 32);
+	writeFileSync(join(spool, `segment-${occurredAtMs}-${digest}.jsonl`), data);
 }
 
 function createAccessibilityFixture(dataDirectory: string): void {
@@ -1261,6 +1517,31 @@ async function collectMessages(
 					messages.push(message);
 					onMessage(message);
 				}
+				newline = buffer.indexOf("\n");
+			}
+		}
+	} finally {
+		reader.releaseLock();
+	}
+}
+
+async function collectServerStderr(
+	stream: ReadableStream<Uint8Array>,
+	onLine: (line: string) => void,
+): Promise<void> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			buffer += decoder.decode(value, { stream: true });
+			let newline = buffer.indexOf("\n");
+			while (newline >= 0) {
+				const line = buffer.slice(0, newline).trimEnd();
+				buffer = buffer.slice(newline + 1);
+				if (line) onLine(line);
 				newline = buffer.indexOf("\n");
 			}
 		}
