@@ -337,6 +337,30 @@ describe("ReflectionCollector boundaries and goal isolation", () => {
 		expect(window?.events.at(-1)?.kind).toBe("presence.afkEnded");
 	});
 
+	test("a late historical sleep boundary cannot close a newer wake window", async () => {
+		const { collector, repository } = createCollector({});
+		await collector.recover();
+		await collector.ingest(foregroundEvent(1, 10_000));
+		const lateSleep: DesktopEventForKind<"presence.sleep"> = {
+			...presenceBoundary(2, 5_000),
+			kind: "presence.sleep",
+			observedAtMs: 10_500,
+			payload: {},
+		};
+
+		expect(await collector.ingest(lateSleep)).toBeNull();
+		expect(collector.getSnapshot()).toMatchObject({
+			state: "ACTIVE_COLLECTING",
+			materializedCursor: "cursor-0002",
+			openWindow: {
+				startedAtMs: 10_000,
+				finalizedSemanticEventCount: 1,
+				events: [{ eventId: "event-1" }],
+			},
+		});
+		expect((await repository.getQueueStats()).pendingJobs).toBe(0);
+	});
+
 	test("goal change seals the old version and the next event starts a new version", async () => {
 		const firstGoal = goal(1);
 		const secondGoal = goal(2);

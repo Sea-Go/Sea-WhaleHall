@@ -357,6 +357,21 @@ export class ReflectionCollector {
 		}
 
 		if (isPresenceFlushBoundary(event)) {
+			// The native presence tracker can discover a sleep transition only
+			// after wake. EventJournal cursor order remains authoritative, so a
+			// historical boundary must not close an already-started wake window.
+			// Persist its receipt/cursor and leave current evidence untouched.
+			if (
+				snapshot.openWindow &&
+				event.occurredAtMs < snapshot.openWindow.startedAtMs
+			) {
+				await this.saveSnapshot({
+					...snapshot,
+					recentEventIds: this.withRecentEventId(snapshot, event.eventId),
+					materializedCursor: event.cursor,
+				});
+				return null;
+			}
 			return this.handlePresenceBoundary(event);
 		}
 

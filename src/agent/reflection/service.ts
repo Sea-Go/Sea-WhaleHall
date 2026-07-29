@@ -6,10 +6,6 @@ import type {
 	LocalEventQueryResult,
 } from "../local-protocol";
 import {
-	MonotonicEventIdentityFactory,
-	SemanticEventCoalescer,
-} from "./coalescer";
-import {
 	DEFAULT_MAX_WAIT_MS,
 	DEFAULT_SEMANTIC_EVENT_THRESHOLD,
 	ReflectionCollector,
@@ -116,7 +112,6 @@ export class DesktopReflectionService {
 		| undefined;
 	private readonly onError: (error: unknown) => void;
 	private readonly collector: ReflectionCollector;
-	private readonly coalescer: SemanticEventCoalescer;
 	private readonly jobs: ReflectionJobRunner;
 
 	private started = false;
@@ -172,9 +167,6 @@ export class DesktopReflectionService {
 			onBackgroundError: this.onError,
 			onDeadlineReady: (deadlineAtMs) => this.coordinateDeadline(deadlineAtMs),
 			onCountReady: (reachedAtMs) => this.coordinateCount(reachedAtMs),
-		});
-		this.coalescer = new SemanticEventCoalescer({
-			identityFactory: new MonotonicEventIdentityFactory("reflection"),
 		});
 		const committer = new TelemetryReflectionCommitter(
 			options.sinks ?? [],
@@ -393,14 +385,11 @@ export class DesktopReflectionService {
 		) {
 			event.goalVersion = activeGoalVersion;
 		}
-		const prepared = this.coalescer.prepareDesktopEvent(event);
-		for (const semanticEvent of prepared.events) {
-			await this.collector.ingest(semanticEvent);
-		}
-		// Repeat-suppression state advances only after collector persistence.
-		// If native cursor commit then fails, a replay may safely classify the
-		// event as duplicate because its semantic materialization is durable.
-		prepared.commit();
+		// EventJournal contains completed semantic events. Native sensors own
+		// aggregation and transition de-duplication, while the collector's
+		// durable recent-event receipts make replay after a cursor-commit crash
+		// deterministic across process restarts.
+		await this.collector.ingest(event);
 		await this.commitCursor(rawEvent.cursor);
 	}
 

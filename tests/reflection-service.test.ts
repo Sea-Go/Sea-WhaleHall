@@ -922,7 +922,7 @@ function reflectionFor(window: EventWindowV1): ReflectionV1 {
 		entropy: 0.2,
 		abstain: false,
 		evidenceEventIds: window.events.slice(0, 1).map((event) => event.eventId),
-		feedbackCode: "silent",
+		feedbackCode: window.goal ? "encourage" : "silent",
 		modelVersion: "test-model",
 		taxonomyVersion: "activity.v1",
 	};
