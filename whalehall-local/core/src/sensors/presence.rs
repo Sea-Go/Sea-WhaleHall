@@ -459,11 +459,15 @@ fn presence_event_draft(event: &PendingPresenceEvent, observed_at_ms: i64) -> De
         | PresenceEventKind::SleepStarted
         | PresenceEventKind::WokeUp => json!({}),
     };
+    let journal_occurred_at_ms = match event.event_type {
+        PresenceEventKind::SleepStarted | PresenceEventKind::WokeUp => observed_at_ms,
+        _ => event.occurred_at_ms,
+    };
     DesktopEventDraft {
         kind: kind.to_owned(),
         source: "presence.sensor".to_owned(),
-        occurred_at_ms: event.occurred_at_ms,
-        observed_at_ms: observed_at_ms.max(event.occurred_at_ms),
+        occurred_at_ms: journal_occurred_at_ms,
+        observed_at_ms: journal_occurred_at_ms,
         goal_version: None,
         sensitivity: DesktopEventSensitivity::Metadata,
         payload,
@@ -1478,6 +1482,21 @@ mod tests {
         let events = journal.query(&EventQueryParams::default()).unwrap().events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, desktop_event_kinds::PRESENCE_LOCKED);
+    }
+
+    #[test]
+    fn delayed_sleep_boundary_uses_detection_time_in_global_journal() {
+        let draft = presence_event_draft(
+            &PendingPresenceEvent {
+                event_type: PresenceEventKind::SleepStarted,
+                occurred_at_ms: 10_000,
+                idle_for_ms: None,
+            },
+            50_000,
+        );
+        assert_eq!(draft.occurred_at_ms, 50_000);
+        assert_eq!(draft.observed_at_ms, 50_000);
+        assert_eq!(draft.deduplication_key, "presence:sleep_started:10000");
     }
 
     #[test]

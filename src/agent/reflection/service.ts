@@ -587,18 +587,18 @@ function validateRequestedGoal(
 ): Omit<ActiveGoalContextV1, "version"> {
 	const text = goal.text.trim();
 	if (!isBoundedGoalString(goal.goalId, 200)) {
-		throw new Error("goalId must contain 1 to 200 non-NUL characters.");
+		throw new Error("goalId must contain 1 to 200 non-control UTF-8 bytes.");
 	}
 	if (goal.planId !== null && !isBoundedGoalString(goal.planId, 200)) {
-		throw new Error("planId must be null or contain 1 to 200 non-NUL characters.");
+		throw new Error("planId must be null or contain 1 to 200 non-control UTF-8 bytes.");
 	}
 	if (
 		text.length === 0 ||
 		Array.from(text).length > MAX_ACTIVE_GOAL_TEXT_LENGTH ||
-		text.includes("\u0000")
+		containsControlCharacter(text)
 	) {
 		throw new Error(
-			`goal text must contain 1 to ${MAX_ACTIVE_GOAL_TEXT_LENGTH} non-NUL characters.`,
+			`goal text must contain 1 to ${MAX_ACTIVE_GOAL_TEXT_LENGTH} non-control characters.`,
 		);
 	}
 	if (!Number.isSafeInteger(goal.activatedAtMs) || goal.activatedAtMs < 0) {
@@ -613,7 +613,12 @@ function validateRequestedGoal(
 }
 
 function isBoundedGoalString(value: string, maximum: number): boolean {
-	return value.length >= 1 && value.length <= maximum && !value.includes("\u0000");
+	const byteLength = new TextEncoder().encode(value).byteLength;
+	return byteLength >= 1 && byteLength <= maximum && !containsControlCharacter(value);
+}
+
+function containsControlCharacter(value: string): boolean {
+	return Array.from(value).some((character) => /\p{Cc}/u.test(character));
 }
 
 function sameGoalContext(

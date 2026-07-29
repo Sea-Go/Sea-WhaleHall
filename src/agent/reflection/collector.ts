@@ -515,19 +515,11 @@ export class ReflectionCollector {
 		const snapshot = this.requireSnapshot();
 		const openWindow = snapshot.openWindow;
 		if (!openWindow) return null;
-		const before = openWindow.events.filter(
-			(candidate) => candidate.occurredAtMs <= event.occurredAtMs,
-		);
-		const after = openWindow.events.filter(
-			(candidate) => candidate.occurredAtMs > event.occurredAtMs,
-		);
-		const beforeCount = before.filter(isCountedSemanticEvent).length;
 		const recentEventIds = this.withRecentEventId(snapshot, event.eventId);
 
-		// The boundary predates every counted event in this cursor-ordered
-		// window. It belongs to historical presence state, not to the current
-		// wake window; persist only its durable receipt.
-		if (beforeCount === 0) {
+		// A boundary older than the first counted evidence belongs entirely to
+		// historical presence state and must not close the newer wake window.
+		if (event.occurredAtMs < openWindow.startedAtMs) {
 			await this.saveSnapshot({
 				...snapshot,
 				recentEventIds,
@@ -536,31 +528,20 @@ export class ReflectionCollector {
 			return null;
 		}
 
-		const followingCounted = after.filter(isCountedSemanticEvent);
-		const followingOpen =
-			followingCounted.length === 0
-				? null
-				: {
-						goal: cloneGoal(openWindow.goal),
-						goalVersion: openWindow.goalVersion,
-						startedAtMs: Math.min(
-							...followingCounted.map((candidate) => candidate.occurredAtMs),
-						),
-						deadlineAtMs:
-							Math.min(
-								...followingCounted.map(
-									(candidate) => candidate.occurredAtMs,
-								),
-							) + this.maxWaitMs,
-						events: structuredClone(after),
-						finalizedSemanticEventCount: followingCounted.length,
-					};
+		// Cursor order is the durable cross-sensor total order. When an older
+		// producer timestamp arrives late, the boundary still outranks a
+		// count-ready window, but its observed time (and all already-materialized
+		// evidence) determines a non-regressing window end. This avoids moving a
+		// cursor backwards into the next window.
+		const endedAtMs = Math.max(
+			event.observedAtMs,
+			latestEventTime(openWindow),
+		);
 		const candidate: ReflectionCollectorSnapshotV1 = {
 			...snapshot,
 			openWindow: {
 				...openWindow,
-				events: [...structuredClone(before), structuredClone(event)],
-				finalizedSemanticEventCount: beforeCount,
+				events: [...openWindow.events, structuredClone(event)],
 			},
 			recentEventIds,
 			materializedCursor: event.cursor,
@@ -568,9 +549,7 @@ export class ReflectionCollector {
 		return this.sealCandidate(
 			candidate,
 			"presence_boundary",
-			event.occurredAtMs,
-			candidate.activeGoal,
-			followingOpen,
+			endedAtMs,
 		);
 	}
 
@@ -586,7 +565,6 @@ export class ReflectionCollector {
 		reason: ReflectionTriggerReason,
 		endedAtMs: number,
 		nextGoal: ActiveGoalContextV1 | null = candidateSnapshot.activeGoal,
-		nextOpenWindow: OpenEventWindowV1 | null = null,
 	): Promise<EventWindowV1> {
 		const openWindow = candidateSnapshot.openWindow;
 		if (!openWindow) throw new Error("Cannot seal without an open reflection window.");
@@ -604,19 +582,16 @@ export class ReflectionCollector {
 		const current = this.requireSnapshot();
 		const nextSnapshot: ReflectionCollectorSnapshotV1 = {
 			...candidateSnapshot,
-			state: nextOpenWindow ? "ACTIVE_COLLECTING" : "ACTIVE_EMPTY",
+			state: "ACTIVE_EMPTY",
 			activeGoal: cloneGoal(nextGoal),
-			openWindow: nextOpenWindow ? structuredClone(nextOpenWindow) : null,
+			openWindow: null,
 			contextCandidates: contextCandidatesFromWindow(window),
 			revision: current.revision + 1,
 			updatedAtMs: this.clock.nowMs(),
 		};
 		const result = await this.repository.sealWindow(window, nextSnapshot, current.revision);
 		this.snapshot = result.snapshot;
-		this.runtimeState = nextOpenWindow ? "ACTIVE_COLLECTING" : "ACTIVE_EMPTY";
-		if (nextOpenWindow && !this.deadlinesDeferred) {
-			this.armDeadline(nextOpenWindow.deadlineAtMs);
-		}
+		this.runtimeState = "ACTIVE_EMPTY";
 		return result.window;
 	}
 

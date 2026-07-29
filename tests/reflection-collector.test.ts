@@ -363,7 +363,7 @@ describe("ReflectionCollector boundaries and goal isolation", () => {
 		expect((await repository.getQueueStats()).pendingJobs).toBe(0);
 	});
 
-	test("a late in-window sleep boundary partitions count-ready evidence by event time", async () => {
+	test("a late in-window sleep boundary outranks count using durable observed order", async () => {
 		const { collector, repository } = createCollector({
 			threshold: 2,
 			onCountReady: () => undefined,
@@ -383,15 +383,15 @@ describe("ReflectionCollector boundaries and goal isolation", () => {
 		expect(window).toMatchObject({
 			triggerReason: "presence_boundary",
 			startedAtMs: 1_000,
-			endedAtMs: 5_000,
-			eventCount: 1,
-			events: [{ eventId: "event-1" }, { eventId: "event-3" }],
+			endedAtMs: 11_000,
+			eventCount: 2,
+			events: [
+				{ eventId: "event-1" },
+				{ eventId: "event-2" },
+				{ eventId: "event-3" },
+			],
 		});
-		expect(collector.getSnapshot().openWindow).toMatchObject({
-			startedAtMs: 10_000,
-			finalizedSemanticEventCount: 1,
-			events: [{ eventId: "event-2" }],
-		});
+		expect(collector.getSnapshot().openWindow).toBeNull();
 		expect((await repository.getQueueStats()).pendingJobs).toBe(1);
 	});
 
@@ -411,17 +411,18 @@ describe("ReflectionCollector boundaries and goal isolation", () => {
 
 		expect(window).toMatchObject({
 			triggerReason: "presence_boundary",
-			endedAtMs: 250_000,
-			eventCount: 1,
-			events: [{ eventId: "event-1" }, { eventId: "event-3" }],
+			endedAtMs: 301_000,
+			eventCount: 2,
+			events: [
+				{ eventId: "event-1" },
+				{ eventId: "event-2" },
+				{ eventId: "event-3" },
+			],
 		});
 		expect(
 			window?.events.every((event) => event.occurredAtMs <= window.endedAtMs),
 		).toBeTrue();
-		expect(collector.getSnapshot().openWindow).toMatchObject({
-			startedAtMs: 300_000,
-			events: [{ eventId: "event-2" }],
-		});
+		expect(collector.getSnapshot().openWindow).toBeNull();
 	});
 
 	test("goal change seals the old version and the next event starts a new version", async () => {

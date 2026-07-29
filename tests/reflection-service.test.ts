@@ -766,9 +766,9 @@ class FakeTransport implements DesktopEventTransport {
 	async appendDesktopGoalChange(
 		change: LocalEventGoalChange,
 	): Promise<LocalEventGoalChangeResult> {
-		this.beforeGoalAppend?.();
 		const existing = this.goalEvents.get(change.deduplicationKey);
 		if (existing) return { event: structuredClone(existing), inserted: false };
+		this.beforeGoalAppend?.();
 		const sequence =
 			this.events.reduce(
 				(maximum, event) =>
