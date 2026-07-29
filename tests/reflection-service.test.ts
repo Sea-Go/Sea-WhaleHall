@@ -494,6 +494,39 @@ describe("DesktopReflectionService", () => {
 		await service.stop();
 	});
 
+	test("matches native goal identifier and multiline text validation", async () => {
+		const service = new DesktopReflectionService({
+			transport: new FakeTransport([]),
+			repository: new InMemoryReflectionRepository(),
+			inference: { infer: async (window) => reflectionFor(window) },
+			identity: identity(),
+			clock: new FakeClock(30_000),
+			jobPollMs: 60_000,
+		});
+		await service.start();
+
+		await expect(
+			service.setActiveGoal({
+				goalId: "bad\nidentifier",
+				planId: null,
+				text: "valid",
+				activatedAtMs: 30_000,
+			}),
+		).rejects.toThrow("goalId");
+		await expect(
+			service.setActiveGoal({
+				goalId: "goal-multiline",
+				planId: null,
+				text: "第一行\n第二行",
+				activatedAtMs: 30_000,
+			}),
+		).resolves.toMatchObject({
+			version: 1,
+			text: "第一行\n第二行",
+		});
+		await service.stop();
+	});
+
 	test("goal revisions remain monotonic across an explicit no-goal interval", async () => {
 		const repository = new InMemoryReflectionRepository();
 		const clock = new FakeClock(30_000);

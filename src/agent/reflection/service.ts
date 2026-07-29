@@ -595,10 +595,10 @@ function validateRequestedGoal(
 	if (
 		text.length === 0 ||
 		Array.from(text).length > MAX_ACTIVE_GOAL_TEXT_LENGTH ||
-		containsControlCharacter(text)
+		containsDisallowedGoalTextControl(text)
 	) {
 		throw new Error(
-			`goal text must contain 1 to ${MAX_ACTIVE_GOAL_TEXT_LENGTH} non-control characters.`,
+			`goal text must contain 1 to ${MAX_ACTIVE_GOAL_TEXT_LENGTH} printable characters (line whitespace is allowed).`,
 		);
 	}
 	if (!Number.isSafeInteger(goal.activatedAtMs) || goal.activatedAtMs < 0) {
@@ -614,10 +614,14 @@ function validateRequestedGoal(
 
 function isBoundedGoalString(value: string, maximum: number): boolean {
 	const byteLength = new TextEncoder().encode(value).byteLength;
-	return byteLength >= 1 && byteLength <= maximum && !containsControlCharacter(value);
+	return (
+		byteLength >= 1 &&
+		byteLength <= maximum &&
+		!Array.from(value).some((character) => /\p{Cc}/u.test(character))
+	);
 }
 
-function containsControlCharacter(value: string): boolean {
+function containsDisallowedGoalTextControl(value: string): boolean {
 	return Array.from(value).some(
 		(character) =>
 			/\p{Cc}/u.test(character) &&
