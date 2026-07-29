@@ -429,17 +429,6 @@ async fn run_presence_monitor(
     }
 }
 
-fn publish_presence_events(
-    event_journal: &EventJournal,
-    events: &[PendingPresenceEvent],
-    observed_at_ms: i64,
-) -> Result<(), PresenceError> {
-    for event in events {
-        event_journal.append(presence_event_draft(event, observed_at_ms))?;
-    }
-    Ok(())
-}
-
 fn presence_event_draft(event: &PendingPresenceEvent, observed_at_ms: i64) -> DesktopEventDraft {
     let kind = match event.event_type {
         PresenceEventKind::AfkStarted => desktop_event_kinds::PRESENCE_AFK_STARTED,
