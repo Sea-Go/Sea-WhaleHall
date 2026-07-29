@@ -206,6 +206,7 @@ function createCollector(options: {
 	clock?: FakeClock;
 	initialGoal?: ActiveGoalContextV1 | null;
 	threshold?: number;
+	onCountReady?: (reachedAtMs: number) => void;
 }) {
 	const repository = options.repository ?? new InMemoryReflectionRepository();
 	const clock = options.clock ?? new FakeClock();
@@ -218,6 +219,7 @@ function createCollector(options: {
 		clock,
 		initialGoal: options.initialGoal,
 		semanticEventThreshold: options.threshold,
+		onCountReady: options.onCountReady,
 	});
 	return { collector, repository, clock };
 }
@@ -359,6 +361,67 @@ describe("ReflectionCollector boundaries and goal isolation", () => {
 			},
 		});
 		expect((await repository.getQueueStats()).pendingJobs).toBe(0);
+	});
+
+	test("a late in-window sleep boundary partitions count-ready evidence by event time", async () => {
+		const { collector, repository } = createCollector({
+			threshold: 2,
+			onCountReady: () => undefined,
+		});
+		await collector.recover();
+		await collector.ingest(foregroundEvent(1, 1_000));
+		await collector.ingest(foregroundEvent(2, 10_000));
+		const lateSleep: DesktopEventForKind<"presence.sleep"> = {
+			...presenceBoundary(3, 5_000),
+			kind: "presence.sleep",
+			observedAtMs: 11_000,
+			payload: {},
+		};
+
+		const window = await collector.ingest(lateSleep);
+
+		expect(window).toMatchObject({
+			triggerReason: "presence_boundary",
+			startedAtMs: 1_000,
+			endedAtMs: 5_000,
+			eventCount: 1,
+			events: [{ eventId: "event-1" }, { eventId: "event-3" }],
+		});
+		expect(collector.getSnapshot().openWindow).toMatchObject({
+			startedAtMs: 10_000,
+			finalizedSemanticEventCount: 1,
+			events: [{ eventId: "event-2" }],
+		});
+		expect((await repository.getQueueStats()).pendingJobs).toBe(1);
+	});
+
+	test("a late boundary never seals a window before an included event", async () => {
+		const { collector } = createCollector({});
+		await collector.recover();
+		await collector.ingest(foregroundEvent(1, 1_000));
+		await collector.ingest(foregroundEvent(2, 300_000));
+		const lateSleep: DesktopEventForKind<"presence.sleep"> = {
+			...presenceBoundary(3, 250_000),
+			kind: "presence.sleep",
+			observedAtMs: 301_000,
+			payload: {},
+		};
+
+		const window = await collector.ingest(lateSleep);
+
+		expect(window).toMatchObject({
+			triggerReason: "presence_boundary",
+			endedAtMs: 250_000,
+			eventCount: 1,
+			events: [{ eventId: "event-1" }, { eventId: "event-3" }],
+		});
+		expect(
+			window?.events.every((event) => event.occurredAtMs <= window.endedAtMs),
+		).toBeTrue();
+		expect(collector.getSnapshot().openWindow).toMatchObject({
+			startedAtMs: 300_000,
+			events: [{ eventId: "event-2" }],
+		});
 	});
 
 	test("goal change seals the old version and the next event starts a new version", async () => {

@@ -313,6 +313,14 @@ export class ReflectionCollector {
 			return null;
 		}
 
+		if (
+			isPresenceFlushBoundary(event) &&
+			snapshot.openWindow &&
+			event.occurredAtMs < latestEventTime(snapshot.openWindow)
+		) {
+			return this.handleRetroactivePresenceBoundary(event);
+		}
+
 		const thresholdOpenWindow = snapshot.openWindow;
 		if (
 			thresholdOpenWindow &&
@@ -501,6 +509,71 @@ export class ReflectionCollector {
 		return this.sealCandidate(candidate, "presence_boundary", event.occurredAtMs);
 	}
 
+	private async handleRetroactivePresenceBoundary(
+		event: DesktopEventV1,
+	): Promise<EventWindowV1 | null> {
+		const snapshot = this.requireSnapshot();
+		const openWindow = snapshot.openWindow;
+		if (!openWindow) return null;
+		const before = openWindow.events.filter(
+			(candidate) => candidate.occurredAtMs <= event.occurredAtMs,
+		);
+		const after = openWindow.events.filter(
+			(candidate) => candidate.occurredAtMs > event.occurredAtMs,
+		);
+		const beforeCount = before.filter(isCountedSemanticEvent).length;
+		const recentEventIds = this.withRecentEventId(snapshot, event.eventId);
+
+		// The boundary predates every counted event in this cursor-ordered
+		// window. It belongs to historical presence state, not to the current
+		// wake window; persist only its durable receipt.
+		if (beforeCount === 0) {
+			await this.saveSnapshot({
+				...snapshot,
+				recentEventIds,
+				materializedCursor: event.cursor,
+			});
+			return null;
+		}
+
+		const followingCounted = after.filter(isCountedSemanticEvent);
+		const followingOpen =
+			followingCounted.length === 0
+				? null
+				: {
+						goal: cloneGoal(openWindow.goal),
+						goalVersion: openWindow.goalVersion,
+						startedAtMs: Math.min(
+							...followingCounted.map((candidate) => candidate.occurredAtMs),
+						),
+						deadlineAtMs:
+							Math.min(
+								...followingCounted.map(
+									(candidate) => candidate.occurredAtMs,
+								),
+							) + this.maxWaitMs,
+						events: structuredClone(after),
+						finalizedSemanticEventCount: followingCounted.length,
+					};
+		const candidate: ReflectionCollectorSnapshotV1 = {
+			...snapshot,
+			openWindow: {
+				...openWindow,
+				events: [...structuredClone(before), structuredClone(event)],
+				finalizedSemanticEventCount: beforeCount,
+			},
+			recentEventIds,
+			materializedCursor: event.cursor,
+		};
+		return this.sealCandidate(
+			candidate,
+			"presence_boundary",
+			event.occurredAtMs,
+			candidate.activeGoal,
+			followingOpen,
+		);
+	}
+
 	private async sealOpenWindow(
 		reason: ReflectionTriggerReason,
 		endedAtMs: number,
@@ -513,6 +586,7 @@ export class ReflectionCollector {
 		reason: ReflectionTriggerReason,
 		endedAtMs: number,
 		nextGoal: ActiveGoalContextV1 | null = candidateSnapshot.activeGoal,
+		nextOpenWindow: OpenEventWindowV1 | null = null,
 	): Promise<EventWindowV1> {
 		const openWindow = candidateSnapshot.openWindow;
 		if (!openWindow) throw new Error("Cannot seal without an open reflection window.");
@@ -530,16 +604,19 @@ export class ReflectionCollector {
 		const current = this.requireSnapshot();
 		const nextSnapshot: ReflectionCollectorSnapshotV1 = {
 			...candidateSnapshot,
-			state: "ACTIVE_EMPTY",
+			state: nextOpenWindow ? "ACTIVE_COLLECTING" : "ACTIVE_EMPTY",
 			activeGoal: cloneGoal(nextGoal),
-			openWindow: null,
+			openWindow: nextOpenWindow ? structuredClone(nextOpenWindow) : null,
 			contextCandidates: contextCandidatesFromWindow(window),
 			revision: current.revision + 1,
 			updatedAtMs: this.clock.nowMs(),
 		};
 		const result = await this.repository.sealWindow(window, nextSnapshot, current.revision);
 		this.snapshot = result.snapshot;
-		this.runtimeState = "ACTIVE_EMPTY";
+		this.runtimeState = nextOpenWindow ? "ACTIVE_COLLECTING" : "ACTIVE_EMPTY";
+		if (nextOpenWindow && !this.deadlinesDeferred) {
+			this.armDeadline(nextOpenWindow.deadlineAtMs);
+		}
 		return result.window;
 	}
 
@@ -661,6 +738,10 @@ function countThresholdReachedAt(openWindow: OpenEventWindowV1): number {
 		if (event && isCountedSemanticEvent(event)) return event.occurredAtMs;
 	}
 	throw new Error("Counted reflection window has no counted event timestamp.");
+}
+
+function latestEventTime(openWindow: OpenEventWindowV1): number {
+	return Math.max(...openWindow.events.map((event) => event.occurredAtMs));
 }
 
 function cloneGoal(goal: ActiveGoalContextV1 | null): ActiveGoalContextV1 | null {
