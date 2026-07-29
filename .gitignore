@@ -8,5 +8,8 @@ native/**/target/
 
 .DS_Store
 *.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
 .idea/
 .vscode/
