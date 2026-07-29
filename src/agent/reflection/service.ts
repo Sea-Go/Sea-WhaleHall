@@ -1,0 +1,645 @@
+import type { AgentRuntime } from "../agent-runtime";
+import { MAX_ACTIVE_GOAL_TEXT_LENGTH } from "../../shared/goal-context";
+import type {
+	LocalEventCommitResult,
+	LocalEventQuery,
+	LocalEventQueryResult,
+} from "../local-protocol";
+import {
+	MonotonicEventIdentityFactory,
+	SemanticEventCoalescer,
+} from "./coalescer";
+import {
+	DEFAULT_MAX_WAIT_MS,
+	DEFAULT_SEMANTIC_EVENT_THRESHOLD,
+	ReflectionCollector,
+	type ReflectionClock,
+} from "./collector";
+import {
+	ReflectionJobRunner,
+	type ReflectionCommitter,
+	type ReflectionInferenceProvider,
+	type ReflectionJobRunResult,
+} from "./job-runner";
+import type { ReflectionRepository } from "./repository";
+import {
+	DESKTOP_EVENT_SCHEMA_VERSION,
+	type ActiveGoalContextV1,
+	type DesktopEventV1,
+	type EventWindowV1,
+	type ReflectionQueueMode,
+	type ReflectionV1,
+} from "./types";
+import {
+	DeterministicWindowBuilder,
+} from "./window-builder";
+import { WebCryptoReflectionHasher } from "./hash";
+
+export const REFLECTION_EVENT_CONSUMER_ID = "whalehall.reflection.v1";
+export const DEFAULT_EVENT_PULL_LIMIT = 256;
+export const DEFAULT_JOB_POLL_MS = 1_000;
+export const DEFAULT_EVENT_POLL_MS = 5_000;
+export const DEFAULT_DEADLINE_PULL_RETRY_MS = 1_000;
+
+export interface DesktopEventTransport {
+	start(): Promise<void>;
+	queryDesktopEvents(query: LocalEventQuery): Promise<LocalEventQueryResult>;
+	commitDesktopEventCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalEventCommitResult>;
+	onDesktopEvent(listener: (event: DesktopEventV1) => void): () => void;
+}
+
+export type ReflectionServiceIdentity = {
+	collectorId: string;
+	deviceId: string;
+	sessionId: string;
+};
+
+export type TelemetryEnvelopeV1 = {
+	schemaVersion: "telemetry-envelope.v1";
+	name: "whalehall.reflection.v1";
+	idempotencyKey: string;
+	occurredAtMs: number;
+	window: EventWindowV1;
+	reflection: ReflectionV1;
+};
+
+/**
+ * Sinks must upsert by idempotencyKey. A crash after sink delivery but before
+ * COMMITTED can retry the same envelope.
+ */
+export interface TelemetrySink {
+	emit(envelope: TelemetryEnvelopeV1): Promise<void>;
+}
+
+export type DesktopReflectionServiceOptions = {
+	transport: DesktopEventTransport;
+	repository: ReflectionRepository;
+	inference: ReflectionInferenceProvider;
+	identity: ReflectionServiceIdentity;
+	sinks?: readonly TelemetrySink[];
+	clock?: ReflectionClock;
+	consumerId?: string;
+	pullLimit?: number;
+	jobPollMs?: number;
+	eventPollMs?: number;
+	semanticEventThreshold?: number;
+	maxWaitMs?: number;
+	/**
+	 * An authoritative goal known by the host before native sensors start.
+	 * `null` clears a recovered goal before any new durable event is pulled;
+	 * `undefined` preserves the recovered collector state.
+	 */
+	startupGoal?: Omit<ActiveGoalContextV1, "version"> | null;
+	onError?: (error: unknown) => void;
+};
+
+/**
+ * Connects the durable Rust event stream to deterministic windowing and the
+ * persisted reflection job state machine.
+ */
+export class DesktopReflectionService {
+	private readonly transport: DesktopEventTransport;
+	private readonly repository: ReflectionRepository;
+	private readonly inference: ReflectionInferenceProvider;
+	private readonly identity: ReflectionServiceIdentity;
+	private readonly clock: ReflectionClock;
+	private readonly consumerId: string;
+	private readonly pullLimit: number;
+	private readonly jobPollMs: number;
+	private readonly eventPollMs: number;
+	private readonly startupGoal:
+		| Omit<ActiveGoalContextV1, "version">
+		| null
+		| undefined;
+	private readonly onError: (error: unknown) => void;
+	private readonly collector: ReflectionCollector;
+	private readonly coalescer: SemanticEventCoalescer;
+	private readonly jobs: ReflectionJobRunner;
+
+	private started = false;
+	private acceptingLiveEvents = false;
+	private pausedLiveGeneration = 0;
+	private operationTail: Promise<void> = Promise.resolve();
+	private unsubscribeLive: (() => void) | null = null;
+	private jobTimer: ReturnType<typeof setTimeout> | null = null;
+	private eventPollTimer: ReturnType<typeof setTimeout> | null = null;
+	private deadlineRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	private countRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	private catchUpRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	private activeJobPump: Promise<void> | null = null;
+	private lastCommittedCursor: string | null = null;
+
+	constructor(options: DesktopReflectionServiceOptions) {
+		this.transport = options.transport;
+		this.repository = options.repository;
+		this.inference = options.inference;
+		this.identity = { ...options.identity };
+		this.clock = options.clock ?? {
+			nowMs: () => Date.now(),
+			setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+			clearTimer: (handle) => clearTimeout(handle),
+		};
+		this.consumerId = options.consumerId ?? REFLECTION_EVENT_CONSUMER_ID;
+		this.pullLimit = options.pullLimit ?? DEFAULT_EVENT_PULL_LIMIT;
+		this.jobPollMs = options.jobPollMs ?? DEFAULT_JOB_POLL_MS;
+		this.eventPollMs = options.eventPollMs ?? DEFAULT_EVENT_POLL_MS;
+		this.startupGoal =
+			options.startupGoal === undefined || options.startupGoal === null
+				? options.startupGoal
+				: validateRequestedGoal(options.startupGoal);
+		this.onError = options.onError ?? ((error) => console.error("[reflection]", error));
+		if (!Number.isInteger(this.pullLimit) || this.pullLimit < 1 || this.pullLimit > 1_000) {
+			throw new Error("pullLimit must be between 1 and 1000.");
+		}
+		if (!Number.isFinite(this.jobPollMs) || this.jobPollMs <= 0) {
+			throw new Error("jobPollMs must be positive.");
+		}
+		if (!Number.isFinite(this.eventPollMs) || this.eventPollMs <= 0) {
+			throw new Error("eventPollMs must be positive.");
+		}
+
+		this.collector = new ReflectionCollector({
+			...this.identity,
+			repository: this.repository,
+			windowBuilder: new DeterministicWindowBuilder(new WebCryptoReflectionHasher()),
+			clock: this.clock,
+			semanticEventThreshold:
+				options.semanticEventThreshold ?? DEFAULT_SEMANTIC_EVENT_THRESHOLD,
+			maxWaitMs: options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS,
+			onBackgroundError: this.onError,
+			onDeadlineReady: (deadlineAtMs) => this.coordinateDeadline(deadlineAtMs),
+			onCountReady: (reachedAtMs) => this.coordinateCount(reachedAtMs),
+		});
+		this.coalescer = new SemanticEventCoalescer({
+			identityFactory: new MonotonicEventIdentityFactory("reflection"),
+		});
+		const committer = new TelemetryReflectionCommitter(
+			options.sinks ?? [],
+			this.clock,
+		);
+		this.jobs = new ReflectionJobRunner({
+			repository: this.repository,
+			inference: this.inference,
+			committer,
+			clock: this.clock,
+		});
+	}
+
+	async start(): Promise<void> {
+		if (this.started) return;
+		this.started = true;
+		this.acceptingLiveEvents = false;
+		this.unsubscribeLive = this.transport.onDesktopEvent((event) => {
+			if (!this.acceptingLiveEvents) {
+				this.pausedLiveGeneration += 1;
+				return;
+			}
+			void this.enqueue(async () => {
+				// A previous queued event may have failed after this callback was
+				// enqueued. Never let a later cursor jump over that durable gap.
+				if (!this.acceptingLiveEvents) {
+					this.pausedLiveGeneration += 1;
+					return;
+				}
+				try {
+					await this.ingestJournalEvent(event);
+				} catch (error) {
+					this.pauseLiveFastPath();
+					throw error;
+				}
+			}).catch(this.onError);
+		});
+
+		try {
+			await this.collector.recover({ deferDeadline: true });
+			if (this.startupGoal !== undefined) {
+				await this.applyActiveGoalToCollector(this.startupGoal);
+			}
+			await this.transport.start();
+			for (;;) {
+				const generation = this.pausedLiveGeneration;
+				await this.pullBacklog();
+				// Push is only a wake-up/latency path. Every event is replayed
+				// from the durable named consumer in cursor order.
+				if (generation === this.pausedLiveGeneration) break;
+			}
+			const resumeDeadlines = this.enqueue(() => this.collector.resumeDeadlines());
+			this.acceptingLiveEvents = true;
+			await resumeDeadlines;
+			this.armJobPump(0);
+			this.armEventPoll(this.eventPollMs);
+		} catch (error) {
+			this.started = false;
+			this.acceptingLiveEvents = false;
+			this.cancelCatchUpRetry();
+			this.unsubscribeLive?.();
+			this.unsubscribeLive = null;
+			throw error;
+		}
+	}
+
+	async stop(): Promise<void> {
+		this.acceptingLiveEvents = false;
+		this.started = false;
+		this.unsubscribeLive?.();
+		this.unsubscribeLive = null;
+		if (this.jobTimer !== null) {
+			this.clock.clearTimer(this.jobTimer);
+			this.jobTimer = null;
+		}
+		if (this.eventPollTimer !== null) {
+			this.clock.clearTimer(this.eventPollTimer);
+			this.eventPollTimer = null;
+		}
+		this.cancelDeadlineRetry();
+		this.cancelCountRetry();
+		this.cancelCatchUpRetry();
+		await this.operationTail;
+		await this.activeJobPump;
+		this.collector.dispose();
+	}
+
+	async setActiveGoal(
+		requestedGoal: Omit<ActiveGoalContextV1, "version"> | null,
+	): Promise<ActiveGoalContextV1 | null> {
+		const validatedGoal =
+			requestedGoal === null ? null : validateRequestedGoal(requestedGoal);
+		let normalized: ActiveGoalContextV1 | null = null;
+		await this.enqueue(async () => {
+			if (!this.started) throw new Error("DesktopReflectionService is not started.");
+			await this.pullBacklog();
+			normalized = await this.applyActiveGoalToCollector(validatedGoal);
+		});
+		return normalized;
+	}
+
+	async pullNow(): Promise<void> {
+		await this.enqueue(async () => {
+			if (!this.acceptingLiveEvents && this.started) {
+				await this.restorePausedLiveFastPath();
+				return;
+			}
+			await this.pullBacklog();
+		});
+	}
+
+	async runJobsNow(maxJobs = 100): Promise<ReflectionJobRunResult[]> {
+		return this.jobs.runUntilIdle(maxJobs);
+	}
+
+	async getStatus(): Promise<{
+		collectorState: ReturnType<ReflectionCollector["getState"]>;
+		queueMode: ReflectionQueueMode;
+		pendingJobs: number;
+		pendingEvents: number;
+		lastCommittedCursor: string | null;
+	}> {
+		const pressure = await this.jobs.getQueuePressure();
+		return {
+			collectorState: this.collector.getState(),
+			queueMode: pressure.mode,
+			pendingJobs: pressure.stats.pendingJobs,
+			pendingEvents: pressure.stats.pendingEvents,
+			lastCommittedCursor: this.lastCommittedCursor,
+		};
+	}
+
+	private async pullBacklog(): Promise<void> {
+		try {
+			for (;;) {
+				const page = await this.transport.queryDesktopEvents({
+					consumerId: this.consumerId,
+					limit: this.pullLimit,
+				});
+				for (const event of page.events) await this.ingestJournalEvent(event);
+				if (page.events.length === 0 || !page.hasMore) return;
+			}
+		} catch (error) {
+			if (this.acceptingLiveEvents) this.pauseLiveFastPath();
+			throw error;
+		}
+	}
+
+	private async applyActiveGoalToCollector(
+		validatedGoal: Omit<ActiveGoalContextV1, "version"> | null,
+	): Promise<ActiveGoalContextV1 | null> {
+		const collectorSnapshot = this.collector.getSnapshot();
+		const previous = collectorSnapshot.activeGoal;
+		if (
+			validatedGoal !== null &&
+			previous !== null &&
+			validatedGoal.activatedAtMs < previous.activatedAtMs
+		) {
+			return structuredClone(previous);
+		}
+		if (
+			validatedGoal !== null &&
+			previous?.goalId === validatedGoal.goalId &&
+			previous.planId === validatedGoal.planId &&
+			previous.text === validatedGoal.text
+		) {
+			return structuredClone(previous);
+		}
+		if (validatedGoal === null && previous === null) return null;
+
+		const normalized = validatedGoal
+			? {
+					...structuredClone(validatedGoal),
+					version: collectorSnapshot.goalRevision + 1,
+				}
+			: null;
+		const nowMs = this.clock.nowMs();
+		const version = normalized?.version ?? collectorSnapshot.goalRevision + 1;
+		const event: DesktopEventV1 = {
+			schemaVersion: DESKTOP_EVENT_SCHEMA_VERSION,
+			eventId: `goal_${this.identity.deviceId}_${version}_${nowMs}`,
+			cursor: `goal:${version.toString().padStart(12, "0")}:${nowMs}`,
+			deviceId: this.identity.deviceId,
+			sessionId: this.identity.sessionId,
+			kind: "goal.contextChanged",
+			source: "planning.controller",
+			occurredAtMs: nowMs,
+			observedAtMs: nowMs,
+			goalVersion: previous?.version ?? null,
+			sensitivity: "content",
+			payload: {
+				previous: structuredClone(previous),
+				next: structuredClone(normalized),
+			},
+		};
+		await this.collector.ingest(event);
+		return normalized;
+	}
+
+	private async ingestJournalEvent(rawEvent: DesktopEventV1): Promise<void> {
+		if (!this.belongsToCurrentInstallation(rawEvent)) return;
+		if (
+			this.lastCommittedCursor !== null &&
+			compareEventCursors(rawEvent.cursor, this.lastCommittedCursor) <= 0
+		) {
+			return;
+		}
+		const activeGoalVersion = this.collector.getSnapshot().activeGoal?.version ?? null;
+		const event = structuredClone(rawEvent);
+		event.deviceId = this.identity.deviceId;
+		event.sessionId = this.identity.sessionId;
+		if (
+			event.kind !== "goal.contextChanged" &&
+			!event.kind.startsWith("reflection.") &&
+			!event.kind.startsWith("tool.")
+		) {
+			event.goalVersion = activeGoalVersion;
+		}
+		const prepared = this.coalescer.prepareDesktopEvent(event);
+		for (const semanticEvent of prepared.events) {
+			await this.collector.ingest(semanticEvent);
+		}
+		// Repeat-suppression state advances only after collector persistence.
+		// If native cursor commit then fails, a replay may safely classify the
+		// event as duplicate because its semantic materialization is durable.
+		prepared.commit();
+		await this.commitCursor(rawEvent.cursor);
+	}
+
+	private belongsToCurrentInstallation(event: DesktopEventV1): boolean {
+		// The native journal owns its own stable device id. Once this service has
+		// accepted a stream, device identity is normalized to the app installation
+		// id for window hashing. Empty identifiers are always rejected by protocol.
+		return event.deviceId.length > 0;
+	}
+
+	private async commitCursor(cursor: string): Promise<void> {
+		if (
+			this.lastCommittedCursor !== null &&
+			compareEventCursors(cursor, this.lastCommittedCursor) <= 0
+		) {
+			return;
+		}
+		await this.transport.commitDesktopEventCursor(this.consumerId, cursor);
+		this.lastCommittedCursor = cursor;
+	}
+
+	private armJobPump(delayMs: number): void {
+		if (!this.started || this.jobTimer !== null) return;
+		this.jobTimer = this.clock.setTimer(() => {
+			this.jobTimer = null;
+			const pump = this.jobs
+				.runUntilIdle()
+				.then(() => undefined)
+				.catch(this.onError)
+				.finally(() => {
+					if (this.activeJobPump === pump) this.activeJobPump = null;
+					this.armJobPump(this.jobPollMs);
+				});
+			this.activeJobPump = pump;
+		}, delayMs);
+	}
+
+	private armEventPoll(delayMs: number): void {
+		if (!this.started || this.eventPollTimer !== null) return;
+		this.eventPollTimer = this.clock.setTimer(() => {
+			this.eventPollTimer = null;
+			void this.enqueue(async () => {
+				if (!this.started) return;
+				if (this.acceptingLiveEvents) {
+					await this.pullBacklog();
+				} else {
+					await this.restorePausedLiveFastPath();
+				}
+			})
+				.catch(this.onError)
+				.finally(() => this.armEventPoll(this.eventPollMs));
+		}, delayMs);
+	}
+
+	private coordinateDeadline(_deadlineAtMs: number): void {
+		if (!this.started) return;
+		void this.enqueue(async () => {
+			if (!this.started) return;
+			try {
+				await this.pullBacklog();
+			} catch (error) {
+				this.scheduleDeadlineRetry();
+				throw error;
+			}
+			this.cancelDeadlineRetry();
+			await this.collector.flushDue();
+		}).catch(this.onError);
+	}
+
+	private coordinateCount(_reachedAtMs: number): void {
+		// Startup replay has its own materialization barrier and calls
+		// resumeDeadlines(), which resolves count before time. Avoid starting a
+		// second pull concurrently with that barrier.
+		if (!this.started || !this.acceptingLiveEvents) return;
+		void this.enqueue(async () => {
+			if (!this.started) return;
+			try {
+				await this.pullBacklog();
+			} catch (error) {
+				this.scheduleCountRetry();
+				throw error;
+			}
+			this.cancelCountRetry();
+			await this.collector.flushCountDue();
+		}).catch(this.onError);
+	}
+
+	private scheduleDeadlineRetry(): void {
+		if (!this.started || this.deadlineRetryTimer !== null) return;
+		this.deadlineRetryTimer = this.clock.setTimer(() => {
+			this.deadlineRetryTimer = null;
+			this.coordinateDeadline(this.clock.nowMs());
+		}, DEFAULT_DEADLINE_PULL_RETRY_MS);
+	}
+
+	private cancelDeadlineRetry(): void {
+		if (this.deadlineRetryTimer === null) return;
+		this.clock.clearTimer(this.deadlineRetryTimer);
+		this.deadlineRetryTimer = null;
+	}
+
+	private scheduleCountRetry(): void {
+		if (!this.started || this.countRetryTimer !== null) return;
+		this.countRetryTimer = this.clock.setTimer(() => {
+			this.countRetryTimer = null;
+			this.coordinateCount(this.clock.nowMs());
+		}, DEFAULT_DEADLINE_PULL_RETRY_MS);
+	}
+
+	private cancelCountRetry(): void {
+		if (this.countRetryTimer === null) return;
+		this.clock.clearTimer(this.countRetryTimer);
+		this.countRetryTimer = null;
+	}
+
+	private pauseLiveFastPath(): void {
+		if (!this.started) return;
+		this.acceptingLiveEvents = false;
+		this.scheduleCatchUpRetry();
+	}
+
+	private scheduleCatchUpRetry(): void {
+		if (!this.started || this.catchUpRetryTimer !== null) return;
+		this.catchUpRetryTimer = this.clock.setTimer(() => {
+			this.catchUpRetryTimer = null;
+			void this.enqueue(async () => {
+				if (!this.started) return;
+				try {
+					await this.restorePausedLiveFastPath();
+				} catch (error) {
+					this.scheduleCatchUpRetry();
+					throw error;
+				}
+			}).catch(this.onError);
+		}, DEFAULT_DEADLINE_PULL_RETRY_MS);
+	}
+
+	/**
+	 * Replays until no push notification arrived during either the durable pull
+	 * or the count/deadline flush. The final generation comparison and enabling
+	 * the live path are synchronous, so a later cursor can never jump over an
+	 * event that arrived while recovery was sealing a window.
+	 */
+	private async restorePausedLiveFastPath(): Promise<void> {
+		for (;;) {
+			const generation = this.pausedLiveGeneration;
+			await this.pullBacklog();
+			await this.collector.flushCountDue();
+			await this.collector.flushDue();
+			if (generation === this.pausedLiveGeneration) break;
+		}
+		if (!this.started) return;
+		this.cancelCatchUpRetry();
+		this.acceptingLiveEvents = true;
+	}
+
+	private cancelCatchUpRetry(): void {
+		if (this.catchUpRetryTimer === null) return;
+		this.clock.clearTimer(this.catchUpRetryTimer);
+		this.catchUpRetryTimer = null;
+	}
+
+	private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+		const result = this.operationTail.then(operation);
+		this.operationTail = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	}
+}
+
+function validateRequestedGoal(
+	goal: Omit<ActiveGoalContextV1, "version">,
+): Omit<ActiveGoalContextV1, "version"> {
+	const text = goal.text.trim();
+	if (!isBoundedGoalString(goal.goalId, 200)) {
+		throw new Error("goalId must contain 1 to 200 non-NUL characters.");
+	}
+	if (goal.planId !== null && !isBoundedGoalString(goal.planId, 200)) {
+		throw new Error("planId must be null or contain 1 to 200 non-NUL characters.");
+	}
+	if (
+		text.length === 0 ||
+		Array.from(text).length > MAX_ACTIVE_GOAL_TEXT_LENGTH ||
+		text.includes("\u0000")
+	) {
+		throw new Error(
+			`goal text must contain 1 to ${MAX_ACTIVE_GOAL_TEXT_LENGTH} non-NUL characters.`,
+		);
+	}
+	if (!Number.isSafeInteger(goal.activatedAtMs) || goal.activatedAtMs < 0) {
+		throw new Error("activatedAtMs must be a non-negative safe integer.");
+	}
+	return {
+		goalId: goal.goalId,
+		planId: goal.planId,
+		text,
+		activatedAtMs: goal.activatedAtMs,
+	};
+}
+
+function isBoundedGoalString(value: string, maximum: number): boolean {
+	return value.length >= 1 && value.length <= maximum && !value.includes("\u0000");
+}
+
+class TelemetryReflectionCommitter implements ReflectionCommitter {
+	constructor(
+		private readonly sinks: readonly TelemetrySink[],
+		private readonly clock: Pick<ReflectionClock, "nowMs">,
+	) {}
+
+	async commit(window: EventWindowV1, reflection: ReflectionV1): Promise<void> {
+		const envelope: TelemetryEnvelopeV1 = {
+			schemaVersion: "telemetry-envelope.v1",
+			name: "whalehall.reflection.v1",
+			idempotencyKey: window.windowId,
+			occurredAtMs: this.clock.nowMs(),
+			window: structuredClone(window),
+			reflection: structuredClone(reflection),
+		};
+		for (const sink of this.sinks) await sink.emit(envelope);
+	}
+}
+
+function compareEventCursors(left: string, right: string): number {
+	const leftSequence = eventCursorSequence(left);
+	const rightSequence = eventCursorSequence(right);
+	if (leftSequence !== null && rightSequence !== null) {
+		return leftSequence === rightSequence ? 0 : leftSequence > rightSequence ? 1 : -1;
+	}
+	return left.localeCompare(right);
+}
+
+function eventCursorSequence(cursor: string): bigint | null {
+	if (!/^ec1_[0-9a-f]{16}$/.test(cursor)) return null;
+	return BigInt(`0x${cursor.slice(4)}`);
+}
+
+export function asDesktopEventTransport(runtime: AgentRuntime): DesktopEventTransport {
+	return runtime;
+}
