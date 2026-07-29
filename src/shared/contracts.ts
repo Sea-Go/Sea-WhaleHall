@@ -1,5 +1,7 @@
 import type { RPCSchema } from 'electrobun/bun';
 import type { PetActionId } from './pet-actions';
+import type { PetPresentationEvent } from './pet-presentation';
+import type { ActiveGoalContextV1 } from './goal-context';
 import type {
 	LocalRuntimeStatus,
 	LocalToolCall,
@@ -16,6 +18,8 @@ export type {
 	LocalToolCancelResult,
 	LocalToolDescriptor,
 	LocalToolEvent,
+	PetPresentationEvent,
+	ActiveGoalContextV1,
 };
 
 export type PetMood = 'idle' | 'happy' | 'busy' | 'error';
@@ -86,6 +90,14 @@ export type ClientRPC = {
 			setPetVisible: {
 				params: { visible: boolean };
 				response: { visible: boolean };
+			};
+			presentPetEvent: {
+				params: PetPresentationEvent;
+				response: { accepted: boolean };
+			};
+			setActiveGoalContext: {
+				params: { goal: ActiveGoalContextV1 | null };
+				response: { goal: ActiveGoalContextV1 | null };
 			};
 		};
 		messages: Record<never, never>;

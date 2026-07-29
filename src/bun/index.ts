@@ -10,6 +10,12 @@ import {
 import { AgentRuntime } from "../agent/agent-runtime";
 import { LocalToolClient } from "../agent/local-tool-client";
 import {
+	createWhaleHallReflectionRuntime,
+	setRuntimeGoal,
+	type WhaleHallReflectionRuntime,
+} from "./reflection-runtime";
+import type { ActiveReflectionFeedbackCode } from "./reflection-feedback";
+import {
 	PetStateArbiter,
 } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
@@ -31,6 +37,8 @@ const agent = new AgentRuntime(
 );
 let petVisible = true;
 let shutdownPromise: Promise<void> | null = null;
+let startupPromise: Promise<void> | null = null;
+let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
 
 let clientWindow: BrowserWindow;
 let petWindow: BrowserWindow;
@@ -61,6 +69,33 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 				petWindowController.setVisible(visible);
 				clientRPC.send.petVisibilityChanged({ visible });
 				return { visible };
+			},
+			presentPetEvent: (event): { accepted: boolean } => {
+				petStateArbiter.showPresentationEvent(event);
+				return { accepted: true };
+			},
+			setActiveGoalContext: async ({ goal }) => {
+				const runtime = reflectionRuntime;
+				if (!runtime) throw new Error("Reflection runtime is not ready.");
+				const normalized = await setRuntimeGoal(
+					runtime,
+					goal
+						? {
+								goalId: goal.goalId,
+								planId: goal.planId,
+								text: goal.text,
+								activatedAtMs: goal.activatedAtMs,
+							}
+						: null,
+				);
+				return {
+					goal: normalized
+						? {
+								schemaVersion: "active-goal.v1" as const,
+								...normalized,
+							}
+						: null,
+				};
 			},
 		},
 		messages: {},
@@ -117,6 +152,9 @@ async function viewUrl(view: "client" | "pet"): Promise<string> {
 
 const petWidth = 360;
 const petHeight = 300;
+const display = Screen.getPrimaryDisplay();
+const clientWidth = Math.min(1280, Math.max(1000, display.workArea.width - 80));
+const clientHeight = Math.min(800, Math.max(720, display.workArea.height - 80));
 
 clientWindow = new BrowserWindow({
 	title: "WhaleHall",
@@ -125,15 +163,14 @@ clientWindow = new BrowserWindow({
 	frame: {
 		x: 120,
 		y: 100,
-		width: 1000,
-		height: 720,
+		width: clientWidth,
+		height: clientHeight,
 	},
 });
 
-const display = Screen.getPrimaryDisplay();
 clientWindow.setPosition(
-	display.workArea.x + Math.max(40, Math.floor((display.workArea.width - 1000) / 2)),
-	display.workArea.y + Math.max(40, Math.floor((display.workArea.height - 720) / 2)),
+	display.workArea.x + Math.max(0, Math.floor((display.workArea.width - clientWidth) / 2)),
+	display.workArea.y + Math.max(0, Math.floor((display.workArea.height - clientHeight) / 2)),
 );
 
 petWindow = new BrowserWindow({
@@ -179,6 +216,12 @@ petWindow.webview.on("dom-ready", () => {
 function shutdown(): Promise<void> {
 	if (shutdownPromise) return shutdownPromise;
 	shutdownPromise = (async () => {
+		// Startup owns both the initial native start and any reflection-service
+		// start. Waiting here prevents a late candidate from restarting the
+		// native sensor process after shutdown has already stopped it.
+		await startupPromise;
+		await reflectionRuntime?.close();
+		reflectionRuntime = null;
 		await agent.stop();
 		petStateArbiter.dispose();
 		petWindowController.dispose();
@@ -199,5 +242,57 @@ process.once("SIGTERM", () => {
 	void shutdown().finally(() => process.exit(0));
 });
 
-void agent.start();
+startupPromise = (async () => {
+	await agent.start();
+	if (shutdownPromise) return;
+	const candidate = await createWhaleHallReflectionRuntime({
+		agent,
+		dataDirectory: localDataPath,
+		canPresentFeedback: () => petVisible,
+		onFeedback: (code) => {
+			petStateArbiter.showPresentationEvent(reflectionPresentationEvent(code));
+		},
+	});
+	if (shutdownPromise) {
+		await candidate.close();
+		return;
+	}
+	try {
+		await candidate.service.start();
+		if (shutdownPromise) {
+			await candidate.close();
+			return;
+		}
+		reflectionRuntime = candidate;
+		console.log(
+			`WhaleHall reflection runtime ready; qwen teacher lock: ${
+				candidate.teacherVerified ? "verified" : "unavailable"
+			}`,
+		);
+	} catch (error) {
+		await candidate.close();
+		throw error;
+	}
+})().catch((error) => {
+	console.error("WhaleHall reflection runtime failed to start:", error);
+});
 console.log(`WhaleHall started; local tool host: ${nativePath}`);
+
+function reflectionPresentationEvent(
+	code: ActiveReflectionFeedbackCode,
+):
+	| { kind: "reflection-encourage" }
+	| { kind: "reflection-refocus" }
+	| { kind: "reflection-clarify-goal" }
+	| { kind: "reflection-take-break" } {
+	switch (code) {
+		case "encourage":
+			return { kind: "reflection-encourage" };
+		case "refocus":
+			return { kind: "reflection-refocus" };
+		case "clarifyGoal":
+			return { kind: "reflection-clarify-goal" };
+		case "takeBreak":
+			return { kind: "reflection-take-break" };
+	}
+}

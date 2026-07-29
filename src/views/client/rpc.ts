@@ -1,9 +1,11 @@
 import { Electroview } from "electrobun/view";
 import type {
 	ClientRPC,
+	ActiveGoalContextV1,
 	LocalRuntimeStatus,
 	LocalToolCall,
 	LocalToolEvent,
+	PetPresentationEvent,
 } from "../../shared/contracts";
 
 type StatusListener = (status: LocalRuntimeStatus) => void;
@@ -40,7 +42,11 @@ export const clientApi = {
 	callLocalTool: (call: LocalToolCall) => rpc.request.callLocalTool(call),
 	cancelLocalTool: (callId: string) => rpc.request.cancelLocalTool({ callId }),
 	setPetVisible: (visible: boolean) => rpc.request.setPetVisible({ visible }),
-		onStatus(listener: StatusListener): () => void {
+	presentPetEvent: (event: PetPresentationEvent) =>
+		rpc.request.presentPetEvent(event),
+	setActiveGoalContext: (goal: ActiveGoalContextV1 | null) =>
+		rpc.request.setActiveGoalContext({ goal }),
+	onStatus(listener: StatusListener): () => void {
 		statusListeners.add(listener);
 		return () => statusListeners.delete(listener);
 	},
