@@ -8,6 +8,8 @@ import {
 	parseLocalMessage,
 	type LocalDesktopEventFrame,
 	type LocalEventCommitResult,
+	type LocalEventGoalChange,
+	type LocalEventGoalChangeResult,
 	type LocalEventQuery,
 	type LocalEventQueryResult,
 	type LocalMessage,
@@ -68,6 +70,7 @@ export interface LocalToolProcess {
 	cancelTool(callId: string): Promise<LocalToolCancelResult>;
 	queryEvents(query: LocalEventQuery): Promise<LocalEventQueryResult>;
 	commitEventCursor(consumerId: string, cursor: string): Promise<LocalEventCommitResult>;
+	appendGoalChange(change: LocalEventGoalChange): Promise<LocalEventGoalChangeResult>;
 	stop(): Promise<void>;
 	onEvent(listener: (event: LocalToolEvent) => void): () => void;
 	onDesktopEvent(listener: (event: LocalDesktopEventFrame["data"]) => void): () => void;
@@ -232,6 +235,28 @@ export class LocalToolClient implements LocalToolProcess {
 			throw this.protocolFailure("event.commit returned an invalid result.");
 		}
 		return result as LocalEventCommitResult;
+	}
+
+	async appendGoalChange(
+		change: LocalEventGoalChange,
+	): Promise<LocalEventGoalChangeResult> {
+		const result = await this.request<unknown>("event.goal.change", change);
+		if (
+			!isRecord(result) ||
+			typeof result.inserted !== "boolean" ||
+			!isDesktopEvent(result.event) ||
+			result.event.kind !== "goal.contextChanged" ||
+			result.event.source !== "planning.controller" ||
+			result.event.occurredAtMs !== change.occurredAtMs ||
+			result.event.observedAtMs !== change.occurredAtMs ||
+			result.event.goalVersion !== (change.previous?.version ?? null) ||
+			result.event.sensitivity !== "content" ||
+			!sameGoalContext(result.event.payload.previous, change.previous) ||
+			!sameGoalContext(result.event.payload.next, change.next)
+		) {
+			throw this.protocolFailure("event.goal.change returned an invalid result.");
+		}
+		return result as LocalEventGoalChangeResult;
 	}
 
 	async stop(): Promise<void> {
@@ -435,6 +460,21 @@ export class LocalToolClient implements LocalToolProcess {
 			void child.stdin.flush();
 		} catch {}
 	}
+}
+
+function sameGoalContext(
+	left: unknown,
+	right: LocalEventGoalChange["previous"],
+): boolean {
+	if (left === null || right === null) return left === right;
+	if (!isRecord(left)) return false;
+	return (
+		left.goalId === right.goalId &&
+		left.planId === right.planId &&
+		left.version === right.version &&
+		left.text === right.text &&
+		left.activatedAtMs === right.activatedAtMs
+	);
 }
 
 async function closeGracefully(child: ChildTransport): Promise<void> {

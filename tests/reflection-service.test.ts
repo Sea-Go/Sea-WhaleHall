@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type {
 	LocalEventCommitResult,
+	LocalEventGoalChange,
+	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
 } from "../src/agent/local-protocol";
@@ -316,11 +318,67 @@ describe("DesktopReflectionService", () => {
 		expect(goal?.version).toBe(1);
 		expect((await service.getStatus()).pendingJobs).toBe(1);
 
-		transport.emit(foregroundEvent(2, "Terminal"));
+		transport.emit(foregroundEvent(3, "Terminal"));
 		await service.pullNow();
 		const snapshot = await repository.loadCollector("collector-1");
 		expect(snapshot?.openWindow?.goalVersion).toBe(1);
 		expect(snapshot?.openWindow?.events[0]?.goalVersion).toBe(1);
+		await service.stop();
+	});
+
+	test("the native goal cursor orders racing sensor events on the correct goal side", async () => {
+		const clock = new FakeClock(30_000);
+		const transport = new FakeTransport([
+			foregroundEvent(1, "Code", 1_000),
+		]);
+		transport.beforeGoalAppend = () => {
+			transport.appendDurable(foregroundEvent(2, "Terminal", 29_999));
+		};
+		transport.afterGoalAppend = () => {
+			transport.appendDurable(foregroundEvent(4, "Safari", 30_001));
+		};
+		const repository = new InMemoryReflectionRepository();
+		const envelopes: TelemetryEnvelopeV1[] = [];
+		const service = new DesktopReflectionService({
+			transport,
+			repository,
+			inference: { infer: async (window) => reflectionFor(window) },
+			identity: identity(),
+			clock,
+			semanticEventThreshold: 64,
+			jobPollMs: 60_000,
+			eventPollMs: 60_000,
+			sinks: [collectingSink(envelopes)],
+		});
+		await service.start();
+
+		const goal = await service.setActiveGoal({
+			goalId: "goal-ordered",
+			planId: null,
+			text: "验证原生目标边界",
+			activatedAtMs: 30_000,
+		});
+		await service.runJobsNow();
+
+		expect(goal?.version).toBe(1);
+		expect(envelopes[0]?.window).toMatchObject({
+			triggerReason: "goal_boundary",
+			goalVersion: null,
+			eventCount: 2,
+		});
+		expect(
+			envelopes[0]?.window.events
+				.filter((event) => event.kind === "application.foregroundChanged")
+				.map((event) => event.eventId),
+		).toEqual(["event-1", "event-2"]);
+		expect(await repository.loadCollector("collector-1")).toMatchObject({
+			activeGoal: { version: 1 },
+			openWindow: {
+				goalVersion: 1,
+				finalizedSemanticEventCount: 1,
+				events: [{ eventId: "event-4", goalVersion: 1 }],
+			},
+		});
 		await service.stop();
 	});
 
@@ -514,7 +572,7 @@ describe("DesktopReflectionService", () => {
 			null,
 		);
 		const transport = new FakeTransport([
-			foregroundEvent(2, "Terminal", 31_000),
+			foregroundEvent(2, "Terminal", 2_000),
 		]);
 		const envelopes: TelemetryEnvelopeV1[] = [];
 		const service = new DesktopReflectionService({
@@ -534,12 +592,7 @@ describe("DesktopReflectionService", () => {
 		expect(await repository.loadCollector("collector-1")).toMatchObject({
 			activeGoal: null,
 			goalRevision: 2,
-			openWindow: {
-				goal: null,
-				goalVersion: null,
-				finalizedSemanticEventCount: 1,
-				events: [{ eventId: "event-2", goalVersion: null }],
-			},
+			openWindow: null,
 		});
 		expect((await service.getStatus()).pendingJobs).toBe(1);
 		const results = await service.runJobsNow();
@@ -550,8 +603,16 @@ describe("DesktopReflectionService", () => {
 		expect(envelopes[0]?.window).toMatchObject({
 			triggerReason: "goal_boundary",
 			goalVersion: 1,
-			eventCount: 1,
+			eventCount: 2,
 		});
+		expect(
+			envelopes[0]?.window.events
+				.filter((event) => event.kind === "application.foregroundChanged")
+				.map((event) => [event.eventId, event.goalVersion]),
+		).toEqual([
+			["event-1", 1],
+			["event-2", 1],
+		]);
 		await service.stop();
 	});
 
@@ -666,8 +727,11 @@ class FakeTransport implements DesktopEventTransport {
 	readonly commits: string[] = [];
 	emitDuringStart: DesktopEventV1 | null = null;
 	failNextCommit = false;
+	beforeGoalAppend: (() => void) | null = null;
+	afterGoalAppend: (() => void) | null = null;
 	private readonly listeners = new Set<(event: DesktopEventV1) => void>();
 	private committedIndex = 0;
+	private readonly goalEvents = new Map<string, DesktopEventV1>();
 
 	constructor(private readonly events: DesktopEventV1[]) {}
 
@@ -697,6 +761,41 @@ class FakeTransport implements DesktopEventTransport {
 		const index = this.events.findIndex((event) => event.cursor === cursor);
 		if (index >= 0) this.committedIndex = Math.max(this.committedIndex, index + 1);
 		return { consumerId, cursor, advanced: true };
+	}
+
+	async appendDesktopGoalChange(
+		change: LocalEventGoalChange,
+	): Promise<LocalEventGoalChangeResult> {
+		this.beforeGoalAppend?.();
+		const existing = this.goalEvents.get(change.deduplicationKey);
+		if (existing) return { event: structuredClone(existing), inserted: false };
+		const sequence =
+			this.events.reduce(
+				(maximum, event) =>
+					Math.max(maximum, Number.parseInt(event.cursor.slice(4), 16) || 0),
+				0,
+			) + 1;
+		const event: DesktopEventV1 = {
+			schemaVersion: "desktop-event.v1",
+			eventId: `goal-event-${sequence}`,
+			cursor: `ec1_${sequence.toString(16).padStart(16, "0")}`,
+			deviceId: "native-device",
+			sessionId: "native-session",
+			kind: "goal.contextChanged",
+			source: "planning.controller",
+			occurredAtMs: change.occurredAtMs,
+			observedAtMs: change.occurredAtMs,
+			goalVersion: change.previous?.version ?? null,
+			sensitivity: "content",
+			payload: {
+				previous: structuredClone(change.previous),
+				next: structuredClone(change.next),
+			},
+		};
+		this.events.push(structuredClone(event));
+		this.goalEvents.set(change.deduplicationKey, structuredClone(event));
+		this.afterGoalAppend?.();
+		return { event, inserted: true };
 	}
 
 	onDesktopEvent(listener: (event: DesktopEventV1) => void): () => void {

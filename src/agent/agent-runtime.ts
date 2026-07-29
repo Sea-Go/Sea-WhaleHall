@@ -4,6 +4,8 @@ import type {
 } from "./local-tool-client";
 import type {
 	LocalEventCommitResult,
+	LocalEventGoalChange,
+	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
 	LocalRuntimeStatus,
@@ -99,6 +101,13 @@ export class AgentRuntime {
 	): Promise<LocalEventCommitResult> {
 		await this.ensureStarted();
 		return this.local.commitEventCursor(consumerId, cursor);
+	}
+
+	async appendDesktopGoalChange(
+		change: LocalEventGoalChange,
+	): Promise<LocalEventGoalChangeResult> {
+		await this.ensureStarted();
+		return this.local.appendGoalChange(change);
 	}
 
 	async stop(): Promise<void> {

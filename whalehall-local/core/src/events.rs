@@ -12,14 +12,17 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use whalehall_local_protocol::{
     DESKTOP_EVENT_SCHEMA_VERSION, DesktopEvent, DesktopEventSensitivity, EventCommitParams,
-    EventCommitResult, EventQueryParams, EventQueryResult, MAX_EVENT_QUERY_LIMIT,
-    desktop_event_kinds,
+    EventCommitResult, EventGoalChangeParams, EventQueryParams, EventQueryResult, GoalContext,
+    MAX_EVENT_QUERY_LIMIT, desktop_event_kinds,
 };
 
 const SCHEMA_VERSION: i64 = 1;
 const DEFAULT_BROADCAST_CAPACITY: usize = 256;
 const DEFAULT_RETENTION_DAYS: u64 = 30;
 const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
+const MAX_GOAL_ID_BYTES: usize = 200;
+const MAX_GOAL_TEXT_CHARS: usize = 1_000;
+const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 const CURSOR_PREFIX: &str = "ec1_";
 pub const EVENT_START_CURSOR: &str = "ec1_0000000000000000";
 const RETAINED_THROUGH_KEY: &str = "retained_through_sequence";
@@ -129,6 +132,8 @@ struct EventJournalInner {
     session_id: String,
     publisher: broadcast::Sender<DesktopEvent>,
     append_guard: Mutex<()>,
+    #[cfg(test)]
+    fail_next_appends: AtomicU64,
 }
 
 impl EventJournal {
@@ -175,6 +180,8 @@ impl EventJournal {
                 session_id,
                 publisher,
                 append_guard: Mutex::new(()),
+                #[cfg(test)]
+                fail_next_appends: AtomicU64::new(0),
             }),
         })
     }
@@ -197,6 +204,19 @@ impl EventJournal {
 
     pub fn append(&self, draft: DesktopEventDraft) -> Result<EventAppendResult, EventJournalError> {
         validate_draft(&draft)?;
+        #[cfg(test)]
+        if self
+            .inner
+            .fail_next_appends
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(EventJournalError::Io(std::io::Error::other(
+                "injected event append failure",
+            )));
+        }
         let payload_json = serde_json::to_string(&draft.payload)?;
         if payload_json.len() > MAX_EVENT_PAYLOAD_BYTES {
             return Err(EventJournalError::Configuration(format!(
@@ -251,6 +271,31 @@ impl EventJournal {
             let _ = self.inner.publisher.send(event.clone());
         }
         Ok(EventAppendResult { event, inserted })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_appends_for_test(&self, count: u64) {
+        self.inner.fail_next_appends.store(count, Ordering::SeqCst);
+    }
+
+    pub fn append_goal_change(
+        &self,
+        params: &EventGoalChangeParams,
+    ) -> Result<EventAppendResult, EventJournalError> {
+        validate_goal_change(params)?;
+        self.append(DesktopEventDraft {
+            kind: desktop_event_kinds::GOAL_CONTEXT_CHANGED.to_owned(),
+            source: "planning.controller".to_owned(),
+            occurred_at_ms: params.occurred_at_ms,
+            observed_at_ms: params.occurred_at_ms,
+            goal_version: params.previous.as_ref().map(|goal| goal.version),
+            sensitivity: DesktopEventSensitivity::Content,
+            payload: serde_json::json!({
+                "previous": params.previous,
+                "next": params.next,
+            }),
+            deduplication_key: params.deduplication_key.clone(),
+        })
     }
 
     pub fn query(&self, params: &EventQueryParams) -> Result<EventQueryResult, EventJournalError> {
@@ -490,6 +535,84 @@ impl EventJournal {
             protected_by_consumer_cursor: minimum_consumer_sequence.map(encode_cursor),
         })
     }
+}
+
+fn validate_goal_change(params: &EventGoalChangeParams) -> Result<(), EventJournalError> {
+    if params.previous.is_none() && params.next.is_none() {
+        return Err(EventJournalError::Configuration(
+            "event.goal.change requires previous or next goal context".to_owned(),
+        ));
+    }
+    if params.previous == params.next {
+        return Err(EventJournalError::Configuration(
+            "event.goal.change previous and next contexts must differ".to_owned(),
+        ));
+    }
+    if params.occurred_at_ms < 0 || params.occurred_at_ms > MAX_SAFE_INTEGER {
+        return Err(EventJournalError::Configuration(
+            "event.goal.change occurredAtMs must be a non-negative safe integer".to_owned(),
+        ));
+    }
+    validate_identifier(
+        "event.goal.change deduplicationKey",
+        &params.deduplication_key,
+        512,
+    )?;
+    if let Some(previous) = &params.previous {
+        validate_goal_context("previous", previous, params.occurred_at_ms)?;
+    }
+    if let Some(next) = &params.next {
+        validate_goal_context("next", next, params.occurred_at_ms)?;
+    }
+    if let (Some(previous), Some(next)) = (&params.previous, &params.next)
+        && next.version != previous.version.saturating_add(1)
+    {
+        return Err(EventJournalError::Configuration(
+            "event.goal.change next.version must equal previous.version + 1".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_goal_context(
+    label: &str,
+    goal: &GoalContext,
+    occurred_at_ms: i64,
+) -> Result<(), EventJournalError> {
+    validate_identifier(
+        &format!("event.goal.change {label}.goalId"),
+        &goal.goal_id,
+        MAX_GOAL_ID_BYTES,
+    )?;
+    if let Some(plan_id) = &goal.plan_id {
+        validate_identifier(
+            &format!("event.goal.change {label}.planId"),
+            plan_id,
+            MAX_GOAL_ID_BYTES,
+        )?;
+    }
+    if goal.version < 0 || goal.version > MAX_SAFE_INTEGER {
+        return Err(EventJournalError::Configuration(format!(
+            "event.goal.change {label}.version must be a non-negative safe integer"
+        )));
+    }
+    if goal.activated_at_ms < 0
+        || goal.activated_at_ms > occurred_at_ms
+        || goal.activated_at_ms > MAX_SAFE_INTEGER
+    {
+        return Err(EventJournalError::Configuration(format!(
+            "event.goal.change {label}.activatedAtMs must be a non-negative safe integer at or before occurredAtMs"
+        )));
+    }
+    if goal.text.trim().is_empty()
+        || goal.text.chars().count() > MAX_GOAL_TEXT_CHARS
+        || goal.text.chars().any(char::is_control)
+    {
+        return Err(EventJournalError::Configuration(format!(
+            "event.goal.change {label}.text must contain 1 to {MAX_GOAL_TEXT_CHARS} non-control characters"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_draft(draft: &DesktopEventDraft) -> Result<(), EventJournalError> {
@@ -1093,6 +1216,86 @@ mod tests {
                 .events
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn specialized_goal_change_append_is_validated_durable_and_idempotent() {
+        let (_directory, journal) = test_journal();
+        let params = EventGoalChangeParams {
+            previous: None,
+            next: Some(GoalContext {
+                goal_id: "goal-1".to_owned(),
+                plan_id: Some("plan-1".to_owned()),
+                version: 1,
+                text: "完成 WhaleHall 反思系统".to_owned(),
+                activated_at_ms: 1_000,
+            }),
+            occurred_at_ms: 1_000,
+            deduplication_key: "goal-change:goal-1:1".to_owned(),
+        };
+
+        let first = journal.append_goal_change(&params).unwrap();
+        assert!(first.inserted);
+        assert_eq!(first.event.kind, desktop_event_kinds::GOAL_CONTEXT_CHANGED);
+        assert_eq!(first.event.source, "planning.controller");
+        assert_eq!(first.event.sensitivity, DesktopEventSensitivity::Content);
+        assert_eq!(first.event.goal_version, None);
+        assert_eq!(first.event.payload["previous"], serde_json::Value::Null);
+        assert_eq!(first.event.payload["next"]["goalId"], "goal-1");
+        assert!(!first.event.contributes_to_reflection_count());
+
+        let replay = journal.append_goal_change(&params).unwrap();
+        assert!(!replay.inserted);
+        assert_eq!(replay.event, first.event);
+        assert_eq!(
+            journal.query(&EventQueryParams::default()).unwrap().events,
+            vec![first.event]
+        );
+    }
+
+    #[test]
+    fn specialized_goal_change_rejects_invalid_or_unbounded_contexts() {
+        let (_directory, journal) = test_journal();
+        let invalid = EventGoalChangeParams {
+            previous: None,
+            next: None,
+            occurred_at_ms: 1_000,
+            deduplication_key: "goal-change:none".to_owned(),
+        };
+        assert!(matches!(
+            journal.append_goal_change(&invalid),
+            Err(EventJournalError::Configuration(_))
+        ));
+
+        let invalid = EventGoalChangeParams {
+            previous: Some(GoalContext {
+                goal_id: "goal-1".to_owned(),
+                plan_id: None,
+                version: 1,
+                text: "previous".to_owned(),
+                activated_at_ms: 500,
+            }),
+            next: Some(GoalContext {
+                goal_id: "goal-2".to_owned(),
+                plan_id: None,
+                version: 3,
+                text: "x".repeat(MAX_GOAL_TEXT_CHARS + 1),
+                activated_at_ms: 1_000,
+            }),
+            occurred_at_ms: 1_000,
+            deduplication_key: "goal-change:bad-version".to_owned(),
+        };
+        assert!(matches!(
+            journal.append_goal_change(&invalid),
+            Err(EventJournalError::Configuration(_))
+        ));
+        assert!(
+            journal
+                .query(&EventQueryParams::default())
+                .unwrap()
+                .events
+                .is_empty()
         );
     }
 

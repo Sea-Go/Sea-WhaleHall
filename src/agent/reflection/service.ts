@@ -2,6 +2,8 @@ import type { AgentRuntime } from "../agent-runtime";
 import { MAX_ACTIVE_GOAL_TEXT_LENGTH } from "../../shared/goal-context";
 import type {
 	LocalEventCommitResult,
+	LocalEventGoalChange,
+	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
 } from "../local-protocol";
@@ -19,7 +21,6 @@ import {
 } from "./job-runner";
 import type { ReflectionRepository } from "./repository";
 import {
-	DESKTOP_EVENT_SCHEMA_VERSION,
 	type ActiveGoalContextV1,
 	type DesktopEventV1,
 	type EventWindowV1,
@@ -44,6 +45,9 @@ export interface DesktopEventTransport {
 		consumerId: string,
 		cursor: string,
 	): Promise<LocalEventCommitResult>;
+	appendDesktopGoalChange(
+		change: LocalEventGoalChange,
+	): Promise<LocalEventGoalChangeResult>;
 	onDesktopEvent(listener: (event: DesktopEventV1) => void): () => void;
 }
 
@@ -84,9 +88,9 @@ export type DesktopReflectionServiceOptions = {
 	semanticEventThreshold?: number;
 	maxWaitMs?: number;
 	/**
-	 * An authoritative goal known by the host before native sensors start.
-	 * `null` clears a recovered goal before any new durable event is pulled;
-	 * `undefined` preserves the recovered collector state.
+	 * An authoritative goal known during startup. The service first materializes
+	 * the pre-crash journal tail under the recovered goal, then appends this as
+	 * a durable native boundary. `undefined` preserves recovered goal state.
 	 */
 	startupGoal?: Omit<ActiveGoalContextV1, "version"> | null;
 	onError?: (error: unknown) => void;
@@ -113,6 +117,7 @@ export class DesktopReflectionService {
 	private readonly onError: (error: unknown) => void;
 	private readonly collector: ReflectionCollector;
 	private readonly jobs: ReflectionJobRunner;
+	private readonly hasher = new WebCryptoReflectionHasher();
 
 	private started = false;
 	private acceptingLiveEvents = false;
@@ -159,7 +164,7 @@ export class DesktopReflectionService {
 		this.collector = new ReflectionCollector({
 			...this.identity,
 			repository: this.repository,
-			windowBuilder: new DeterministicWindowBuilder(new WebCryptoReflectionHasher()),
+			windowBuilder: new DeterministicWindowBuilder(this.hasher),
 			clock: this.clock,
 			semanticEventThreshold:
 				options.semanticEventThreshold ?? DEFAULT_SEMANTIC_EVENT_THRESHOLD,
@@ -207,10 +212,15 @@ export class DesktopReflectionService {
 
 		try {
 			await this.collector.recover({ deferDeadline: true });
-			if (this.startupGoal !== undefined) {
-				await this.applyActiveGoalToCollector(this.startupGoal);
-			}
 			await this.transport.start();
+			// Materialize the pre-crash journal tail under the recovered goal
+			// before writing an authoritative startup goal boundary. The native
+			// append then orders every concurrent sensor event on the correct
+			// side of that boundary.
+			if (this.startupGoal !== undefined) {
+				await this.pullBacklog();
+				await this.appendActiveGoalToJournal(this.startupGoal);
+			}
 			for (;;) {
 				const generation = this.pausedLiveGeneration;
 				await this.pullBacklog();
@@ -263,7 +273,7 @@ export class DesktopReflectionService {
 		await this.enqueue(async () => {
 			if (!this.started) throw new Error("DesktopReflectionService is not started.");
 			await this.pullBacklog();
-			normalized = await this.applyActiveGoalToCollector(validatedGoal);
+			normalized = await this.appendActiveGoalToJournal(validatedGoal);
 		});
 		return normalized;
 	}
@@ -315,7 +325,7 @@ export class DesktopReflectionService {
 		}
 	}
 
-	private async applyActiveGoalToCollector(
+	private async appendActiveGoalToJournal(
 		validatedGoal: Omit<ActiveGoalContextV1, "version"> | null,
 	): Promise<ActiveGoalContextV1 | null> {
 		const collectorSnapshot = this.collector.getSnapshot();
@@ -337,33 +347,43 @@ export class DesktopReflectionService {
 		}
 		if (validatedGoal === null && previous === null) return null;
 
-		const normalized = validatedGoal
+		const next = validatedGoal
 			? {
 					...structuredClone(validatedGoal),
 					version: collectorSnapshot.goalRevision + 1,
 				}
 			: null;
-		const nowMs = this.clock.nowMs();
-		const version = normalized?.version ?? collectorSnapshot.goalRevision + 1;
-		const event: DesktopEventV1 = {
-			schemaVersion: DESKTOP_EVENT_SCHEMA_VERSION,
-			eventId: `goal_${this.identity.deviceId}_${version}_${nowMs}`,
-			cursor: `goal:${version.toString().padStart(12, "0")}:${nowMs}`,
-			deviceId: this.identity.deviceId,
-			sessionId: this.identity.sessionId,
-			kind: "goal.contextChanged",
-			source: "planning.controller",
-			occurredAtMs: nowMs,
-			observedAtMs: nowMs,
-			goalVersion: previous?.version ?? null,
-			sensitivity: "content",
-			payload: {
-				previous: structuredClone(previous),
-				next: structuredClone(normalized),
-			},
-		};
-		await this.collector.ingest(event);
-		return normalized;
+		const occurredAtMs = this.clock.nowMs();
+		if (
+			next !== null &&
+			next.activatedAtMs > occurredAtMs
+		) {
+			throw new Error("Active goal activatedAtMs cannot be in the future.");
+		}
+		const digest = await this.hasher.sha256(
+			JSON.stringify({
+				collectorId: this.identity.collectorId,
+				deviceId: this.identity.deviceId,
+				revision: collectorSnapshot.goalRevision + 1,
+				previous,
+				next,
+			}),
+		);
+		await this.transport.appendDesktopGoalChange({
+			previous: structuredClone(previous),
+			next: structuredClone(next),
+			occurredAtMs,
+			deduplicationKey: `whalehall-goal-v1:${digest}`,
+		});
+		// The append response is not the materialization barrier. Pull through
+		// the named consumer so the boundary and surrounding sensor events are
+		// assigned strictly by their durable cursor order.
+		await this.pullBacklog();
+		const activeGoal = this.collector.getSnapshot().activeGoal;
+		if (!sameGoalContext(activeGoal, next)) {
+			throw new Error("Durable goal boundary did not materialize as requested.");
+		}
+		return structuredClone(activeGoal);
 	}
 
 	private async ingestJournalEvent(rawEvent: DesktopEventV1): Promise<void> {
@@ -594,6 +614,22 @@ function validateRequestedGoal(
 
 function isBoundedGoalString(value: string, maximum: number): boolean {
 	return value.length >= 1 && value.length <= maximum && !value.includes("\u0000");
+}
+
+function sameGoalContext(
+	left: ActiveGoalContextV1 | null,
+	right: ActiveGoalContextV1 | null,
+): boolean {
+	return (
+		left === right ||
+		(left !== null &&
+			right !== null &&
+			left.goalId === right.goalId &&
+			left.planId === right.planId &&
+			left.version === right.version &&
+			left.text === right.text &&
+			left.activatedAtMs === right.activatedAtMs)
+	);
 }
 
 class TelemetryReflectionCommitter implements ReflectionCommitter {

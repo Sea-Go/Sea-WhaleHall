@@ -6,6 +6,8 @@ import {
 } from "../src/agent/local-tool-client";
 import type {
 	LocalEventCommitResult,
+	LocalEventGoalChange,
+	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
 	LocalRuntimeHealth,
@@ -74,6 +76,31 @@ class FakeLocalProcess implements LocalToolProcess {
 		cursor: string,
 	): Promise<LocalEventCommitResult> {
 		return { consumerId, cursor, advanced: true };
+	}
+
+	async appendGoalChange(
+		change: LocalEventGoalChange,
+	): Promise<LocalEventGoalChangeResult> {
+		return {
+			inserted: true,
+			event: {
+				schemaVersion: "desktop-event.v1",
+				eventId: "goal-event",
+				cursor: "ec1_0000000000000001",
+				deviceId: "device",
+				sessionId: "session",
+				kind: "goal.contextChanged",
+				source: "planning.controller",
+				occurredAtMs: change.occurredAtMs,
+				observedAtMs: change.occurredAtMs,
+				goalVersion: change.previous?.version ?? null,
+				sensitivity: "content",
+				payload: {
+					previous: structuredClone(change.previous),
+					next: structuredClone(change.next),
+				},
+			},
+		};
 	}
 
 	async stop(): Promise<void> {

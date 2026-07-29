@@ -1,10 +1,12 @@
 use std::io;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use whalehall_local_core::ToolHost;
 use whalehall_local_core::events::{EventJournal, EventJournalError};
 use whalehall_local_core::sensors::accessibility_tree::{
@@ -29,10 +31,13 @@ use whalehall_local_core::sensors::vscode_edit_bridge::{
     VscodeEditBridgeConfig, VscodeEditBridgeService,
 };
 use whalehall_local_protocol::{
-    DesktopEventFrame, DesktopEventFrameKind, EventCommitParams, EventQueryParams,
-    MAX_JSONL_LINE_BYTES, OutboundMessage, Request, Response, RuntimeHealth, ToolCallParams,
-    ToolCallResult, ToolCancelParams, ToolCancelResult, ToolListResult, error_codes,
+    DesktopEventFrame, DesktopEventFrameKind, EventCommitParams, EventGoalChangeParams,
+    EventGoalChangeResult, EventQueryParams, MAX_JSONL_LINE_BYTES, OutboundMessage, Request,
+    Response, RuntimeHealth, ToolCallParams, ToolCallResult, ToolCancelParams, ToolCancelResult,
+    ToolListResult, error_codes,
 };
+
+const EVENT_RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub async fn serve<R, W>(reader: R, writer: W) -> io::Result<()>
 where
@@ -92,9 +97,10 @@ where
             return Err(io::Error::other(error));
         }
     };
-    let accessibility = match AccessibilityService::start(
+    let accessibility = match AccessibilityService::start_with_event_journal(
         accessibility_config,
         Arc::new(SystemAccessibilityProvider),
+        Some(event_journal.clone()),
     ) {
         Ok(accessibility) => accessibility,
         Err(error) => {
@@ -415,6 +421,8 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let retention_task =
+        EventRetentionTask::start(event_journal.clone(), EVENT_RETENTION_CLEANUP_INTERVAL);
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_output = output_tx.clone();
@@ -526,6 +534,7 @@ where
     }
 
     while calls.join_next().await.is_some() {}
+    retention_task.shutdown().await;
     services.shutdown().await;
     drop(event_tx);
     let _ = event_forwarder.await;
@@ -536,6 +545,52 @@ where
         .await
         .map_err(|error| io::Error::other(format!("Local writer task failed: {error}")))??;
     Ok(())
+}
+
+struct EventRetentionTask {
+    stop: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl EventRetentionTask {
+    fn start(event_journal: EventJournal, cleanup_interval: Duration) -> Self {
+        run_event_retention_cleanup(&event_journal);
+        let (stop, mut stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut ticker = interval_at(Instant::now() + cleanup_interval, cleanup_interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    _ = ticker.tick() => run_event_retention_cleanup(&event_journal),
+                }
+            }
+        });
+        Self {
+            stop: Some(stop),
+            task,
+        }
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let _ = self.task.await;
+    }
+}
+
+fn run_event_retention_cleanup(event_journal: &EventJournal) {
+    if let Err(error) = event_journal.cleanup(server_now_ms()) {
+        eprintln!("desktop event retention cleanup warning: {error}");
+    }
+}
+
+fn server_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
 }
 
 fn dispatch_request(
@@ -654,6 +709,30 @@ fn dispatch_request(
             };
             let _ = output.send(OutboundMessage::Response(response));
         }
+        "event.goal.change" => {
+            let params: EventGoalChangeParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid event.goal.change parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match event_journal.append_goal_change(&params) {
+                Ok(result) => Response::success(
+                    request.id,
+                    EventGoalChangeResult {
+                        event: result.event,
+                        inserted: result.inserted,
+                    },
+                ),
+                Err(error) => event_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
         _ => {
             let method = request.method;
             let _ = output.send(OutboundMessage::Response(Response::failure(
@@ -703,11 +782,11 @@ mod tests {
 
     use tempfile::TempDir;
     use tokio::io::{AsyncWriteExt, BufReader, duplex};
-    use whalehall_local_core::events::{DesktopEventDraft, EventJournal};
+    use whalehall_local_core::events::{DesktopEventDraft, EventJournal, EventJournalConfig};
     use whalehall_local_core::sensors::activity::{
         ActivityConfig, ActivityError, ActivityService, ForegroundApp, ForegroundAppProvider,
     };
-    use whalehall_local_protocol::desktop_event_kinds;
+    use whalehall_local_protocol::{EventCommitParams, EventQueryParams, desktop_event_kinds};
 
     use super::*;
 
@@ -842,6 +921,12 @@ mod tests {
             )
             .await
             .expect("write consumer event query");
+        input
+            .write_all(
+                b"{\"id\":\"goal\",\"method\":\"event.goal.change\",\"params\":{\"previous\":null,\"next\":{\"goalId\":\"goal-1\",\"planId\":null,\"version\":1,\"text\":\"Ship reflection\",\"activatedAtMs\":2000},\"occurredAtMs\":2000,\"deduplicationKey\":\"goal-change:goal-1:1\"}}\n",
+            )
+            .await
+            .expect("write goal change");
         input.shutdown().await.expect("close input");
 
         let mut lines = vec![health_line];
@@ -878,6 +963,83 @@ mod tests {
             .expect("consumer event.query response");
         assert_eq!(resume["result"]["events"], serde_json::json!([]));
         assert_eq!(resume["result"]["nextCursor"], appended.cursor);
+        let goal = frames
+            .iter()
+            .find(|frame| frame["id"] == "goal")
+            .expect("event.goal.change response");
+        assert_eq!(
+            goal["result"]["event"]["kind"],
+            desktop_event_kinds::GOAL_CONTEXT_CHANGED
+        );
+        assert_eq!(
+            goal["result"]["event"]["payload"]["next"]["goalId"],
+            "goal-1"
+        );
+        assert_eq!(goal["result"]["inserted"], true);
+    }
+
+    #[tokio::test]
+    async fn retention_task_runs_on_start_and_repeats_without_crossing_consumer_cursor() {
+        let directory = tempfile::tempdir().expect("create retention scheduler directory");
+        let journal = EventJournal::open_with_config(EventJournalConfig {
+            database_path: directory.path().join("events.sqlite3"),
+            retention: Duration::from_millis(1),
+            broadcast_capacity: 8,
+        })
+        .expect("open retention journal");
+        let first = journal
+            .append(DesktopEventDraft::metadata(
+                "test.first",
+                "server.test",
+                1,
+                serde_json::json!({}),
+                "retention-first",
+            ))
+            .unwrap()
+            .event;
+        let second = journal
+            .append(DesktopEventDraft::metadata(
+                "test.second",
+                "server.test",
+                2,
+                serde_json::json!({}),
+                "retention-second",
+            ))
+            .unwrap()
+            .event;
+        journal
+            .commit(&EventCommitParams {
+                consumer_id: "slow-consumer".to_owned(),
+                cursor: first.cursor,
+            })
+            .unwrap();
+
+        let task = EventRetentionTask::start(journal.clone(), Duration::from_millis(20));
+        let remaining = journal.query(&EventQueryParams::default()).unwrap();
+        assert_eq!(remaining.events, vec![second.clone()]);
+
+        journal
+            .commit(&EventCommitParams {
+                consumer_id: "slow-consumer".to_owned(),
+                cursor: second.cursor,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if journal
+                    .query(&EventQueryParams::default())
+                    .unwrap()
+                    .events
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("scheduled cleanup should run");
+        task.shutdown().await;
     }
 
     #[tokio::test]

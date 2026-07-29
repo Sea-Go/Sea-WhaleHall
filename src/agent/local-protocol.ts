@@ -1,4 +1,5 @@
 import type {
+	ActiveGoalContextV1,
 	DesktopEventKind,
 	DesktopEventV1,
 } from "./reflection/types";
@@ -14,7 +15,8 @@ export type LocalMethod =
 	| "tool.call"
 	| "tool.cancel"
 	| "event.query"
-	| "event.commit";
+	| "event.commit"
+	| "event.goal.change";
 
 export type LocalRequest = {
 	id: string;
@@ -126,6 +128,18 @@ export type LocalEventCommitResult = {
 	consumerId: string;
 	cursor: string;
 	advanced: boolean;
+};
+
+export type LocalEventGoalChange = {
+	previous: ActiveGoalContextV1 | null;
+	next: ActiveGoalContextV1 | null;
+	occurredAtMs: number;
+	deduplicationKey: string;
+};
+
+export type LocalEventGoalChangeResult = {
+	event: DesktopEventV1;
+	inserted: boolean;
 };
 
 export type LocalMessage = LocalResponse | LocalToolEvent | LocalDesktopEventFrame;

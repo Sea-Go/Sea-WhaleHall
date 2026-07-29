@@ -297,6 +297,72 @@ describe("LocalToolClient", () => {
 		await client.stop();
 	});
 
+	test("appends only the specific validated durable goal boundary", async () => {
+		const child = new FakeChild((line, process) => {
+			const request = JSON.parse(line) as {
+				id: string;
+				method: string;
+				params: Record<string, unknown>;
+			};
+			if (request.method !== "event.goal.change") return;
+			const previous = request.params.previous as null;
+			const next = request.params.next as {
+				goalId: string;
+				planId: string | null;
+				version: number;
+				text: string;
+				activatedAtMs: number;
+			};
+			const occurredAtMs = request.params.occurredAtMs as number;
+			process.respond({
+				id: request.id,
+				ok: true,
+				result: {
+					inserted: true,
+					event: {
+						schemaVersion: "desktop-event.v1",
+						eventId: "goal-event-1",
+						cursor: "ec1_0000000000000001",
+						deviceId: "native-device",
+						sessionId: "native-session",
+						kind: "goal.contextChanged",
+						source: "planning.controller",
+						occurredAtMs,
+						observedAtMs: occurredAtMs,
+						goalVersion: null,
+						sensitivity: "content",
+						payload: { previous, next },
+					},
+				},
+			});
+		});
+		const client = new LocalToolClient("fake", { spawn: () => child });
+		await client.start();
+		const next = {
+			goalId: "goal-1",
+			planId: null,
+			version: 1,
+			text: "完成实现",
+			activatedAtMs: 10_000,
+		};
+
+		await expect(
+			client.appendGoalChange({
+				previous: null,
+				next,
+				occurredAtMs: 10_000,
+				deduplicationKey: "goal-change-1",
+			}),
+		).resolves.toMatchObject({
+			inserted: true,
+			event: {
+				kind: "goal.contextChanged",
+				payload: { previous: null, next },
+			},
+		});
+		await client.stop();
+	});
+
 	test("times out a tool call and sends a best-effort cancellation", async () => {
 		const methods: string[] = [];
 		const child = new FakeChild((line) => {

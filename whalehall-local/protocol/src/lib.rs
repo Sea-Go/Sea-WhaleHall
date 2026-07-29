@@ -261,6 +261,32 @@ pub struct EventCommitResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalContext {
+    pub goal_id: String,
+    pub plan_id: Option<String>,
+    pub version: i64,
+    pub text: String,
+    pub activated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventGoalChangeParams {
+    pub previous: Option<GoalContext>,
+    pub next: Option<GoalContext>,
+    pub occurred_at_ms: i64,
+    pub deduplication_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EventGoalChangeResult {
+    pub event: DesktopEvent,
+    pub inserted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ToolEventKind {
     #[serde(rename = "tool.started")]
     Started,
