@@ -38,7 +38,9 @@ const agent = new AgentRuntime(
 let petVisible = true;
 let shutdownPromise: Promise<void> | null = null;
 let startupPromise: Promise<void> | null = null;
+let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
+const STARTUP_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 45_000, 120_000, 300_000];
 
 let clientWindow: BrowserWindow;
 let petWindow: BrowserWindow;
@@ -216,6 +218,7 @@ petWindow.webview.on("dom-ready", () => {
 function shutdown(): Promise<void> {
 	if (shutdownPromise) return shutdownPromise;
 	shutdownPromise = (async () => {
+		cancelStartupRetryWait?.();
 		// Startup owns both the initial native start and any reflection-service
 		// start. Waiting here prevents a late candidate from restarting the
 		// native sensor process after shutdown has already stopped it.
@@ -243,40 +246,88 @@ process.once("SIGTERM", () => {
 });
 
 startupPromise = (async () => {
-	await agent.start();
-	if (shutdownPromise) return;
-	const candidate = await createWhaleHallReflectionRuntime({
-		agent,
-		dataDirectory: localDataPath,
-		canPresentFeedback: () => petVisible,
-		onFeedback: (code) => {
-			petStateArbiter.showPresentationEvent(reflectionPresentationEvent(code));
-		},
-	});
-	if (shutdownPromise) {
-		await candidate.close();
-		return;
-	}
-	try {
-		await candidate.service.start();
-		if (shutdownPromise) {
-			await candidate.close();
+	let attempt = 0;
+	while (!shutdownPromise) {
+		let candidate: WhaleHallReflectionRuntime | null = null;
+		try {
+			await agent.start();
+			if (shutdownPromise) return;
+			candidate = await createWhaleHallReflectionRuntime({
+				agent,
+				dataDirectory: localDataPath,
+				canPresentFeedback: () => petVisible,
+				onFeedback: (code) => {
+					petStateArbiter.showPresentationEvent(
+						reflectionPresentationEvent(code),
+					);
+				},
+			});
+			if (shutdownPromise) {
+				await candidate.close();
+				return;
+			}
+			await candidate.service.start();
+			if (shutdownPromise) {
+				await candidate.close();
+				return;
+			}
+			reflectionRuntime = candidate;
+			console.log(
+				`WhaleHall reflection runtime ready; qwen teacher lock: ${
+					candidate.teacherVerified ? "verified" : "unavailable"
+				}`,
+			);
 			return;
+		} catch (error) {
+			if (candidate) {
+				await candidate.close().catch((closeError) => {
+					console.error(
+						"WhaleHall reflection candidate cleanup failed:",
+						closeError,
+					);
+				});
+			}
+			if (shutdownPromise) return;
+			// A failed health/query can leave a child allocated but unusable.
+			// Stop it before retrying so AgentRuntime cannot mistake that child
+			// for a healthy already-started transport.
+			await agent.stop().catch((stopError) => {
+				console.error(
+					"WhaleHall local runtime cleanup before retry failed:",
+					stopError,
+				);
+			});
+			const delayMs =
+				STARTUP_RETRY_DELAYS_MS[
+					Math.min(attempt, STARTUP_RETRY_DELAYS_MS.length - 1)
+				] ?? 300_000;
+			attempt += 1;
+			console.error(
+				`WhaleHall reflection runtime start failed; retrying in ${delayMs}ms:`,
+				error,
+			);
+			await waitForStartupRetry(delayMs);
 		}
-		reflectionRuntime = candidate;
-		console.log(
-			`WhaleHall reflection runtime ready; qwen teacher lock: ${
-				candidate.teacherVerified ? "verified" : "unavailable"
-			}`,
-		);
-	} catch (error) {
-		await candidate.close();
-		throw error;
 	}
-})().catch((error) => {
-	console.error("WhaleHall reflection runtime failed to start:", error);
-});
+})();
 console.log(`WhaleHall started; local tool host: ${nativePath}`);
+
+function waitForStartupRetry(delayMs: number): Promise<void> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			cancelStartupRetryWait = null;
+			resolve();
+		};
+		const timer = globalThis.setTimeout(finish, delayMs);
+		cancelStartupRetryWait = () => {
+			globalThis.clearTimeout(timer);
+			finish();
+		};
+	});
+}
 
 function reflectionPresentationEvent(
 	code: ActiveReflectionFeedbackCode,
