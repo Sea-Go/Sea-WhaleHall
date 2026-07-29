@@ -39,6 +39,15 @@ to `appId` and `appName`; `windowTitle`, process ID, and executable path are
 not copied into EventJournal. Repeated heartbeats and transitions to an
 unknown/no-foreground state do not publish semantic events.
 
+The session transition and a private `activity_event_outbox` row are committed
+in the same `usage.sqlite3` transaction. Publication then appends to
+EventJournal and deletes the outbox row. A transient append failure or a crash
+therefore replays by stable deduplication key without losing or duplicating the
+foreground boundary. On restart, the last open session is recovered as a
+one-observation baseline: seeing the same app, process, and window starts the
+new usage session without inventing another foreground event, while a real
+change still publishes normally.
+
 ## Rust service APIs
 
 ```rust

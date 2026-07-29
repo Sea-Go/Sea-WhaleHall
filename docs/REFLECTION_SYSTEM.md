@@ -10,7 +10,7 @@ flowchart LR
   Merge --> Journal["EventJournal · SQLite WAL"]
   Journal -->|"desktop.event push"| Client["LocalToolClient"]
   Journal -->|"event.query pull/replay"| Client
-  Client --> Guard["严格协议校验与重复抑制"]
+  Client --> Guard["严格协议校验与持久化 replay receipt"]
   Guard --> Collector["64 条 OR 首事件后 5 分钟"]
   Collector --> Windows["不可变 EventWindow"]
   Windows --> Jobs["持久化推理 Job"]
@@ -20,10 +20,13 @@ flowchart LR
   Reflections --> Sink["TelemetrySink v1"]
 ```
 
-- Rust `EventJournal` 负责事件落盘、确定性事件 ID、单调 cursor、进程内主动推送、pull 补播和 named-consumer commit。
+- Rust `EventJournal` 负责事件落盘、确定性事件 ID、单调 cursor、进程内主动推送、pull 补播和 named-consumer commit；启动时及此后每日执行一次 30 天、受最慢 consumer cursor 保护的清理。
+- 正常目标切换只经专用 `event.goal.change` 协议原子写入
+  `goal.contextChanged` 并返回 durable cursor；本地协议不开放任意事件
+  append，稳定 dedup key 的重放返回同一事件。
 - 窗口内以 EventJournal cursor/数组顺序作为唯一总序；多传感器的
   `occurredAtMs` 允许回拨，训练导出不得按生产者时间重排不可变窗口。
-- Rust 输入、进程和 VS Code 传感器先产出确定性语义事件；TypeScript 对其他 observation 做同规则合并，并统一执行反思封窗。第 64 条事件立即封窗，或第一条有效事件后 300,000ms 封窗。
+- Rust 输入、进程、浏览器、Accessibility 和 VS Code 传感器先完成聚合与状态变化去重，再把确定性语义事件写入 EventJournal。TypeScript 不保留跨崩溃不安全的内存去重状态，只按 cursor 重放并统一执行反思封窗。第 64 条事件立即封窗，或第一条有效事件后 300,000ms 封窗。
 - `reflections.sqlite3` 原子保存 collector snapshot、不可变窗口、READY job 和最终 `ReflectionV1`。推理与 sink 提交使用租约和幂等 `windowId` 恢复。
 - ModernBERT 仅返回分类概率、相关性、256 维 embedding、OOD 分数和模型版本，不生成自由文本。
 - Qwen 只在 ModernBERT 低置信、OOD 或暂不可用时做本地类别仲裁；其输出不作为校准概率，也不保存思维链。
@@ -72,6 +75,12 @@ Collector 没有事件时不创建五分钟 timer，不产生空反思。每个�
 篡改已经封存的不可变窗口。这样“同时”有可恢复、可测试的定义，且 cursor
 不会因跨传感器调度顺序被倒退提交。
 
+新产生的 presence 事件使用检测时刻作为 EventJournal 的
+`occurredAtMs/observedAtMs`，避免睡眠恢复后的历史估算时间倒退跨越其他
+传感器 cursor。兼容旧数据时，早于当前窗口首事件的迟到边界只持久化
+receipt；发生在窗口内但迟到的边界仍优先于 count，并以观测时刻封窗，
+保证窗口结束时间不早于其中任何证据，也不把旧 cursor 移入下一窗口。
+
 ## 本机文件
 
 默认位于 Electrobun 的应用数据目录；开发/测试可用 `WHALEHALL_DATA_DIR` 隔离：
@@ -82,6 +91,7 @@ Collector 没有事件时不创建五分钟 timer，不产生空反思。每个�
 | `reflections.sqlite3` | collector snapshot、EventWindow、jobs、ReflectionJournal |
 | `reflection-identity.v1.json` | 非秘密的稳定 installation/window identity，权限 `0600` |
 | `usage.sqlite3` | 前台应用 session |
+| `accessibility.sqlite3` | 明确授权后的 UI tree、语义状态与 durable outbox |
 | `editor-bridge/editor.sqlite3` | VS Code claimed segment、durable open burst 与幂等 outbox；目录 `0700`、SQLite/WAL/SHM `0600` |
 
 键鼠聚合器只在内存中累计当前五秒桶；非空桶直接写入
@@ -133,10 +143,24 @@ WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED=false
 metadata 模式只发布真实的 tab open/navigation/close 状态变化，不包含
 URL 或标题；这些状态变化不会因为 payload 为空而被误判成重复轮询。
 
+Accessibility 也采用两道默认关闭的授权：
+
+```bash
+WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED=true
+WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED=false
+```
+
+metadata 模式只产生焦点角色等不含 value/document text 的事件；正文开关
+开启后才允许有界 value/document change。password/secure/protected 节点
+无论配置如何都不会写入值或正文。snapshot 与 event outbox 在同一 SQLite
+事务中提交，EventJournal 瞬态失败后可幂等补写。
+
 活动目标最多 1,000 个 Unicode 字符。客户端启动而计划系统没有恢复出
-当前目标时会显式同步 `null`；同步采用 latest-wins 队列并持续重试到
-runtime 对同一目标返回精确 ACK。退出账号会先清空本地目标并等待 `null`
-ACK，再切换账号，避免旧目标继续影响相关性判断。
+当前目标时会显式同步 `null`。启动恢复先把崩溃前尚未 commit 的 journal
+tail 按旧目标物化，再追加专用、幂等的原生目标边界；因此边界前后的事件
+不会被重标或形成重叠窗口。同步采用 latest-wins 队列并持续重试到 runtime
+对同一目标返回精确 ACK。退出账号会先清空本地目标并等待 `null` ACK，再
+切换账号，避免旧目标继续影响相关性判断。
 
 ## 模型运行配置
 

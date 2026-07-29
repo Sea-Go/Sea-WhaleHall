@@ -84,6 +84,12 @@ The event uses metadata sensitivity and a deterministic key based on its
 bucket boundaries. `EventJournal` deduplication therefore prevents a repeated
 append of the same bucket. The event stream is available through the existing
 `event.query`, `event.commit`, and live `desktop.event` protocol.
+Before append, every non-empty sealed bucket is durably inserted into the
+private `input-activity.sqlite3` outbox beside `events.sqlite3`. The row is
+deleted only after EventJournal accepts it; startup and every bucket tick flush
+pending rows in order. A transient EventJournal error or process restart
+therefore cannot discard a sealed bucket, and replay remains exactly-once by
+the deterministic bucket key.
 On POSIX systems the EventJournal database and present WAL/SHM sidecars are
 forced to owner-only mode `0600`; a newly created journal parent directory is
 forced to `0700`.
@@ -108,8 +114,8 @@ The service states are `starting`, `disabled`, `running`, `degraded`, and
   emits one non-counting `authorization.granted` boundary with the same
   permission payload before publishing resumed aggregates. Startup with
   permission already present and no prior revoke does not invent a grant event.
-- Event publication failure also degrades the status. The current in-memory
-  bucket is not exposed through another channel.
+- Event publication failure degrades the status while the sealed bucket
+  remains in the private durable outbox for retry.
 - Shutdown cancels the bucket loop, stops the run loop, and joins the capture
   thread.
 

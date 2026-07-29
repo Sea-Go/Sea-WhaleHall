@@ -51,6 +51,15 @@ EventJournal. `presence.afkStarted` carries the configured threshold as
 previous sample. Lock/unlock and sleep/wake payloads are empty objects. These
 events seal reflection windows but never contribute to the 64-event count.
 
+Presence state, local history rows, and private EventJournal outbox rows commit
+in one `presence.sqlite3` transaction. The in-memory tracker is updated only
+after that transaction succeeds. EventJournal failure leaves the outbox row for
+ordered idempotent retry, including across process restarts. The local history
+keeps the estimated sleep start time; because sleep is only discovered on the
+later wake sample, the global `presence.sleep` and `presence.wake` drafts use
+that detection time for both `occurredAtMs` and `observedAtMs`, preserving the
+EventJournal cursor as the cross-sensor total order.
+
 ## Rust and Agent APIs
 
 Rust callers construct `PresenceService` with `SystemPresenceProvider` or a custom `PresenceProvider`. The provider abstraction and deterministic transition function allow AFK, lock, and sleep behavior to be tested without changing the real workstation state.

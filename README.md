@@ -161,6 +161,7 @@ Requests:
 {"id":"cancel-1","method":"tool.cancel","params":{"callId":"call-1"}}
 {"id":"events-1","method":"event.query","params":{"consumerId":"whalehall.reflection.v1","limit":256}}
 {"id":"commit-1","method":"event.commit","params":{"consumerId":"whalehall.reflection.v1","cursor":"ec1_0000000000000001"}}
+{"id":"goal-1","method":"event.goal.change","params":{"previous":null,"next":{"goalId":"goal-1","planId":null,"version":1,"text":"Ship WhaleHall reflection","activatedAtMs":1700000000000},"occurredAtMs":1700000000000,"deduplicationKey":"goal-change:goal-1:1"}}
 ```
 
 Responses:
@@ -168,7 +169,19 @@ Responses:
 ```json
 {"id":"call-1","ok":true,"result":{"callId":"call-1","output":{"os":"macos"}}}
 {"id":"call-1","ok":false,"error":{"code":"CANCELLED","message":"Local tool call was cancelled."}}
+{"id":"goal-1","ok":true,"result":{"event":{"kind":"goal.contextChanged"},"inserted":true}}
 ```
+
+`event.goal.change` is the only protocol write that can append a caller-supplied
+semantic boundary; the server does not expose a general event append method.
+Rust validates and bounds both goal contexts, writes the content-sensitive
+boundary atomically, and returns the durable event/cursor. Replaying the same
+stable deduplication key returns that event with `inserted:false`.
+
+EventJournal applies its 30-day retention cleanup once at server startup and
+then daily. Cleanup is consumer-aware and never deletes beyond the slowest
+persisted named-consumer cursor; cleanup errors are warnings and do not stop the
+local server.
 
 The `tool.call` request ID is also its `callId`. Rust can emit events before the final response:
 
