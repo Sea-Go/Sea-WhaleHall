@@ -3089,7 +3089,7 @@ mod tests {
                     first,
                     ObservedBrowserTab {
                         title: "Sensitive".to_owned(),
-                        url: "https://example.com/two?token=secret".to_owned(),
+                        url: "https://example.org/two?token=secret".to_owned(),
                         ..second
                     },
                 ],
