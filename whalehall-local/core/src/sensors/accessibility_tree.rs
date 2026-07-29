@@ -353,6 +353,7 @@ struct AccessibilityEventOutboxRecord {
     sensitivity: DesktopEventSensitivity,
     payload: JsonValue,
     deduplication_key: String,
+    redacted_after_capture: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -824,7 +825,8 @@ impl AccessibilityStore {
                 sensitivity TEXT NOT NULL
                     CHECK(sensitivity IN ('metadata', 'content')),
                 payload_json TEXT NOT NULL,
-                deduplication_key TEXT NOT NULL UNIQUE
+                deduplication_key TEXT NOT NULL UNIQUE,
+                redacted_after_capture INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS accessibility_event_outbox_order
                 ON accessibility_event_outbox(id);",
@@ -955,7 +957,8 @@ impl AccessibilityStore {
     ) -> Result<Vec<AccessibilityEventOutboxRecord>, AccessibilityError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT id, kind, occurred_at_ms, sensitivity, payload_json, deduplication_key
+            "SELECT id, kind, occurred_at_ms, sensitivity, payload_json, deduplication_key,
+                    redacted_after_capture
              FROM accessibility_event_outbox
              ORDER BY id
              LIMIT ?1",
@@ -989,6 +992,7 @@ impl AccessibilityStore {
                     sensitivity,
                     payload,
                     deduplication_key: row.get(5)?,
+                    redacted_after_capture: row.get(6)?,
                 })
             },
         )?;
@@ -1166,7 +1170,7 @@ fn redact_pending_accessibility_content(
         }
         transaction.execute(
             "UPDATE accessibility_event_outbox
-             SET sensitivity = 'metadata', payload_json = ?1
+             SET sensitivity = 'metadata', payload_json = ?1, redacted_after_capture = 1
              WHERE id = ?2",
             params![serde_json::to_string(payload)?, id],
         )?;
@@ -1428,7 +1432,18 @@ fn flush_accessibility_event_outbox(
             return Ok(());
         }
         for record in &records {
-            publish_accessibility_outbox_record(event_sink, record)?;
+            if let Err(error) = publish_accessibility_outbox_record(event_sink, record) {
+                let was_materialized_before_redaction = record.redacted_after_capture
+                    && matches!(
+                        &error,
+                        AccessibilityError::EventJournal(
+                            EventJournalError::IdempotencyConflict { .. }
+                        )
+                    );
+                if !was_materialized_before_redaction {
+                    return Err(error);
+                }
+            }
             store.delete_accessibility_event(record.id)?;
         }
     }
@@ -2028,6 +2043,8 @@ mod tests {
         let config = test_config(&directory);
         let store =
             AccessibilityStore::open(&config.database_path).expect("open accessibility store");
+        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
+            .expect("open event journal");
         let mut observation = sample_observation();
         observation.sanitize(&config);
         store
@@ -2428,6 +2445,11 @@ mod tests {
             .record_snapshot(&changed, 3_000, config.retention, true, true)
             .expect("record changed authorized content");
         assert_eq!(store.accessibility_event_outbox_count().unwrap(), 3);
+        let captured_pending = store
+            .pending_accessibility_events(10)
+            .expect("read captured pending events");
+        publish_accessibility_outbox_record(&journal, &captured_pending[0])
+            .expect("materialize content event before simulated crash");
 
         store
             .enforce_content_policy(false)
@@ -2459,6 +2481,10 @@ mod tests {
                 .iter()
                 .all(|event| !event.payload.to_string().contains("private"))
         );
+        flush_accessibility_event_outbox(&store, &journal)
+            .expect("reconcile redacted outbox after pre-redaction append");
+        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 0);
+        assert_eq!(all_events(&journal).len(), 3);
         let stored = store
             .query_tree(&AccessibilityTreeQuery {
                 include_values: true,
