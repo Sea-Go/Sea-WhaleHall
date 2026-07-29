@@ -97,9 +97,10 @@ limits before writing SQLite:
   16,384;
 - roles marked password or secure, or nodes with `protected: true`, always have
   both `value` and `documentText` removed;
-- turning content monitoring off scrubs stored `value`/`documentText`, the
-  semantic comparison state, and content fields in pending events before the
-  resident loop can start;
+- turning content monitoring off clears the semantic comparison state and
+  redacts content fields in pending events before the resident loop can start;
+  snapshots captured under earlier explicit authorization remain available
+  through the historical Tools until normal retention removes them;
 - only changed trees create a new SQLite snapshot;
 - snapshots older than seven days are deleted when a changed snapshot is
   stored; retention is configurable from 1 through 30 days.

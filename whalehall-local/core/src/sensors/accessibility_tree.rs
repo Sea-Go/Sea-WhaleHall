@@ -831,6 +831,22 @@ impl AccessibilityStore {
              CREATE INDEX IF NOT EXISTS accessibility_event_outbox_order
                 ON accessibility_event_outbox(id);",
         )?;
+        let outbox_has_redaction_marker = {
+            let mut statement =
+                connection.prepare("PRAGMA table_info(accessibility_event_outbox)")?;
+            let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+            columns
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|column| column == "redacted_after_capture")
+        };
+        if !outbox_has_redaction_marker {
+            connection.execute(
+                "ALTER TABLE accessibility_event_outbox
+                 ADD COLUMN redacted_after_capture INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         connection.execute(
             "INSERT INTO accessibility_meta(key, value) VALUES('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -859,11 +875,6 @@ impl AccessibilityStore {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "UPDATE accessibility_nodes SET value = NULL, document_text = NULL
-             WHERE value IS NOT NULL OR document_text IS NOT NULL",
-            [],
-        )?;
         redact_pending_accessibility_content(&transaction)?;
         if let Some(mut state) = load_semantic_state(&transaction)? {
             if let Some(focus) = &mut state.focus {
@@ -2043,8 +2054,6 @@ mod tests {
         let config = test_config(&directory);
         let store =
             AccessibilityStore::open(&config.database_path).expect("open accessibility store");
-        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
-            .expect("open event journal");
         let mut observation = sample_observation();
         observation.sanitize(&config);
         store
@@ -2427,11 +2436,13 @@ mod tests {
     }
 
     #[test]
-    fn disabling_content_scrubs_snapshots_state_and_pending_content_events() {
+    fn disabling_content_preserves_authorized_history_but_redacts_pending_events_and_state() {
         let directory = tempfile::tempdir().expect("create accessibility revoke directory");
         let config = test_config(&directory);
         let store =
             AccessibilityStore::open(&config.database_path).expect("open accessibility store");
+        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
+            .expect("open event journal");
         let mut baseline = sample_observation();
         baseline.sanitize(&config);
         store
@@ -2441,7 +2452,7 @@ mod tests {
         changed.nodes[1].value = Some("new private value".to_owned());
         changed.nodes[1].document_text = Some("new private document".to_owned());
         changed.sanitize(&config);
-        store
+        let authorized_snapshot = store
             .record_snapshot(&changed, 3_000, config.retention, true, true)
             .expect("record changed authorized content");
         assert_eq!(store.accessibility_event_outbox_count().unwrap(), 3);
@@ -2487,13 +2498,25 @@ mod tests {
         assert_eq!(all_events(&journal).len(), 3);
         let stored = store
             .query_tree(&AccessibilityTreeQuery {
+                snapshot_id: Some(authorized_snapshot.id),
                 include_values: true,
                 include_document_text: true,
                 ..AccessibilityTreeQuery::default()
             })
-            .expect("query scrubbed snapshot");
-        assert!(stored.nodes.iter().all(|node| node.value.is_none()));
-        assert!(stored.nodes.iter().all(|node| node.document_text.is_none()));
+            .expect("query previously authorized snapshot");
+        let authorized_editor = stored
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "editor")
+            .expect("authorized editor node");
+        assert_eq!(
+            authorized_editor.value.as_deref(),
+            Some("new private value")
+        );
+        assert_eq!(
+            authorized_editor.document_text.as_deref(),
+            Some("new private document")
+        );
         let connection = store.connect().expect("connect accessibility store");
         let state_json = connection
             .query_row(
