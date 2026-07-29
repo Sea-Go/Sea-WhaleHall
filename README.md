@@ -169,7 +169,7 @@ Responses:
 ```json
 {"id":"call-1","ok":true,"result":{"callId":"call-1","output":{"os":"macos"}}}
 {"id":"call-1","ok":false,"error":{"code":"CANCELLED","message":"Local tool call was cancelled."}}
-{"id":"goal-1","ok":true,"result":{"event":{"kind":"goal.contextChanged"},"inserted":true}}
+{"id":"goal-1","ok":true,"result":{"event":{"schemaVersion":"desktop-event.v1","eventId":"de1_example","cursor":"ec1_0000000000000002","deviceId":"device_example","sessionId":"session_example","kind":"goal.contextChanged","source":"planning.controller","occurredAtMs":1700000000000,"observedAtMs":1700000000000,"goalVersion":null,"sensitivity":"content","payload":{"previous":null,"next":{"goalId":"goal-1","planId":null,"version":1,"text":"Ship WhaleHall reflection","activatedAtMs":1700000000000}}},"inserted":true}}
 ```
 
 `event.goal.change` is the only protocol write that can append a caller-supplied
