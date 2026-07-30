@@ -4,20 +4,18 @@ import type { PetPresentationEvent } from './pet-presentation';
 import type { ActiveGoalContextV1 } from './goal-context';
 import type {
 	LocalRuntimeStatus,
-	LocalToolCall,
-	LocalToolCallResult,
-	LocalToolCancelResult,
-	LocalToolDescriptor,
-	LocalToolEvent,
+	LocalMonitoringConfigure,
+	LocalMonitoringPermissionState,
+	LocalMonitoringRefreshPermissions,
+	LocalMonitoringStatus,
 } from '../agent/local-protocol';
 
 export type {
 	LocalRuntimeStatus,
-	LocalToolCall,
-	LocalToolCallResult,
-	LocalToolCancelResult,
-	LocalToolDescriptor,
-	LocalToolEvent,
+	LocalMonitoringConfigure,
+	LocalMonitoringPermissionState,
+	LocalMonitoringRefreshPermissions,
+	LocalMonitoringStatus,
 	PetPresentationEvent,
 	ActiveGoalContextV1,
 };
@@ -68,6 +66,30 @@ export type NativePetDragState = {
 	reason?: 'pointerup' | 'webview' | 'hidden' | 'disposed';
 };
 
+export type FiveMinuteAuditFileExportRequest = {
+	/** Start of the fixed five-minute range, expressed as Unix epoch milliseconds. */
+	fromMs: number;
+	/**
+	 * False by default. True requires a separate native confirmation before the
+	 * native directory chooser is shown.
+	 */
+	includeDecryptedContent: boolean;
+};
+
+/**
+ * The renderer intentionally receives no audit contents and no selected path.
+ * A basename is returned only after a new mode-0600 file has been completed.
+ */
+export type FiveMinuteAuditFileExportResult = {
+	status:
+		| 'exported'
+		| 'cancelled'
+		| 'invalid_range'
+		| 'not_ready'
+		| 'failed';
+	basename: string | null;
+};
+
 export type ClientRPC = {
 	bun: RPCSchema<{
 		requests: {
@@ -75,17 +97,29 @@ export type ClientRPC = {
 				params: Record<string, never>;
 				response: LocalRuntimeStatus;
 			};
-			listLocalTools: {
+			getMonitoringStatus: {
 				params: Record<string, never>;
-				response: { tools: LocalToolDescriptor[] };
+				response: LocalMonitoringStatus;
 			};
-			callLocalTool: {
-				params: LocalToolCall;
-				response: LocalToolCallResult;
+			configureMonitoring: {
+				params: LocalMonitoringConfigure;
+				response: LocalMonitoringStatus;
 			};
-			cancelLocalTool: {
-				params: { callId: string };
-				response: LocalToolCancelResult;
+			pauseMonitoring: {
+				params: Record<string, never>;
+				response: LocalMonitoringStatus;
+			};
+			resumeMonitoring: {
+				params: Record<string, never>;
+				response: LocalMonitoringStatus;
+			};
+			refreshMonitoringPermissions: {
+				params: LocalMonitoringRefreshPermissions;
+				response: LocalMonitoringStatus;
+			};
+			exportFiveMinuteAuditToFile: {
+				params: FiveMinuteAuditFileExportRequest;
+				response: FiveMinuteAuditFileExportResult;
 			};
 			setPetVisible: {
 				params: { visible: boolean };
@@ -106,7 +140,6 @@ export type ClientRPC = {
 		requests: Record<never, never>;
 		messages: {
 			localStatusChanged: LocalRuntimeStatus;
-			localToolEvent: LocalToolEvent;
 			petVisibilityChanged: { visible: boolean };
 		};
 	}>;

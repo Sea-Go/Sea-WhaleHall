@@ -17,7 +17,13 @@ import { MockPlanningGenerationService } from "../src/views/client/infrastructur
 import { MockReportService } from "../src/views/client/infrastructure/reports/MockReportService";
 import { PreferencesController } from "../src/views/client/features/settings/PreferencesController";
 import type { PetPresentationBridge } from "../src/views/client/features/pet-bridge/public";
+import {
+	MonitoringController,
+	type MonitoringService,
+	type MonitoringSnapshot,
+} from "../src/views/client/features/monitoring/public";
 import { MockPreferencesService } from "../src/views/client/infrastructure/settings/MockPreferencesService";
+import type { AuditExportService } from "../src/views/client/features/audit-export/public";
 
 const notify = () => {};
 const shellUser = {
@@ -50,6 +56,47 @@ const petBridge: PetPresentationBridge = {
 	async present() {},
 	async setVisible() {},
 };
+const monitoringSnapshot: MonitoringSnapshot = {
+	schemaVersion: "monitoring-status.v2",
+	state: "running",
+	enabled: true,
+	captureContent: true,
+	paused: false,
+	observerConnected: true,
+	permissions: [
+		{ id: "accessibility", state: "granted", required: true, detail: null },
+		{ id: "screenRecording", state: "granted", required: true, detail: null },
+		{ id: "inputMonitoring", state: "granted", required: true, detail: null },
+		{ id: "browserAutomation", state: "granted", required: true, detail: null },
+	],
+	excludedAppIds: [],
+	lastObservationAtMs: null,
+	coverageGaps: [],
+};
+const monitoringService: MonitoringService = {
+	async status() {
+		return monitoringSnapshot;
+	},
+	async configure() {
+		return monitoringSnapshot;
+	},
+	async pause() {
+		return monitoringSnapshot;
+	},
+	async resume() {
+		return monitoringSnapshot;
+	},
+	async refreshPermissions() {
+		return monitoringSnapshot;
+	},
+};
+const monitoringController = new MonitoringController(monitoringService);
+await monitoringController.load();
+const auditExportService: AuditExportService = {
+	async exportFiveMinutes() {
+		return { status: "cancelled", basename: null };
+	},
+};
 
 describe("client app shell", () => {
 	test("defines the stable product destinations including settings", () => {
@@ -74,6 +121,8 @@ describe("client app shell", () => {
 				reportController={reportController}
 				preferencesController={preferencesController}
 				petBridge={petBridge}
+				monitoringController={monitoringController}
+				auditExportService={auditExportService}
 			/>,
 		);
 
@@ -85,6 +134,8 @@ describe("client app shell", () => {
 		expect(markup).toContain('aria-haspopup="menu"');
 		expect(markup).toContain("王一鸣");
 		expect(markup).toContain("已登录 · 本地就绪");
+		expect(markup).toContain("观察中");
+		expect(markup).toContain("暂停观察");
 		expect(markup).not.toContain("Local tool control room");
 	});
 });

@@ -20,6 +20,14 @@ import {
 	type ReactNode,
 } from "react";
 import type { AuthUser } from "../auth/public";
+import {
+	MonitoringExclusionsControl,
+	type MonitoringController,
+} from "../monitoring/public";
+import {
+	AuditExportControl,
+	type AuditExportService,
+} from "../audit-export/public";
 import { Button } from "../../shared/ui/Button";
 import { ConfirmationDialog } from "../../shared/ui/ConfirmationDialog";
 import { EmptyState } from "../../shared/ui/EmptyState";
@@ -59,6 +67,8 @@ const appearanceThemeDescriptions: Record<AppearanceTheme, string> = {
 export interface SettingsPageProps {
 	user: AuthUser;
 	controller: PreferencesController;
+	monitoringController: MonitoringController;
+	auditExportService: AuditExportService;
 	category: SettingsCategory;
 	onCategoryChange: (category: SettingsCategory) => void;
 	onLogout: () => void;
@@ -68,6 +78,8 @@ export interface SettingsPageProps {
 export function SettingsPage({
 	user,
 	controller,
+	monitoringController,
+	auditExportService,
 	category,
 	onCategoryChange,
 	onLogout,
@@ -194,6 +206,8 @@ export function SettingsPage({
 									user={user}
 									values={preferencesState.draft}
 									disabled={saving}
+									monitoringController={monitoringController}
+									auditExportService={auditExportService}
 									onUpdate={(section, value) =>
 										controller.update(section, value)
 									}
@@ -296,6 +310,8 @@ interface SettingsPanelProps {
 	user: AuthUser;
 	values: PreferenceValues;
 	disabled: boolean;
+	monitoringController: MonitoringController;
+	auditExportService: AuditExportService;
 	onUpdate: <K extends keyof PreferenceValues>(
 		section: K,
 		value: PreferenceValues[K],
@@ -673,14 +689,18 @@ function PrivacySettings({
 	values,
 	disabled,
 	onUpdate,
+	monitoringController,
+	auditExportService,
 }: SettingsPanelProps) {
 	const section = values.privacy;
 	return (
 		<SettingsSection
 			eyebrow="数据与隐私"
 			title="本地数据边界"
-			description="偏好仅保存在本机；本任务不会改变 Rust 传感器权限或删除真实活动记录。"
+			description="这里控制派生洞察与保留偏好；内置观察器只能从侧栏显式启用，并始终受 macOS 系统权限约束。"
 		>
+			<AuditExportControl service={auditExportService} />
+			<MonitoringExclusionsControl controller={monitoringController} />
 			<SettingRow
 				title="使用活动汇总生成洞察"
 				description="只使用本地聚合时长，不把窗口内容发送到桌宠。"

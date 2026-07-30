@@ -2,6 +2,7 @@ import { AppShell } from "./app/AppShell";
 import { applyAppearancePreferences } from "./app/appearance";
 import { AuthGate } from "./features/auth/public";
 import { PlanningController } from "./features/planning/public";
+import { MonitoringController } from "./features/monitoring/public";
 import { ReportController } from "./features/reports/public";
 import { PreferencesController } from "./features/settings/public";
 import {
@@ -13,6 +14,8 @@ import { CalendarPlanningGateway } from "./infrastructure/planning/CalendarPlann
 import { MockPlanningGenerationService } from "./infrastructure/planning/MockPlanningGenerationService";
 import { MockReportService } from "./infrastructure/reports/MockReportService";
 import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
+import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
+import { ElectrobunAuditExportService } from "./infrastructure/audit-export/ElectrobunAuditExportService";
 import { MockPreferencesService } from "./infrastructure/settings/MockPreferencesService";
 import {
 	ActiveGoalSyncCoordinator,
@@ -68,6 +71,10 @@ const preferencesController = new PreferencesController(
 	new MockPreferencesService(),
 );
 const petBridge = new ElectrobunPetPresentationBridge();
+const monitoringController = new MonitoringController(
+	new ElectrobunMonitoringService(),
+);
+const auditExportService = new ElectrobunAuditExportService();
 
 export function App() {
 	const logoutPendingRef = useRef(false);
@@ -126,6 +133,8 @@ export function App() {
 					reportController={reportController}
 					preferencesController={preferencesController}
 					petBridge={petBridge}
+					monitoringController={monitoringController}
+					auditExportService={auditExportService}
 					enableQaControls={enableQaControls}
 				/>
 			)}

@@ -8,17 +8,29 @@ import {
 	Utils,
 } from "electrobun/bun";
 import { AgentRuntime } from "../agent/agent-runtime";
-import { LocalToolClient } from "../agent/local-tool-client";
+import {
+	LocalClientError,
+	LocalToolClient,
+} from "../agent/local-tool-client";
+import {
+	createTimelineV2Runtime,
+	type TimelineV2Runtime,
+} from "../agent/timeline-v2/runtime";
+import type { RawFiveMinuteAuditSource } from "../agent/timeline-v2/audit";
+import { loadOrCreateReflectionIdentity } from "../agent/reflection";
 import {
 	createWhaleHallReflectionRuntime,
 	setRuntimeGoal,
 	type WhaleHallReflectionRuntime,
 } from "./reflection-runtime";
-import type { ActiveReflectionFeedbackCode } from "./reflection-feedback";
 import {
-	PetStateArbiter,
-} from "./pet-state";
+	isObservationEncryptionUnavailable,
+	nativeRuntimeSecurityEnvironment,
+	parseNativeRuntimeChannel,
+} from "./native-runtime-security";
+import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
+import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
 import type {
 	LocalRuntimeStatus,
 	LocalToolEvent,
@@ -26,13 +38,25 @@ import type {
 import type { ClientRPC, PetRPC } from "../shared/contracts";
 
 const HMR_ORIGIN = "http://127.0.0.1:5173";
+const runtimeChannel = parseNativeRuntimeChannel(
+	await Updater.localInfo.channel(),
+);
 const nativeBinary = process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local";
 const nativePath = join(PATHS.RESOURCES_FOLDER, "app", "native", nativeBinary);
 const localDataPath = join(Utils.paths.userData, "local");
+const runtimeIdentity = loadOrCreateReflectionIdentity(
+	join(localDataPath, "reflection-identity.v1.json"),
+);
+const localRuntimeEnvironment: Record<string, string> = {
+	WHALEHALL_DATA_DIR: localDataPath,
+	WHALEHALL_DEVICE_ID: runtimeIdentity.deviceId,
+	WHALEHALL_SESSION_ID: runtimeIdentity.sessionId,
+	...nativeRuntimeSecurityEnvironment(runtimeChannel),
+};
 
 const agent = new AgentRuntime(
 	new LocalToolClient(nativePath, {
-		environment: { WHALEHALL_DATA_DIR: localDataPath },
+		environment: localRuntimeEnvironment,
 	}),
 	{ requireStartupGoalPreparation: true },
 );
@@ -41,6 +65,7 @@ let shutdownPromise: Promise<void> | null = null;
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
+let timelineRuntime: TimelineV2Runtime | null = null;
 const STARTUP_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 45_000, 120_000, 300_000];
 
 let clientWindow: BrowserWindow;
@@ -54,7 +79,6 @@ function sendLocalStatus(status = agent.getLocalStatus()): void {
 }
 
 function sendToolEvent(event: LocalToolEvent): void {
-	clientRPC.send.localToolEvent(event);
 	petStateArbiter.showToolEvent(event);
 }
 
@@ -63,9 +87,53 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 	handlers: {
 		requests: {
 			getLocalStatus: () => agent.getLocalStatus(),
-			listLocalTools: async () => ({ tools: await agent.listLocalTools() }),
-			callLocalTool: (call) => agent.callLocalTool(call),
-			cancelLocalTool: ({ callId }) => agent.cancelLocalTool(callId),
+			getMonitoringStatus: async () => {
+				try {
+					return await agent.getMonitoringStatus();
+				} catch (error) {
+					console.error(
+						"[monitoring] status request failed:",
+						error instanceof LocalClientError ? error.code : "UNKNOWN",
+					);
+					throw error;
+				}
+			},
+			configureMonitoring: (configuration) =>
+				agent.configureMonitoring(configuration),
+			pauseMonitoring: () => agent.pauseMonitoring(),
+			resumeMonitoring: () => agent.resumeMonitoring(),
+			refreshMonitoringPermissions: (options) =>
+				agent.refreshMonitoringPermissions(options),
+			exportFiveMinuteAuditToFile: (request) =>
+				exportFiveMinuteAuditToFile(request, {
+					getExporter: () => timelineRuntime?.audit ?? null,
+					dialogs: {
+						async confirmDecryptedContent() {
+							const { response } = await Utils.showMessageBox({
+								type: "warning",
+								title: "导出含明文的审计包？",
+								message: "此文件会包含最近五分钟内可解密的可见文本和网址。",
+								detail:
+									"文件只会写入你下一步选择的本机文件夹，权限为仅当前用户可读写。请仅在可信位置保存。",
+								buttons: ["继续选择文件夹", "取消"],
+								defaultId: 1,
+								cancelId: 1,
+							});
+							return response === 0;
+						},
+						async chooseDirectory() {
+							const selected = await Utils.openFileDialog({
+								startingFolder: Utils.paths.downloads,
+								allowedFileTypes: "*",
+								canChooseFiles: false,
+								canChooseDirectory: true,
+								allowsMultipleSelection: false,
+							});
+							const directory = selected[0]?.trim();
+							return directory ? directory : null;
+						},
+					},
+				}),
 			setPetVisible: ({ visible }): { visible: boolean } => {
 				petVisible = visible;
 				if (!visible) petStateArbiter.resetToRuntime(agent.getLocalStatus());
@@ -91,6 +159,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 							}
 						: null,
 				);
+				await timelineRuntime?.service.pullNow();
 				return {
 					goal: normalized
 						? {
@@ -131,7 +200,7 @@ const petRPC = BrowserView.defineRPC<PetRPC>({
 petStateArbiter = new PetStateArbiter((state) => petRPC.send.setPetState(state));
 
 const hmrAvailable = (async (): Promise<boolean> => {
-	if ((await Updater.localInfo.channel()) !== "dev") return false;
+	if (runtimeChannel !== "dev") return false;
 	for (let attempt = 0; attempt < 10; attempt += 1) {
 		try {
 			const response = await fetch(`${HMR_ORIGIN}/client/index.html`, {
@@ -224,6 +293,8 @@ function shutdown(): Promise<void> {
 		// start. Waiting here prevents a late candidate from restarting the
 		// native sensor process after shutdown has already stopped it.
 		await startupPromise;
+		await timelineRuntime?.close();
+		timelineRuntime = null;
 		await reflectionRuntime?.close();
 		reflectionRuntime = null;
 		await agent.stop();
@@ -250,15 +321,17 @@ startupPromise = (async () => {
 	let attempt = 0;
 	while (!shutdownPromise) {
 		let candidate: WhaleHallReflectionRuntime | null = null;
+		let timelineCandidate: TimelineV2Runtime | null = null;
 		try {
 			candidate = await createWhaleHallReflectionRuntime({
 				agent,
 				dataDirectory: localDataPath,
-				canPresentFeedback: () => petVisible,
-				onFeedback: (code) => {
-					petStateArbiter.showPresentationEvent(
-						reflectionPresentationEvent(code),
-					);
+				environment: {
+					...process.env,
+					// v2 phase one is local-only. Ignore remote ModernBERT
+					// overrides even when the parent shell exports them.
+					WHALEHALL_MODERNBERT_ENDPOINT: undefined,
+					WHALEHALL_MODERNBERT_ALLOWED_ORIGINS: undefined,
 				},
 			});
 			if (shutdownPromise) {
@@ -270,14 +343,53 @@ startupPromise = (async () => {
 				await candidate.close();
 				return;
 			}
+			try {
+				timelineCandidate = await createTimelineV2Runtime({
+					agent,
+					dataDirectory: localDataPath,
+					initialGoal: candidate.service.getActiveGoalContext(),
+					rawAuditSource: createRawFiveMinuteAuditSource(agent),
+				});
+				await timelineCandidate.start();
+			} catch (error) {
+				if (!isObservationEncryptionUnavailable(error)) throw error;
+				await timelineCandidate?.close().catch(() => {});
+				timelineCandidate = null;
+				// Keychain can be unavailable before first unlock or after an
+				// ad-hoc development re-sign. Keep the healthy native process
+				// available for monitoring/configuration, while Timeline v2
+				// and decrypted export remain fail closed.
+				reflectionRuntime = candidate;
+				candidate = null;
+				console.warn(
+					"WhaleHall Timeline v2 is unavailable because the local encryption key cannot be opened; monitoring remains available.",
+				);
+				return;
+			}
+			if (shutdownPromise) {
+				await timelineCandidate.close();
+				await candidate.close();
+				return;
+			}
 			reflectionRuntime = candidate;
+			timelineRuntime = timelineCandidate;
 			console.log(
-				`WhaleHall reflection runtime ready; qwen teacher lock: ${
-					candidate.teacherVerified ? "verified" : "unavailable"
+				`WhaleHall Timeline v2 ready; Qwen hypothesis lock: ${
+					timelineCandidate.teacherVerified
+						? "verified"
+						: "deterministic fallback"
 				}`,
 			);
 			return;
 		} catch (error) {
+			if (timelineCandidate) {
+				await timelineCandidate.close().catch((closeError) => {
+					console.error(
+						"WhaleHall Timeline v2 candidate cleanup failed:",
+						closeError,
+					);
+				});
+			}
 			if (candidate) {
 				await candidate.close().catch((closeError) => {
 					console.error(
@@ -328,21 +440,31 @@ function waitForStartupRetry(delayMs: number): Promise<void> {
 	});
 }
 
-function reflectionPresentationEvent(
-	code: ActiveReflectionFeedbackCode,
-):
-	| { kind: "reflection-encourage" }
-	| { kind: "reflection-refocus" }
-	| { kind: "reflection-clarify-goal" }
-	| { kind: "reflection-take-break" } {
-	switch (code) {
-		case "encourage":
-			return { kind: "reflection-encourage" };
-		case "refocus":
-			return { kind: "reflection-refocus" };
-		case "clarifyGoal":
-			return { kind: "reflection-clarify-goal" };
-		case "takeBreak":
-			return { kind: "reflection-take-break" };
-	}
+function createRawFiveMinuteAuditSource(
+	runtime: AgentRuntime,
+): RawFiveMinuteAuditSource {
+	return {
+		async queryAuditRange({
+			fromMs,
+			toMs,
+			includeDecryptedContent,
+		}) {
+			const result = await runtime.queryAuditFiveMinutes({
+				fromMs,
+				toMs,
+				includeDecryptedContent,
+			});
+			return {
+				permissions: {
+					accessibility: result.permissions.accessibility,
+					screenRecording: result.permissions.screenRecording,
+					inputMonitoring: result.permissions.inputMonitoring,
+					automation: result.permissions.automation,
+				},
+				coverage: result.coverage,
+				rawObservations: result.rawObservations,
+				semanticEvents: result.semanticEvents,
+			};
+		},
+	};
 }

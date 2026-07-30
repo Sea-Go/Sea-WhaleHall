@@ -27,6 +27,11 @@ import {
 	type ReportController,
 } from "../features/reports/public";
 import type { PetPresentationBridge } from "../features/pet-bridge/public";
+import type { AuditExportService } from "../features/audit-export/public";
+import {
+	MonitoringStatusControl,
+	type MonitoringController,
+} from "../features/monitoring/public";
 import {
 	SettingsPage,
 	type PreferencesController,
@@ -71,6 +76,8 @@ export interface AppShellProps {
 	reportController: ReportController;
 	preferencesController: PreferencesController;
 	petBridge: PetPresentationBridge;
+	monitoringController: MonitoringController;
+	auditExportService: AuditExportService;
 	initialPage?: PageId;
 	enableQaControls?: boolean;
 }
@@ -83,6 +90,8 @@ export function AppShell({
 	reportController,
 	preferencesController,
 	petBridge,
+	monitoringController,
+	auditExportService,
 	initialPage = "calendar",
 	enableQaControls = false,
 }: AppShellProps) {
@@ -269,15 +278,13 @@ export function AppShell({
 					})}
 				</nav>
 
-				<div className="app-sidebar__insight">
-					<div className="app-sidebar__insight-icon" aria-hidden="true">
-						<Target size={16} />
-					</div>
-					<div>
-						<strong>本周，从一件事开始</strong>
-						<span>制定计划后，这里会显示你的投入节奏。</span>
-					</div>
-				</div>
+				<MonitoringStatusControl
+					controller={monitoringController}
+					onOpenPrivacy={() => {
+						setSettingsCategory("privacy");
+						setActivePage("settings");
+					}}
+				/>
 
 				<div className="user-entry" ref={userMenuContainerRef}>
 					{userMenuOpen ? (
@@ -378,6 +385,8 @@ export function AppShell({
 					<SettingsPage
 						user={user}
 						controller={preferencesController}
+						monitoringController={monitoringController}
+						auditExportService={auditExportService}
 						category={settingsCategory}
 						onCategoryChange={setSettingsCategory}
 						onLogout={() => setLogoutDialogOpen(true)}

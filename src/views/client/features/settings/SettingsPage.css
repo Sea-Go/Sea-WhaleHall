@@ -634,6 +634,100 @@
 	white-space: nowrap;
 }
 
+.audit-export-control {
+	display: grid;
+	gap: var(--space-3);
+	margin-top: var(--space-5);
+	padding: var(--space-4);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-lg);
+	background: var(--color-surface-muted);
+}
+
+.audit-export-control__heading {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-3);
+}
+
+.audit-export-control__heading > span {
+	display: grid;
+	flex: 0 0 auto;
+	place-items: center;
+	width: 32px;
+	height: 32px;
+	border: 1px solid var(--color-accent-border);
+	border-radius: var(--radius-md);
+	color: var(--color-accent);
+	background: var(--color-accent-soft);
+}
+
+.audit-export-control__heading strong {
+	color: var(--color-text-primary);
+	font-size: var(--font-size-sm);
+	font-weight: var(--font-weight-medium);
+}
+
+.audit-export-control__heading p {
+	margin: var(--space-1) 0 0;
+	color: var(--color-text-subtle);
+	font-size: var(--font-size-xs);
+	line-height: var(--line-height-body);
+}
+
+.audit-export-control__decrypted {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-2);
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-md);
+	color: var(--color-text-secondary);
+	background: var(--color-surface-elevated);
+	font-size: var(--font-size-xs);
+	cursor: pointer;
+}
+
+.audit-export-control__decrypted input {
+	margin: 2px 0 0;
+	accent-color: var(--color-accent);
+}
+
+.audit-export-control__decrypted span {
+	display: grid;
+	gap: 2px;
+}
+
+.audit-export-control__decrypted small {
+	color: var(--color-text-subtle);
+	font-size: 11px;
+}
+
+.audit-export-control__actions {
+	display: flex;
+	justify-content: flex-end;
+}
+
+.audit-export-control__result {
+	margin: 0;
+	padding: var(--space-2) var(--space-3);
+	border-radius: var(--radius-md);
+	color: var(--color-text-secondary);
+	background: var(--color-surface-elevated);
+	font-size: var(--font-size-xs);
+	line-height: var(--line-height-body);
+	word-break: break-word;
+}
+
+.audit-export-control__result--success {
+	color: var(--color-success);
+}
+
+.audit-export-control__result--error {
+	color: var(--color-error);
+	background: var(--color-error-soft);
+}
+
 .settings-privacy-note {
 	display: flex;
 	align-items: flex-start;

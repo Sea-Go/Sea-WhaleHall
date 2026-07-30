@@ -9,6 +9,18 @@ import {
 import { PreferencesController } from "../src/views/client/features/settings/PreferencesController";
 import { SettingsPage } from "../src/views/client/features/settings/SettingsPage";
 import { MockPreferencesService } from "../src/views/client/infrastructure/settings/MockPreferencesService";
+import {
+	MonitoringController,
+	type MonitoringService,
+	type MonitoringSnapshot,
+} from "../src/views/client/features/monitoring/public";
+import type { AuditExportService } from "../src/views/client/features/audit-export/public";
+
+const auditExportService: AuditExportService = {
+	async exportFiveMinutes() {
+		return { status: "cancelled", basename: null };
+	},
+};
 
 const user = {
 	id: "user-settings",
@@ -22,11 +34,14 @@ async function setup() {
 		new MockPreferencesService({ latencyMs: 0, storage: null }),
 	);
 	await controller.load();
+	const monitoringController = await createMonitoringController();
 	const render = (category: SettingsCategory) =>
 		renderToStaticMarkup(
 			<SettingsPage
 				user={user}
 				controller={controller}
+				monitoringController={monitoringController}
+				auditExportService={auditExportService}
 				category={category}
 				onCategoryChange={() => {}}
 				onLogout={() => {}}
@@ -34,6 +49,52 @@ async function setup() {
 			/>,
 		);
 	return { controller, render };
+}
+
+async function createMonitoringController(): Promise<MonitoringController> {
+	let current: MonitoringSnapshot = {
+		schemaVersion: "monitoring-status.v2",
+		state: "running",
+		enabled: true,
+		captureContent: true,
+		paused: false,
+		observerConnected: true,
+		permissions: [
+			{ id: "accessibility", state: "granted", required: true, detail: null },
+			{ id: "screenRecording", state: "granted", required: true, detail: null },
+			{ id: "inputMonitoring", state: "granted", required: true, detail: null },
+			{ id: "browserAutomation", state: "granted", required: true, detail: null },
+		],
+		excludedAppIds: ["com.example.private"],
+		lastObservationAtMs: null,
+		coverageGaps: [],
+	};
+	const service: MonitoringService = {
+		async status() {
+			return current;
+		},
+		async configure(configuration) {
+			current = {
+				...current,
+				enabled: configuration.enabled,
+				captureContent: configuration.captureContent,
+				excludedAppIds: configuration.excludedAppIds,
+			};
+			return current;
+		},
+		async pause() {
+			return current;
+		},
+		async resume() {
+			return current;
+		},
+		async refreshPermissions() {
+			return current;
+		},
+	};
+	const controller = new MonitoringController(service);
+	await controller.load();
+	return controller;
 }
 
 describe("settings UI", () => {
@@ -75,7 +136,18 @@ describe("settings UI", () => {
 			pet: ["显示桌宠", "跟随工作状态反馈", "不读取登录凭据"],
 			notifications: ["允许通知", "计划开始提醒", "每周回顾提醒"],
 			calendar: ["默认视图", "显示周末", "每周从周一开始"],
-			privacy: ["本地数据边界", "使用浏览器分类汇总", "保留周期"],
+			privacy: [
+				"本地数据边界",
+				"最近五分钟审计包",
+				"选择文件夹并导出",
+				"包含可解密的文本内容",
+				"按应用排除",
+				"当前排除 1 个应用",
+				"com.example.private",
+				"保存排除列表",
+				"使用浏览器分类汇总",
+				"保留周期",
+			],
 			about: ["A whale falls", "0.1.0", "本地优先"],
 		} as const;
 		for (const [category, fragments] of Object.entries(expected)) {
@@ -124,6 +196,8 @@ describe("settings UI", () => {
 			<SettingsPage
 				user={user}
 				controller={controller}
+				monitoringController={await createMonitoringController()}
+				auditExportService={auditExportService}
 				category="pet"
 				onCategoryChange={() => {}}
 				onLogout={() => {}}
