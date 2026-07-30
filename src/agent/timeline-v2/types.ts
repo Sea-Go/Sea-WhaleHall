@@ -4,6 +4,7 @@ import type {
 	GoalRelevanceLabel,
 	ReflectionTriggerReason,
 } from "../reflection/types";
+import type { OllamaClientErrorCode } from "../model/ollama-json-client";
 
 export const SEMANTIC_EVENT_V2_SCHEMA_VERSION = "semantic-event.v2" as const;
 export const TIMELINE_COLLECTOR_SCHEMA_VERSION =
@@ -170,12 +171,36 @@ export type EvidenceFactV2 = {
 	coverage: CoverageLevel[];
 };
 
+export type TimelineInferenceDiagnosticV2 = {
+	source: "qwen3:4b";
+	stage:
+		| "model_lock"
+		| "readiness_probe"
+		| "pack_selection"
+		| "generation";
+	code:
+		| "model_verification_disabled"
+		| "model_lock_failed"
+		| "pack_limit"
+		| "input_unavailable"
+		| "unexpected_failure"
+		| `ollama.${OllamaClientErrorCode}`;
+	retryable: boolean;
+	httpStatus: number | null;
+	/**
+	 * Counts are safe to persist; episode/fact identifiers and generated or
+	 * prompt content must never be placed in diagnostics.
+	 */
+	affectedEpisodeCount: number | null;
+};
+
 export type EpisodeHypothesisV2 = {
 	text: string;
 	citedFactIds: string[];
 	generator:
 		| "qwen3:4b-cited.v2"
 		| "deterministic-template.v2";
+	diagnostics?: TimelineInferenceDiagnosticV2[];
 };
 
 export type EpisodeClassificationV2 = {
@@ -221,6 +246,8 @@ export type TimelineSummaryV2 = {
 	timelineId: string;
 	windowId: string;
 	triggerReason: ReflectionTriggerReason;
+	triggeredAtMs: number;
+	deadlineAtMs: number;
 	period: { startedAtMs: number; endedAtMs: number };
 	goalVersion: number | null;
 	segments: TimelineSegmentV2[];
@@ -228,6 +255,7 @@ export type TimelineSummaryV2 = {
 	coverageWarnings: string[];
 	renderedText: string;
 	modelVersions: string[];
+	inferenceDiagnostics: TimelineInferenceDiagnosticV2[];
 	taxonomyVersion: string;
 	projectorVersion: string;
 	createdAtMs: number;
@@ -244,12 +272,15 @@ export type AgentInputV1 = {
 	timelineId: string;
 	windowId: string;
 	triggerReason: ReflectionTriggerReason;
+	triggeredAtMs: number;
+	deadlineAtMs: number;
 	period: { startedAtMs: number; endedAtMs: number };
 	goal: ActiveGoalContextV1 | null;
 	segments: TimelineSegmentV2[];
 	renderedText: string;
 	coverage: CoverageLevel[];
 	modelVersions: string[];
+	inferenceDiagnostics: TimelineInferenceDiagnosticV2[];
 	taxonomyVersion: string;
 	projectorVersion: string;
 	payloadHash: string;

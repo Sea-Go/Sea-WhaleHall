@@ -132,6 +132,8 @@ export class TimelineV2Processor {
 			timelineId,
 			windowId: window.windowId,
 			triggerReason: window.triggerReason,
+			triggeredAtMs: window.endedAtMs,
+			deadlineAtMs: window.deadlineAtMs,
 			period: evidencePeriod,
 			goalVersion: window.goalVersion,
 			segments,
@@ -142,9 +144,19 @@ export class TimelineV2Processor {
 				warnings,
 				this.formatTime,
 			),
-			modelVersions: unique(
-				episodes.map(
+			modelVersions: unique([
+				...episodes.map(
 					(episode) => episode.classification.modelVersion,
+				),
+				...episodes.map(
+					(episode) =>
+						`hypothesis:${episode.hypothesis.generator}`,
+				),
+			]),
+			inferenceDiagnostics: uniqueDiagnostics(
+				episodes.flatMap(
+					(episode) =>
+						episode.hypothesis.diagnostics ?? [],
 				),
 			),
 			taxonomyVersion: TIMELINE_TAXONOMY_VERSION,
@@ -164,12 +176,15 @@ export class TimelineV2Processor {
 			timelineId: summary.timelineId,
 			windowId: window.windowId,
 			triggerReason: window.triggerReason,
+			triggeredAtMs: summary.triggeredAtMs,
+			deadlineAtMs: summary.deadlineAtMs,
 			period: summary.period,
 			goal: window.goal,
 			segments: summary.segments,
 			renderedText: summary.renderedText,
 			coverage: summary.coverage,
 			modelVersions: summary.modelVersions,
+			inferenceDiagnostics: summary.inferenceDiagnostics,
 			taxonomyVersion: summary.taxonomyVersion,
 			projectorVersion: summary.projectorVersion,
 			createdAtMs: summary.createdAtMs,
@@ -424,6 +439,20 @@ function periodFromFacts(
 		startedAtMs: Math.min(...facts.map((fact) => fact.startedAtMs)),
 		endedAtMs: Math.max(...facts.map((fact) => fact.endedAtMs)),
 	};
+}
+
+function uniqueDiagnostics(
+	diagnostics: readonly TimelineSummaryV2["inferenceDiagnostics"][number][],
+): TimelineSummaryV2["inferenceDiagnostics"] {
+	const seen = new Set<string>();
+	const result: TimelineSummaryV2["inferenceDiagnostics"] = [];
+	for (const diagnostic of diagnostics) {
+		const key = JSON.stringify(diagnostic);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		result.push(structuredClone(diagnostic));
+	}
+	return result;
 }
 
 function retryDelay(

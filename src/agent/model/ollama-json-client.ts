@@ -13,6 +13,7 @@ export type OllamaJsonRequest<T> = {
 	think?: boolean;
 	temperature?: number;
 	timeoutMs?: number;
+	maxOutputTokens?: number;
 };
 
 export type OllamaJsonClientOptions = {
@@ -36,6 +37,26 @@ type QueueItem<T> = {
 
 type OllamaChatResponse = {
 	message: { content: string };
+};
+
+export type OllamaClientErrorCode =
+	| "invalid_request"
+	| "http_error"
+	| "request_timeout"
+	| "transport_error"
+	| "invalid_response_envelope"
+	| "invalid_json"
+	| "schema_mismatch";
+
+/**
+ * Safe to persist or emit as telemetry. It intentionally excludes prompts,
+ * response content, URLs, and arbitrary exception messages.
+ */
+export type OllamaFailureDiagnostic = {
+	source: "ollama";
+	code: OllamaClientErrorCode;
+	retryable: boolean;
+	httpStatus: number | null;
 };
 
 export class OllamaJsonClient {
@@ -77,7 +98,7 @@ export class OllamaJsonClient {
 				try {
 					item.resolve(await this.executeWithSchemaRetry(item.request));
 				} catch (error) {
-					item.reject(errorMessage(error));
+					item.reject(safeOllamaError(error));
 				}
 			}
 		} finally {
@@ -88,12 +109,12 @@ export class OllamaJsonClient {
 	private async executeWithSchemaRetry<T>(
 		request: OllamaJsonRequest<T>,
 	): Promise<T> {
-		let lastError: Error | null = null;
+		let lastError: OllamaClientError | null = null;
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			try {
 				return await this.execute(request, attempt);
 			} catch (error) {
-				lastError = errorMessage(error);
+				lastError = safeOllamaError(error);
 				if (!(lastError instanceof OllamaSchemaError)) throw lastError;
 			}
 		}
@@ -105,6 +126,24 @@ export class OllamaJsonClient {
 		attempt: number,
 	): Promise<T> {
 		const timeoutMs = request.timeoutMs ?? 90_000;
+		if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+			throw new OllamaClientError(
+				"Ollama request timeout must be positive.",
+				false,
+				"invalid_request",
+			);
+		}
+		if (
+			request.maxOutputTokens !== undefined &&
+			(!Number.isSafeInteger(request.maxOutputTokens) ||
+				request.maxOutputTokens <= 0)
+		) {
+			throw new OllamaClientError(
+				"Ollama maximum output tokens must be a positive integer.",
+				false,
+				"invalid_request",
+			);
+		}
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
@@ -119,6 +158,13 @@ export class OllamaJsonClient {
 									"上一份输出未通过给定 JSON Schema。只返回一份符合 Schema 的 JSON，不要解释。",
 							},
 						];
+			const inferenceOptions: Record<string, number> = {
+				num_ctx: this.contextLength,
+				temperature: request.temperature ?? 0,
+			};
+			if (request.maxOutputTokens !== undefined) {
+				inferenceOptions.num_predict = request.maxOutputTokens;
+			}
 			const response = await this.fetchImpl(`${this.baseUrl}/api/chat`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
@@ -129,10 +175,7 @@ export class OllamaJsonClient {
 					think: request.think ?? false,
 					format: request.schema,
 					keep_alive: this.keepAlive,
-					options: {
-						num_ctx: this.contextLength,
-						temperature: request.temperature ?? 0,
-					},
+					options: inferenceOptions,
 				}),
 				signal: controller.signal,
 			});
@@ -140,29 +183,49 @@ export class OllamaJsonClient {
 				throw new OllamaClientError(
 					`Ollama returned HTTP ${response.status}.`,
 					response.status >= 500 || response.status === 429,
+					"http_error",
+					response.status,
 				);
 			}
-			const envelope: unknown = await response.json();
+			let envelope: unknown;
+			try {
+				envelope = await response.json();
+			} catch {
+				throw new OllamaSchemaError(
+					"Ollama response envelope is invalid.",
+					"invalid_response_envelope",
+				);
+			}
 			if (
 				!isRecord(envelope) ||
 				!isRecord(envelope.message) ||
 				typeof envelope.message.content !== "string"
 			) {
-				throw new OllamaSchemaError("Ollama response envelope is invalid.");
+				throw new OllamaSchemaError(
+					"Ollama response envelope is invalid.",
+					"invalid_response_envelope",
+				);
 			}
 			const parsed = parseJsonObject(envelope as OllamaChatResponse);
-			if (!request.validate(parsed)) {
-				throw new OllamaSchemaError("Ollama JSON did not match the requested schema.");
+			try {
+				if (request.validate(parsed)) return parsed;
+			} catch {
+				// Validators are a trust boundary too. Never propagate an
+				// exception that may have embedded generated content.
 			}
-			return parsed;
+			throw new OllamaSchemaError(
+				"Ollama JSON did not match the requested schema.",
+				"schema_mismatch",
+			);
 		} catch (error) {
 			if (controller.signal.aborted) {
 				throw new OllamaClientError(
 					`Ollama request timed out after ${timeoutMs} ms.`,
 					true,
+					"request_timeout",
 				);
 			}
-			throw error;
+			throw safeOllamaError(error);
 		} finally {
 			clearTimeout(timeout);
 		}
@@ -173,15 +236,32 @@ export class OllamaClientError extends Error {
 	constructor(
 		message: string,
 		public readonly retryable: boolean,
+		public readonly code: OllamaClientErrorCode = "transport_error",
+		public readonly httpStatus: number | null = null,
 	) {
 		super(message);
 		this.name = "OllamaClientError";
 	}
+
+	toDiagnostic(): OllamaFailureDiagnostic {
+		return {
+			source: "ollama",
+			code: this.code,
+			retryable: this.retryable,
+			httpStatus: this.httpStatus,
+		};
+	}
 }
 
 export class OllamaSchemaError extends OllamaClientError {
-	constructor(message: string) {
-		super(message, true);
+	constructor(
+		message: string,
+		code:
+			| "invalid_response_envelope"
+			| "invalid_json"
+			| "schema_mismatch" = "schema_mismatch",
+	) {
+		super(message, true, code);
 		this.name = "OllamaSchemaError";
 	}
 }
@@ -191,15 +271,21 @@ function parseJsonObject(envelope: OllamaChatResponse): unknown {
 		const value: unknown = JSON.parse(envelope.message.content);
 		if (!isRecord(value)) throw new Error("root must be an object");
 		return value;
-	} catch (error) {
+	} catch {
 		throw new OllamaSchemaError(
-			`Ollama content was not a JSON object: ${errorMessage(error).message}`,
+			"Ollama content was not a JSON object.",
+			"invalid_json",
 		);
 	}
 }
 
 function normalizeLoopbackUrl(value: string): string {
-	const url = new URL(value);
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		throw new Error("The local Ollama client URL is invalid.");
+	}
 	if (
 		url.protocol !== "http:" ||
 		!["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname)
@@ -212,6 +298,11 @@ function normalizeLoopbackUrl(value: string): string {
 	return url.toString().replace(/\/$/u, "");
 }
 
-function errorMessage(error: unknown): Error {
-	return error instanceof Error ? error : new Error(String(error));
+function safeOllamaError(error: unknown): OllamaClientError {
+	if (error instanceof OllamaClientError) return error;
+	return new OllamaClientError(
+		"Ollama request failed.",
+		true,
+		"transport_error",
+	);
 }

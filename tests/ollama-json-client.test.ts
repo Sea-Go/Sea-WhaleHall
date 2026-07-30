@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	OllamaClientError,
 	OllamaJsonClient,
 	OllamaSchemaError,
 } from "../src/agent/model/ollama-json-client";
@@ -38,6 +39,7 @@ describe("OllamaJsonClient", () => {
 				messages: [{ role: "user", content: "label this" }],
 				schema,
 				validate: isLabel,
+				maxOutputTokens: 96,
 			}),
 		).resolves.toEqual({ label: "development" });
 		expect(body).toMatchObject({
@@ -46,7 +48,11 @@ describe("OllamaJsonClient", () => {
 			think: false,
 			format: schema,
 			keep_alive: "30m",
-			options: { num_ctx: 4096, temperature: 0 },
+			options: {
+				num_ctx: 4096,
+				temperature: 0,
+				num_predict: 96,
+			},
 		});
 	});
 
@@ -135,5 +141,66 @@ describe("OllamaJsonClient", () => {
 				validate: isLabel,
 			}),
 		).rejects.toBeInstanceOf(OllamaSchemaError);
+	});
+
+	test("returns typed diagnostics without leaking transport or generated content", async () => {
+		const transportSecret = "private prompt copied into transport failure";
+		const transportClient = new OllamaJsonClient({
+			fetch: async () => {
+				throw new Error(transportSecret);
+			},
+		});
+		let transportError: unknown;
+		try {
+			await transportClient.generateJson({
+				messages: [
+					{ role: "user", content: "sensitive user prompt" },
+				],
+				schema,
+				validate: isLabel,
+			});
+		} catch (error) {
+			transportError = error;
+		}
+		expect(transportError).toBeInstanceOf(OllamaClientError);
+		expect((transportError as OllamaClientError).code).toBe(
+			"transport_error",
+		);
+		expect((transportError as Error).message).toBe(
+			"Ollama request failed.",
+		);
+		expect(
+			JSON.stringify(
+				(transportError as OllamaClientError).toDiagnostic(),
+			),
+		).not.toContain(transportSecret);
+
+		const generatedSecret = "private generated response";
+		const schemaClient = new OllamaJsonClient({
+			fetch: async () =>
+				Response.json({
+					message: { content: generatedSecret },
+				}),
+		});
+		let schemaError: unknown;
+		try {
+			await schemaClient.generateJson({
+				messages: [
+					{ role: "user", content: "another sensitive prompt" },
+				],
+				schema,
+				validate: isLabel,
+			});
+		} catch (error) {
+			schemaError = error;
+		}
+		expect(schemaError).toBeInstanceOf(OllamaSchemaError);
+		expect((schemaError as OllamaClientError).code).toBe("invalid_json");
+		expect((schemaError as Error).message).not.toContain(generatedSecret);
+		expect(
+			JSON.stringify(
+				(schemaError as OllamaClientError).toDiagnostic(),
+			),
+		).not.toContain(generatedSecret);
 	});
 });

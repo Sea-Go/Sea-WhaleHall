@@ -1,12 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { parseLocalMessage } from "../src/agent/local-protocol";
-import type { OllamaJsonRequest } from "../src/agent/model/ollama-json-client";
+import {
+	OllamaClientError,
+	type OllamaJsonRequest,
+} from "../src/agent/model/ollama-json-client";
 import {
 	QwenCitedHypothesisGenerator,
+	QWEN_HYPOTHESIS_DEFAULT_MAX_PACKS,
 	QWEN_HYPOTHESIS_EPISODES_PER_PACK,
 	QWEN_HYPOTHESIS_INPUT_TOKEN_LIMIT,
+	QWEN_HYPOTHESIS_MAX_OUTPUT_TOKENS,
 	buildHypothesisPacks,
 	isSemanticEventV2,
+	probeQwenHypothesisReadiness,
 	type ActivityEpisodeV2,
 	type EvidenceFactV2,
 	type SemanticEventV2,
@@ -240,6 +246,16 @@ describe("Qwen cited hypothesis guard", () => {
 			text: "可能在查阅和研究资料",
 			citedFactIds: ["fact-1"],
 			generator: "deterministic-template.v2",
+			diagnostics: [
+				{
+					source: "qwen3:4b",
+					stage: "generation",
+					code: "unexpected_failure",
+					retryable: true,
+					httpStatus: null,
+					affectedEpisodeCount: 1,
+				},
+			],
 		});
 	});
 
@@ -331,6 +347,8 @@ describe("Qwen cited hypothesis guard", () => {
 				) as {
 					episodes: Array<{
 						episodeId: string;
+						activity: string;
+						goalRelevance: string | null;
 						allowedFactIds: string[];
 					}>;
 				};
@@ -341,6 +359,31 @@ describe("Qwen cited hypothesis guard", () => {
 						citedFactIds: [episode.allowedFactIds[0]!],
 					})),
 				};
+				expect(
+					payload.episodes.every(
+						(episode) =>
+							/^e\d+$/u.test(episode.episodeId) &&
+							episode.allowedFactIds.every((factId) =>
+								/^f\d+$/u.test(factId),
+							),
+					),
+				).toBeTrue();
+				expect(JSON.stringify(request.schema)).not.toContain(
+					'"pattern"',
+				);
+				expect(JSON.stringify(request.schema)).toContain(
+					'"maxLength":64',
+				);
+				expect(request.maxOutputTokens).toBe(
+					QWEN_HYPOTHESIS_MAX_OUTPUT_TOKENS,
+				);
+				const wrongPrefix = structuredClone(response);
+				wrongPrefix.episodes[0]!.hypothesis = "正在查阅资料";
+				expect(request.validate(wrongPrefix)).toBeFalse();
+				const tooLong = structuredClone(response);
+				tooLong.episodes[0]!.hypothesis =
+					`可能在${"查".repeat(62)}`;
+				expect(request.validate(tooLong)).toBeFalse();
 				if (!request.validate(response)) {
 					throw new Error("generated response failed validation");
 				}
@@ -351,6 +394,127 @@ describe("Qwen cited hypothesis guard", () => {
 			client,
 		).generate(episodes, facts, null);
 		expect(generated.size).toBe(9);
-		expect(calls).toBe(packs.length);
+		expect(calls).toBe(QWEN_HYPOTHESIS_DEFAULT_MAX_PACKS);
+		const selectedIds = new Set(
+			packs[0]!.episodes.map((episode) => episode.episodeId),
+		);
+		for (const episode of episodes) {
+			const hypothesis = generated.get(episode.episodeId)!;
+			if (selectedIds.has(episode.episodeId)) {
+				expect(hypothesis.generator).toBe("qwen3:4b-cited.v2");
+				expect(hypothesis.diagnostics).toBeUndefined();
+			} else {
+				expect(hypothesis.generator).toBe(
+					"deterministic-template.v2",
+				);
+				expect(hypothesis.diagnostics?.[0]?.code).toBe(
+					"pack_limit",
+				);
+			}
+		}
+
+		let multiPackCalls = 0;
+		const partiallyFailingClient = {
+			generateJson: async <T>(request: OllamaJsonRequest<T>): Promise<T> => {
+				multiPackCalls += 1;
+				if (multiPackCalls === 2) {
+					throw new OllamaClientError(
+						"Ollama request failed.",
+						true,
+						"transport_error",
+					);
+				}
+				const payload = JSON.parse(
+					request.messages[1]!.content,
+					) as {
+						episodes: Array<{
+							episodeId: string;
+							activity: string;
+							goalRelevance: string | null;
+							allowedFactIds: string[];
+						}>;
+				};
+				return {
+					episodes: payload.episodes.map((episode) => ({
+						episodeId: episode.episodeId,
+						hypothesis: "可能在查阅资料",
+						citedFactIds: [episode.allowedFactIds[0]!],
+					})),
+				} as T;
+			},
+		};
+		const partial = await new QwenCitedHypothesisGenerator(
+			partiallyFailingClient,
+			{ maxPacks: 2 },
+		).generate(episodes, facts, null);
+		expect(multiPackCalls).toBe(2);
+		expect(
+			packs[0]!.episodes.every(
+				(episode) =>
+					partial.get(episode.episodeId)?.generator ===
+					"qwen3:4b-cited.v2",
+			),
+		).toBeTrue();
+		expect(
+			packs[1]!.episodes.every(
+				(episode) =>
+					partial.get(episode.episodeId)?.diagnostics?.[0]
+						?.code === "ollama.transport_error",
+			),
+		).toBeTrue();
+		expect(
+			packs[2]!.episodes.every(
+				(episode) =>
+					partial.get(episode.episodeId)?.diagnostics?.[0]
+						?.code === "pack_limit",
+			),
+		).toBeTrue();
+	});
+
+	test("probes the production schema with synthetic aliases only", async () => {
+		let inspected = false;
+		await probeQwenHypothesisReadiness({
+			generateJson: async <T>(request: OllamaJsonRequest<T>): Promise<T> => {
+				inspected = true;
+				const payload = JSON.parse(
+					request.messages[1]!.content,
+					) as {
+						episodes: Array<{
+							episodeId: string;
+							activity: string;
+							goalRelevance: string | null;
+							allowedFactIds: string[];
+						}>;
+						facts: Array<{ factId: string; text: string }>;
+				};
+				expect(payload.episodes).toEqual([
+					{
+						episodeId: "e1",
+						activity: "other_unknown",
+						goalRelevance: null,
+						allowedFactIds: ["f1"],
+					},
+				]);
+				expect(payload.facts[0]).toMatchObject({
+					factId: "f1",
+					text: "当前可见操作",
+				});
+				expect(JSON.stringify(request.schema)).not.toContain(
+					'"pattern"',
+				);
+				const response = {
+					episodes: [
+						{
+							episodeId: "e1",
+							hypothesis: "可能在进行当前可见操作",
+							citedFactIds: ["f1"],
+						},
+					],
+				};
+				expect(request.validate(response)).toBeTrue();
+				return response as T;
+			},
+		});
+		expect(inspected).toBeTrue();
 	});
 });
