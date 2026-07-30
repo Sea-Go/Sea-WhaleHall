@@ -15,6 +15,7 @@ import {
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const INPUT_BUCKET_MS = 5 * 1000;
+const ACTIVE_CAPTURE_POLL_MS = 2 * 1000;
 
 export type AuditExportControlProps = {
 	service: AuditExportService;
@@ -53,6 +54,31 @@ export function AuditExportControl({
 			mounted = false;
 		};
 	}, [service]);
+
+	useEffect(() => {
+		if (capture?.state !== "collecting" && capture?.state !== "settling") {
+			return;
+		}
+		let mounted = true;
+		const poll = async () => {
+			try {
+				const status = await service.getCaptureStatus();
+				if (mounted) setCapture(status);
+			} catch {
+				if (mounted) {
+					setCaptureMessage("自动刷新采集状态失败，可手动刷新后重试。");
+				}
+			}
+		};
+		const intervalId = globalThis.setInterval(
+			() => void poll(),
+			ACTIVE_CAPTURE_POLL_MS,
+		);
+		return () => {
+			mounted = false;
+			globalThis.clearInterval(intervalId);
+		};
+	}, [capture?.state, service]);
 
 	async function exportFiveMinutes(fromMs: number) {
 		if (state.status === "exporting") return;
@@ -153,8 +179,8 @@ export function AuditExportControl({
 					</div>
 				</div>
 				<p>
-					分析完整性：仅包含期间按 64 条/5 分钟或边界自然封窗的生产窗口；
-					采集不会为审计强制封窗，也不保证此时已有完整 Timeline。
+					生产分析仍只来自按 64 条/5 分钟或边界自然封窗的窗口。导出时，尚未封窗的有效语义事件会生成明确标记的
+					audit-only 确定性投影；它不会写回生产时间线，也不会调用 Qwen。
 				</p>
 				<div className="audit-export-control__capture-actions">
 					<Button

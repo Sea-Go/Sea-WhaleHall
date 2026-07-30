@@ -36,8 +36,10 @@ describe("audit export UI", () => {
 		expect(markup).toContain("刷新");
 		expect(markup).toContain("导出本次范围");
 		expect(markup).toContain("导出过去五分钟");
-		expect(markup).toContain("仅包含期间按 64 条/5 分钟或边界自然封窗");
-		expect(markup).toContain("不保证此时已有完整 Timeline");
+		expect(markup).toContain("生产分析仍只来自按 64 条/5 分钟或边界自然封窗");
+		expect(markup).toContain("audit-only 确定性投影");
+		expect(markup).toContain("不会写回生产时间线");
+		expect(markup).toContain("不会调用 Qwen");
 		expect(markup).toContain('type="checkbox"');
 		expect(markup).not.toContain("checked");
 		expect(markup).not.toContain("/Users/");
