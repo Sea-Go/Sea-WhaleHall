@@ -15,13 +15,13 @@ flowchart TB
     Pet["Transparent Canvas pet window"] -->|"Typed RPC"| Bun
     Bun --> Agent["TypeScript AgentRuntime"]
     Agent --> LocalClient["LocalToolClient"]
-    Agent --> Reflection["64条 / 5分钟 Reflection runtime"]
+    Agent --> Reflection["64条 / 5分钟 Timeline v2 runtime"]
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
     Server --> EventJournal["EventJournal · SQLite WAL"]
     EventJournal -->|"desktop.event push + cursor replay"| Reflection
-    Reflection --> ModernBERT["ModernBERT classification / embedding"]
-    Reflection -->|"low confidence / OOD"| Qwen["Local qwen3:4b"]
-    Reflection --> ReflectionJournal["ReflectionJournal · SQLite WAL"]
+    Reflection --> Classifier["deterministic cold-start / verified ModernBERT classification"]
+    Reflection --> Qwen["Local qwen3:4b · cited hypothesis text only"]
+    Reflection --> ReflectionJournal["TimelineJournal · SQLite WAL"]
     Server --> Core["Local Tool core"]
     Core --> Tools["system.info · device.environment · accessibility.* · activity.* · applications.* · presence.* · browser.*"]
     Core --> Accessibility["Foreground accessibility-tree sensor"]
@@ -212,7 +212,7 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 - `browser.history`, `browser.searches`, and `browser.downloads` query the local `browser.sqlite3` import. All browser Tools require the high-impact `browser.read` permission.
 - `editor.status` reports explicit VS Code bridge enablement, spool health, quarantine state, open edit bursts, and durable outbox backlog without returning document content. It requires `editor.metadata`.
 
-WhaleHall now supports a local ModernBERT inference adapter plus a pinned loopback `qwen3:4b` fallback. Application usage and Qwen prompts stay local by default; a remote ModernBERT endpoint is rejected unless its exact HTTPS origin is explicitly allowlisted. WhaleHall still does not control a browser.
+Timeline v2 classifies with the explicit `deterministic-cold-start.v2` implementation by default. Its ModernBERT episode adapter is an opt-in trust boundary: it accepts loopback endpoints, or an exact allowlisted HTTPS origin, and sends facts only after a caller-pinned v2 artifact manifest matches field-for-field. The pinned loopback `qwen3:4b` is a separate cited-hypothesis text generator; it never receives or supplies ModernBERT class probabilities. Serving code or an endpoint address alone is never treated as proof that a trained, calibrated artifact is ready. WhaleHall still does not control a browser.
 
 ## Foreground application usage and SQLite
 

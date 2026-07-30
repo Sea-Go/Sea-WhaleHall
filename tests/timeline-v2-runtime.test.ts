@@ -5,7 +5,17 @@ import { join } from "node:path";
 import type { AgentRuntime } from "../src/agent/agent-runtime";
 import { WHALEHALL_TEACHER_MODEL_LOCK } from "../src/agent/model/ollama-model-lock";
 import {
+	MODERNBERT_ACTIVITY_LABELS,
+	MODERNBERT_EVIDENCE_PROJECTOR_VERSION,
+	MODERNBERT_GOAL_RELEVANCE_LABELS,
+	MODERNBERT_INPUT_SCHEMA_VERSION,
+	MODERNBERT_MANIFEST_SCHEMA_VERSION,
+	MODERNBERT_MODEL_INPUT_FORMAT,
+	MODERNBERT_REQUEST_SCHEMA_VERSION,
+	MODERNBERT_RESPONSE_SCHEMA_VERSION,
+	MODERNBERT_RUNTIME_SCHEMA_VERSION,
 	createTimelineV2Runtime,
+	type ModernBertArtifactManifestV1,
 	type TimelineV2Runtime,
 } from "../src/agent/timeline-v2";
 
@@ -51,7 +61,52 @@ function lockedMetadata(input: string | URL | Request): Response | null {
 	return null;
 }
 
-describe("Timeline v2 Qwen runtime readiness", () => {
+function modernBertManifest(): ModernBertArtifactManifestV1 {
+	return {
+		schemaVersion: MODERNBERT_MANIFEST_SCHEMA_VERSION,
+		artifactId: "runtime-test-artifact",
+		artifactSha256: "a".repeat(64),
+		runtime: {
+			schemaVersion: MODERNBERT_RUNTIME_SCHEMA_VERSION,
+			modelVersion: "modernbert-runtime-test",
+			modelFamily: "ModernBERT",
+			maximumTokens: 8_192,
+			tokenizerSha256: "b".repeat(64),
+			inputFormat: MODERNBERT_MODEL_INPUT_FORMAT,
+			projectorVersion: MODERNBERT_EVIDENCE_PROJECTOR_VERSION,
+			architecture: {
+				activityClasses: 12,
+				relevanceClasses: 4,
+				embeddingDimensions: 256,
+				heads: [
+					"boundary",
+					"activity",
+					"relevance",
+					"evidence",
+					"summary",
+					"embedding",
+				],
+			},
+			taxonomy: {
+				version: "activity-taxonomy.v2",
+				activities: [...MODERNBERT_ACTIVITY_LABELS],
+				goalRelevance: [
+					...MODERNBERT_GOAL_RELEVANCE_LABELS,
+				],
+			},
+			oodScoring:
+				"calibrated-energy-plus-cluster-distance.v1",
+			calibrationVersion: "temperature-scaling.v1",
+		},
+		requestSchemaVersion: MODERNBERT_REQUEST_SCHEMA_VERSION,
+		inputSchemaVersion: MODERNBERT_INPUT_SCHEMA_VERSION,
+		responseSchemaVersion: MODERNBERT_RESPONSE_SCHEMA_VERSION,
+		maximumFacts: 64,
+		maximumInputBytes: 64 * 1024,
+	};
+}
+
+describe("Timeline v2 model runtime readiness", () => {
 	test("keeps the verified lock distinct from a failed production-schema probe", async () => {
 		const errors: unknown[] = [];
 		const runtime = await createTimelineV2Runtime({
@@ -119,5 +174,95 @@ describe("Timeline v2 Qwen runtime readiness", () => {
 		expect(runtime.teacherVerified).toBeTrue();
 		expect(runtime.inferenceReady).toBeTrue();
 		expect(runtime.diagnostics).toEqual([]);
+	});
+
+	test("keeps episode classification on deterministic cold-start by default", async () => {
+		const runtime = await createTimelineV2Runtime({
+			agent: {} as AgentRuntime,
+			dataDirectory: dataDirectory(),
+			verifyTeacher: false,
+		});
+		runtimes.push(runtime);
+
+		expect(runtime.episodeClassifier).toEqual({
+			configured: false,
+			artifactVerified: false,
+			activeClassifier: "deterministic-cold-start",
+			modelVersion: "deterministic-cold-start.v2",
+			code: "disabled",
+		});
+	});
+
+	test("activates ModernBERT only after the pinned deployment manifest verifies", async () => {
+		const expected = modernBertManifest();
+		let manifestCalls = 0;
+		const runtime = await createTimelineV2Runtime({
+			agent: {} as AgentRuntime,
+			dataDirectory: dataDirectory(),
+			verifyTeacher: false,
+			modernBert: {
+				enabled: true,
+				endpoint:
+					"http://127.0.0.1:9417/v1/episodes:classify",
+				manifestEndpoint:
+					"http://127.0.0.1:9417/manifest",
+				expectedArtifact: expected,
+				fetch: async () => {
+					manifestCalls += 1;
+					return Response.json(expected);
+				},
+			},
+		});
+		runtimes.push(runtime);
+
+		expect(manifestCalls).toBe(1);
+		expect(runtime.episodeClassifier).toEqual({
+			configured: true,
+			artifactVerified: true,
+			activeClassifier: "modernbert",
+			modelVersion: "modernbert-runtime-test",
+			code: null,
+		});
+	});
+
+	test("records a content-free verification code and retains cold-start on mismatch", async () => {
+		const expected = modernBertManifest();
+		const errors: unknown[] = [];
+		let manifestCalls = 0;
+		const runtime = await createTimelineV2Runtime({
+			agent: {} as AgentRuntime,
+			dataDirectory: dataDirectory(),
+			verifyTeacher: false,
+			onError: (error) => errors.push(error),
+			modernBert: {
+				enabled: true,
+				endpoint:
+					"http://127.0.0.1:9417/v1/episodes:classify",
+				manifestEndpoint:
+					"http://127.0.0.1:9417/manifest",
+				expectedArtifact: expected,
+				fetch: async () => {
+					manifestCalls += 1;
+					return Response.json({
+						...expected,
+						artifactSha256: "c".repeat(64),
+					});
+				},
+			},
+		});
+		runtimes.push(runtime);
+
+		expect(runtime.episodeClassifier).toEqual({
+			configured: true,
+			artifactVerified: false,
+			activeClassifier: "deterministic-cold-start",
+			modelVersion: "deterministic-cold-start.v2",
+			code: "modernbert.artifact_manifest_mismatch",
+		});
+		expect(errors).toHaveLength(1);
+		expect(manifestCalls).toBe(1);
+		expect(JSON.stringify(runtime.episodeClassifier)).not.toContain(
+			"artifactSha256",
+		);
 	});
 });

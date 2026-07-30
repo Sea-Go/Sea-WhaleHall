@@ -152,6 +152,25 @@ Qwen 只生成一句以“可能在”开头的假设，必须引用该 Episode 
 EvidenceFact renderer，Qwen 不能撰写或改写事实。无目标时 relevance 为
 `null`。
 
+Timeline v2 的 ModernBERT Episode adapter 默认关闭。只有调用方显式传入
+endpoint 和完整的预期 deployment manifest，且 endpoint 返回值与预期
+manifest 逐字段完全一致时，runtime 才会从
+`deterministic-cold-start.v2` 切换到该 artifact。manifest 内嵌训练侧实际
+可导出的 `modernbert-episode-runtime.v1` 元数据，包括
+`timeline-event-sequence.v2`、`evidence-projector.v2`、tokenizer SHA-256、
+六个 head、12/4 taxonomy、OOD 与 calibration 版本；模型、taxonomy、
+projector、tokenizer 或 artifact digest 任一不符都保留 cold-start，并只
+记录不含事实内容的状态码。
+
+分类请求只包含结构化 EvidenceFact 和可选 goal，不包含 Episode hypothesis、
+Qwen prompt 或 Qwen 输出。客户端同时执行 byte 上限和保守的 8,192-token
+上界检查，绝不裁剪；验证后的 serving projector 还必须用 artifact 内锁定
+的 tokenizer、`truncation=false` 精确计数，超限直接拒绝。响应严格校验
+schema version、correlation/input hash、artifact identity、12/4 概率全集与
+归一化、label 最大概率一致性，以及 confidence/entropy/OOD 边界；无 goal
+时 relevance label 和概率都必须为 `null`。请求 timeout 覆盖 response body，
+响应 byte 数也有独立硬上限。
+
 ### TimelineJournal、vault 和本地 Outbox
 
 `timeline-v2.sqlite3` 的 collector snapshot、window、fact、episode、
@@ -282,7 +301,6 @@ flowchart LR
   Collector --> Windows["不可变 EventWindow"]
   Windows --> Jobs["持久化推理 Job"]
   Jobs --> Student["ModernBERT HTTP adapter"]
-  Student -->|"低置信/OOD/不可用"| Teacher["本机 qwen3:4b"]
   Jobs --> Reflections["ReflectionJournal · SQLite WAL"]
   Reflections --> Sink["TelemetrySink v1"]
 ```
@@ -296,7 +314,9 @@ flowchart LR
 - Rust 输入、进程、浏览器、Accessibility 和 VS Code 传感器先完成聚合与状态变化去重，再把确定性语义事件写入 EventJournal。TypeScript 不保留跨崩溃不安全的内存去重状态，只按 cursor 重放并统一执行反思封窗。第 64 条事件立即封窗，或第一条有效事件后 300,000ms 封窗。
 - `reflections.sqlite3` 原子保存 collector snapshot、不可变窗口、READY job 和最终 `ReflectionV1`。推理与 sink 提交使用租约和幂等 `windowId` 恢复。
 - ModernBERT 仅返回分类概率、相关性、256 维 embedding、OOD 分数和模型版本，不生成自由文本。
-- Qwen 只在 ModernBERT 低置信、OOD 或暂不可用时做本地类别仲裁；其输出不作为校准概率，也不保存思维链。
+- 当前 Timeline v2 runtime 不使用 Qwen 做类别仲裁或概率 fallback；Qwen
+  只对已形成的 Episode 生成有 `factId` 引用的暂定文本。ModernBERT 未启用
+  或 manifest 未验证时由明确标记的 deterministic cold-start 分类。
 - window builder 的不可变 `modelInput` 固定限制为估算 3,000 token 且
   32 KiB。超过时仍保留全部语义事件的 kind/时间骨架，并优先从最新
   主证据开始补充有界 payload；训练导出端使用同样的确定性规则。
@@ -319,7 +339,10 @@ flowchart LR
   FP32。runtime/manifest 同时记录请求精度、实际精度、checkpointing 与
   micro-batch，避免仅靠命令日志推断训练条件。
 
-仓库中没有伪造“已训练模型”。在完成真实授权数据、Teacher gate、GPU 训练、校准、三种随机种子、消融和冻结测试之前，ModernBERT endpoint 可能不可用；窗口会保留并按持久化退避策略重试。
+仓库中没有伪造“已训练模型”。在完成真实授权数据、Teacher gate、GPU
+训练、校准、三种随机种子、消融和冻结测试之前，Timeline v2 保持
+deterministic cold-start。显式启用且完成 manifest 验证后，如 endpoint
+推理失败，对应持久化 job 才按现有恢复策略重试，不会把 Qwen 当作分类器。
 
 ## 事件计数与边界
 
@@ -450,21 +473,32 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 
 运行时在发送任何窗口前只读检查 `/api/version` 和 `/api/tags`；版本、digest、参数规模或量化不匹配时 fail closed，不会静默换模型。请求固定使用 `/api/chat`、structured output、`think:false` 和 `temperature:0`。
 
-ModernBERT 默认只访问：
+Timeline v2 没有 ModernBERT 默认 URL，也不会读取环境变量后自行启用。
+`createTimelineV2Runtime()` 只有收到
+`modernBert: { enabled: true, endpoint, manifestEndpoint,
+expectedArtifact, ... }` 才做一次纯元数据验证；未配置、显式关闭、URL
+不安全、manifest 不匹配或验证超时都继续 cold-start。loopback HTTP/HTTPS
+默认允许；远端必须使用调用方给出的精确 origin allowlist，并默认要求
+HTTPS。只有显式 `allowInsecureRemote: true` 才允许 allowlist 内的远端
+HTTP。推理 URL 与 manifest URL 必须同 origin，禁止 credentials、query、
+fragment 和 redirect。
 
-```text
-http://127.0.0.1:8765/v1/reflections:infer
-```
+authorization token 只能通过 runtime options 注入，不得写入仓库、训练
+runtime/manifest 或日志。更简单的远端验证方式是把服务端 loopback 端口经
+已有 SSH 控制路径转发到本机 loopback；这仍然需要显式 opt-in 与完整的
+预期 artifact manifest。
 
-远端部署必须使用精确 HTTPS origin allowlist：
-
-```bash
-WHALEHALL_MODERNBERT_ENDPOINT=https://model.example/v1/reflections:infer
-WHALEHALL_MODERNBERT_ALLOWED_ORIGINS=https://model.example
-WHALEHALL_MODERNBERT_TOKEN='runtime-secret-from-secure-env'
-```
-
-不要把 token 写入仓库、训练 manifest 或日志。更简单的家里云验证方式是将远端 loopback 推理端口通过现有 SSH 控制路径转发到本机 `127.0.0.1:8765`，这样模型输入仍使用默认 loopback policy。
+截至 2026-07-30 的只读基线核对中，独立 `WhaleHall-Training` 工作区可从
+`episode_training_v2.py` 导出 v2 `runtime.json` 和模型/tokenizer 文件；
+当时核对的既有 `inference_server.py` 路径仍是
+`modernbert-request.v1` / `modernbert-inference.v1`、
+`activity-taxonomy.v1` 的 `/v1/reflections:infer`，通用
+`artifact_manifest()` 也只接受旧 `modernbert-runtime.v2`。兼容的本机 v2
+server 可以独立实现或演进，但只有在它完成 EvidenceFact →
+`timeline-event-sequence.v2` 的确定性投影、锁定 tokenizer 的无截断精确
+计数、严格 Episode schema，并返回与调用方 pin 完全一致且非
+`uncalibrated` 的 serving manifest 后，adapter 才会启用。存在 server 代码
+或 listener 本身不代表已有训练、校准并可用的 artifact。
 
 ## 家里云只读核验
 

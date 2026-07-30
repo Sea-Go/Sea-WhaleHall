@@ -16,21 +16,45 @@ import {
 	type RawFiveMinuteAuditSource,
 } from "./audit";
 import {
+	HeuristicTimelineEpisodeClassifier,
+	type TimelineEpisodeClassifier,
+} from "./episodes";
+import {
 	DeterministicTimelineHypothesisGenerator,
 	QwenCitedHypothesisGenerator,
 	probeQwenHypothesisReadiness,
 	type TimelineHypothesisGenerator,
 } from "./hypothesis";
+import {
+	ModernBertClassifierError,
+	ModernBertEpisodeClassifier,
+	type ModernBertClassifierErrorCode,
+	type ModernBertRuntimeOptIn,
+} from "./modernbert-classifier";
 import { RuntimeTimelineVault } from "./runtime-vault";
 import { TimelineV2Service } from "./service";
 import { SqliteTimelineV2Repository } from "./sqlite-repository";
 import type { TimelineInferenceDiagnosticV2 } from "./types";
 
+export type TimelineEpisodeClassifierRuntimeStatus = {
+	configured: boolean;
+	artifactVerified: boolean;
+	activeClassifier: "deterministic-cold-start" | "modernbert";
+	modelVersion: string;
+	code:
+		| "disabled"
+		| `modernbert.${ModernBertClassifierErrorCode}`
+		| "modernbert.unexpected_failure"
+		| null;
+};
+
 export type TimelineV2Runtime = {
 	service: TimelineV2Service;
 	repository: SqliteTimelineV2Repository;
 	audit: TimelineFiveMinuteAuditExporter | null;
+	episodeClassifier: TimelineEpisodeClassifierRuntimeStatus;
 	modelLockVerified: boolean;
+	/** Readiness of the Qwen cited-hypothesis generator, not classification. */
 	inferenceReady: boolean;
 	diagnostics: readonly TimelineInferenceDiagnosticV2[];
 	/**
@@ -56,6 +80,12 @@ export type CreateTimelineV2RuntimeOptions = {
 	verifyTeacher?: boolean;
 	/** Shared only by the metadata lock check and local inference client. */
 	teacherFetch?: FetchLike;
+	/**
+	 * Disabled unless explicitly enabled with a caller-pinned v2 deployment
+	 * manifest. Verification fetches metadata only; no fact content is sent
+	 * unless the manifest matches exactly.
+	 */
+	modernBert?: ModernBertRuntimeOptIn;
 };
 
 /**
@@ -86,8 +116,44 @@ export async function createTimelineV2Runtime(
 	let modelLockVerified = false;
 	let inferenceReady = false;
 	const diagnostics: TimelineInferenceDiagnosticV2[] = [];
+	let classifier: TimelineEpisodeClassifier =
+		new HeuristicTimelineEpisodeClassifier();
+	let episodeClassifier: TimelineEpisodeClassifierRuntimeStatus = {
+		configured: false,
+		artifactVerified: false,
+		activeClassifier: "deterministic-cold-start",
+		modelVersion: "deterministic-cold-start.v2",
+		code: "disabled",
+	};
 	let hypotheses: TimelineHypothesisGenerator =
 		new DeterministicTimelineHypothesisGenerator();
+	if (options.modernBert?.enabled === true) {
+		try {
+			const modernBert = new ModernBertEpisodeClassifier(
+				options.modernBert,
+			);
+			await modernBert.verifyArtifact();
+			classifier = modernBert;
+			episodeClassifier = {
+				configured: true,
+				artifactVerified: true,
+				activeClassifier: "modernbert",
+				modelVersion: modernBert.modelVersion,
+				code: null,
+			};
+		} catch (error) {
+			// Keep classification on the explicit cold-start implementation.
+			// An unverified endpoint never receives EvidenceFact content.
+			episodeClassifier = {
+				configured: true,
+				artifactVerified: false,
+				activeClassifier: "deterministic-cold-start",
+				modelVersion: "deterministic-cold-start.v2",
+				code: modernBertStatusCode(error),
+			};
+			onError(error);
+		}
+	}
 	if (options.verifyTeacher !== false) {
 		try {
 			await verifyOllamaModelLock(WHALEHALL_TEACHER_MODEL_LOCK, {
@@ -137,6 +203,7 @@ export async function createTimelineV2Runtime(
 				sessionId: identity.sessionId,
 			},
 			hypotheses,
+			classifier,
 			initialGoal: options.initialGoal,
 			onError,
 		});
@@ -150,6 +217,7 @@ export async function createTimelineV2Runtime(
 			service,
 			repository,
 			audit,
+			episodeClassifier,
 			modelLockVerified,
 			inferenceReady,
 			diagnostics,
@@ -164,6 +232,14 @@ export async function createTimelineV2Runtime(
 		repository.close();
 		throw error;
 	}
+}
+
+function modernBertStatusCode(
+	error: unknown,
+): TimelineEpisodeClassifierRuntimeStatus["code"] {
+	return error instanceof ModernBertClassifierError
+		? `modernbert.${error.code}`
+		: "modernbert.unexpected_failure";
 }
 
 function runtimeDiagnostic(
