@@ -9,6 +9,7 @@ import {
 } from "../src/agent/local-tool-client";
 import type {
 	LocalEventGoalChange,
+	LocalMonitoringStatus,
 	LocalToolDescriptor,
 } from "../src/agent/local-protocol";
 import { parseLocalMessage } from "../src/agent/local-protocol";
@@ -494,6 +495,87 @@ describe("LocalToolClient", () => {
 		await client.stop();
 	});
 
+	test("validates and forwards every monitoring control request", async () => {
+		const requests: Array<{
+			method: string;
+			params: Record<string, unknown>;
+		}> = [];
+		const child = new FakeChild((line, process) => {
+			const request = JSON.parse(line) as {
+				id: string;
+				method: string;
+				params: Record<string, unknown>;
+			};
+			if (!request.method.startsWith("monitoring.")) return;
+			requests.push({ method: request.method, params: request.params });
+			process.respond({
+				id: request.id,
+				ok: true,
+				result: monitoringStatus({
+					state:
+						request.method === "monitoring.pause"
+							? "paused"
+							: request.method === "monitoring.configure" &&
+								  request.params.enabled === false
+								? "disabled"
+								: "running",
+					enabled:
+						request.method === "monitoring.configure"
+							? request.params.enabled === true
+							: true,
+				}),
+			});
+		});
+		const client = new LocalToolClient("fake", { spawn: () => child });
+		await client.start();
+
+		await expect(client.getMonitoringStatus()).resolves.toMatchObject({
+			state: "running",
+		});
+		await expect(
+			client.configureMonitoring({
+				enabled: false,
+				captureContent: true,
+				excludedBundleIds: ["com.example.private"],
+			}),
+		).resolves.toMatchObject({ state: "disabled", enabled: false });
+		await expect(client.pauseMonitoring()).resolves.toMatchObject({
+			state: "paused",
+		});
+		await expect(client.resumeMonitoring()).resolves.toMatchObject({
+			state: "running",
+		});
+		await expect(
+			client.refreshMonitoringPermissions({ prompt: true }),
+		).resolves.toMatchObject({ state: "running" });
+
+		expect(requests).toEqual([
+			{ method: "monitoring.status", params: {} },
+			{
+				method: "monitoring.configure",
+				params: {
+					enabled: false,
+					captureContent: true,
+					excludedBundleIds: ["com.example.private"],
+				},
+			},
+			{ method: "monitoring.pause", params: {} },
+			{ method: "monitoring.resume", params: {} },
+			{
+				method: "monitoring.refreshPermissions",
+				params: { prompt: true },
+			},
+		]);
+		await expect(
+			client.configureMonitoring({
+				enabled: true,
+				captureContent: true,
+				excludedBundleIds: ["com.example.same", "com.example.same"],
+			}),
+		).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
+		await client.stop();
+	});
+
 	test("times out a tool call and sends a best-effort cancellation", async () => {
 		const methods: string[] = [];
 		const child = new FakeChild((line) => {
@@ -547,5 +629,31 @@ function desktopEvent(): DesktopEventV1 {
 		goalVersion: null,
 		sensitivity: "metadata",
 		payload: { appId: "com.microsoft.VSCode", appName: "Visual Studio Code" },
+	};
+}
+
+function monitoringStatus(
+	overrides: Partial<LocalMonitoringStatus> = {},
+): LocalMonitoringStatus {
+	return {
+		state: "running",
+		enabled: true,
+		captureContent: true,
+		excludedBundleIds: [],
+		helperPid: 4243,
+		helperPathAvailable: true,
+		bootId: "boot-test",
+		lastSequence: 10,
+		lastAckedSequence: 10,
+		lastHeartbeatAtMs: 1_800_000_000_000,
+		permissions: {
+			accessibility: "granted",
+			screenRecording: "granted",
+			inputMonitoring: "granted",
+			automation: "granted",
+		},
+		coverage: ["content", "metadata"],
+		lastError: null,
+		...overrides,
 	};
 }

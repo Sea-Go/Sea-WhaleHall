@@ -3,19 +3,32 @@ import type {
 	LocalToolProcess,
 } from "./local-tool-client";
 import type {
+	LocalAuditFiveMinutesQuery,
+	LocalAuditFiveMinutesResult,
 	LocalEventCommitResult,
 	LocalEventGoalChange,
 	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
+	LocalMonitoringConfigure,
+	LocalMonitoringRefreshPermissions,
+	LocalMonitoringStatus,
 	LocalRuntimeStatus,
+	LocalSemanticCommitResult,
+	LocalSemanticQuery,
+	LocalSemanticQueryResult,
 	LocalToolCall,
 	LocalToolCallResult,
 	LocalToolCancelResult,
 	LocalToolDescriptor,
 	LocalToolEvent,
+	LocalVaultOpenBatch,
+	LocalVaultOpenBatchResult,
+	LocalVaultSealBatch,
+	LocalVaultSealBatchResult,
 } from "./local-protocol";
 import type { DesktopEventV1 } from "./reflection/types";
+import type { SemanticEventV2 } from "./timeline-v2/types";
 
 export type AgentRuntimeOptions = {
 	/**
@@ -36,6 +49,9 @@ export class AgentRuntime {
 	private readonly statusListeners = new Set<(status: LocalRuntimeStatus) => void>();
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
 	private readonly desktopEventListeners = new Set<(event: DesktopEventV1) => void>();
+	private readonly semanticEventListeners = new Set<
+		(event: SemanticEventV2) => void
+	>();
 	private startPromise: Promise<void> | null = null;
 	private startupGoalPrepared = false;
 	private automaticRestartPrepared = false;
@@ -48,6 +64,7 @@ export class AgentRuntime {
 	) {
 		local.onEvent((event) => this.handleEvent(event));
 		local.onDesktopEvent((event) => this.handleDesktopEvent(event));
+		local.onSemanticEvent((event) => this.handleSemanticEvent(event));
 		local.onFailure((error) => this.handleFailure(error));
 	}
 
@@ -68,6 +85,11 @@ export class AgentRuntime {
 	onDesktopEvent(listener: (event: DesktopEventV1) => void): () => void {
 		this.desktopEventListeners.add(listener);
 		return () => this.desktopEventListeners.delete(listener);
+	}
+
+	onSemanticEvent(listener: (event: SemanticEventV2) => void): () => void {
+		this.semanticEventListeners.add(listener);
+		return () => this.semanticEventListeners.delete(listener);
 	}
 
 	async prepareStartupGoalChange(
@@ -159,6 +181,71 @@ export class AgentRuntime {
 		return this.local.appendGoalChange(change);
 	}
 
+	async getMonitoringStatus(): Promise<LocalMonitoringStatus> {
+		await this.ensureStarted();
+		return this.local.getMonitoringStatus();
+	}
+
+	async configureMonitoring(
+		configuration: LocalMonitoringConfigure,
+	): Promise<LocalMonitoringStatus> {
+		await this.ensureStarted();
+		return this.local.configureMonitoring(configuration);
+	}
+
+	async pauseMonitoring(): Promise<LocalMonitoringStatus> {
+		await this.ensureStarted();
+		return this.local.pauseMonitoring();
+	}
+
+	async resumeMonitoring(): Promise<LocalMonitoringStatus> {
+		await this.ensureStarted();
+		return this.local.resumeMonitoring();
+	}
+
+	async refreshMonitoringPermissions(
+		options: LocalMonitoringRefreshPermissions = {},
+	): Promise<LocalMonitoringStatus> {
+		await this.ensureStarted();
+		return this.local.refreshMonitoringPermissions(options);
+	}
+
+	async querySemanticEvents(
+		query: LocalSemanticQuery,
+	): Promise<LocalSemanticQueryResult> {
+		await this.ensureStarted();
+		return this.local.querySemanticEvents(query);
+	}
+
+	async commitSemanticEventCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalSemanticCommitResult> {
+		await this.ensureStarted();
+		return this.local.commitSemanticCursor(consumerId, cursor);
+	}
+
+	async queryAuditFiveMinutes(
+		query: LocalAuditFiveMinutesQuery,
+	): Promise<LocalAuditFiveMinutesResult> {
+		await this.ensureStarted();
+		return this.local.queryAuditFiveMinutes(query);
+	}
+
+	async sealVaultBatch(
+		batch: LocalVaultSealBatch,
+	): Promise<LocalVaultSealBatchResult> {
+		await this.ensureStarted();
+		return this.local.sealVaultBatch(batch);
+	}
+
+	async openVaultBatch(
+		batch: LocalVaultOpenBatch,
+	): Promise<LocalVaultOpenBatchResult> {
+		await this.ensureStarted();
+		return this.local.openVaultBatch(batch);
+	}
+
 	async stop(): Promise<void> {
 		this.startupGoalPrepared = false;
 		this.automaticRestartPrepared = false;
@@ -206,6 +293,11 @@ export class AgentRuntime {
 
 	private handleDesktopEvent(event: DesktopEventV1): void {
 		for (const listener of this.desktopEventListeners) listener(event);
+		this.setStatus("ready", null);
+	}
+
+	private handleSemanticEvent(event: SemanticEventV2): void {
+		for (const listener of this.semanticEventListeners) listener(event);
 		this.setStatus("ready", null);
 	}
 

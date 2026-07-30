@@ -3,10 +3,18 @@ import {
 	LOCAL_TOOL_TIMEOUT_MS,
 	MAX_JSONL_LINE_BYTES,
 	isDesktopEvent,
+	isLocalAuditFiveMinutesResult,
+	isLocalVaultOpenResultRecord,
+	isLocalVaultSealResultRecord,
+	isLocalMonitoringConfigure,
+	isLocalMonitoringRefreshPermissions,
+	isLocalMonitoringStatus,
 	isLocalToolDescriptor,
 	isRecord,
 	parseLocalMessage,
 	type LocalDesktopEventFrame,
+	type LocalAuditFiveMinutesQuery,
+	type LocalAuditFiveMinutesResult,
 	type LocalEventCommitResult,
 	type LocalEventGoalChange,
 	type LocalEventGoalChangeResult,
@@ -14,15 +22,30 @@ import {
 	type LocalEventQueryResult,
 	type LocalMessage,
 	type LocalMethod,
+	type LocalMonitoringConfigure,
+	type LocalMonitoringRefreshPermissions,
+	type LocalMonitoringStatus,
 	type LocalRequest,
 	type LocalRuntimeHealth,
+	type LocalSemanticCommitResult,
+	type LocalSemanticEventFrame,
+	type LocalSemanticQuery,
+	type LocalSemanticQueryResult,
 	type LocalToolCall,
 	type LocalToolCallResult,
 	type LocalToolCancelResult,
 	type LocalToolDescriptor,
 	type LocalToolEvent,
 	type LocalToolListResult,
+	type LocalVaultOpenBatch,
+	type LocalVaultOpenBatchResult,
+	type LocalVaultSealBatch,
+	type LocalVaultSealBatchResult,
 } from "./local-protocol";
+import {
+	isSemanticCursorV2,
+	isSemanticEventV2,
+} from "./timeline-v2/contract";
 
 export type LocalClientFailureCode =
 	| "SPAWN_FAILED"
@@ -76,9 +99,31 @@ export interface LocalToolProcess {
 	queryEvents(query: LocalEventQuery): Promise<LocalEventQueryResult>;
 	commitEventCursor(consumerId: string, cursor: string): Promise<LocalEventCommitResult>;
 	appendGoalChange(change: LocalEventGoalChange): Promise<LocalEventGoalChangeResult>;
+	getMonitoringStatus(): Promise<LocalMonitoringStatus>;
+	configureMonitoring(
+		configuration: LocalMonitoringConfigure,
+	): Promise<LocalMonitoringStatus>;
+	pauseMonitoring(): Promise<LocalMonitoringStatus>;
+	resumeMonitoring(): Promise<LocalMonitoringStatus>;
+	refreshMonitoringPermissions(
+		options?: LocalMonitoringRefreshPermissions,
+	): Promise<LocalMonitoringStatus>;
+	querySemanticEvents(query: LocalSemanticQuery): Promise<LocalSemanticQueryResult>;
+	commitSemanticCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalSemanticCommitResult>;
+	queryAuditFiveMinutes(
+		query: LocalAuditFiveMinutesQuery,
+	): Promise<LocalAuditFiveMinutesResult>;
+	sealVaultBatch(batch: LocalVaultSealBatch): Promise<LocalVaultSealBatchResult>;
+	openVaultBatch(batch: LocalVaultOpenBatch): Promise<LocalVaultOpenBatchResult>;
 	stop(): Promise<void>;
 	onEvent(listener: (event: LocalToolEvent) => void): () => void;
 	onDesktopEvent(listener: (event: LocalDesktopEventFrame["data"]) => void): () => void;
+	onSemanticEvent(
+		listener: (event: LocalSemanticEventFrame["data"]) => void,
+	): () => void;
 	onFailure(listener: (error: LocalClientError) => void): () => void;
 }
 
@@ -117,6 +162,9 @@ export class LocalToolClient implements LocalToolProcess {
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
 	private readonly desktopEventListeners = new Set<
 		(event: LocalDesktopEventFrame["data"]) => void
+	>();
+	private readonly semanticEventListeners = new Set<
+		(event: LocalSemanticEventFrame["data"]) => void
 	>();
 	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
 	private stopping = false;
@@ -331,6 +379,204 @@ export class LocalToolClient implements LocalToolProcess {
 		return result as LocalEventGoalChangeResult;
 	}
 
+	async getMonitoringStatus(): Promise<LocalMonitoringStatus> {
+		return this.requestMonitoringStatus("monitoring.status", {});
+	}
+
+	async configureMonitoring(
+		configuration: LocalMonitoringConfigure,
+	): Promise<LocalMonitoringStatus> {
+		if (!isLocalMonitoringConfigure(configuration)) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"monitoring.configure received invalid parameters.",
+			);
+		}
+		return this.requestMonitoringStatus(
+			"monitoring.configure",
+			configuration,
+		);
+	}
+
+	async pauseMonitoring(): Promise<LocalMonitoringStatus> {
+		return this.requestMonitoringStatus("monitoring.pause", {});
+	}
+
+	async resumeMonitoring(): Promise<LocalMonitoringStatus> {
+		return this.requestMonitoringStatus("monitoring.resume", {});
+	}
+
+	async refreshMonitoringPermissions(
+		options: LocalMonitoringRefreshPermissions = {},
+	): Promise<LocalMonitoringStatus> {
+		if (!isLocalMonitoringRefreshPermissions(options)) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"monitoring.refreshPermissions received invalid parameters.",
+			);
+		}
+		return this.requestMonitoringStatus(
+			"monitoring.refreshPermissions",
+			options,
+		);
+	}
+
+	async querySemanticEvents(
+		query: LocalSemanticQuery,
+	): Promise<LocalSemanticQueryResult> {
+		if (query.afterCursor !== undefined && query.consumerId !== undefined) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"semantic.query accepts afterCursor or consumerId, not both.",
+			);
+		}
+		if (
+			(query.afterCursor !== undefined &&
+				!isSemanticCursorV2(query.afterCursor)) ||
+			(query.consumerId !== undefined &&
+				!isSemanticConsumerId(query.consumerId)) ||
+			(query.limit !== undefined &&
+				(!Number.isInteger(query.limit) ||
+					query.limit < 1 ||
+					query.limit > 1_000)) ||
+			(query.includeContent !== undefined &&
+				typeof query.includeContent !== "boolean")
+		) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"semantic.query received invalid parameters.",
+			);
+		}
+		const result = await this.request<unknown>("semantic.query", query);
+		if (
+			!isRecord(result) ||
+			!Array.isArray(result.events) ||
+			!result.events.every(isSemanticEventV2) ||
+			(result.nextCursor !== null &&
+				!isSemanticCursorV2(result.nextCursor)) ||
+			typeof result.hasMore !== "boolean" ||
+			(result.events.length > 0 &&
+				result.nextCursor !== result.events.at(-1)?.cursor)
+		) {
+			throw this.protocolFailure(
+				"semantic.query returned an invalid result.",
+			);
+		}
+		return result as LocalSemanticQueryResult;
+	}
+
+	async commitSemanticCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalSemanticCommitResult> {
+		if (
+			!isSemanticConsumerId(consumerId) ||
+			!isSemanticCursorV2(cursor)
+		) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"semantic.commit received an invalid consumer or cursor.",
+			);
+		}
+		const result = await this.request<unknown>("semantic.commit", {
+			consumerId,
+			cursor,
+		});
+		if (
+			!isRecord(result) ||
+			result.consumerId !== consumerId ||
+			result.cursor !== cursor ||
+			typeof result.advanced !== "boolean"
+		) {
+			throw this.protocolFailure(
+				"semantic.commit returned an invalid result.",
+			);
+		}
+		return result as LocalSemanticCommitResult;
+	}
+
+	async queryAuditFiveMinutes(
+		query: LocalAuditFiveMinutesQuery,
+	): Promise<LocalAuditFiveMinutesResult> {
+		if (
+			!Number.isSafeInteger(query.fromMs) ||
+			query.fromMs < 0 ||
+			!Number.isSafeInteger(query.toMs) ||
+			query.toMs - query.fromMs !== 300_000 ||
+			(query.includeDecryptedContent !== undefined &&
+				typeof query.includeDecryptedContent !== "boolean")
+		) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"audit.queryFiveMinutes requires one exact non-negative five-minute range.",
+			);
+		}
+		const result = await this.request<unknown>(
+			"audit.queryFiveMinutes",
+			query,
+		);
+		if (!isLocalAuditFiveMinutesResult(result, query)) {
+			throw this.protocolFailure(
+				"audit.queryFiveMinutes returned an invalid result.",
+			);
+		}
+		return result;
+	}
+
+	async sealVaultBatch(
+		batch: LocalVaultSealBatch,
+	): Promise<LocalVaultSealBatchResult> {
+		if (batch.records.length < 1 || batch.records.length > 64) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"vault.sealBatch requires 1 to 64 records.",
+			);
+		}
+		const result = await this.request<unknown>("vault.sealBatch", batch);
+		if (
+			!isRecord(result) ||
+			!Array.isArray(result.records) ||
+			result.records.length !== batch.records.length ||
+			!result.records.every(isLocalVaultSealResultRecord) ||
+			!result.records.every(
+				(record, index) =>
+					record.recordId === batch.records[index]?.recordId,
+			)
+		) {
+			throw this.protocolFailure(
+				"vault.sealBatch returned an invalid result.",
+			);
+		}
+		return result as LocalVaultSealBatchResult;
+	}
+
+	async openVaultBatch(
+		batch: LocalVaultOpenBatch,
+	): Promise<LocalVaultOpenBatchResult> {
+		if (batch.contentRefs.length < 1 || batch.contentRefs.length > 64) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"vault.openBatch requires 1 to 64 content references.",
+			);
+		}
+		const result = await this.request<unknown>("vault.openBatch", batch);
+		if (
+			!isRecord(result) ||
+			!Array.isArray(result.records) ||
+			result.records.length !== batch.contentRefs.length ||
+			!result.records.every(isLocalVaultOpenResultRecord) ||
+			!result.records.every(
+				(record, index) =>
+					record.contentRef === batch.contentRefs[index],
+			)
+		) {
+			throw this.protocolFailure(
+				"vault.openBatch returned an invalid result.",
+			);
+		}
+		return result as LocalVaultOpenBatchResult;
+	}
+
 	async stop(): Promise<void> {
 		this.stopping = true;
 		const child = this.child;
@@ -350,6 +596,13 @@ export class LocalToolClient implements LocalToolProcess {
 	): () => void {
 		this.desktopEventListeners.add(listener);
 		return () => this.desktopEventListeners.delete(listener);
+	}
+
+	onSemanticEvent(
+		listener: (event: LocalSemanticEventFrame["data"]) => void,
+	): () => void {
+		this.semanticEventListeners.add(listener);
+		return () => this.semanticEventListeners.delete(listener);
 	}
 
 	onFailure(listener: (error: LocalClientError) => void): () => void {
@@ -410,6 +663,24 @@ export class LocalToolClient implements LocalToolProcess {
 		});
 	}
 
+	private async requestMonitoringStatus(
+		method:
+			| "monitoring.status"
+			| "monitoring.configure"
+			| "monitoring.pause"
+			| "monitoring.resume"
+			| "monitoring.refreshPermissions",
+		params: Record<string, unknown>,
+	): Promise<LocalMonitoringStatus> {
+		const result = await this.request<unknown>(method, params);
+		if (!isLocalMonitoringStatus(result)) {
+			throw this.protocolFailure(
+				`${method} returned an invalid monitoring status.`,
+			);
+		}
+		return result;
+	}
+
 	private async readStdout(child: ChildTransport): Promise<void> {
 		const parser = new JsonlParser(
 			(line) => this.handleLine(child, line),
@@ -459,6 +730,12 @@ export class LocalToolClient implements LocalToolProcess {
 		const message = parseLocalMessage(line);
 		if (isDesktopEventFrame(message)) {
 			for (const listener of this.desktopEventListeners) listener(message.data);
+			return;
+		}
+		if (isSemanticEventFrame(message)) {
+			for (const listener of this.semanticEventListeners) {
+				listener(message.data);
+			}
 			return;
 		}
 		if (isToolEvent(message)) {
@@ -532,6 +809,13 @@ export class LocalToolClient implements LocalToolProcess {
 			void child.stdin.flush();
 		} catch {}
 	}
+}
+
+function isSemanticConsumerId(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		/^[A-Za-z0-9._:/-]{1,128}$/u.test(value)
+	);
 }
 
 function sameGoalContext(
@@ -618,11 +902,21 @@ export class JsonlParser {
 }
 
 function isToolEvent(message: LocalMessage): message is LocalToolEvent {
-	return "event" in message && message.event !== "desktop.event";
+	return (
+		"event" in message &&
+		message.event !== "desktop.event" &&
+		message.event !== "semantic.event"
+	);
 }
 
 function isDesktopEventFrame(message: LocalMessage): message is LocalDesktopEventFrame {
 	return "event" in message && message.event === "desktop.event";
+}
+
+function isSemanticEventFrame(
+	message: LocalMessage,
+): message is LocalSemanticEventFrame {
+	return "event" in message && message.event === "semantic.event";
 }
 
 function errorMessage(error: unknown): string {

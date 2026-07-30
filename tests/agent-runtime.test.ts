@@ -5,19 +5,32 @@ import {
 	type LocalToolProcess,
 } from "../src/agent/local-tool-client";
 import type {
+	LocalAuditFiveMinutesQuery,
+	LocalAuditFiveMinutesResult,
 	LocalEventCommitResult,
 	LocalEventGoalChange,
 	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
+	LocalMonitoringConfigure,
+	LocalMonitoringRefreshPermissions,
+	LocalMonitoringStatus,
 	LocalRuntimeHealth,
+	LocalSemanticCommitResult,
+	LocalSemanticQuery,
+	LocalSemanticQueryResult,
 	LocalToolCall,
 	LocalToolCallResult,
 	LocalToolCancelResult,
 	LocalToolDescriptor,
 	LocalToolEvent,
+	LocalVaultOpenBatch,
+	LocalVaultOpenBatchResult,
+	LocalVaultSealBatch,
+	LocalVaultSealBatchResult,
 } from "../src/agent/local-protocol";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
+import type { SemanticEventV2 } from "../src/agent/timeline-v2/types";
 
 class FakeLocalProcess implements LocalToolProcess {
 	pid: number | null = null;
@@ -30,6 +43,9 @@ class FakeLocalProcess implements LocalToolProcess {
 	startupGoalAcknowledgements = 0;
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
 	private readonly desktopEventListeners = new Set<(event: DesktopEventV1) => void>();
+	private readonly semanticEventListeners = new Set<
+		(event: SemanticEventV2) => void
+	>();
 	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
 
 	async prepareStartupGoalChange(
@@ -120,6 +136,73 @@ class FakeLocalProcess implements LocalToolProcess {
 		};
 	}
 
+	async getMonitoringStatus(): Promise<LocalMonitoringStatus> {
+		return monitoringStatus();
+	}
+
+	async configureMonitoring(
+		configuration: LocalMonitoringConfigure,
+	): Promise<LocalMonitoringStatus> {
+		return monitoringStatus({
+			state: configuration.enabled ? "running" : "disabled",
+			enabled: configuration.enabled,
+			captureContent: configuration.captureContent,
+			excludedBundleIds: configuration.excludedBundleIds,
+		});
+	}
+
+	async pauseMonitoring(): Promise<LocalMonitoringStatus> {
+		return monitoringStatus({ state: "paused" });
+	}
+
+	async resumeMonitoring(): Promise<LocalMonitoringStatus> {
+		return monitoringStatus();
+	}
+
+	async refreshMonitoringPermissions(
+		_options?: LocalMonitoringRefreshPermissions,
+	): Promise<LocalMonitoringStatus> {
+		return monitoringStatus();
+	}
+
+	async querySemanticEvents(
+		_query: LocalSemanticQuery,
+	): Promise<LocalSemanticQueryResult> {
+		return { events: [], nextCursor: null, hasMore: false };
+	}
+
+	async commitSemanticCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalSemanticCommitResult> {
+		return { consumerId, cursor, advanced: true };
+	}
+
+	async queryAuditFiveMinutes(
+		query: LocalAuditFiveMinutesQuery,
+	): Promise<LocalAuditFiveMinutesResult> {
+		return {
+			fromMs: query.fromMs,
+			toMs: query.toMs,
+			permissions: monitoringStatus().permissions,
+			coverage: ["metadata"],
+			rawObservations: [],
+			semanticEvents: [],
+		};
+	}
+
+	async sealVaultBatch(
+		_batch: LocalVaultSealBatch,
+	): Promise<LocalVaultSealBatchResult> {
+		return { records: [] };
+	}
+
+	async openVaultBatch(
+		_batch: LocalVaultOpenBatch,
+	): Promise<LocalVaultOpenBatchResult> {
+		return { records: [] };
+	}
+
 	async stop(): Promise<void> {
 		this.pid = null;
 		this.isRunning = false;
@@ -133,6 +216,11 @@ class FakeLocalProcess implements LocalToolProcess {
 	onDesktopEvent(listener: (event: DesktopEventV1) => void): () => void {
 		this.desktopEventListeners.add(listener);
 		return () => this.desktopEventListeners.delete(listener);
+	}
+
+	onSemanticEvent(listener: (event: SemanticEventV2) => void): () => void {
+		this.semanticEventListeners.add(listener);
+		return () => this.semanticEventListeners.delete(listener);
 	}
 
 	onFailure(listener: (error: LocalClientError) => void): () => void {
@@ -153,6 +241,32 @@ class FakeLocalProcess implements LocalToolProcess {
 		this.pid = null;
 		for (const listener of this.failureListeners) listener(error);
 	}
+}
+
+function monitoringStatus(
+	overrides: Partial<LocalMonitoringStatus> = {},
+): LocalMonitoringStatus {
+	return {
+		state: "running",
+		enabled: true,
+		captureContent: true,
+		excludedBundleIds: [],
+		helperPid: 7002,
+		helperPathAvailable: true,
+		bootId: "boot-test",
+		lastSequence: 2,
+		lastAckedSequence: 2,
+		lastHeartbeatAtMs: 1_800_000_000_000,
+		permissions: {
+			accessibility: "granted",
+			screenRecording: "granted",
+			inputMonitoring: "granted",
+			automation: "granted",
+		},
+		coverage: ["content", "metadata"],
+		lastError: null,
+		...overrides,
+	};
 }
 
 describe("AgentRuntime", () => {

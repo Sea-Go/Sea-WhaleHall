@@ -4,6 +4,11 @@ import type {
 	DesktopEventV1,
 } from "./reflection/types";
 import { MAX_ACTIVE_GOAL_TEXT_LENGTH } from "../shared/goal-context";
+import { isSemanticEventV2 } from "./timeline-v2/contract";
+import type {
+	CoverageLevel,
+	SemanticEventV2,
+} from "./timeline-v2/types";
 
 export const MAX_JSONL_LINE_BYTES = 1024 * 1024;
 export const LOCAL_CONTROL_TIMEOUT_MS = 5000;
@@ -16,7 +21,17 @@ export type LocalMethod =
 	| "tool.cancel"
 	| "event.query"
 	| "event.commit"
-	| "event.goal.change";
+	| "event.goal.change"
+	| "monitoring.status"
+	| "monitoring.configure"
+	| "monitoring.pause"
+	| "monitoring.resume"
+	| "monitoring.refreshPermissions"
+	| "semantic.query"
+	| "semantic.commit"
+	| "audit.queryFiveMinutes"
+	| "vault.sealBatch"
+	| "vault.openBatch";
 
 export type LocalRequest = {
 	id: string;
@@ -112,6 +127,11 @@ export type LocalDesktopEventFrame = {
 	data: DesktopEventV1;
 };
 
+export type LocalSemanticEventFrame = {
+	event: "semantic.event";
+	data: SemanticEventV2;
+};
+
 export type LocalEventQuery = {
 	afterCursor?: string;
 	consumerId?: string;
@@ -130,6 +150,131 @@ export type LocalEventCommitResult = {
 	advanced: boolean;
 };
 
+export type LocalMonitoringState =
+	| "disabled"
+	| "starting"
+	| "running"
+	| "paused"
+	| "degraded"
+	| "stopped";
+
+export type LocalMonitoringPermissionState =
+	| "unknown"
+	| "granted"
+	| "denied"
+	| "not_determined"
+	| "unsupported";
+
+export type LocalMonitoringPermissions = {
+	accessibility: LocalMonitoringPermissionState;
+	screenRecording: LocalMonitoringPermissionState;
+	inputMonitoring: LocalMonitoringPermissionState;
+	automation: LocalMonitoringPermissionState;
+};
+
+export type LocalMonitoringStatus = {
+	state: LocalMonitoringState;
+	enabled: boolean;
+	captureContent: boolean;
+	excludedBundleIds: string[];
+	helperPid: number | null;
+	helperPathAvailable: boolean;
+	bootId: string | null;
+	lastSequence: number | null;
+	lastAckedSequence: number | null;
+	lastHeartbeatAtMs: number | null;
+	permissions: LocalMonitoringPermissions;
+	coverage: CoverageLevel[];
+	lastError: string | null;
+};
+
+export type LocalMonitoringConfigure = {
+	enabled: boolean;
+	captureContent: boolean;
+	excludedBundleIds: string[];
+};
+
+export type LocalMonitoringRefreshPermissions = {
+	prompt?: boolean;
+};
+
+export type LocalSemanticQuery = {
+	afterCursor?: string;
+	consumerId?: string;
+	limit?: number;
+	includeContent?: boolean;
+};
+
+export type LocalSemanticQueryResult = {
+	events: SemanticEventV2[];
+	nextCursor: string | null;
+	hasMore: boolean;
+};
+
+export type LocalSemanticCommitResult = {
+	consumerId: string;
+	cursor: string;
+	advanced: boolean;
+};
+
+export type LocalAuditFiveMinutesQuery = {
+	fromMs: number;
+	toMs: number;
+	includeDecryptedContent?: boolean;
+};
+
+export type LocalAuditFiveMinutesResult = {
+	fromMs: number;
+	toMs: number;
+	permissions: LocalMonitoringPermissions;
+	coverage: CoverageLevel[];
+	rawObservations: unknown[];
+	semanticEvents: SemanticEventV2[];
+};
+
+export type LocalVaultSealRecord = {
+	recordId: string;
+	schemaVersion: string;
+	content: unknown;
+	expiresAtMs?: number | null;
+};
+
+export type LocalVaultSealBatch = {
+	namespace: string;
+	records: LocalVaultSealRecord[];
+};
+
+export type LocalVaultSealResultRecord = {
+	recordId: string;
+	contentRef: string;
+	contentHash: string;
+	keyVersion: string;
+	inserted: boolean;
+};
+
+export type LocalVaultSealBatchResult = {
+	records: LocalVaultSealResultRecord[];
+};
+
+export type LocalVaultOpenBatch = {
+	namespace: string;
+	contentRefs: string[];
+};
+
+export type LocalVaultOpenResultRecord = {
+	recordId: string;
+	schemaVersion: string;
+	contentRef: string;
+	contentHash: string;
+	content: unknown;
+	createdAtMs: number;
+	expiresAtMs: number | null;
+};
+
+export type LocalVaultOpenBatchResult = {
+	records: LocalVaultOpenResultRecord[];
+};
+
 export type LocalEventGoalChange = {
 	previous: ActiveGoalContextV1 | null;
 	next: ActiveGoalContextV1 | null;
@@ -142,7 +287,11 @@ export type LocalEventGoalChangeResult = {
 	inserted: boolean;
 };
 
-export type LocalMessage = LocalResponse | LocalToolEvent | LocalDesktopEventFrame;
+export type LocalMessage =
+	| LocalResponse
+	| LocalToolEvent
+	| LocalDesktopEventFrame
+	| LocalSemanticEventFrame;
 
 export type LocalRuntimeState = "starting" | "ready" | "degraded" | "stopped";
 
@@ -190,6 +339,13 @@ export function parseLocalMessage(line: string): LocalMessage {
 		return value as LocalDesktopEventFrame;
 	}
 
+	if (value.event === "semantic.event") {
+		if (!isSemanticEventV2(value.data)) {
+			throw new Error("Semantic event frame has an invalid shape.");
+		}
+		return value as LocalSemanticEventFrame;
+	}
+
 	if (typeof value.event === "string") {
 		if (
 			!EVENT_KINDS.has(value.event as LocalToolEventKind) ||
@@ -220,6 +376,164 @@ export function parseLocalMessage(line: string): LocalMessage {
 		throw new Error("Failed local response has an invalid error payload.");
 	}
 	return value as LocalFailureResponse;
+}
+
+export function isLocalAuditFiveMinutesResult(
+	value: unknown,
+	query?: LocalAuditFiveMinutesQuery,
+): value is LocalAuditFiveMinutesResult {
+	if (!isRecord(value)) return false;
+	const fromMs = value.fromMs;
+	const toMs = value.toMs;
+	return (
+		typeof fromMs === "number" &&
+		Number.isSafeInteger(fromMs) &&
+		fromMs >= 0 &&
+		typeof toMs === "number" &&
+		Number.isSafeInteger(toMs) &&
+		toMs >= 0 &&
+		toMs - fromMs === 300_000 &&
+		(query === undefined ||
+			(fromMs === query.fromMs && toMs === query.toMs)) &&
+		isMonitoringPermissions(value.permissions) &&
+		Array.isArray(value.coverage) &&
+		value.coverage.every(isCoverageLevel) &&
+		Array.isArray(value.rawObservations) &&
+		Array.isArray(value.semanticEvents) &&
+		value.semanticEvents.every(isSemanticEventV2)
+	);
+}
+
+export function isLocalVaultSealResultRecord(
+	value: unknown,
+): value is LocalVaultSealResultRecord {
+	return (
+		isRecord(value) &&
+		hasExactKeys(value, [
+			"recordId",
+			"contentRef",
+			"contentHash",
+			"keyVersion",
+			"inserted",
+		]) &&
+		isProtocolIdentifier(value.recordId, 256) &&
+		isProtocolIdentifier(value.contentRef, 512) &&
+		isProtocolIdentifier(value.contentHash, 256) &&
+		isProtocolIdentifier(value.keyVersion, 128) &&
+		typeof value.inserted === "boolean"
+	);
+}
+
+export function isLocalVaultOpenResultRecord(
+	value: unknown,
+): value is LocalVaultOpenResultRecord {
+	return (
+		isRecord(value) &&
+		hasExactKeys(value, [
+			"recordId",
+			"schemaVersion",
+			"contentRef",
+			"contentHash",
+			"content",
+			"createdAtMs",
+			"expiresAtMs",
+		]) &&
+		isProtocolIdentifier(value.recordId, 256) &&
+		isProtocolIdentifier(value.schemaVersion, 160) &&
+		isProtocolIdentifier(value.contentRef, 512) &&
+		isProtocolIdentifier(value.contentHash, 256) &&
+		isNonNegativeSafeInteger(value.createdAtMs) &&
+		(value.expiresAtMs === null ||
+			isNonNegativeSafeInteger(value.expiresAtMs))
+	);
+}
+
+export function isLocalMonitoringStatus(
+	value: unknown,
+): value is LocalMonitoringStatus {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, [
+			"state",
+			"enabled",
+			"captureContent",
+			"excludedBundleIds",
+			"helperPid",
+			"helperPathAvailable",
+			"bootId",
+			"lastSequence",
+			"lastAckedSequence",
+			"lastHeartbeatAtMs",
+			"permissions",
+			"coverage",
+			"lastError",
+		]) ||
+		!isMonitoringState(value.state) ||
+		typeof value.enabled !== "boolean" ||
+		typeof value.captureContent !== "boolean" ||
+		!Array.isArray(value.excludedBundleIds) ||
+		value.excludedBundleIds.length > 256 ||
+		!value.excludedBundleIds.every(isMonitoringBundleId) ||
+		new Set(value.excludedBundleIds).size !==
+			value.excludedBundleIds.length ||
+		!(
+			value.helperPid === null ||
+			(isNonNegativeSafeInteger(value.helperPid) &&
+				(value.helperPid as number) >= 1 &&
+				(value.helperPid as number) <= 0xffff_ffff)
+		) ||
+		typeof value.helperPathAvailable !== "boolean" ||
+		!(
+			value.bootId === null ||
+			(typeof value.bootId === "string" &&
+				/^[A-Za-z0-9-]{1,128}$/u.test(value.bootId))
+		) ||
+		!isNullableNonNegativeSafeInteger(value.lastSequence) ||
+		!isNullableNonNegativeSafeInteger(value.lastAckedSequence) ||
+		!isNullableNonNegativeSafeInteger(value.lastHeartbeatAtMs) ||
+		!isMonitoringPermissions(value.permissions) ||
+		!Array.isArray(value.coverage) ||
+		value.coverage.length > 5 ||
+		!value.coverage.every(isCoverageLevel) ||
+		new Set(value.coverage).size !== value.coverage.length ||
+		!(
+			value.lastError === null ||
+			isBoundedString(value.lastError, 2_048)
+		)
+	) {
+		return false;
+	}
+	return true;
+}
+
+export function isLocalMonitoringConfigure(
+	value: unknown,
+): value is LocalMonitoringConfigure {
+	return (
+		isRecord(value) &&
+		hasExactKeys(value, [
+			"enabled",
+			"captureContent",
+			"excludedBundleIds",
+		]) &&
+		typeof value.enabled === "boolean" &&
+		typeof value.captureContent === "boolean" &&
+		Array.isArray(value.excludedBundleIds) &&
+		value.excludedBundleIds.length <= 256 &&
+		value.excludedBundleIds.every(isMonitoringBundleId) &&
+		new Set(value.excludedBundleIds).size ===
+			value.excludedBundleIds.length
+	);
+}
+
+export function isLocalMonitoringRefreshPermissions(
+	value: unknown,
+): value is LocalMonitoringRefreshPermissions {
+	return (
+		isRecord(value) &&
+		hasRequiredAndOptionalKeys(value, [], ["prompt"]) &&
+		(value.prompt === undefined || typeof value.prompt === "boolean")
+	);
 }
 
 export function isLocalToolDescriptor(value: unknown): value is LocalToolDescriptor {
@@ -656,6 +970,66 @@ function isPermissionList(value: unknown): boolean {
 	);
 }
 
+function isMonitoringState(value: unknown): value is LocalMonitoringState {
+	return (
+		value === "disabled" ||
+		value === "starting" ||
+		value === "running" ||
+		value === "paused" ||
+		value === "degraded" ||
+		value === "stopped"
+	);
+}
+
+function isMonitoringPermissionState(
+	value: unknown,
+): value is LocalMonitoringPermissionState {
+	return (
+		value === "unknown" ||
+		value === "granted" ||
+		value === "denied" ||
+		value === "not_determined" ||
+		value === "unsupported"
+	);
+}
+
+function isMonitoringPermissions(
+	value: unknown,
+): value is LocalMonitoringPermissions {
+	return (
+		isRecord(value) &&
+		hasExactKeys(value, [
+			"accessibility",
+			"screenRecording",
+			"inputMonitoring",
+			"automation",
+		]) &&
+		isMonitoringPermissionState(value.accessibility) &&
+		isMonitoringPermissionState(value.screenRecording) &&
+		isMonitoringPermissionState(value.inputMonitoring) &&
+		isMonitoringPermissionState(value.automation)
+	);
+}
+
+function isMonitoringBundleId(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		new TextEncoder().encode(value).byteLength <= 256 &&
+		!/\p{Cc}/u.test(value)
+	);
+}
+
+function isCoverageLevel(value: unknown): value is CoverageLevel {
+	return (
+		value === "content" ||
+		value === "metadata" ||
+		value === "redacted" ||
+		value === "denied" ||
+		value === "unavailable"
+	);
+}
+
 function isSafeRelativePath(value: unknown): boolean {
 	return (
 		isBoundedString(value, 1_024) &&
@@ -667,6 +1041,10 @@ function isSafeRelativePath(value: unknown): boolean {
 
 function isNonNegativeSafeInteger(value: unknown): boolean {
 	return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isNullableNonNegativeSafeInteger(value: unknown): boolean {
+	return value === null || isNonNegativeSafeInteger(value);
 }
 
 function isBoundedFiniteNumber(
@@ -688,6 +1066,18 @@ function isBoundedString(value: unknown, maximum: number): value is string {
 		value.length >= 1 &&
 		value.length <= maximum &&
 		!value.includes("\u0000")
+	);
+}
+
+function isProtocolIdentifier(
+	value: unknown,
+	maximum: number,
+): value is string {
+	return (
+		typeof value === "string" &&
+		value.length >= 1 &&
+		value.length <= maximum &&
+		/^[A-Za-z0-9._:@/-]+$/u.test(value)
 	);
 }
 

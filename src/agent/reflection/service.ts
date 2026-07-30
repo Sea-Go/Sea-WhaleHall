@@ -330,6 +330,14 @@ export class DesktopReflectionService {
 		};
 	}
 
+	/**
+	 * Read-only startup handoff for downstream durable consumers. Call after
+	 * start() has reconciled the native goal boundary and pulled its backlog.
+	 */
+	getActiveGoalContext(): ActiveGoalContextV1 | null {
+		return structuredClone(this.collector.getSnapshot().activeGoal);
+	}
+
 	private async pullBacklog(): Promise<void> {
 		try {
 			for (;;) {
