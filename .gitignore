@@ -5,6 +5,7 @@ artifacts/
 .native/
 whalehall-local/target/
 native/**/target/
+/training/
 
 .DS_Store
 *.log
