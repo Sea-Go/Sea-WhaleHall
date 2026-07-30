@@ -1044,7 +1044,7 @@ function isMonitoringBundleId(value: unknown): value is string {
 		typeof value === "string" &&
 		value.length > 0 &&
 		new TextEncoder().encode(value).byteLength <= 256 &&
-		!/\p{Cc}/u.test(value)
+		/^[A-Za-z0-9][A-Za-z0-9.-]*$/u.test(value)
 	);
 }
 

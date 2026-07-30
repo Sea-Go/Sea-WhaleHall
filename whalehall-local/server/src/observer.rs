@@ -1,11 +1,13 @@
 use std::collections::VecDeque;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -24,6 +26,12 @@ const RUNTIME_CHANNEL_ENV: &str = "WHALEHALL_RUNTIME_CHANNEL";
 const HELPER_ENABLED_ENV: &str = "WHALEHALL_OBSERVER_MONITORING_ENABLED";
 const HELPER_CAPTURE_CONTENT_ENV: &str = "WHALEHALL_OBSERVER_CAPTURE_CONTENT";
 const HELPER_EXCLUDED_APPS_ENV: &str = "WHALEHALL_OBSERVER_EXCLUDED_BUNDLE_IDS";
+const MONITORING_SETTINGS_DIRECTORY: &str = "monitoring";
+const MONITORING_SETTINGS_FILE: &str = "settings.v1.json";
+const MONITORING_SETTINGS_SCHEMA_VERSION: &str = "monitoring-settings.v1";
+const MAX_MONITORING_SETTINGS_BYTES: u64 = 128 * 1024;
+const MONITORING_SETTINGS_LOAD_WARNING: &str = "observer_settings_load_failed";
+const MONITORING_SETTINGS_PERSISTENCE_WARNING: &str = "observer_settings_persistence_failed";
 const OBSERVER_BUNDLE_NAME: &str = "WhaleHall Observer.app";
 const OBSERVER_EXECUTABLE_NAME: &str = "whalehall-observer";
 const OBSERVER_BUNDLE_ID: &str = "com.seago.whalehall.observer";
@@ -41,6 +49,7 @@ const RESTART_DELAYS: &[Duration] = &[
     Duration::from_secs(15),
     Duration::from_secs(60),
 ];
+static MONITORING_SETTINGS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeChannel {
@@ -59,6 +68,155 @@ impl RuntimeChannel {
                 "{RUNTIME_CHANNEL_ENV} must be one of dev, canary, or stable"
             )),
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedMonitoringSettings {
+    schema_version: String,
+    enabled: bool,
+    capture_content: bool,
+    paused: bool,
+    excluded_bundle_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct MonitoringSettingsStore {
+    directory_path: PathBuf,
+    settings_path: PathBuf,
+}
+
+impl MonitoringSettingsStore {
+    fn for_observation_journal(journal: &ObservationJournal) -> Self {
+        let data_directory = journal
+            .database_path()
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        Self::new(data_directory)
+    }
+
+    fn new(data_directory: &Path) -> Self {
+        let directory_path = data_directory.join(MONITORING_SETTINGS_DIRECTORY);
+        let settings_path = directory_path.join(MONITORING_SETTINGS_FILE);
+        Self {
+            directory_path,
+            settings_path,
+        }
+    }
+
+    fn load(&self) -> Result<Option<PersistedMonitoringSettings>, String> {
+        self.prepare_directory()?;
+        let metadata = match fs::symlink_metadata(&self.settings_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(MONITORING_SETTINGS_LOAD_WARNING.to_owned()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(MONITORING_SETTINGS_LOAD_WARNING.to_owned());
+        }
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        let mut file = options
+            .open(&self.settings_path)
+            .map_err(|_| MONITORING_SETTINGS_LOAD_WARNING.to_owned())?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| MONITORING_SETTINGS_LOAD_WARNING.to_owned())?;
+        if !metadata.is_file() || metadata.len() > MAX_MONITORING_SETTINGS_BYTES {
+            return Err(MONITORING_SETTINGS_LOAD_WARNING.to_owned());
+        }
+        harden_monitoring_settings_file(&file)
+            .map_err(|_| MONITORING_SETTINGS_LOAD_WARNING.to_owned())?;
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
+        (&mut file)
+            .take(MAX_MONITORING_SETTINGS_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| MONITORING_SETTINGS_LOAD_WARNING.to_owned())?;
+        if bytes.len() as u64 > MAX_MONITORING_SETTINGS_BYTES {
+            return Err(MONITORING_SETTINGS_LOAD_WARNING.to_owned());
+        }
+        let settings: PersistedMonitoringSettings = serde_json::from_slice(&bytes)
+            .map_err(|_| MONITORING_SETTINGS_LOAD_WARNING.to_owned())?;
+        if settings.schema_version != MONITORING_SETTINGS_SCHEMA_VERSION {
+            return Err(MONITORING_SETTINGS_LOAD_WARNING.to_owned());
+        }
+        validate_excluded_bundle_ids(&settings.excluded_bundle_ids)
+            .map_err(|_| MONITORING_SETTINGS_LOAD_WARNING.to_owned())?;
+        Ok(Some(settings))
+    }
+
+    fn save(&self, settings: &RuntimeSettings) -> Result<(), String> {
+        self.prepare_directory()
+            .map_err(|_| MONITORING_SETTINGS_PERSISTENCE_WARNING.to_owned())?;
+        validate_excluded_bundle_ids(&settings.excluded_bundle_ids)
+            .map_err(|_| MONITORING_SETTINGS_PERSISTENCE_WARNING.to_owned())?;
+        let persisted = PersistedMonitoringSettings {
+            schema_version: MONITORING_SETTINGS_SCHEMA_VERSION.to_owned(),
+            enabled: settings.enabled,
+            capture_content: settings.capture_content,
+            paused: settings.paused,
+            excluded_bundle_ids: settings.excluded_bundle_ids.clone(),
+        };
+        let mut bytes = serde_json::to_vec(&persisted)
+            .map_err(|_| MONITORING_SETTINGS_PERSISTENCE_WARNING.to_owned())?;
+        bytes.push(b'\n');
+        if bytes.len() as u64 > MAX_MONITORING_SETTINGS_BYTES {
+            return Err(MONITORING_SETTINGS_PERSISTENCE_WARNING.to_owned());
+        }
+
+        let sequence = MONITORING_SETTINGS_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = self.directory_path.join(format!(
+            ".{MONITORING_SETTINGS_FILE}.tmp-{}-{sequence}",
+            std::process::id()
+        ));
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+
+                options
+                    .mode(0o600)
+                    .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+            }
+            let mut file = options.open(&temporary_path)?;
+            harden_monitoring_settings_file(&file)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary_path, &self.settings_path)?;
+            sync_monitoring_settings_directory(&self.directory_path)?;
+            Ok::<(), io::Error>(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        result.map_err(|_| MONITORING_SETTINGS_PERSISTENCE_WARNING.to_owned())
+    }
+
+    fn prepare_directory(&self) -> Result<(), String> {
+        match fs::symlink_metadata(&self.directory_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(MONITORING_SETTINGS_LOAD_WARNING.to_owned());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(&self.directory_path)
+                    .map_err(|_| MONITORING_SETTINGS_LOAD_WARNING.to_owned())?;
+            }
+            Err(_) => return Err(MONITORING_SETTINGS_LOAD_WARNING.to_owned()),
+        }
+        harden_monitoring_settings_directory(&self.directory_path)
+            .map_err(|_| MONITORING_SETTINGS_LOAD_WARNING.to_owned())
     }
 }
 
@@ -104,19 +262,23 @@ pub struct ObserverSupervisor {
 
 impl ObserverSupervisor {
     pub fn start(config: ObserverSupervisorConfig, journal: ObservationJournal) -> Self {
-        let initial_state = if config.enabled {
-            MonitoringState::Starting
-        } else {
+        let settings_store = MonitoringSettingsStore::for_observation_journal(&journal);
+        let (settings, settings_warning) = load_runtime_settings(config, &settings_store);
+        let initial_state = if !settings.enabled {
             MonitoringState::Disabled
+        } else if settings.paused {
+            MonitoringState::Paused
+        } else {
+            MonitoringState::Starting
         };
         let key_warning = observation_key_warning(&journal).map(ToOwned::to_owned);
         let status = Arc::new(Mutex::new(MonitoringStatusResult {
             state: initial_state,
-            enabled: config.enabled,
-            capture_content: config.capture_content,
-            excluded_bundle_ids: config.excluded_bundle_ids.clone(),
+            enabled: settings.enabled,
+            capture_content: settings.capture_content,
+            excluded_bundle_ids: settings.excluded_bundle_ids.clone(),
             helper_pid: None,
-            helper_path_available: config.helper_path.is_some(),
+            helper_path_available: settings.helper_path.is_some(),
             boot_id: None,
             last_sequence: None,
             last_acked_sequence: None,
@@ -125,10 +287,16 @@ impl ObserverSupervisor {
             permission_check_state: MonitoringPermissionCheckState::Unchecked,
             permissions_checked_at_ms: None,
             coverage: vec![CoverageLevelV2::Metadata],
-            last_error: key_warning,
+            last_error: settings_warning.or(key_warning),
         }));
         let (commands, receiver) = mpsc::channel(32);
-        tokio::spawn(run_supervisor(config, journal, status.clone(), receiver));
+        tokio::spawn(run_supervisor(
+            settings,
+            settings_store,
+            journal,
+            status.clone(),
+            receiver,
+        ));
         Self { status, commands }
     }
 
@@ -216,6 +384,7 @@ enum SupervisorCommand {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeSettings {
     enabled: bool,
     paused: bool,
@@ -237,6 +406,13 @@ struct PendingPermissionRefresh {
     command_result_received: bool,
     deadline: Instant,
     response: oneshot::Sender<Result<MonitoringStatusResult, String>>,
+}
+
+struct HelperSessionContext<'a> {
+    journal: &'a ObservationJournal,
+    status: &'a Arc<Mutex<MonitoringStatusResult>>,
+    settings_store: &'a MonitoringSettingsStore,
+    permission_check_before_start: MonitoringPermissionCheckState,
 }
 
 enum HelperFrameEvent {
@@ -272,19 +448,78 @@ impl RestartFailures {
     }
 }
 
-async fn run_supervisor(
+fn load_runtime_settings(
     config: ObserverSupervisorConfig,
+    settings_store: &MonitoringSettingsStore,
+) -> (RuntimeSettings, Option<String>) {
+    let helper_path = config.helper_path;
+    match settings_store.load() {
+        Ok(Some(persisted)) => (
+            RuntimeSettings {
+                enabled: persisted.enabled,
+                paused: persisted.paused,
+                capture_content: persisted.capture_content,
+                excluded_bundle_ids: persisted.excluded_bundle_ids,
+                helper_path,
+            },
+            None,
+        ),
+        Ok(None) => (
+            RuntimeSettings {
+                enabled: config.enabled,
+                paused: false,
+                capture_content: config.capture_content,
+                excluded_bundle_ids: config.excluded_bundle_ids,
+                helper_path,
+            },
+            None,
+        ),
+        Err(_) => (
+            RuntimeSettings {
+                enabled: false,
+                paused: false,
+                capture_content: false,
+                excluded_bundle_ids: Vec::new(),
+                helper_path,
+            },
+            Some(MONITORING_SETTINGS_LOAD_WARNING.to_owned()),
+        ),
+    }
+}
+
+fn persist_runtime_settings(
+    settings_store: &MonitoringSettingsStore,
+    settings: &RuntimeSettings,
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+) -> Result<(), String> {
+    match settings_store.save(settings) {
+        Ok(()) => {
+            let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+            if matches!(
+                current.last_error.as_deref(),
+                Some(MONITORING_SETTINGS_LOAD_WARNING | MONITORING_SETTINGS_PERSISTENCE_WARNING)
+            ) {
+                current.last_error = None;
+            }
+            Ok(())
+        }
+        Err(_) => {
+            status
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .last_error = Some(MONITORING_SETTINGS_PERSISTENCE_WARNING.to_owned());
+            Err(MONITORING_SETTINGS_PERSISTENCE_WARNING.to_owned())
+        }
+    }
+}
+
+async fn run_supervisor(
+    mut settings: RuntimeSettings,
+    settings_store: MonitoringSettingsStore,
     journal: ObservationJournal,
     status: Arc<Mutex<MonitoringStatusResult>>,
     mut commands: mpsc::Receiver<SupervisorCommand>,
 ) {
-    let mut settings = RuntimeSettings {
-        enabled: config.enabled,
-        paused: false,
-        capture_content: config.capture_content,
-        excluded_bundle_ids: config.excluded_bundle_ids,
-        helper_path: config.helper_path,
-    };
     let mut restart_attempt = 0_usize;
     let mut restart_failures = RestartFailures::default();
     let mut restart_latched = false;
@@ -300,7 +535,7 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status).await {
+            if handle_idle_command(command, &mut settings, &status, &settings_store).await {
                 break;
             }
             if manual_retry && settings.enabled && !settings.paused {
@@ -325,7 +560,7 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status).await {
+            if handle_idle_command(command, &mut settings, &status, &settings_store).await {
                 break;
             }
             if manual_retry && settings.enabled && !settings.paused {
@@ -344,7 +579,7 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status).await {
+            if handle_idle_command(command, &mut settings, &status, &settings_store).await {
                 break;
             }
             if manual_retry && settings.enabled && !settings.paused {
@@ -362,11 +597,14 @@ async fn run_supervisor(
                 match run_helper_session(
                     child,
                     stderr_task,
-                    &journal,
-                    &status,
+                    HelperSessionContext {
+                        journal: &journal,
+                        status: &status,
+                        settings_store: &settings_store,
+                        permission_check_before_start,
+                    },
                     &mut settings,
                     &mut commands,
-                    permission_check_before_start,
                 )
                 .await
                 {
@@ -405,7 +643,7 @@ async fn run_supervisor(
             _ = tokio::time::sleep(delay) => {}
             command = commands.recv() => {
                 let Some(command) = command else { break; };
-                if handle_idle_command(command, &mut settings, &status).await {
+                if handle_idle_command(command, &mut settings, &status, &settings_store).await {
                     break;
                 }
             }
@@ -417,12 +655,16 @@ async fn run_supervisor(
 async fn run_helper_session(
     mut child: Child,
     stderr_task: JoinHandle<()>,
-    journal: &ObservationJournal,
-    status: &Arc<Mutex<MonitoringStatusResult>>,
+    context: HelperSessionContext<'_>,
     settings: &mut RuntimeSettings,
     commands: &mut mpsc::Receiver<SupervisorCommand>,
-    permission_check_before_start: MonitoringPermissionCheckState,
 ) -> SessionOutcome {
+    let HelperSessionContext {
+        journal,
+        status,
+        settings_store,
+        permission_check_before_start,
+    } = context;
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill().await;
         stderr_task.abort();
@@ -531,6 +773,7 @@ async fn run_helper_session(
                     command,
                     settings,
                     status,
+                    settings_store,
                     &mut stdin,
                     &mut pending_permission_refresh,
                 ).await {
@@ -583,14 +826,21 @@ async fn handle_running_command(
     command: SupervisorCommand,
     settings: &mut RuntimeSettings,
     status: &Arc<Mutex<MonitoringStatusResult>>,
+    settings_store: &MonitoringSettingsStore,
     stdin: &mut ChildStdin,
     pending_permission_refresh: &mut Option<PendingPermissionRefresh>,
 ) -> RunningCommandOutcome {
     match command {
         SupervisorCommand::Configure { params, response } => {
-            settings.enabled = params.enabled;
-            settings.capture_content = params.capture_content;
-            settings.excluded_bundle_ids = params.excluded_bundle_ids;
+            let mut proposed = settings.clone();
+            proposed.enabled = params.enabled;
+            proposed.capture_content = params.capture_content;
+            proposed.excluded_bundle_ids = params.excluded_bundle_ids;
+            if let Err(error) = persist_runtime_settings(settings_store, &proposed, status) {
+                let _ = response.send(Err(error));
+                return RunningCommandOutcome::Continue;
+            }
+            *settings = proposed;
             update_configuration_status(status, settings);
             set_state(
                 status,
@@ -609,7 +859,13 @@ async fn handle_running_command(
             }
         }
         SupervisorCommand::Pause { response } => {
-            settings.paused = true;
+            let mut proposed = settings.clone();
+            proposed.paused = true;
+            if let Err(error) = persist_runtime_settings(settings_store, &proposed, status) {
+                let _ = response.send(Err(error));
+                return RunningCommandOutcome::Continue;
+            }
+            *settings = proposed;
             let result = send_simple_command(stdin, "pause-runtime", "pause", false)
                 .await
                 .map(|()| {
@@ -621,7 +877,13 @@ async fn handle_running_command(
             RunningCommandOutcome::Disabled
         }
         SupervisorCommand::Resume { response } => {
-            settings.paused = false;
+            let mut proposed = settings.clone();
+            proposed.paused = false;
+            if let Err(error) = persist_runtime_settings(settings_store, &proposed, status) {
+                let _ = response.send(Err(error));
+                return RunningCommandOutcome::Continue;
+            }
+            *settings = proposed;
             let result = send_simple_command(stdin, "resume-runtime", "resume", false)
                 .await
                 .map(|()| {
@@ -752,13 +1014,20 @@ async fn handle_idle_command(
     command: SupervisorCommand,
     settings: &mut RuntimeSettings,
     status: &Arc<Mutex<MonitoringStatusResult>>,
+    settings_store: &MonitoringSettingsStore,
 ) -> bool {
     match command {
         SupervisorCommand::Configure { params, response } => {
-            settings.enabled = params.enabled;
-            settings.capture_content = params.capture_content;
-            settings.excluded_bundle_ids = params.excluded_bundle_ids;
-            settings.paused = false;
+            let mut proposed = settings.clone();
+            proposed.enabled = params.enabled;
+            proposed.capture_content = params.capture_content;
+            proposed.excluded_bundle_ids = params.excluded_bundle_ids;
+            proposed.paused = false;
+            if let Err(error) = persist_runtime_settings(settings_store, &proposed, status) {
+                let _ = response.send(Err(error));
+                return false;
+            }
+            *settings = proposed;
             update_configuration_status(status, settings);
             set_state(
                 status,
@@ -773,13 +1042,25 @@ async fn handle_idle_command(
             false
         }
         SupervisorCommand::Pause { response } => {
-            settings.paused = true;
+            let mut proposed = settings.clone();
+            proposed.paused = true;
+            if let Err(error) = persist_runtime_settings(settings_store, &proposed, status) {
+                let _ = response.send(Err(error));
+                return false;
+            }
+            *settings = proposed;
             set_state(status, MonitoringState::Paused, None);
             let _ = response.send(Ok(status_snapshot(status)));
             false
         }
         SupervisorCommand::Resume { response } => {
-            settings.paused = false;
+            let mut proposed = settings.clone();
+            proposed.paused = false;
+            if let Err(error) = persist_runtime_settings(settings_store, &proposed, status) {
+                let _ = response.send(Err(error));
+                return false;
+            }
+            *settings = proposed;
             if !settings.enabled {
                 let _ = response.send(Err("observer_monitoring_disabled".to_owned()));
             } else {
@@ -1354,9 +1635,16 @@ fn set_state(
 ) {
     let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
     current.state = state;
-    let preserve_key_warning =
-        error_code.is_none() && current.last_error.as_deref() == Some(DEV_LEGACY_KEYCHAIN_WARNING);
-    if !preserve_key_warning {
+    let preserve_warning = error_code.is_none()
+        && matches!(
+            current.last_error.as_deref(),
+            Some(
+                DEV_LEGACY_KEYCHAIN_WARNING
+                    | MONITORING_SETTINGS_LOAD_WARNING
+                    | MONITORING_SETTINGS_PERSISTENCE_WARNING
+            )
+        );
+    if !preserve_warning {
         current.last_error = error_code.map(ToOwned::to_owned);
     }
 }
@@ -1382,6 +1670,34 @@ fn push_coverage(values: &mut Vec<CoverageLevelV2>, value: CoverageLevelV2) {
     }
 }
 
+#[cfg(unix)]
+fn harden_monitoring_settings_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn harden_monitoring_settings_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_monitoring_settings_file(file: &File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn harden_monitoring_settings_file(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
+fn sync_monitoring_settings_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
 fn validate_boot_id(value: &str) -> Result<(), ()> {
     if value.is_empty()
         || value.len() > 128
@@ -1402,10 +1718,18 @@ fn validate_excluded_bundle_ids(values: &[String]) -> Result<(), String> {
     for value in values {
         if value.is_empty()
             || value.len() > 256
-            || value.chars().any(char::is_control)
+            || !value
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
             || !unique.insert(value)
         {
-            return Err("excludedBundleIds must be unique, bounded non-control strings".to_owned());
+            return Err(
+                "excludedBundleIds must be unique, bounded macOS bundle identifiers".to_owned(),
+            );
         }
     }
     Ok(())
@@ -1633,6 +1957,16 @@ fn trim_line_end(bytes: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
+    fn test_runtime_settings() -> RuntimeSettings {
+        RuntimeSettings {
+            enabled: false,
+            paused: false,
+            capture_content: true,
+            excluded_bundle_ids: Vec::new(),
+            helper_path: None,
+        }
+    }
+
     fn test_status() -> Arc<Mutex<MonitoringStatusResult>> {
         Arc::new(Mutex::new(MonitoringStatusResult {
             state: MonitoringState::Starting,
@@ -1651,6 +1985,293 @@ mod tests {
             coverage: vec![CoverageLevelV2::Metadata],
             last_error: None,
         }))
+    }
+
+    #[test]
+    fn monitoring_settings_are_private_atomic_and_allowlisted() {
+        let directory = tempfile::tempdir().expect("create monitoring settings directory");
+        let store = MonitoringSettingsStore::new(directory.path());
+        let settings = RuntimeSettings {
+            enabled: true,
+            paused: true,
+            capture_content: false,
+            excluded_bundle_ids: vec!["com.example.private".to_owned()],
+            helper_path: Some(PathBuf::from(
+                "/tmp/https://private.example/observed-window-title.txt",
+            )),
+        };
+
+        store.save(&settings).expect("persist monitoring settings");
+        let loaded = store
+            .load()
+            .expect("load monitoring settings")
+            .expect("settings exist");
+        assert!(loaded.enabled);
+        assert!(loaded.paused);
+        assert!(!loaded.capture_content);
+        assert_eq!(
+            loaded.excluded_bundle_ids,
+            vec!["com.example.private".to_owned()]
+        );
+
+        let bytes = fs::read(&store.settings_path).expect("read settings file");
+        let value: Value = serde_json::from_slice(&bytes).expect("parse settings JSON");
+        let keys = value
+            .as_object()
+            .expect("settings object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "captureContent",
+                "enabled",
+                "excludedBundleIds",
+                "paused",
+                "schemaVersion",
+            ])
+        );
+        let serialized = String::from_utf8(bytes).expect("settings JSON is UTF-8");
+        assert!(!serialized.contains("helperPath"));
+        assert!(!serialized.contains("https://private.example"));
+        assert!(!serialized.contains("observed-window-title"));
+        assert!(
+            fs::read_dir(&store.directory_path)
+                .expect("list monitoring settings directory")
+                .all(|entry| {
+                    entry
+                        .expect("read monitoring settings entry")
+                        .path()
+                        .file_name()
+                        .is_some_and(|name| name == MONITORING_SETTINGS_FILE)
+                })
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let directory_mode = fs::metadata(&store.directory_path)
+                .expect("monitoring settings directory metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = fs::metadata(&store.settings_path)
+                .expect("monitoring settings file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(directory_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_changes_persist_before_response_and_restore_after_restart() {
+        let directory = tempfile::tempdir().expect("create monitoring settings directory");
+        let store = MonitoringSettingsStore::new(directory.path());
+        let status = test_status();
+        let mut settings = test_runtime_settings();
+        let (configure_response, configured) = oneshot::channel();
+
+        assert!(
+            !handle_idle_command(
+                SupervisorCommand::Configure {
+                    params: MonitoringConfigureParams {
+                        enabled: true,
+                        capture_content: false,
+                        excluded_bundle_ids: vec!["com.example.excluded".to_owned()],
+                    },
+                    response: configure_response,
+                },
+                &mut settings,
+                &status,
+                &store,
+            )
+            .await
+        );
+        configured
+            .await
+            .expect("configure response")
+            .expect("configure succeeds");
+        let persisted_after_configure = store
+            .load()
+            .expect("load configured settings")
+            .expect("configured settings exist");
+        assert!(persisted_after_configure.enabled);
+        assert!(!persisted_after_configure.capture_content);
+        assert!(!persisted_after_configure.paused);
+
+        let (pause_response, paused) = oneshot::channel();
+        assert!(
+            !handle_idle_command(
+                SupervisorCommand::Pause {
+                    response: pause_response,
+                },
+                &mut settings,
+                &status,
+                &store,
+            )
+            .await
+        );
+        paused
+            .await
+            .expect("pause response")
+            .expect("pause succeeds");
+
+        let (restored, warning) = load_runtime_settings(
+            ObserverSupervisorConfig {
+                enabled: false,
+                capture_content: true,
+                excluded_bundle_ids: Vec::new(),
+                helper_path: Some(PathBuf::from("/tmp/helper")),
+            },
+            &store,
+        );
+        assert_eq!(warning, None);
+        assert!(restored.enabled);
+        assert!(restored.paused);
+        assert!(!restored.capture_content);
+        assert_eq!(
+            restored.excluded_bundle_ids,
+            vec!["com.example.excluded".to_owned()]
+        );
+        assert_eq!(restored.helper_path, Some(PathBuf::from("/tmp/helper")));
+    }
+
+    #[test]
+    fn corrupt_monitoring_settings_fail_closed() {
+        let directory = tempfile::tempdir().expect("create monitoring settings directory");
+        let store = MonitoringSettingsStore::new(directory.path());
+        store
+            .prepare_directory()
+            .expect("prepare monitoring settings directory");
+        fs::write(
+            &store.settings_path,
+            br#"{
+                "schemaVersion":"monitoring-settings.v1",
+                "enabled":true,
+                "captureContent":true,
+                "paused":false,
+                "excludedBundleIds":[],
+                "url":"https://private.example/secret"
+            }"#,
+        )
+        .expect("write corrupt settings");
+
+        let (restored, warning) = load_runtime_settings(
+            ObserverSupervisorConfig {
+                enabled: true,
+                capture_content: true,
+                excluded_bundle_ids: vec!["com.example.environment".to_owned()],
+                helper_path: None,
+            },
+            &store,
+        );
+        assert_eq!(warning.as_deref(), Some(MONITORING_SETTINGS_LOAD_WARNING));
+        assert!(!restored.enabled);
+        assert!(!restored.paused);
+        assert!(!restored.capture_content);
+        assert!(restored.excluded_bundle_ids.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn monitoring_settings_loader_rejects_symlinks_without_touching_the_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().expect("create monitoring settings directory");
+        let store = MonitoringSettingsStore::new(directory.path());
+        store
+            .prepare_directory()
+            .expect("prepare monitoring settings directory");
+        let target = directory.path().join("outside-settings.json");
+        fs::write(
+            &target,
+            br#"{
+                "schemaVersion":"monitoring-settings.v1",
+                "enabled":true,
+                "captureContent":true,
+                "paused":false,
+                "excludedBundleIds":[]
+            }"#,
+        )
+        .expect("write symlink target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))
+            .expect("set target permissions");
+        symlink(&target, &store.settings_path).expect("create settings symlink");
+
+        assert_eq!(store.load().unwrap_err(), MONITORING_SETTINGS_LOAD_WARNING);
+        let target_mode = fs::metadata(&target)
+            .expect("target metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(target_mode, 0o644);
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_rejects_change_without_mutating_runtime_settings() {
+        let directory = tempfile::tempdir().expect("create monitoring settings directory");
+        fs::write(
+            directory.path().join(MONITORING_SETTINGS_DIRECTORY),
+            b"not a directory",
+        )
+        .expect("block monitoring settings directory");
+        let store = MonitoringSettingsStore::new(directory.path());
+        let status = test_status();
+        let mut settings = test_runtime_settings();
+        let original = settings.clone();
+        let (response, completed) = oneshot::channel();
+
+        assert!(
+            !handle_idle_command(
+                SupervisorCommand::Configure {
+                    params: MonitoringConfigureParams {
+                        enabled: true,
+                        capture_content: false,
+                        excluded_bundle_ids: vec!["com.example.excluded".to_owned()],
+                    },
+                    response,
+                },
+                &mut settings,
+                &status,
+                &store,
+            )
+            .await
+        );
+        assert_eq!(
+            completed.await.expect("configure response").unwrap_err(),
+            MONITORING_SETTINGS_PERSISTENCE_WARNING
+        );
+        assert_eq!(settings, original);
+        assert_eq!(
+            status_snapshot(&status).last_error.as_deref(),
+            Some(MONITORING_SETTINGS_PERSISTENCE_WARNING)
+        );
+    }
+
+    #[test]
+    fn monitoring_exclusions_accept_only_bundle_identifiers() {
+        assert!(
+            validate_excluded_bundle_ids(&[
+                "com.apple.Passwords".to_owned(),
+                "com.example.private-app".to_owned(),
+            ])
+            .is_ok()
+        );
+        for value in [
+            "https://private.example/window-title",
+            "敏感窗口标题",
+            "com.example/private",
+            ".com.example",
+        ] {
+            assert!(
+                validate_excluded_bundle_ids(&[value.to_owned()]).is_err(),
+                "{value} must not be persisted as a bundle identifier"
+            );
+        }
     }
 
     #[test]

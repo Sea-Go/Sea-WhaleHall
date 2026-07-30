@@ -102,6 +102,20 @@ describe("monitoring local protocol", () => {
 				excludedBundleIds: ["é".repeat(129)],
 			}),
 		).toBeFalse();
+		expect(
+			isLocalMonitoringConfigure({
+				enabled: true,
+				captureContent: false,
+				excludedBundleIds: ["https://private.example/window-title"],
+			}),
+		).toBeFalse();
+		expect(
+			isLocalMonitoringConfigure({
+				enabled: true,
+				captureContent: false,
+				excludedBundleIds: ["敏感窗口标题"],
+			}),
+		).toBeFalse();
 		expect(isLocalMonitoringRefreshPermissions({})).toBeTrue();
 		expect(
 			isLocalMonitoringRefreshPermissions({ prompt: true }),
