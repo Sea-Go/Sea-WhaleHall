@@ -303,6 +303,29 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 			sourceObservationIds: ["observation-3"],
 			payload: { processCount: 10 },
 		};
+		const authorizationEvent: SemanticEventV2 = {
+			...populated.events[0]!,
+			eventId: "event-9",
+			cursor: "sec2_0000000000000009",
+			source: "workspace.observer-authorization.v2",
+			occurredAtMs: 100_070,
+			observedAtMs: 100_070,
+			kind: "authorization.changed",
+			countClass: "boundary",
+			coverage: ["metadata"],
+			sourceObservationIds: ["observation-9"],
+			payload: {
+				permissions: {
+					accessibility: "granted",
+					screenRecording: "granted",
+					inputMonitoring: "denied",
+					automation: "not_determined",
+				},
+				changedPermissions: ["inputMonitoring"],
+				transition: "revoked",
+				reason: "runtime_change",
+			},
+		};
 		const raw: RawFiveMinuteAuditSource = {
 			queryAuditRange: async ({ includeDecryptedContent }) => ({
 				permissions: { accessibility: true },
@@ -416,8 +439,41 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 							coalescedBucketCount: 2,
 						},
 					}),
+					rawObservation(9, 100_070, {
+						kind: "authorization.changed",
+						source: {
+							sensor: "workspace",
+							adapterVersion: "observer-authorization.v2",
+						},
+						subject: {
+							appId: "system.authorization",
+							appName: "macOS",
+							opaqueWindowId: null,
+						},
+						metadata: structuredClone(authorizationEvent.payload),
+					}),
+					rawObservation(10, 100_080, {
+						kind: "authorization.changed",
+						source: {
+							sensor: "workspace",
+							adapterVersion: "observer-authorization.v2",
+						},
+						subject: {
+							appId: "system.authorization",
+							appName: "macOS",
+							opaqueWindowId: null,
+						},
+						metadata: structuredClone(authorizationEvent.payload),
+						content: {
+							windowTitle: "授权边界绝不能携带窗口标题",
+						},
+					}),
 				],
-				semanticEvents: [...populated.events, ignoredEvent],
+				semanticEvents: [
+					...populated.events,
+					ignoredEvent,
+					authorizationEvent,
+				],
 			}),
 		};
 		const sourceRange = await repository.readAuditRange(0, 300_000);
@@ -509,6 +565,9 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 		expect(JSON.stringify(decrypted)).not.toContain("绝不能导出的顶层像素");
 		expect(JSON.stringify(decrypted)).not.toContain("绝不能导出的临时路径");
 		expect(JSON.stringify(decrypted)).not.toContain("绝不能导出的屏幕路径");
+		expect(JSON.stringify(decrypted)).not.toContain(
+			"授权边界绝不能携带窗口标题",
+		);
 		expect(
 			decrypted.rawObservations.map(
 				(observation) =>
@@ -527,6 +586,30 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 					(observation as { observationId: string }).observationId,
 			),
 		).toContain("observation-8");
+		expect(
+			decrypted.rawObservations.map(
+				(observation) =>
+					(observation as { observationId: string }).observationId,
+			),
+		).toContain("observation-9");
+		expect(
+			decrypted.rawObservations.map(
+				(observation) =>
+					(observation as { observationId: string }).observationId,
+			),
+		).not.toContain("observation-10");
+		expect(decrypted.lineage).toContainEqual({
+			observationId: "observation-9",
+			eventId: "event-9",
+			factId: null,
+			sourceEpisodeId: null,
+			sourceEpisodeRevisionId: null,
+			episodeSliceId: null,
+			sourceTimelineId: null,
+			timelineSliceId: null,
+			timelineSegmentSliceId: null,
+			status: "semantic_only",
+		});
 		expect(decrypted.manifest.timelineSliceCount).toBe(1);
 		expect(decrypted.manifest.sourceTimelineSummaryCount).toBe(1);
 		expect(decrypted.episodeSlices).toHaveLength(1);
@@ -573,7 +656,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 			timelineSlices: decrypted.timelineSlices.length,
 		});
 		expect(decrypted.manifest.rangeBoundaryOmissions).toEqual({
-			rawObservations: 3,
+			rawObservations: 4,
 			semanticEvents: 0,
 			evidenceFacts: 0,
 			sourceEpisodes: 0,
@@ -650,7 +733,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 				clipped.evidenceFacts.some((fact) => fact.factId === factId),
 			),
 		).toBeTrue();
-		expect(clipped.manifest.rangeBoundaryOmissions.rawObservations).toBe(5);
+		expect(clipped.manifest.rangeBoundaryOmissions.rawObservations).toBe(6);
 		expect(clipped.manifest.rangeBoundaryOmissions.timelineSlices).toBe(0);
 		expect(clipped.manifest.exportWarnings).toContain(
 			"derived_timeline_clipped_to_exact_range",

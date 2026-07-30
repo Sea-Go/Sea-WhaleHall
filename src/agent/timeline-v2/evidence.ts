@@ -17,14 +17,23 @@ export class DeterministicEvidenceRenderer {
 	async render(events: readonly SemanticEventV2[]): Promise<EvidenceFactV2[]> {
 		const facts: EvidenceFactV2[] = [];
 		for (const event of events) {
-			if (event.countClass === "ignored") continue;
-			facts.push(await this.renderEvent(event));
+			if (
+				event.countClass === "ignored" ||
+				event.kind === "authorization.changed"
+			) {
+				continue;
+			}
+			const fact = await this.renderEvent(event);
+			if (fact) facts.push(fact);
 		}
 		return facts;
 	}
 
-	private async renderEvent(event: SemanticEventV2): Promise<EvidenceFactV2> {
+	private async renderEvent(
+		event: SemanticEventV2,
+	): Promise<EvidenceFactV2 | null> {
 		const rendered = renderTemplate(event);
+		if (!rendered) return null;
 		const anchor = await evidenceAnchor(event, this.hasher);
 		const factId = `fact_${await this.hasher.sha256(
 			canonicalJson({
@@ -58,7 +67,7 @@ type RenderedTemplate = {
 	text: string;
 };
 
-function renderTemplate(event: SemanticEventV2): RenderedTemplate {
+function renderTemplate(event: SemanticEventV2): RenderedTemplate | null {
 	const appName = stringValue(event, "appName") ?? stringValue(event, "appId");
 	switch (event.kind) {
 		case "application.foregroundChanged": {
@@ -215,6 +224,8 @@ function renderTemplate(event: SemanticEventV2): RenderedTemplate {
 					: "当前目标已清除",
 			};
 		}
+		case "authorization.changed":
+			return null;
 		case "application.processObservedBatch":
 			throw new Error("Ignored process inventory cannot become EvidenceFact.");
 		case "coverage.gap":

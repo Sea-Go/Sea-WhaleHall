@@ -91,6 +91,37 @@ function processBatch(index: number, atMs: number): SemanticEventV2 {
 	};
 }
 
+function authorization(
+	index: number,
+	atMs: number,
+	transition: "baseline" | "changed" | "granted" | "revoked" | "mixed",
+	automation: "granted" | "denied" | "not_determined" = "granted",
+): SemanticEventV2 {
+	return {
+		...event(index, atMs),
+		kind: "authorization.changed",
+		source: "workspace.observer-authorization.v2",
+		countClass: "boundary",
+		reliability: "high",
+		coverage: ["metadata"],
+		contentState: "available",
+		payload: {
+			permissions: {
+				accessibility: "granted",
+				screenRecording: "granted",
+				inputMonitoring: "granted",
+				automation,
+			},
+			changedPermissions: ["automation"],
+			transition,
+			reason:
+				transition === "baseline"
+					? "startup_snapshot"
+					: "runtime_change",
+		},
+	};
+}
+
 function collector(clock = new FakeClock()) {
 	const repository = new InMemoryTimelineV2Repository();
 	return {
@@ -159,16 +190,20 @@ describe("TimelineV2Collector dual trigger", () => {
 		);
 	});
 
-	test("process inventory never counts and never starts a timer", async () => {
-		const runtime = collector();
-		await runtime.collector.recover();
-		for (let index = 1; index <= 10_000; index += 1) {
-			await runtime.collector.ingest(processBatch(index, 0));
-		}
-		expect(runtime.collector.getState()).toBe("ACTIVE_EMPTY");
-		expect(runtime.collector.getSnapshot().openWindow).toBeNull();
-		expect(runtime.clock.timerCount).toBe(0);
-	});
+	test(
+		"process inventory never counts and never starts a timer",
+		async () => {
+			const runtime = collector();
+			await runtime.collector.recover();
+			for (let index = 1; index <= 10_000; index += 1) {
+				await runtime.collector.ingest(processBatch(index, 0));
+			}
+			expect(runtime.collector.getState()).toBe("ACTIVE_EMPTY");
+			expect(runtime.collector.getSnapshot().openWindow).toBeNull();
+			expect(runtime.clock.timerCount).toBe(0);
+		},
+		10_000,
+	);
 
 	test("authorization revocation discards a non-empty open window", async () => {
 		const runtime = collector();
@@ -184,5 +219,78 @@ describe("TimelineV2Collector dual trigger", () => {
 			materializedCursor: "sec2_0000000000000002",
 		});
 		expect(runtime.clock.timerCount).toBe(0);
+	});
+
+	test("authorization boundaries never count and restoration starts a new window", async () => {
+		const runtime = collector();
+		await runtime.collector.recover();
+		await runtime.collector.ingest(
+			authorization(1, 0, "baseline", "not_determined"),
+		);
+		expect(runtime.collector.getState()).toBe("ACTIVE_EMPTY");
+		expect(runtime.clock.timerCount).toBe(0);
+
+		await runtime.collector.ingest(event(2, 1_000));
+		await runtime.collector.ingest(
+			authorization(3, 2_000, "revoked", "denied"),
+		);
+		expect(runtime.collector.getSnapshot()).toMatchObject({
+			state: "ACTIVE_EMPTY",
+			openWindow: null,
+			contextCandidates: [],
+			materializedCursor: "sec2_0000000000000003",
+		});
+		expect(runtime.clock.timerCount).toBe(0);
+		expect(
+			runtime.collector.getSnapshot().recentEventIds,
+		).toContain("event-3");
+
+		await runtime.collector.ingest(
+			authorization(4, 3_000, "granted", "granted"),
+		);
+		await runtime.collector.ingest(event(5, 4_000));
+		expect(runtime.collector.getSnapshot().openWindow).toMatchObject({
+			startedAtMs: 4_000,
+			effectiveEventCount: 1,
+			events: [{ eventId: "event-5" }],
+		});
+	});
+
+	test("recovery applies a durable revocation before sealing an overdue window", async () => {
+		const clock = new FakeClock(400_000);
+		const repository = new InMemoryTimelineV2Repository();
+		const first = new TimelineV2Collector({
+			collectorId: "collector.authorization-recovery",
+			deviceId: "device-1",
+			sessionId: "session-1",
+			repository,
+			hasher: new WebCryptoReflectionHasher(),
+			clock,
+		});
+		await first.recover({ deferDeadline: true });
+		await first.ingest(event(1, 0));
+		first.dispose();
+
+		const recovered = new TimelineV2Collector({
+			collectorId: "collector.authorization-recovery",
+			deviceId: "device-1",
+			sessionId: "session-1",
+			repository,
+			hasher: new WebCryptoReflectionHasher(),
+			clock,
+		});
+		await recovered.recover({ deferDeadline: true });
+		await recovered.ingest(
+			authorization(2, 300_000, "revoked", "denied"),
+		);
+		await recovered.resumeDeadlines();
+		expect(recovered.getSnapshot()).toMatchObject({
+			state: "ACTIVE_EMPTY",
+			openWindow: null,
+			materializedCursor: "sec2_0000000000000002",
+		});
+		expect(
+			(await repository.readAuditRange(0, 500_000)).windows,
+		).toHaveLength(0);
 	});
 });

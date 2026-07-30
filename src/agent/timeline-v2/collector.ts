@@ -194,17 +194,10 @@ export class TimelineV2Collector {
 		materializedCursor: string | null = null,
 	): Promise<void> {
 		return this.enqueue(async () => {
-			this.cancelTimer();
-			const snapshot = this.requireSnapshot();
-			await this.save({
-				...snapshot,
-				state: "ACTIVE_EMPTY",
-				openWindow: null,
-				contextCandidates: [],
-				materializedCursor:
-					materializedCursor ?? snapshot.materializedCursor,
-			});
-			this.state = "ACTIVE_EMPTY";
+			await this.discardForAuthorizationRevocationSerialized(
+				materializedCursor,
+				null,
+			);
 		});
 	}
 
@@ -230,6 +223,11 @@ export class TimelineV2Collector {
 	): Promise<TimelineWindowV2 | null> {
 		let snapshot = this.requireSnapshot();
 		if (snapshot.recentEventIds.includes(event.eventId)) return null;
+
+		if (event.kind === "authorization.changed") {
+			await this.handleAuthorizationBoundary(event);
+			return null;
+		}
 
 		const openAtEntry = snapshot.openWindow;
 		if (
@@ -402,6 +400,54 @@ export class TimelineV2Collector {
 			"presence_boundary",
 			Math.max(event.observedAtMs, latestEventAt(snapshot.openWindow)),
 		);
+	}
+
+	private async handleAuthorizationBoundary(
+		event: SemanticEventV2,
+	): Promise<void> {
+		const transition = event.payload.transition;
+		if (transition === "revoked" || transition === "mixed") {
+			await this.discardForAuthorizationRevocationSerialized(
+				event.cursor,
+				event.eventId,
+			);
+			return;
+		}
+		await this.resetForAuthorizationBoundarySerialized(
+			event.cursor,
+			event.eventId,
+		);
+	}
+
+	private async discardForAuthorizationRevocationSerialized(
+		materializedCursor: string | null,
+		eventId: string | null,
+	): Promise<void> {
+		await this.resetForAuthorizationBoundarySerialized(
+			materializedCursor,
+			eventId,
+		);
+	}
+
+	private async resetForAuthorizationBoundarySerialized(
+		materializedCursor: string | null,
+		eventId: string | null,
+	): Promise<void> {
+		this.cancelTimer();
+		const snapshot = this.requireSnapshot();
+		await this.save({
+			...snapshot,
+			state: "ACTIVE_EMPTY",
+			openWindow: null,
+			contextCandidates: [],
+			recentEventIds:
+				eventId === null
+					? snapshot.recentEventIds
+					: addRecent(snapshot, eventId),
+			materializedCursor:
+				materializedCursor ?? snapshot.materializedCursor,
+		});
+		this.state = "ACTIVE_EMPTY";
 	}
 
 	private async seal(

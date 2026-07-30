@@ -92,6 +92,7 @@ ui.controlActivated
 input.activityBucket
 presence.changed
 goal.changed
+authorization.changed
 application.processObservedBatch
 coverage.gap
 ```
@@ -101,8 +102,14 @@ coverage、content state、taxonomy/projector version 和由 Rust allow-list
 决定的 `countClass`。调用方不能把进程扫描伪装成 effective：
 
 - 前七种用户语义变化为 `effective`；
-- presence/goal 为 `boundary`；
+- presence/goal/authorization 为 `boundary`；
 - process batch 与匿名 coverage gap 永远为 `ignored`。
+
+Observer 的 `ready`、权限刷新和运行期权限变化先投影成严格的
+metadata-only `authorization.changed`：只允许四项权限状态、实际变化的权限名、
+变化类型和固定原因码，不允许标题、URL、正文或窗口 ID。Rust 在同一 ingest
+事务中更新独立的 durable 权限基线；相同 heartbeat/status 不重复写边界，基线
+也不受三十天审计清理影响。
 
 消费使用命名 consumer `whalehall.timeline.v2`。push 只用于唤醒；所有数据
 均从 durable journal 按 `sec2_` semantic cursor 拉取（`sc2_` 只属于 raw
@@ -125,7 +132,8 @@ now >= firstEffectiveEventAt + 300000ms
 - 第 63 条不触发，第 64 条只封窗一次；
 - process、heartbeat、tool、reflection 不计数；
 - goal/AFK/锁屏/睡眠在非空窗口上优先封窗；
-- 授权撤销优先于全部触发并丢弃尚未处理的 open window；
+- 任一授权变化都结束当前采集上下文；撤权或 mixed 变化优先于全部触发并
+  丢弃尚未处理的 open window，恢复后从新窗口开始；
 - 每个 semantic event 只属于一个主窗口，最多五条、30 秒的前窗内容仅作
   `contextOnly`。
 
@@ -216,7 +224,10 @@ timeline slice 数量，所有 included count 与实际数组逐项一致。
 
 Raw observation 在 TypeScript 导出边界按 `raw-observation.v2` schema 和已知 kind
 执行严格字段 allow-list；未知 schema/kind、额外字段或错误 payload 直接省略，
-不依赖截图/路径关键词黑名单。文件先流式写入所选目录内隐藏的 `0600` 临时文件，
+不依赖截图/路径关键词黑名单。`authorization.changed` 还必须是 point interval、
+固定 system subject、`workspace/observer-authorization.v2` 来源、high reliability、
+仅 metadata coverage、无 content，才可进入审计包。文件先流式写入所选目录内
+隐藏的 `0600` 临时文件，
 每次写入都检查 `bytesWritten`，完成后 `fsync` 并关闭，再用不覆盖目标的原子
 hard-link 发布最终 `.json`，清理临时文件并 `fsync` 目录。失败时不会留下可见的
 部分 JSON，也不会覆盖已有文件。

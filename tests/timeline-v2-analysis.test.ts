@@ -172,6 +172,38 @@ function windowFor(
 }
 
 describe("Timeline v2 real-capture regressions", () => {
+	test("deterministically skips authorization boundaries during evidence rendering", async () => {
+		const renderer = new DeterministicEvidenceRenderer(
+			new WebCryptoReflectionHasher(),
+		);
+		const authorization: SemanticEventV2 = {
+			...browserEvent(1, 1_000),
+			kind: "authorization.changed",
+			source: "workspace.observer-authorization.v2",
+			countClass: "boundary",
+			reliability: "high",
+			coverage: ["metadata"],
+			contentState: "available",
+			payload: {
+				permissions: {
+					accessibility: "granted",
+					screenRecording: "granted",
+					inputMonitoring: "granted",
+					automation: "denied",
+				},
+				changedPermissions: ["automation"],
+				transition: "revoked",
+				reason: "runtime_change",
+			},
+		};
+		const facts = await renderer.render([
+			authorization,
+			browserEvent(2, 2_000),
+		]);
+		expect(facts).toHaveLength(1);
+		expect(facts[0]?.eventIds).toEqual(["event-2"]);
+	});
+
 	test("uses stable page and window anchors instead of visible content hashes", async () => {
 		const renderer = new DeterministicEvidenceRenderer(
 			new WebCryptoReflectionHasher(),

@@ -74,6 +74,35 @@ function textValueEvent(
 	};
 }
 
+function authorizationEvent(): SemanticEventV2 {
+	return {
+		...semanticEvent(),
+		kind: "authorization.changed",
+		source: "workspace.observer-authorization.v2",
+		countClass: "boundary",
+		reliability: "high",
+		coverage: ["metadata"],
+		contentState: "available",
+		sourceObservationIds: ["authorization-observation-1"],
+		payload: {
+			permissions: {
+				accessibility: "granted",
+				screenRecording: "denied",
+				inputMonitoring: "not_determined",
+				automation: "unsupported",
+			},
+			changedPermissions: [
+				"accessibility",
+				"screenRecording",
+				"inputMonitoring",
+				"automation",
+			],
+			transition: "revoked",
+			reason: "startup_snapshot",
+		},
+	};
+}
+
 describe("semantic-event.v2 protocol mirror", () => {
 	test("accepts the exact Rust contract and parses semantic push frames", () => {
 		const event = semanticEvent();
@@ -128,6 +157,51 @@ describe("semantic-event.v2 protocol mirror", () => {
 			payload: {},
 		};
 		expect(isSemanticEventV2(event)).toBeTrue();
+	});
+
+	test("accepts only the metadata-only authorization boundary shape", () => {
+		const event = authorizationEvent();
+		expect(isSemanticEventV2(event)).toBeTrue();
+		expect(
+			parseLocalMessage(
+				JSON.stringify({ event: "semantic.event", data: event }),
+			),
+		).toEqual({ event: "semantic.event", data: event });
+		for (const invalid of [
+			{ ...event, countClass: "effective" },
+			{ ...event, source: "workspace.untrusted" },
+			{ ...event, coverage: ["metadata", "denied"] },
+			{
+				...event,
+				payload: { ...event.payload, windowTitle: "private" },
+			},
+			{
+				...event,
+				payload: {
+					...event.payload,
+					permissions: {
+						...(event.payload.permissions as Record<string, string>),
+						automation: "authorized",
+					},
+				},
+			},
+			{
+				...event,
+				payload: {
+					...event.payload,
+					changedPermissions: ["automation", "automation"],
+				},
+			},
+			{
+				...event,
+				payload: {
+					...event.payload,
+					reason: "captured_path",
+				},
+			},
+		]) {
+			expect(isSemanticEventV2(invalid)).toBeFalse();
+		}
 	});
 
 	test("accepts only an empty, permanently ignored coverage gap", () => {

@@ -43,6 +43,7 @@ class FakeSemanticTransport {
 	readonly queries: LocalSemanticQuery[] = [];
 	readonly commits: string[] = [];
 	private readonly listeners = new Set<(event: SemanticEventV2) => void>();
+	private readonly failCommitOnce = new Set<string>();
 	private committedIndex = 0;
 
 	constructor(private readonly durable: SemanticEventV2[]) {}
@@ -65,6 +66,9 @@ class FakeSemanticTransport {
 		consumerId: string,
 		cursor: string,
 	): Promise<LocalSemanticCommitResult> {
+		if (this.failCommitOnce.delete(cursor)) {
+			throw new Error("injected semantic commit failure");
+		}
 		this.commits.push(cursor);
 		const index = this.durable.findIndex(
 			(event) => event.cursor === cursor,
@@ -89,6 +93,10 @@ class FakeSemanticTransport {
 
 	wake(event: SemanticEventV2): void {
 		for (const listener of this.listeners) listener(event);
+	}
+
+	failNextCommit(cursor: string): void {
+		this.failCommitOnce.add(cursor);
 	}
 }
 
@@ -151,6 +159,46 @@ function textChange(
 	};
 }
 
+function authorization(
+	index: number,
+	atMs: number,
+	transition: "baseline" | "changed" | "granted" | "revoked" | "mixed",
+	automation: "granted" | "denied" | "not_determined",
+): SemanticEventV2 {
+	return {
+		...foreground(index, atMs),
+		kind: "authorization.changed",
+		source: "workspace.observer-authorization.v2",
+		countClass: "boundary",
+		reliability: "high",
+		coverage: ["metadata"],
+		contentState: "available",
+		sourceObservationIds: [`authorization-observation-${index}`],
+		payload: {
+			permissions: {
+				accessibility: "granted",
+				screenRecording: "granted",
+				inputMonitoring: "granted",
+				automation,
+			},
+			changedPermissions:
+				transition === "baseline"
+					? [
+							"accessibility",
+							"screenRecording",
+							"inputMonitoring",
+							"automation",
+						]
+					: ["automation"],
+			transition,
+			reason:
+				transition === "baseline"
+					? "startup_snapshot"
+					: "runtime_change",
+		},
+	};
+}
+
 describe("TimelineV2Service", () => {
 	test("rejects semantic events whose durable identity differs from the runtime identity", async () => {
 		const forged = {
@@ -177,6 +225,133 @@ describe("TimelineV2Service", () => {
 			"Semantic event identity mismatch",
 		);
 		expect(transport.commits).toHaveLength(0);
+	});
+
+	test("revocation outranks a due count window and restored authorization starts fresh", async () => {
+		const clock = new FakeClock();
+		const transport = new FakeSemanticTransport([
+			authorization(1, 500, "baseline", "not_determined"),
+			foreground(2, 1_000),
+			textChange(3, 2_000, "must be discarded"),
+			authorization(4, 2_000, "revoked", "denied"),
+		]);
+		const repository = new InMemoryTimelineV2Repository();
+		const service = new TimelineV2Service({
+			transport,
+			repository,
+			identity: {
+				collectorId: "collector.timeline-v2.authorization-count",
+				deviceId: "device-1",
+				sessionId: "session-1",
+			},
+			hypotheses:
+				new DeterministicTimelineHypothesisGenerator(),
+			clock,
+			effectiveEventThreshold: 2,
+			eventPollMs: 60_000,
+			jobPollMs: 60_000,
+		});
+
+		await service.start();
+		expect(transport.commits).toEqual([
+			"sec2_0000000000000001",
+			"sec2_0000000000000002",
+			"sec2_0000000000000003",
+			"sec2_0000000000000004",
+		]);
+		expect(
+			(await repository.readAuditRange(0, 10_000)).windows,
+		).toHaveLength(0);
+		expect((await service.getStatus()).collectorState).toBe("ACTIVE_EMPTY");
+
+		transport.append(
+			authorization(5, 3_000, "granted", "granted"),
+			foreground(6, 4_000),
+			textChange(7, 5_000, "fresh"),
+		);
+		await service.pullNow();
+		expect(await service.runJobsNow()).toBe(1);
+		const windows = (
+			await repository.readAuditRange(0, 10_000)
+		).windows;
+		expect(windows).toHaveLength(1);
+		expect(windows[0]).toMatchObject({
+			firstCursor: "sec2_0000000000000006",
+			lastCursor: "sec2_0000000000000007",
+			eventCount: 2,
+		});
+		await service.stop();
+	});
+
+	test("revocation backlog discards an overdue recovered window before deadline resume", async () => {
+		const clock = new FakeClock(400_000);
+		const transport = new FakeSemanticTransport([
+			foreground(1, 0),
+			authorization(2, 300_000, "revoked", "denied"),
+		]);
+		const repository = new InMemoryTimelineV2Repository();
+		const service = new TimelineV2Service({
+			transport,
+			repository,
+			identity: {
+				collectorId: "collector.timeline-v2.authorization-deadline",
+				deviceId: "device-1",
+				sessionId: "session-1",
+			},
+			hypotheses:
+				new DeterministicTimelineHypothesisGenerator(),
+			clock,
+			eventPollMs: 60_000,
+			jobPollMs: 60_000,
+		});
+
+		await service.start();
+		expect(
+			(await repository.readAuditRange(0, 500_000)).windows,
+		).toHaveLength(0);
+		expect((await service.getStatus()).collectorState).toBe("ACTIVE_EMPTY");
+		await service.stop();
+	});
+
+	test("replays a persisted authorization reset after cursor commit failure", async () => {
+		const clock = new FakeClock();
+		const revocation = authorization(2, 2_000, "revoked", "denied");
+		const transport = new FakeSemanticTransport([
+			foreground(1, 1_000),
+			revocation,
+		]);
+		transport.failNextCommit(revocation.cursor);
+		const repository = new InMemoryTimelineV2Repository();
+		const options = {
+			transport,
+			repository,
+			identity: {
+				collectorId: "collector.timeline-v2.authorization-replay",
+				deviceId: "device-1",
+				sessionId: "session-1",
+			},
+			hypotheses:
+				new DeterministicTimelineHypothesisGenerator(),
+			clock,
+			eventPollMs: 60_000,
+			jobPollMs: 60_000,
+		};
+		const first = new TimelineV2Service(options);
+		await expect(first.start()).rejects.toThrow(
+			"injected semantic commit failure",
+		);
+
+		const recovered = new TimelineV2Service(options);
+		await recovered.start();
+		expect(transport.commits).toEqual([
+			"sec2_0000000000000001",
+			"sec2_0000000000000002",
+		]);
+		expect(
+			(await repository.readAuditRange(0, 10_000)).windows,
+		).toHaveLength(0);
+		expect((await recovered.getStatus()).collectorState).toBe("ACTIVE_EMPTY");
+		await recovered.stop();
 	});
 
 	test("pulls decrypted semantic data, builds meeting-style summary, and holds AgentInput locally", async () => {

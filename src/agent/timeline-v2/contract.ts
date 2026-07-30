@@ -95,6 +95,17 @@ export function isSemanticEventV2(value: unknown): value is SemanticEventV2 {
 	) {
 		return false;
 	}
+	if (
+		value.kind === "authorization.changed" &&
+		(value.source !== "workspace.observer-authorization.v2" ||
+			value.reliability !== "high" ||
+			value.contentState !== "available" ||
+			value.coverage.length !== 1 ||
+			value.coverage[0] !== "metadata" ||
+			value.sourceObservationIds.length !== 1)
+	) {
+		return false;
+	}
 
 	let serialized: string;
 	try {
@@ -123,6 +134,7 @@ export function expectedCountClass(kind: SemanticEventKind): SemanticCountClass 
 	switch (kind) {
 		case "presence.changed":
 		case "goal.changed":
+		case "authorization.changed":
 			return "boundary";
 		case "application.processObservedBatch":
 		case "coverage.gap":
@@ -323,6 +335,38 @@ function payloadMatchesKind(
 					isGoalOrNull(payload.previous) &&
 					isGoalOrNull(payload.next))
 			);
+		case "authorization.changed":
+			return (
+				hasRequiredAndOnlyKnownKeys(
+					payload,
+					[
+						"permissions",
+						"changedPermissions",
+						"transition",
+						"reason",
+					],
+					[],
+				) &&
+				isAuthorizationPermissions(payload.permissions) &&
+				isChangedPermissionList(payload.changedPermissions) &&
+				typeof payload.transition === "string" &&
+				[
+					"baseline",
+					"changed",
+					"granted",
+					"revoked",
+					"mixed",
+				].includes(payload.transition) &&
+				typeof payload.reason === "string" &&
+				[
+					"startup_snapshot",
+					"runtime_change",
+					"manual_refresh",
+					"status_request",
+					"heartbeat_check",
+					"legacy_status",
+				].includes(payload.reason)
+			);
 		case "application.processObservedBatch":
 			return (
 				hasRequiredAndOnlyKnownKeys(payload, ["started", "exited"], []) &&
@@ -350,6 +394,54 @@ function isProcessObservation(value: JsonValue): boolean {
 		(value.processId as number) <= 0xffff_ffff &&
 		isBoundedIdentifier(value.appId, 512) &&
 		isBoundedIdentifier(value.appName, 512)
+	);
+}
+
+const AUTHORIZATION_PERMISSION_NAMES = [
+	"accessibility",
+	"screenRecording",
+	"inputMonitoring",
+	"automation",
+] as const;
+
+function isAuthorizationPermissions(value: JsonValue | undefined): boolean {
+	return (
+		isRecord(value) &&
+		hasRequiredAndOnlyKnownKeys(
+			value,
+			[...AUTHORIZATION_PERMISSION_NAMES],
+			[],
+		) &&
+		AUTHORIZATION_PERMISSION_NAMES.every((permission) => {
+			const state = value[permission];
+			return (
+				typeof state === "string" &&
+				[
+					"unknown",
+					"granted",
+					"denied",
+					"not_determined",
+					"unsupported",
+				].includes(state)
+			);
+		})
+	);
+}
+
+function isChangedPermissionList(value: JsonValue | undefined): boolean {
+	if (!Array.isArray(value) || value.length < 1 || value.length > 4) {
+		return false;
+	}
+	const changed = new Set(value);
+	return (
+		changed.size === value.length &&
+		value.every(
+			(permission) =>
+				typeof permission === "string" &&
+				AUTHORIZATION_PERMISSION_NAMES.includes(
+					permission as (typeof AUTHORIZATION_PERMISSION_NAMES)[number],
+				),
+		)
 	);
 }
 

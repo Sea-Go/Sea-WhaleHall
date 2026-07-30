@@ -879,6 +879,21 @@ function projectRawObservationForAudit(
 	) {
 		return null;
 	}
+	if (
+		kind === "authorization.changed" &&
+		!validRawAuthorizationEnvelope({
+			interval,
+			source,
+			subject,
+			reliability,
+			coverage,
+			redactions,
+			contentState,
+			content,
+		})
+	) {
+		return null;
+	}
 	const payload = projectRawKindPayload(
 		kind,
 		source.sensor as string,
@@ -1047,6 +1062,37 @@ function projectRawKindPayload(
 				return null;
 			}
 			break;
+		case "authorization.changed":
+			if (
+				sensor !== "workspace" ||
+				!exactKeys(metadata, [
+					"permissions",
+					"changedPermissions",
+					"transition",
+					"reason",
+				]) ||
+				!validAuthorizationPermissions(metadata.permissions) ||
+				!validChangedPermissionList(metadata.changedPermissions) ||
+				![
+					"baseline",
+					"changed",
+					"granted",
+					"revoked",
+					"mixed",
+				].includes(String(metadata.transition)) ||
+				![
+					"startup_snapshot",
+					"runtime_change",
+					"manual_refresh",
+					"status_request",
+					"heartbeat_check",
+					"legacy_status",
+				].includes(String(metadata.reason)) ||
+				content !== undefined
+			) {
+				return null;
+			}
+			break;
 		case "application.processObservedBatch":
 			if (
 				sensor !== "workspace" ||
@@ -1069,6 +1115,73 @@ function projectRawKindPayload(
 					content: structuredClone(content) as Record<string, JsonValue>,
 				}),
 	};
+}
+
+function validRawAuthorizationEnvelope(value: {
+	interval: Record<string, JsonValue>;
+	source: Record<string, JsonValue>;
+	subject: Record<string, JsonValue>;
+	reliability: unknown;
+	coverage: CoverageLevel[];
+	redactions: unknown[];
+	contentState: unknown;
+	content: Record<string, unknown> | undefined;
+}): boolean {
+	return (
+		value.interval.startedAtMs === value.interval.endedAtMs &&
+		value.source.sensor === "workspace" &&
+		value.source.adapterVersion === "observer-authorization.v2" &&
+		value.subject.appId === "system.authorization" &&
+		value.subject.appName === "macOS" &&
+		(value.subject.opaqueWindowId === undefined ||
+			value.subject.opaqueWindowId === null) &&
+		value.reliability === "high" &&
+		value.coverage.length === 1 &&
+		value.coverage[0] === "metadata" &&
+		value.redactions.length === 0 &&
+		value.contentState === "available" &&
+		value.content === undefined
+	);
+}
+
+const AUTHORIZATION_PERMISSION_NAMES = [
+	"accessibility",
+	"screenRecording",
+	"inputMonitoring",
+	"automation",
+] as const;
+
+function validAuthorizationPermissions(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		exactKeys(value, [...AUTHORIZATION_PERMISSION_NAMES]) &&
+		AUTHORIZATION_PERMISSION_NAMES.every((permission) =>
+			[
+				"unknown",
+				"granted",
+				"denied",
+				"not_determined",
+				"unsupported",
+			].includes(String(value[permission])),
+		)
+	);
+}
+
+function validChangedPermissionList(value: unknown): boolean {
+	if (!Array.isArray(value) || value.length < 1 || value.length > 4) {
+		return false;
+	}
+	const uniquePermissions = new Set(value);
+	return (
+		uniquePermissions.size === value.length &&
+		value.every(
+			(permission) =>
+				typeof permission === "string" &&
+				AUTHORIZATION_PERMISSION_NAMES.includes(
+					permission as (typeof AUTHORIZATION_PERMISSION_NAMES)[number],
+				),
+		)
+	);
 }
 
 function validRawInterval(value: unknown): value is Record<string, JsonValue> {

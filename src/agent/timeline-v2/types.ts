@@ -31,6 +31,7 @@ export const SEMANTIC_EVENT_KINDS = [
 	"input.activityBucket",
 	"presence.changed",
 	"goal.changed",
+	"authorization.changed",
 	"application.processObservedBatch",
 	"coverage.gap",
 ] as const;
