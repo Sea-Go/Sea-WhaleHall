@@ -273,4 +273,39 @@ describe("PreferencesController", () => {
 		});
 		expect(state.snapshot.values.privacy.retentionDays).toBe(90);
 	});
+
+	test("migrates the retired ocean theme to observatory", async () => {
+		const defaults = createDefaultPreferences();
+		const legacySnapshot = JSON.stringify({
+			values: {
+				...defaults,
+				appearance: {
+					...defaults.appearance,
+					theme: "ocean",
+				},
+			},
+			version: 3,
+			savedAtMs: 1_800_000_000_000,
+		});
+		const controller = new PreferencesController(
+			new MockPreferencesService({
+				latencyMs: 0,
+				storage: {
+					getItem() {
+						return legacySnapshot;
+					},
+					setItem() {},
+					removeItem() {
+						throw new Error("Valid legacy settings must not be removed");
+					},
+				},
+			}),
+		);
+
+		await controller.load();
+		const state = controller.getSnapshot();
+		if (!("snapshot" in state)) throw new Error("Expected preferences");
+		expect(state.snapshot.values.appearance.theme).toBe("observatory");
+		expect(state.snapshot.version).toBe(3);
+	});
 });

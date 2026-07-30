@@ -22,18 +22,18 @@ export const SETTINGS_CATEGORY_LABELS: Record<SettingsCategory, string> = {
 
 export const APPEARANCE_THEME_IDS = [
 	"orange",
-	"ocean",
-	"whale-fall",
+	"observatory",
 	"firefly",
+	"whale-fall",
 ] as const;
 
 export type AppearanceTheme = (typeof APPEARANCE_THEME_IDS)[number];
 
 export const APPEARANCE_THEME_LABELS: Record<AppearanceTheme, string> = {
 	orange: "橘子",
-	ocean: "海洋",
-	"whale-fall": "海洋鲸落",
+	observatory: "天文馆",
 	firefly: "萤火虫",
+	"whale-fall": "海洋鲸落",
 };
 
 export type InterfaceDensity = "comfortable" | "compact";
@@ -161,8 +161,8 @@ export function isPreferencesSnapshot(
 }
 
 /*
- * Legacy snapshots predate theme selection. Preserve every other preference
- * and migrate only the missing theme to the orange default.
+ * Legacy snapshots either predate theme selection or use the retired ocean
+ * theme identifier. Preserve every other preference while migrating them.
  */
 export function preferencesSnapshotFromUnknown(
 	value: unknown,
@@ -196,6 +196,8 @@ function parsePreferenceValues(
 	const theme =
 		isAppearanceTheme(appearance.theme)
 			? appearance.theme
+			: allowLegacyTheme && appearance.theme === "ocean"
+				? "observatory"
 			: allowLegacyTheme && appearance.theme === undefined
 				? "orange"
 				: null;
@@ -254,7 +256,7 @@ function parsePreferenceValues(
 function isAppearanceTheme(value: unknown): value is AppearanceTheme {
 	return (
 		value === "orange" ||
-		value === "ocean" ||
+		value === "observatory" ||
 		value === "whale-fall" ||
 		value === "firefly"
 	);

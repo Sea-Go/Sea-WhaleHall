@@ -50,10 +50,10 @@ const categoryIcons = {
 } as const;
 
 const appearanceThemeDescriptions: Record<AppearanceTheme, string> = {
-	orange: "温暖的橙金光，是 WhaleHall 默认的工作氛围。",
-	ocean: "深海青蓝与克制的水波光，安静而清爽。",
-	"whale-fall": "更深的靛蓝海沟与鲸落微光，安静而有层次。",
-	firefly: "墨绿夜色与黄绿色微光，像林间散落的萤火。",
+	orange: "奶油白与鲜橘暖光，像阳光落进清晨的果园。",
+	observatory: "靛蓝星幕与星座微光，像安静的午夜天文馆。",
+	firefly: "深林青绿与流动萤光，像夏夜溪谷里的呼吸。",
+	"whale-fall": "深海蓝绿与鲸落微光，沉静、辽阔而富有生命。",
 };
 
 export interface SettingsPageProps {
@@ -381,8 +381,12 @@ function AppearanceSettings({
 			/>
 			<SettingRow
 				title="颜色模式"
-				description="四套主题均使用经过对比度检查的深色基调，减少长时间工作的视觉刺激。"
-				control={<span className="settings-badge">深色</span>}
+				description="橘子主题使用柔和浅色，其余主题使用低亮度深色；文字与控件保持清晰对比。"
+				control={
+					<span className="settings-badge">
+						{values.appearance.theme === "orange" ? "柔和浅色" : "沉浸深色"}
+					</span>
+				}
 			/>
 			<SettingRow
 				title="界面密度"
