@@ -15,6 +15,7 @@ import {
 	TimelineFiveMinuteAuditExporter,
 	type RawFiveMinuteAuditSource,
 } from "./audit";
+import { TimelineAgentInputAdapterV1 } from "./agent-input-adapter";
 import {
 	HeuristicTimelineEpisodeClassifier,
 	type TimelineEpisodeClassifier,
@@ -52,6 +53,8 @@ export type TimelineV2Runtime = {
 	service: TimelineV2Service;
 	repository: SqliteTimelineV2Repository;
 	audit: TimelineFiveMinuteAuditExporter | null;
+	/** Local-only durable outbox boundary; no renderer or network transport. */
+	agentInput: TimelineAgentInputAdapterV1;
 	episodeClassifier: TimelineEpisodeClassifierRuntimeStatus;
 	modelLockVerified: boolean;
 	/** Readiness of the Qwen cited-hypothesis generator, not classification. */
@@ -213,10 +216,12 @@ export async function createTimelineV2Runtime(
 					repository,
 				)
 			: null;
+		const agentInput = new TimelineAgentInputAdapterV1(service);
 		return {
 			service,
 			repository,
 			audit,
+			agentInput,
 			episodeClassifier,
 			modelLockVerified,
 			inferenceReady,

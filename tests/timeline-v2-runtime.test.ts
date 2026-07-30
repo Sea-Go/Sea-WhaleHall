@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { AgentRuntime } from "../src/agent/agent-runtime";
 import { WHALEHALL_TEACHER_MODEL_LOCK } from "../src/agent/model/ollama-model-lock";
 import {
+	AGENT_INPUT_QUERY_REQUEST_VERSION,
 	MODERNBERT_ACTIVITY_LABELS,
 	MODERNBERT_EVIDENCE_PROJECTOR_VERSION,
 	MODERNBERT_GOAL_RELEVANCE_LABELS,
@@ -190,6 +191,14 @@ describe("Timeline v2 model runtime readiness", () => {
 			activeClassifier: "deterministic-cold-start",
 			modelVersion: "deterministic-cold-start.v2",
 			code: "disabled",
+		});
+		expect(
+			await runtime.agentInput.query({
+				schemaVersion: AGENT_INPUT_QUERY_REQUEST_VERSION,
+			}),
+		).toEqual({
+			schemaVersion: "agent-input.query-result.v1",
+			inputs: [],
 		});
 	});
 

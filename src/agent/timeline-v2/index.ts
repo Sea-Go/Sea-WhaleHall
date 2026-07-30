@@ -1,3 +1,4 @@
+export * from "./agent-input-adapter";
 export * from "./audit";
 export * from "./collector";
 export * from "./contract";
