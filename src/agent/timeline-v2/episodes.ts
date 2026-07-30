@@ -15,6 +15,7 @@ export const EPISODE_INACTIVITY_BOUNDARY_MS = 30_000;
 export const EPISODE_BRIEF_DETOUR_MS = 10_000;
 export const EPISODE_CROSS_WINDOW_GAP_MS = 90_000;
 export const EPISODE_CROSS_WINDOW_SIMILARITY = 0.8;
+export const EPISODE_MAX_PRIMARY_SEGMENTS = 8;
 
 export interface TimelineEpisodeClassifier {
 	classify(
@@ -66,8 +67,13 @@ export class DeterministicEpisodeAssembler {
 		for (let index = 0; index < segments.length; index += 1) {
 			const segment = segments[index];
 			if (!segment) continue;
+			const classificationFacts = segment.facts.filter(
+				(fact) => !segment.supportingFactIds.has(fact.factId),
+			);
 			const classification = await this.classifier.classify(
-				segment.facts,
+				classificationFacts.length > 0
+					? classificationFacts
+					: segment.facts,
 				window.goal,
 			);
 			const anchor = segmentAnchor(segment.facts);
@@ -218,38 +224,87 @@ export class HeuristicTimelineEpisodeClassifier
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
 	): Promise<EpisodeClassificationV2> {
-		const corpus = facts
-			.map(
-				(fact) =>
-					`${fact.templateCode} ${Object.values(fact.templateArgs).join(" ")}`,
-			)
+		const appCorpus = facts
+			.flatMap((fact) => [
+				fact.templateArgs.appName,
+				fact.templateArgs.appId,
+			])
+			.filter((value): value is string => typeof value === "string")
+			.join(" ")
+			.toLowerCase();
+		const browserFacts = facts.filter(
+			(fact) => fact.templateCode === "browser.visible_page",
+		);
+		const browserMetadata = browserFacts
+			.flatMap((fact) => [
+				fact.templateArgs.title,
+				fact.templateArgs.url,
+				fact.templateArgs.domain,
+			])
+			.filter((value): value is string => typeof value === "string")
 			.join(" ")
 			.toLowerCase();
 		let activity: EpisodeClassificationV2["activity"] = "other_unknown";
 		if (
-			/(visual studio code|vscode|xcode|terminal|iterm|代码|github|gitlab|development)/u.test(
-				corpus,
+			facts.some((fact) => fact.templateCode === "presence.changed")
+		) {
+			activity = "idle_transition";
+		} else if (
+			/(visual studio code|vscode|xcode|terminal|iterm|code editor)/u.test(
+				appCorpus,
 			)
 		) {
 			activity = "development";
-		} else if (/(飞书|feishu|lark|qq|微信|wechat|slack|teams)/u.test(corpus)) {
+		} else if (
+			/(飞书|feishu|lark|qq|微信|wechat|slack|teams|messages)/u.test(
+				appCorpus,
+			)
+		) {
 			activity = "communication";
-		} else if (/(网易云|music|spotify|video|youtube|bilibili|媒体)/u.test(corpus)) {
+		} else if (
+			/(网易云|music|spotify|vlc|quicktime|media player)/u.test(
+				appCorpus,
+			)
+		) {
 			activity = "media";
-		} else if (/(finder|访达|文件|system settings)/u.test(corpus)) {
+		} else if (
+			/(^|\s)(finder|访达|system settings|系统设置)(\s|$)/u.test(
+				appCorpus,
+			)
+		) {
 			activity = "system_file_ops";
+		} else if (browserFacts.length > 0) {
+			if (
+				/(github|gitlab|stackoverflow|developer\.|localhost|127\.0\.0\.1)/u.test(
+					browserMetadata,
+				)
+			) {
+				activity = "development";
+			} else if (
+				/(mail\.|gmail|outlook|slack|teams|feishu|lark|qq\.com)/u.test(
+					browserMetadata,
+				)
+			) {
+				activity = "communication";
+			} else if (
+				/(youtube|bilibili|spotify|music|video)/u.test(
+					browserMetadata,
+				)
+			) {
+				activity = "media";
+			} else if (
+				/(amazon|taobao|tmall|jd\.com|shop|checkout|cart)/u.test(
+					browserMetadata,
+				)
+			) {
+				activity = "commerce";
+			} else {
+				activity = "research";
+			}
 		} else if (
 			facts.some((fact) => fact.templateCode === "application.text_value")
 		) {
 			activity = "writing";
-		} else if (
-			facts.some((fact) => fact.templateCode === "browser.visible_page")
-		) {
-			activity = "research";
-		} else if (
-			facts.some((fact) => fact.templateCode === "presence.changed")
-		) {
-			activity = "idle_transition";
 		}
 		const uncertain = activity === "other_unknown";
 		return {
@@ -332,7 +387,77 @@ function segmentFacts(facts: readonly EvidenceFactV2[]): FactSegment[] {
 		index += 1;
 	}
 	if (current) segments.push(current);
-	return segments.filter((segment) => segment.facts.length > 0);
+	return collapseOverflowSegments(
+		segments.filter((segment) => segment.facts.length > 0),
+		EPISODE_MAX_PRIMARY_SEGMENTS,
+	);
+}
+
+function collapseOverflowSegments(
+	input: readonly FactSegment[],
+	limit: number,
+): FactSegment[] {
+	const segments = input.map((segment) => ({
+		facts: [...segment.facts],
+		supportingFactIds: new Set(segment.supportingFactIds),
+	}));
+	while (segments.length > limit) {
+		let selectedIndex = 0;
+		for (let index = 1; index < segments.length; index += 1) {
+			const candidate = segments[index];
+			const selected = segments[selectedIndex];
+			if (
+				candidate &&
+				selected &&
+				segmentDuration(candidate) < segmentDuration(selected)
+			) {
+				selectedIndex = index;
+			}
+		}
+		const selected = segments[selectedIndex];
+		if (!selected) break;
+		const previous = segments[selectedIndex - 1];
+		const next = segments[selectedIndex + 1];
+		const mergeIntoPrevious =
+			previous !== undefined &&
+			(next === undefined ||
+				sameAnchor(
+					segmentAnchor(previous.facts),
+					segmentAnchor(selected.facts),
+				) ||
+				!sameAnchor(
+					segmentAnchor(next.facts),
+					segmentAnchor(selected.facts),
+				));
+		const targetIndex = mergeIntoPrevious
+			? selectedIndex - 1
+			: selectedIndex + 1;
+		const target = segments[targetIndex];
+		if (!target) break;
+		for (const fact of selected.facts) {
+			target.supportingFactIds.add(fact.factId);
+		}
+		for (const factId of selected.supportingFactIds) {
+			target.supportingFactIds.add(factId);
+		}
+		target.facts = [...target.facts, ...selected.facts].sort(
+			(left, right) =>
+				left.startedAtMs - right.startedAtMs ||
+				left.factId.localeCompare(right.factId),
+		);
+		segments.splice(selectedIndex, 1);
+	}
+	return segments;
+}
+
+function segmentDuration(segment: FactSegment): number {
+	const startedAtMs = Math.min(
+		...segment.facts.map((fact) => fact.startedAtMs),
+	);
+	const endedAtMs = Math.max(
+		...segment.facts.map((fact) => fact.endedAtMs),
+	);
+	return Math.max(0, endedAtMs - startedAtMs);
 }
 
 function findBriefReturn(

@@ -126,15 +126,13 @@ export class TimelineV2Processor {
 			facts.map((fact) => fact.coverage),
 		);
 		const warnings = coverageWarnings(coverage);
+		const evidencePeriod = periodFromFacts(facts, window);
 		return {
 			schemaVersion: TIMELINE_SUMMARY_SCHEMA_VERSION,
 			timelineId,
 			windowId: window.windowId,
 			triggerReason: window.triggerReason,
-			period: {
-				startedAtMs: window.startedAtMs,
-				endedAtMs: window.endedAtMs,
-			},
+			period: evidencePeriod,
 			goalVersion: window.goalVersion,
 			segments,
 			coverage,
@@ -390,7 +388,10 @@ async function correctionTarget(
 	if (
 		!previousEpisode ||
 		!window.events.some(
-			(event) => event.occurredAtMs < previousEpisode.endedAtMs,
+			(event) =>
+				explicitlyLate(event) ||
+				(event.occurredAtMs < previousEpisode.endedAtMs &&
+					event.observedAtMs < previousEpisode.endedAtMs),
 		)
 	) {
 		return null;
@@ -399,6 +400,30 @@ async function correctionTarget(
 	return previousWindowId
 		? repository.getTimelineResult(previousWindowId)
 		: null;
+}
+
+function explicitlyLate(event: TimelineWindowV2["events"][number]): boolean {
+	return (
+		event.payload.late === true ||
+		event.payload.isLate === true ||
+		event.payload.lateObservation === true
+	);
+}
+
+function periodFromFacts(
+	facts: readonly EvidenceFactV2[],
+	window: TimelineWindowV2,
+): { startedAtMs: number; endedAtMs: number } {
+	if (facts.length === 0) {
+		return {
+			startedAtMs: window.startedAtMs,
+			endedAtMs: window.startedAtMs,
+		};
+	}
+	return {
+		startedAtMs: Math.min(...facts.map((fact) => fact.startedAtMs)),
+		endedAtMs: Math.max(...facts.map((fact) => fact.endedAtMs)),
+	};
 }
 
 function retryDelay(

@@ -469,4 +469,57 @@ describe("TimelineV2Service", () => {
 		expect(corrected?.summary.renderedText).toContain("late");
 		await service.stop();
 	});
+
+	test("does not create a correction for a normal interval whose start overlaps the prior episode", async () => {
+		const clock = new FakeClock();
+		const transport = new FakeSemanticTransport([
+			foreground(1, 1_000),
+			textChange(2, 1_010, "original"),
+		]);
+		const repository = new InMemoryTimelineV2Repository();
+		const service = new TimelineV2Service({
+			transport,
+			repository,
+			identity: {
+				collectorId: "collector.timeline-v2.interval-overlap",
+				deviceId: "device-1",
+				sessionId: "session-1",
+			},
+			hypotheses:
+				new DeterministicTimelineHypothesisGenerator(),
+			clock,
+			effectiveEventThreshold: 2,
+			eventPollMs: 60_000,
+			jobPollMs: 60_000,
+		});
+		await service.start();
+		await service.runJobsNow();
+		const firstWindow = (
+			await repository.readAuditRange(0, 2_000)
+		).windows[0]!;
+
+		transport.append(
+			{
+				...foreground(3, 1_005),
+				observedAtMs: 1_020,
+			},
+			textChange(4, 1_025, "continued"),
+		);
+		await service.pullNow();
+		await service.runJobsNow();
+		const secondWindow = (
+			await repository.readAuditRange(0, 2_000)
+		).windows.find(
+			(window) => window.windowId !== firstWindow.windowId,
+		)!;
+		const second = await repository.getTimelineResult(
+			secondWindow.windowId,
+		);
+
+		expect(second?.summary).toMatchObject({
+			revision: 1,
+			correctsTimelineId: null,
+		});
+		await service.stop();
+	});
 });

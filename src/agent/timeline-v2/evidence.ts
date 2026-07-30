@@ -25,6 +25,7 @@ export class DeterministicEvidenceRenderer {
 
 	private async renderEvent(event: SemanticEventV2): Promise<EvidenceFactV2> {
 		const rendered = renderTemplate(event);
+		const anchor = await evidenceAnchor(event, this.hasher);
 		const factId = `fact_${await this.hasher.sha256(
 			canonicalJson({
 				eventIds: [event.eventId],
@@ -43,7 +44,7 @@ export class DeterministicEvidenceRenderer {
 			templateCode: rendered.templateCode,
 			templateArgs: rendered.templateArgs,
 			renderedText: rendered.text,
-			anchor: evidenceAnchor(event),
+			anchor,
 			role: factRole(event),
 			reliability: event.reliability,
 			coverage: [...event.coverage],
@@ -228,19 +229,38 @@ function unavailableContentTemplate(
 	};
 }
 
-function evidenceAnchor(event: SemanticEventV2): EvidenceAnchorV2 {
+async function evidenceAnchor(
+	event: SemanticEventV2,
+	hasher: ReflectionHasher,
+): Promise<EvidenceAnchorV2> {
 	const appId = stringValue(event, "appId");
 	const windowId = stringValue(event, "opaqueWindowId");
 	switch (event.kind) {
-		case "browser.visiblePageChanged":
+		case "browser.visiblePageChanged": {
+			const suppliedPageId =
+				stringValue(event, "opaquePageId") ??
+				stringValue(event, "pageAnchorHash");
+			const canonicalUrl = canonicalPageUrl(
+				contentValue(event, "url"),
+			);
+			const pageId =
+				suppliedPageId ??
+				(canonicalUrl
+					? `page_${await hasher.sha256(
+							canonicalJson({
+								appId,
+								windowId,
+								url: canonicalUrl,
+							}),
+						)}`
+					: stringValue(event, "domain"));
 			return {
 				appId,
 				windowId,
 				documentId: null,
-				pageId:
-					stringValue(event, "contentHash") ??
-					stringValue(event, "domain"),
+				pageId,
 			};
+		}
 		case "application.textValueChanged":
 			return {
 				appId,
@@ -253,11 +273,35 @@ function evidenceAnchor(event: SemanticEventV2): EvidenceAnchorV2 {
 			return {
 				appId,
 				windowId,
-				documentId: stringValue(event, "contentHash"),
+				documentId:
+					stringValue(event, "opaqueDocumentId") ??
+					stringValue(event, "documentAnchorHash") ??
+					windowId,
 				pageId: null,
 			};
 		default:
 			return { appId, windowId, documentId: null, pageId: null };
+	}
+}
+
+function canonicalPageUrl(value: string | null): string | null {
+	if (!value) return null;
+	try {
+		const url = new URL(value);
+		url.username = "";
+		url.password = "";
+		url.hash = "";
+		url.protocol = url.protocol.toLowerCase();
+		url.hostname = url.hostname.toLowerCase();
+		if (
+			(url.protocol === "http:" && url.port === "80") ||
+			(url.protocol === "https:" && url.port === "443")
+		) {
+			url.port = "";
+		}
+		return url.toString();
+	} catch {
+		return value.split("#", 1)[0]?.trim() || null;
 	}
 }
 
