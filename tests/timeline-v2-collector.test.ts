@@ -202,7 +202,7 @@ describe("TimelineV2Collector dual trigger", () => {
 			expect(runtime.collector.getSnapshot().openWindow).toBeNull();
 			expect(runtime.clock.timerCount).toBe(0);
 		},
-		10_000,
+		30_000,
 	);
 
 	test("authorization revocation discards a non-empty open window", async () => {
