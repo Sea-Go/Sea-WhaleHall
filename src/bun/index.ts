@@ -16,7 +16,10 @@ import {
 	createTimelineV2Runtime,
 	type TimelineV2Runtime,
 } from "../agent/timeline-v2/runtime";
-import type { RawFiveMinuteAuditSource } from "../agent/timeline-v2/audit";
+import {
+	TimelineFiveMinuteAuditExporter,
+	type RawFiveMinuteAuditSource,
+} from "../agent/timeline-v2/audit";
 import { loadOrCreateReflectionIdentity } from "../agent/reflection";
 import {
 	createWhaleHallReflectionRuntime,
@@ -65,6 +68,15 @@ const agent = new AgentRuntime(
 	}),
 	{ requireStartupGoalPreparation: true },
 );
+const rawAuditSource = createRawFiveMinuteAuditSource(agent);
+const rawOnlyAuditExporter = new TimelineFiveMinuteAuditExporter(
+	rawAuditSource,
+	{
+		async readAuditRange() {
+			throw new Error("Production-derived Timeline data is unavailable.");
+		},
+	},
+);
 let petVisible = true;
 let shutdownPromise: Promise<void> | null = null;
 let startupPromise: Promise<void> | null = null;
@@ -84,31 +96,29 @@ const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
 			throw new Error("The audit capture range is invalid.");
 		}
 		const runtime = timelineRuntime;
-		if (runtime === null) {
-			throw new Error("Timeline v2 is unavailable.");
-		}
 		// Pull and process only naturally sealed production windows. An audit
 		// capture must never force-seal or otherwise perturb collector state.
-		try {
-			await runtime.service.pullNow();
-			await runtime.service.runJobsNow();
-		} catch (error) {
-			// A redacted audit can still be complete at the raw/semantic
-			// boundary when the production-derived vault is temporarily
-			// unavailable (for example after an ad-hoc development re-sign).
-			// The exporter records that gap and creates audit-only projections.
-			console.warn(
-				"[audit-capture] production timeline settle deferred:",
-				error instanceof Error ? error.name : "UNKNOWN",
-			);
-		}
-		if (runtime.audit === null) {
-			throw new Error("Timeline v2 audit exporter is unavailable.");
+		if (runtime !== null) {
+			try {
+				await runtime.service.pullNow();
+				await runtime.service.runJobsNow();
+			} catch (error) {
+				// A redacted audit can still be complete at the raw/semantic
+				// boundary when the production-derived vault is temporarily
+				// unavailable (for example after an ad-hoc development re-sign).
+				// The exporter records that gap and creates audit-only projections.
+				console.warn(
+					"[audit-capture] production timeline settle deferred:",
+					error instanceof Error ? error.name : "UNKNOWN",
+				);
+			}
 		}
 		// Build once without decrypted content before declaring READY. This
 		// verifies that the exact raw range is queryable while keeping text
 		// behind the later explicit export confirmation.
-		await runtime.audit.exportFiveMinutes(fromMs);
+		await (
+			runtime?.audit ?? rawOnlyAuditExporter
+		).exportFiveMinutes(fromMs);
 	},
 	onError(error) {
 		console.error(
@@ -165,9 +175,10 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						Utils.openExternal(url),
 				};
 			},
-			exportFiveMinuteAuditToFile: (request) =>
+				exportFiveMinuteAuditToFile: (request) =>
 				exportFiveMinuteAuditToFile(request, {
-					getExporter: () => timelineRuntime?.audit ?? null,
+					getExporter: () =>
+						timelineRuntime?.audit ?? rawOnlyAuditExporter,
 					dialogs: {
 						async confirmDecryptedContent() {
 							const { response } = await Utils.showMessageBox({
@@ -418,7 +429,7 @@ startupPromise = (async () => {
 					agent,
 					dataDirectory: localDataPath,
 					initialGoal: candidate.service.getActiveGoalContext(),
-					rawAuditSource: createRawFiveMinuteAuditSource(agent),
+					rawAuditSource,
 				});
 				await timelineCandidate.start();
 			} catch (error) {

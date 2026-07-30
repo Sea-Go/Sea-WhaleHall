@@ -50,7 +50,10 @@ export interface RawFiveMinuteAuditSource {
 export class TimelineFiveMinuteAuditExporter {
 	constructor(
 		private readonly raw: RawFiveMinuteAuditSource,
-		private readonly repository: TimelineV2Repository,
+		private readonly repository: Pick<
+			TimelineV2Repository,
+			"readAuditRange"
+		>,
 		private readonly nowMs: () => number = Date.now,
 	) {}
 
