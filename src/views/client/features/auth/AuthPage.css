@@ -20,6 +20,53 @@
 	background: var(--theme-auth-background);
 }
 
+.auth-atmosphere::before {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	content: "";
+}
+
+:root[data-ui-theme="orange"] .auth-atmosphere::before {
+	background:
+		radial-gradient(circle at 11% 84%, var(--color-accent-soft) 0 1px, transparent 2px),
+		radial-gradient(circle at 14% 80%, var(--color-accent-soft) 0 2px, transparent 3px),
+		linear-gradient(118deg, transparent 0 67%, var(--color-accent-soft) 68%, transparent 69%);
+	opacity: 0.8;
+}
+
+:root[data-ui-theme="observatory"] .auth-atmosphere::before {
+	background:
+		linear-gradient(28deg, transparent 17%, var(--color-contour) 17.2% 17.35%, transparent 17.55%),
+		linear-gradient(154deg, transparent 67%, var(--color-contour) 67.2% 67.35%, transparent 67.55%),
+		radial-gradient(circle at 18% 30%, var(--color-accent-strong) 0 1px, transparent 2px),
+		radial-gradient(circle at 32% 18%, var(--color-accent) 0 1px, transparent 3px),
+		radial-gradient(circle at 78% 25%, var(--color-accent-strong) 0 1px, transparent 2px);
+	opacity: 0.72;
+}
+
+:root[data-ui-theme="firefly"] .auth-atmosphere::before {
+	background:
+		radial-gradient(circle at 12% 33%, var(--color-accent-strong) 0 1px, transparent 5px),
+		radial-gradient(circle at 26% 20%, var(--color-accent) 0 2px, transparent 7px),
+		radial-gradient(circle at 54% 42%, var(--color-accent-strong) 0 1px, transparent 5px),
+		radial-gradient(circle at 76% 17%, var(--color-accent) 0 1px, transparent 6px),
+		radial-gradient(circle at 87% 54%, var(--color-accent-strong) 0 2px, transparent 7px),
+		radial-gradient(ellipse at 46% 112%, var(--color-accent-soft), transparent 48%);
+	filter: drop-shadow(0 0 6px var(--color-accent-glow));
+	opacity: 0.86;
+}
+
+:root[data-ui-theme="whale-fall"] .auth-atmosphere::before {
+	background:
+		linear-gradient(112deg, transparent 50%, var(--color-accent-soft) 50.3%, transparent 62%),
+		linear-gradient(105deg, transparent 67%, var(--color-accent-soft) 67.3%, transparent 77%),
+		radial-gradient(circle at 19% 28%, var(--color-accent-strong) 0 1px, transparent 4px),
+		radial-gradient(circle at 67% 44%, var(--color-accent) 0 1px, transparent 5px),
+		radial-gradient(ellipse at 60% 108%, var(--color-accent-soft), transparent 46%);
+	opacity: 0.72;
+}
+
 .auth-atmosphere__glow {
 	position: absolute;
 	right: -220px;
@@ -172,6 +219,158 @@
 .auth-ocean__point--two {
 	right: 32px;
 	bottom: 38px;
+}
+
+:root[data-ui-theme="orange"] .auth-ocean {
+	right: 34px;
+	bottom: 36px;
+	width: 390px;
+	height: 300px;
+	transform: rotate(-7deg);
+}
+
+:root[data-ui-theme="orange"] .auth-ocean::before {
+	position: absolute;
+	inset: 18px 55px 2px 55px;
+	border: 11px solid var(--color-accent-soft);
+	border-radius: 50%;
+	background:
+		radial-gradient(circle, var(--color-surface) 0 11%, transparent 12%),
+		repeating-conic-gradient(
+			from -10deg,
+			var(--color-accent) 0 27deg,
+			var(--color-surface-muted) 28deg 32deg
+		);
+	box-shadow:
+		inset 0 0 0 11px var(--color-surface),
+		0 22px 56px var(--color-accent-glow);
+	content: "";
+	opacity: 0.72;
+}
+
+:root[data-ui-theme="orange"] .auth-ocean::after {
+	position: absolute;
+	top: 4px;
+	right: 46px;
+	width: 86px;
+	height: 36px;
+	border: 1px solid var(--color-accent-border);
+	border-radius: 100% 0 100% 0;
+	background: var(--color-accent-soft);
+	content: "";
+	transform: rotate(22deg);
+}
+
+:root[data-ui-theme="orange"] .auth-ocean > * {
+	display: none;
+}
+
+:root[data-ui-theme="observatory"] .auth-ocean {
+	right: 24px;
+	bottom: 50px;
+	width: 390px;
+	height: 250px;
+}
+
+:root[data-ui-theme="observatory"] .auth-ocean::before {
+	position: absolute;
+	right: 22px;
+	bottom: 0;
+	width: 250px;
+	height: 126px;
+	border: 1px solid var(--color-accent-border);
+	border-bottom: 0;
+	border-radius: 250px 250px 0 0;
+	background:
+		linear-gradient(154deg, transparent 48%, var(--color-contour) 48.4% 49%, transparent 49.4%),
+		radial-gradient(circle at 50% 100%, var(--color-accent-soft), transparent 68%);
+	box-shadow: 0 -16px 52px var(--color-accent-glow);
+	content: "";
+}
+
+:root[data-ui-theme="observatory"] .auth-ocean__whale {
+	top: 94px;
+	left: 185px;
+	width: 94px;
+	height: 47px;
+	border-radius: 94px 94px 8px 8px;
+	transform: none;
+}
+
+:root[data-ui-theme="observatory"] .auth-ocean__whale svg {
+	display: none;
+}
+
+:root[data-ui-theme="observatory"] .auth-ocean__orbit {
+	border-style: dashed;
+}
+
+:root[data-ui-theme="firefly"] .auth-ocean {
+	right: 26px;
+	bottom: 34px;
+	width: 400px;
+	height: 270px;
+}
+
+:root[data-ui-theme="firefly"] .auth-ocean::before {
+	position: absolute;
+	inset: 0;
+	background:
+		radial-gradient(circle at 14% 22%, var(--color-accent-strong) 0 2px, transparent 7px),
+		radial-gradient(circle at 36% 46%, var(--color-accent) 0 1px, transparent 6px),
+		radial-gradient(circle at 63% 18%, var(--color-accent-strong) 0 1px, transparent 5px),
+		radial-gradient(circle at 78% 62%, var(--color-accent) 0 2px, transparent 7px),
+		radial-gradient(circle at 91% 34%, var(--color-accent-strong) 0 1px, transparent 6px),
+		radial-gradient(ellipse at 50% 112%, var(--color-accent-soft), transparent 62%);
+	filter: drop-shadow(0 0 8px var(--color-accent-glow));
+	content: "";
+}
+
+:root[data-ui-theme="firefly"] .auth-ocean::after {
+	position: absolute;
+	right: 12px;
+	bottom: 30px;
+	left: 20px;
+	height: 54px;
+	border-top: 1px solid var(--color-accent-border);
+	border-radius: 50%;
+	box-shadow: 0 -12px 28px var(--color-accent-glow);
+	content: "";
+	transform: rotate(-6deg);
+}
+
+:root[data-ui-theme="firefly"] .auth-ocean > * {
+	display: none;
+}
+
+:root[data-ui-theme="whale-fall"] .auth-ocean {
+	right: 30px;
+	bottom: 50px;
+	width: 390px;
+	height: 250px;
+}
+
+:root[data-ui-theme="whale-fall"] .auth-ocean__whale {
+	top: 80px;
+	left: 124px;
+	width: 136px;
+	height: 62px;
+	border-radius: 62% 38% 52% 48%;
+	box-shadow: 0 0 44px var(--color-accent-glow);
+}
+
+:root[data-ui-theme="whale-fall"] .auth-ocean__orbit {
+	height: 132px;
+	border-radius: 50% 50% 42% 58%;
+	transform: rotate(-7deg);
+}
+
+:root[data-ui-theme="whale-fall"] .auth-ocean__orbit--two {
+	height: 112px;
+}
+
+:root[data-ui-theme="whale-fall"] .auth-ocean__orbit--three {
+	height: 88px;
 }
 
 .auth-privacy-note {

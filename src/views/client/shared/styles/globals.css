@@ -9,6 +9,10 @@ html {
 	background: var(--theme-shell-background);
 }
 
+html[data-ui-theme="orange"] {
+	color-scheme: light;
+}
+
 body {
 	min-width: var(--viewport-min-width);
 	min-height: var(--viewport-min-height);

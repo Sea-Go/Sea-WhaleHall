@@ -1,4 +1,5 @@
 .settings-page {
+	position: relative;
 	display: flex;
 	height: 100%;
 	min-width: 0;
@@ -6,6 +7,78 @@
 	flex-direction: column;
 	overflow: hidden;
 	background: var(--theme-settings-background);
+}
+
+.settings-page::before {
+	position: absolute;
+	top: -82px;
+	right: -68px;
+	width: 260px;
+	height: 260px;
+	border-radius: 50%;
+	pointer-events: none;
+	content: "";
+	opacity: 0.55;
+}
+
+.settings-page > * {
+	position: relative;
+	z-index: 1;
+}
+
+:root[data-ui-theme="orange"] .settings-page::before {
+	border: 10px solid var(--color-accent-soft);
+	background:
+		radial-gradient(circle, var(--color-surface) 0 12%, transparent 13%),
+		repeating-conic-gradient(
+			from -8deg,
+			var(--color-accent-soft) 0 27deg,
+			transparent 28deg 32deg
+		);
+	box-shadow:
+		inset 0 0 0 12px var(--color-surface),
+		0 0 52px var(--color-accent-glow);
+}
+
+:root[data-ui-theme="observatory"] .settings-page::before {
+	background:
+		linear-gradient(38deg, transparent 46%, var(--color-contour) 46.3% 46.8%, transparent 47.1%),
+		radial-gradient(circle at 22% 65%, var(--color-accent-strong) 0 1px, transparent 3px),
+		radial-gradient(circle at 52% 38%, var(--color-accent) 0 2px, transparent 4px),
+		radial-gradient(circle at 79% 74%, var(--color-accent-strong) 0 1px, transparent 3px),
+		radial-gradient(circle, var(--color-accent-soft), transparent 68%);
+	filter: drop-shadow(0 0 9px var(--color-accent-glow));
+}
+
+:root[data-ui-theme="firefly"] .settings-page::before {
+	background:
+		radial-gradient(circle at 16% 30%, var(--color-accent-strong) 0 2px, transparent 7px),
+		radial-gradient(circle at 42% 68%, var(--color-accent) 0 1px, transparent 6px),
+		radial-gradient(circle at 73% 22%, var(--color-accent-strong) 0 1px, transparent 6px),
+		radial-gradient(circle at 86% 61%, var(--color-accent) 0 2px, transparent 8px),
+		radial-gradient(circle, var(--color-accent-soft), transparent 68%);
+	filter: drop-shadow(0 0 9px var(--color-accent-glow));
+}
+
+:root[data-ui-theme="whale-fall"] .settings-page::before {
+	top: 14px;
+	right: -44px;
+	width: 310px;
+	height: 116px;
+	border: 1px solid var(--color-contour);
+	border-radius: 62% 38% 52% 48%;
+	background:
+		linear-gradient(96deg, transparent 16%, var(--color-contour) 17% 18%, transparent 19%),
+		repeating-radial-gradient(
+			ellipse at 34% 50%,
+			transparent 0 12px,
+			var(--color-contour) 13px 14px,
+			transparent 15px 22px
+		),
+		radial-gradient(ellipse at 54% 45%, var(--color-accent-soft), transparent 68%);
+	box-shadow: 0 0 52px var(--color-accent-glow);
+	opacity: 0.68;
+	transform: rotate(-9deg);
 }
 
 .settings-page .page-header {
@@ -216,6 +289,105 @@
 	border-radius: var(--radius-md);
 	background: var(--theme-preview-background);
 	box-shadow: var(--shadow-inset-highlight);
+}
+
+.settings-theme-card__preview::before,
+.settings-theme-card__preview::after {
+	position: absolute;
+	z-index: 1;
+	pointer-events: none;
+	content: "";
+}
+
+[data-theme-option="orange"] .settings-theme-card__preview::before {
+	right: -13px;
+	bottom: -18px;
+	width: 56px;
+	height: 56px;
+	border: 4px solid var(--theme-preview-surface);
+	border-radius: 50%;
+	background:
+		radial-gradient(circle, var(--theme-preview-surface) 0 10%, transparent 11%),
+		repeating-conic-gradient(
+			from -8deg,
+			var(--theme-preview-accent) 0 27deg,
+			var(--theme-preview-surface) 28deg 32deg
+		);
+	box-shadow: 0 0 14px var(--theme-preview-glow);
+	opacity: 0.8;
+}
+
+[data-theme-option="observatory"] .settings-theme-card__preview::before {
+	right: -3px;
+	bottom: -11px;
+	width: 60px;
+	height: 32px;
+	border: 1px solid var(--theme-preview-border);
+	border-bottom: 0;
+	border-radius: 60px 60px 0 0;
+	background: var(--theme-preview-glow);
+	opacity: 0.66;
+}
+
+[data-theme-option="observatory"] .settings-theme-card__preview::after {
+	top: 8px;
+	right: 8px;
+	width: 28px;
+	height: 22px;
+	background:
+		linear-gradient(34deg, transparent 47%, var(--theme-preview-border) 48% 51%, transparent 52%),
+		radial-gradient(circle at 4px 15px, var(--theme-preview-accent) 0 1px, transparent 2px),
+		radial-gradient(circle at 21px 4px, var(--theme-preview-accent) 0 1px, transparent 2px);
+}
+
+[data-theme-option="firefly"] .settings-theme-card__preview::before {
+	inset: 4px 3px 5px 28px;
+	background:
+		radial-gradient(circle at 15% 20%, var(--theme-preview-accent) 0 1px, transparent 4px),
+		radial-gradient(circle at 63% 28%, var(--theme-preview-accent) 0 1px, transparent 4px),
+		radial-gradient(circle at 38% 71%, var(--theme-preview-accent) 0 1px, transparent 4px),
+		radial-gradient(circle at 86% 61%, var(--theme-preview-accent) 0 1px, transparent 4px);
+	filter: drop-shadow(0 0 4px var(--theme-preview-glow));
+}
+
+[data-theme-option="firefly"] .settings-theme-card__preview::after {
+	right: -3px;
+	bottom: -8px;
+	width: 65px;
+	height: 30px;
+	border-radius: 50%;
+	background: var(--theme-preview-glow);
+	filter: blur(7px);
+}
+
+[data-theme-option="whale-fall"] .settings-theme-card__preview::before {
+	right: -2px;
+	bottom: 10px;
+	width: 48px;
+	height: 17px;
+	border: 1px solid var(--theme-preview-border);
+	border-radius: 62% 38% 52% 48%;
+	background:
+		repeating-radial-gradient(
+			ellipse at 34% 50%,
+			transparent 0 3px,
+			var(--theme-preview-border) 4px 5px,
+			transparent 6px 8px
+		),
+		var(--theme-preview-glow);
+	box-shadow: 0 0 9px var(--theme-preview-glow);
+	transform: rotate(-8deg);
+}
+
+[data-theme-option="whale-fall"] .settings-theme-card__preview::after {
+	top: -8px;
+	right: 15px;
+	width: 1px;
+	height: 72px;
+	background: var(--theme-preview-border);
+	box-shadow: 8px 0 13px var(--theme-preview-glow);
+	opacity: 0.62;
+	transform: rotate(18deg);
 }
 
 .settings-theme-card__sidebar {
