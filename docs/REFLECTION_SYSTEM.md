@@ -1,6 +1,229 @@
 # WhaleHall 行为理解与反思系统
 
-## 当前实现边界
+## Timeline v2：零扩展语义消费与 Agent 输入
+
+v1 `DesktopReflectionService` 和 `reflections.sqlite3` 暂时保留为目标
+控制与回滚兼容链路，但不再驱动主动反馈，也不进入 v2 训练。新的 Timeline
+v2 使用独立 consumer、独立数据库和独立 Schema，不会把 v1 进程噪声重新
+解释为训练样本：
+
+```mermaid
+flowchart LR
+  Observer["内置 macOS Observer"] --> Observation["加密 ObservationJournal"]
+  Observation --> Semantic["semantic-event.v2"]
+  Semantic -->|"semantic.query · includeContent=true"| Collector["64 条 OR 首事件后 5 分钟"]
+  Collector --> Vault["Rust vault"]
+  Vault --> TimelineDb["timeline-v2.sqlite3 · 仅 contentRef/状态"]
+  TimelineDb --> Facts["确定性 EvidenceFactV2"]
+  Facts --> Episodes["跨窗 ActivityEpisodeV2 revision"]
+  Episodes --> Qwen["本机 qwen3:4b · 有引用假设"]
+  Qwen --> Summary["TimelineSummaryV2"]
+  Summary --> Outbox["AgentInputV1 · HELD_LOCAL"]
+```
+
+### macOS 零扩展 Observer 与隐私边界
+
+`native/observer` 构建为 Swift 6、macOS 14+ 的
+`WhaleHall Observer.app`。它由 Rust 子进程监督，只通过 stdin/stdout
+JSONL 通信；Rust 完成 ObservationJournal 事务后才 ACK。Observer 使用
+NSWorkspace、AXObserver/AXUIElement、CGEventTap，以及
+ScreenCaptureKit + Vision 的前台单帧 OCR，不依赖 Chrome、VSCode、飞书或
+其他第三方扩展。
+
+- 观察默认关闭，必须由用户在侧栏显式启用，并分别授予辅助功能、屏幕录制、
+  输入监控和受支持浏览器自动化权限；
+- 只统计按键/点击/滚动/移动量，不读取 keyCode，不保存鼠标坐标；文字只能
+  来自应用最终显示的 AX/OCR 状态；
+- AX 文本只接受未隐藏、具有有效几何范围且与当前焦点窗口相交的节点，并优先
+  遍历 `AXVisibleChildren`；无法证明可见时不遍历完整 AX 树，改走前台窗口
+  OCR 或记录 coverage gap；
+- 用户排除、已识别的密码管理器/系统认证/支付/钱包、SecureField，以及隐私
+  状态无法验证的浏览器会 fail closed；只写匿名 `coverage.gap`，不写真实
+  app identity、PID 或内容；
+- OCR 图像只在内存中存在；AX 足够时不 OCR，任务串行且只保留最新结果；
+- Observer 启用 App Sandbox，但不授予 network client/server entitlement；
+  Apple Events 仅 allow-list 当前支持并能验证隐私状态的 Chromium 浏览器；
+- stdout 写入位于独立串行队列。未 ACK 上限为 256 帧/16 MiB；压力下合并
+  input bucket、只保留最新 OCR，并把 gap 持久化进审计 coverage。
+
+ObservationJournal 的正文使用 AES-256-GCM 字段加密，随机 96-bit nonce，
+AAD 绑定记录身份、Schema、时间、内容 hash 和 key version。正式签名制品
+只接受 `AfterFirstUnlockThisDeviceOnly` Data Protection Keychain。
+无 Developer ID 的 dev/canary 可显式启用隔离的 login-Keychain fallback，
+但只有现代写入精确返回 `-34018` 且当前 binary 为 ad-hoc、没有 Team ID 时
+才生效；状态固定显示 `dev_legacy_keychain_in_use`。它不允许文件或明文密钥
+回退，也不会在已签名制品中生效。
+Keychain 在首次解锁前不可用，或 dev/canary 因重新 ad-hoc 签名而无法打开
+既有 ACL 时，Timeline v2 与解密审计保持 fail closed，但已启动的本机
+监控/权限配置运行时继续可用；不会删除旧密钥或数据库，也不会进入整进程
+重启循环。
+
+一次性 legacy 迁移使用 Rust CLI `whalehall-legacy-migrate`，固定为四步
+`report → migrate → verify → cleanup`。`report` 只读扫描指定
+`snapshotAtMs` 之前最近七天并给出范围、计数、跳过原因、数据集 hash 和
+report hash，报告不包含 payload。只有来源和 shape 均可验证的五秒 input
+bucket 与 presence boundary 能迁入 v2；旧浏览器、AX、编辑器、目标、前台
+应用和 process 数据继续标记为 `legacy-noise`，不会因迁移而绕过 v2 的隐私
+规则。`migrate` 必须带回完全相同的 report hash，且目的库必须为空或只含
+同次迁移的幂等部分；目的库已有 goal 或正常 v2 观测时 fail closed。
+`cleanup` 默认不存在，只有再次验证 report/migration hash、确认来源进程已
+停止并同时传入 `--delete-legacy` 与 `SOURCE_STOPPED` 才会删除精确的旧
+DB/WAL/SHM。由于安全可迁子集只有 metadata，该工具明确报告
+`decryptionStatus=not_applicable_metadata_only_policy`，但仍要求 v2
+Keychain key 可用；它不会伪称对被跳过的旧明文做过可解密迁移。
+
+零扩展 AX/OCR 无法数学判定一个没有 secure role、标签或上下文提示的普通
+数字文本框是否为 OTP。实现会基于控件角色、窗口/可见上下文、银行卡位数和
+敏感标记保守拦截，但生产发布前仍必须用真实的认证/支付回放集证明“0 泄漏”
+门槛；未通过时只能继续 shadow，不能把这一限制包装成已解决。
+
+### Rust/TypeScript 语义契约
+
+TypeScript 在 `src/agent/timeline-v2` 手写镜像并严格校验 Rust
+`semantic-event.v2`。固定事件类型为：
+
+```text
+application.foregroundChanged
+application.visibleContentChanged
+application.textValueChanged
+browser.visiblePageChanged
+ui.focusChanged
+ui.controlActivated
+input.activityBucket
+presence.changed
+goal.changed
+application.processObservedBatch
+coverage.gap
+```
+
+每条事件携带 observation 血缘、单调 cursor、goal version、可靠度、
+coverage、content state、taxonomy/projector version 和由 Rust allow-list
+决定的 `countClass`。调用方不能把进程扫描伪装成 effective：
+
+- 前七种用户语义变化为 `effective`；
+- presence/goal 为 `boundary`；
+- process batch 与匿名 coverage gap 永远为 `ignored`。
+
+消费使用命名 consumer `whalehall.timeline.v2`。push 只用于唤醒；所有数据
+均从 durable journal 按 `sec2_` semantic cursor 拉取（`sc2_` 只属于 raw
+observation），并明确请求 `includeContent:true`。
+collector/window 经 Rust vault 成功加密后才提交 semantic cursor。目标正文
+无法解密时 fail closed 并等待原 cursor 重放，不伪造目标或继续输出目标
+相关性。
+
+### 双触发与跨窗 Episode
+
+Timeline v2 严格执行：
+
+```text
+effectiveEventCount >= 64
+OR
+now >= firstEffectiveEventAt + 300000ms
+```
+
+- 0 条事件不创建 timer，也不产生空 Timeline/AgentInput；
+- 第 63 条不触发，第 64 条只封窗一次；
+- process、heartbeat、tool、reflection 不计数；
+- goal/AFK/锁屏/睡眠在非空窗口上优先封窗；
+- 授权撤销优先于全部触发并丢弃尚未处理的 open window；
+- 每个 semantic event 只属于一个主窗口，最多五条、30 秒的前窗内容仅作
+  `contextOnly`。
+
+处理窗口只是崩溃恢复和 AgentInput 幂等单位，不等于一项活动。
+EvidenceFact 由固定中文模板渲染，保留
+`observation → event → fact` 精确血缘。Episode 以应用、窗口、文档或页面
+anchor、30 秒无活动和 presence/goal boundary 分段；小于 10 秒且返回原
+anchor 的切换作为 supporting evidence。同一 goal 下、间隔不超过 90 秒且
+anchor 兼容的相邻窗口写成同一 `episodeId` 的新 immutable revision，并
+指向 `supersedesRevisionId`。迟到证据生成 correction/revision，不覆盖旧
+摘要。
+
+ModernBERT v2 就绪前使用明确标记的 deterministic cold-start classifier。
+Qwen 只生成一句以“可能在”开头的假设，必须引用该 Episode 内 1–8 个
+`factId`；Schema 或引用校验失败一次后使用确定性模板。事实子项永远来自
+EvidenceFact renderer，Qwen 不能撰写或改写事实。无目标时 relevance 为
+`null`。
+
+### TimelineJournal、vault 和本地 Outbox
+
+`timeline-v2.sqlite3` 的 collector snapshot、window、fact、episode、
+summary 和 AgentInput 全部只保存 Rust vault `contentRef`。SQLite 明文列只
+包含 ID、不可逆 hash、时间、计数、状态、revision 和 lease 元数据：
+
+- Rust vault 负责 macOS Keychain、AES-256-GCM、nonce 和 key version；
+- collector/window 内容七天到期；
+- fact/episode/summary/AgentInput 默认三十天到期；
+- 七天后重建不含旧 raw context 的 collector；三十天后同步清理 Timeline
+  SQLite 索引行并 truncate WAL，避免只删 vault 密文却永久保留索引；
+- vault 不可用时写入失败，绝不退化为明文；
+- DB、WAL、SHM 权限为 `0600`，父目录为 `0700`。
+
+每个完成窗口原子写入 `TimelineSummaryV2` 和一个确定性
+`AgentInputV1`。Outbox 初始状态始终为 `HELD_LOCAL`，没有 dispatcher 和
+网络上传。未来必须显式 release 后才进入
+`READY → LEASED → ACKED`；lease 到期可重领，Agent 按 idempotency key
+去重。
+
+推理 Job 使用真实的持久化阶段：
+
+```text
+READY → RUNNING → RESULT_PERSISTED → COMMITTING → COMMITTED
+             ↘ RETRY_WAIT → TERMINAL_FAILED
+```
+
+结果、Fact、Episode、Summary 与 `HELD_LOCAL` Outbox 在一个 IMMEDIATE
+事务内完成后才进入 `RESULT_PERSISTED`；`COMMITTING` 和 `COMMITTED`
+分别使用后续事务。重启看到两个中间态时只做幂等 finalize，绝不重新运行
+ModernBERT/Qwen 或复制 Outbox。
+
+`TrainingDatasetSink` 当前只有 disabled 接口和 Null implementation。
+构造 Timeline service 时若传入 enabled sink 会直接拒绝；本阶段不会连接
+家里云或其他远端，也不展示时间线页面。
+
+### 五分钟审计导出
+
+`TimelineFiveMinuteAuditExporter.exportFiveMinutes(fromMs)` 固定导出
+`[fromMs, fromMs + 300000)`：
+
+```text
+manifest + permissions/coverage
++ rawObservations
++ semanticEvents
++ evidenceFacts
++ episode revisions
++ timeline summaries
++ observation → event → fact → episode → timeline lineage
+```
+
+默认导出遮蔽正文、假设和 Fact 参数；只有调用方显式请求
+`includeDecryptedContent:true` 时，Rust 才可返回仍在保留期且已授权的文本。
+导出协议不包含截图字节或路径。Renderer 只能请求 Bun 执行文件导出，永远
+拿不到 audit bundle、Held AgentInput、明文或完整文件路径。解密导出需要
+原生二次确认和目录选择；文件以 `O_EXCL`、`0600` 新建并 `fsync`，不会覆盖
+已有文件。任一 raw/event/fact/episode/summary 跨越所选五分钟边界时，导出
+会 fail closed 地省略该层内容，在 manifest 记录各层 omission 数并把 coverage
+标为 unavailable，绝不把相邻时段的明文一并导出。默认脱敏还会在 Bun
+边界再次执行 raw allow-list 和字符串脱敏，解密模式也会剥离任何截图、像素
+缓冲或临时文件字段。
+
+WebView 的生产 CSP 只允许自身资源和 Electrobun 固定使用的
+`ws://localhost:*` 本机 RPC。该通道使用每个 WebView 独立的 AES-GCM
+密钥；生产 CSP 不允许任何 localhost HTTP，也不允许 5173 HMR。5173 的
+开发连接仅由 Vite dev transform 临时加入。Renderer 不再拥有通用
+`tool.list/tool.call/tool.cancel` 或 Local Tool 事件通道，因此无法直接
+查询 legacy 浏览器历史、AX 树或调用数据清理工具。
+
+stable macOS 构建会无条件要求 Developer ID、十位 Team ID、
+Hardened Runtime 与 notarization 开关；缺任一项在配置或内层 native 构建
+阶段立即失败。签名顺序固定为 Rust child、Observer、外层 Electrobun app。
+由于 Electrobun 在配置模块抛异常时会尝试默认配置，release gate 使用进程级
+fail-closed 终止，并由子进程回归测试覆盖，禁止回退后继续生成未签名 stable。
+dev/canary 仍可 ad-hoc 构建，但会被明确标记且不能作为生产制品。
+运行时只接受 `dev|canary|stable` 三种 channel；每次启动固定 sibling
+Observer 前都会重新检查 bundle ID 和 `codesign --verify --strict`，stable
+还要求 Rust child 与 Observer 的非空 Team ID 完全一致。
+
+## Legacy v1 回滚边界
 
 WhaleHall 已实现可运行的本地事件与反思骨架：
 
@@ -213,12 +436,21 @@ WHALEHALL_MODERNBERT_TOKEN='runtime-secret-from-secure-env'
 
 ## 训练
 
-完整可执行流程、数据配额、Teacher A/B/C、gate、断点续跑、DAPT、多任务蒸馏、校准、评测和制品 smoke 见 [`training/README.md`](../training/README.md)。
+训练实现、数据配置和模型代码不属于 WhaleHall 桌面应用仓库，也不得由应用
+仓库的远端或发布流水线分发。本机开发时使用独立、未纳入 Git worktree 的
+`WhaleHall-Training` 工作目录；应用仓库只保留运行时输入输出协议和模型版本
+校验。
 
-最低验证：
+训练工作区最低验证：
 
 ```bash
-PYTHONPATH=training python3 -m unittest discover -s training/tests -v
+cd /path/to/WhaleHall-Training
+PYTHONPATH=. python3 -m unittest discover -s tests -v
+```
+
+应用运行时单独验证：
+
+```bash
 bun test tests/reflection-*.test.ts tests/ollama-*.test.ts
 bun run check
 ```
