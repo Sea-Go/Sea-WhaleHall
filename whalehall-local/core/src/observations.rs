@@ -15,8 +15,9 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use whalehall_local_protocol::{
     AuditQueryFiveMinutesParams, CoverageLevelV2, EventGoalChangeParams, EvidenceReliabilityV2,
-    MAX_SEMANTIC_QUERY_LIMIT, ObservationIntervalV2, ObservationSensorV2, ObservationSourceV2,
-    ObservationSubjectV2, RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2, RawObservationV2,
+    MAX_SEMANTIC_QUERY_LIMIT, MonitoringPermissionState, MonitoringPermissions,
+    ObservationIntervalV2, ObservationSensorV2, ObservationSourceV2, ObservationSubjectV2,
+    RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2, RawObservationV2,
     SEMANTIC_EVENT_SCHEMA_VERSION, SEMANTIC_PROJECTOR_VERSION, SEMANTIC_TAXONOMY_VERSION,
     SemanticCommitParams, SemanticCommitResult, SemanticContentStateV2, SemanticCountClassV2,
     SemanticEventV2, SemanticQueryParams, SemanticQueryResult, VaultOpenBatchParams,
@@ -41,6 +42,8 @@ const KEY_VERSION: &str = "keychain-v1";
 const FIVE_MINUTES_MS: i64 = 300_000;
 const DEVICE_ID_ENV: &str = "WHALEHALL_DEVICE_ID";
 const SESSION_ID_ENV: &str = "WHALEHALL_SESSION_ID";
+const AUTHORIZATION_SNAPSHOT_META_KEY: &str = "authorization_snapshot_v1";
+const AUTHORIZATION_SNAPSHOT_SCHEMA_VERSION: &str = "authorization-snapshot.v1";
 #[cfg(target_os = "macos")]
 const LEGACY_DEV_KEYCHAIN_ENV: &str = "WHALEHALL_ALLOW_LEGACY_DEV_KEYCHAIN";
 
@@ -605,6 +608,113 @@ impl ObservationJournal {
         )
     }
 
+    /// Persists a metadata-only snapshot whenever the bundled observer's
+    /// macOS authorization state changes. The most recent durable snapshot is
+    /// the comparison baseline, so an offline revocation is materialized on
+    /// the next helper startup and identical heartbeat/status frames are not
+    /// repeated as Timeline boundaries.
+    pub fn append_authorization_change(
+        &self,
+        boot_id: &str,
+        observed_at_ms: i64,
+        permissions: &MonitoringPermissions,
+        reason: &str,
+    ) -> Result<Option<ObservationAppendResult>, ObservationJournalError> {
+        validate_ascii_identifier("observer authorization boot id", boot_id, 128)?;
+        if !(0..=MAX_SAFE_INTEGER).contains(&observed_at_ms) {
+            return Err(ObservationJournalError::Configuration(
+                "observer authorization timestamp must be a non-negative safe integer".to_owned(),
+            ));
+        }
+        if !matches!(
+            reason,
+            "startup_snapshot"
+                | "runtime_change"
+                | "manual_refresh"
+                | "status_request"
+                | "heartbeat_check"
+                | "legacy_status"
+        ) {
+            return Err(ObservationJournalError::Configuration(
+                "observer authorization reason is unsupported".to_owned(),
+            ));
+        }
+
+        let previous = self.latest_authorization_permissions()?;
+        if previous.as_ref() == Some(permissions) {
+            return Ok(None);
+        }
+        let changed_permissions = authorization_permission_names(previous.as_ref(), permissions);
+        let transition = authorization_transition(previous.as_ref(), permissions);
+        let permission_value = serde_json::to_value(permissions)?;
+        let metadata = json!({
+            "permissions": permission_value,
+            "changedPermissions": changed_permissions,
+            "transition": transition,
+            "reason": reason,
+        });
+        let snapshot_hash = digest_json(&metadata)?;
+        let deduplication_key =
+            format!("observer-authorization:{boot_id}:{observed_at_ms}:{snapshot_hash}");
+        self.ingest(
+            &deduplication_key,
+            RawObservationInputV2 {
+                schema_version: RAW_OBSERVATION_SCHEMA_VERSION.to_owned(),
+                kind: "authorization.changed".to_owned(),
+                interval: ObservationIntervalV2 {
+                    started_at_ms: observed_at_ms,
+                    ended_at_ms: observed_at_ms,
+                },
+                source: ObservationSourceV2 {
+                    sensor: ObservationSensorV2::Workspace,
+                    adapter_version: "observer-authorization.v2".to_owned(),
+                },
+                subject: ObservationSubjectV2 {
+                    app_id: "system.authorization".to_owned(),
+                    app_name: "macOS".to_owned(),
+                    opaque_window_id: None,
+                },
+                reliability: EvidenceReliabilityV2::High,
+                coverage: vec![CoverageLevelV2::Metadata],
+                redactions: Vec::new(),
+                metadata,
+                content: None,
+            },
+        )
+        .map(Some)
+    }
+
+    fn latest_authorization_permissions(
+        &self,
+    ) -> Result<Option<MonitoringPermissions>, ObservationJournalError> {
+        let connection = connect(&self.inner.database_path)?;
+        let stored = connection
+            .query_row(
+                "SELECT value FROM journal_meta WHERE key = ?1",
+                [AUTHORIZATION_SNAPSHOT_META_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        stored
+            .map(|snapshot| {
+                let snapshot: Value = serde_json::from_str(&snapshot)?;
+                if snapshot.get("schemaVersion").and_then(Value::as_str)
+                    != Some(AUTHORIZATION_SNAPSHOT_SCHEMA_VERSION)
+                {
+                    return Err(ObservationJournalError::Configuration(
+                        "stored authorization snapshot has an unsupported schema".to_owned(),
+                    ));
+                }
+                let permissions = snapshot.get("permissions").cloned().ok_or_else(|| {
+                    ObservationJournalError::Configuration(
+                        "stored authorization snapshot is missing permissions".to_owned(),
+                    )
+                })?;
+                serde_json::from_value(permissions).map_err(ObservationJournalError::from)
+            })
+            .transpose()
+    }
+
     /// Records an interval where the native observer explicitly reported
     /// missing coverage, or where its durable sequence skipped. Gap rows never
     /// contain captured content and are idempotent by their caller-supplied key.
@@ -826,6 +936,9 @@ impl ObservationJournal {
             insert_semantic_projection(&transaction, &self.inner, projected, &observation_id)?;
         if sanitized.kind == "goal.changed" {
             set_current_goal_version(&transaction, goal_transition_version(&sanitized, "next")?)?;
+        }
+        if sanitized.kind == "authorization.changed" {
+            set_authorization_snapshot(&transaction, &sanitized)?;
         }
         let observation = load_raw_observation(&transaction, raw_sequence, false, None)?;
         transaction.commit()?;
@@ -1537,6 +1650,32 @@ fn set_current_goal_version(
     Ok(())
 }
 
+fn set_authorization_snapshot(
+    transaction: &Transaction<'_>,
+    observation: &RawObservationInputV2,
+) -> Result<(), ObservationJournalError> {
+    let permissions = observation
+        .metadata
+        .get("permissions")
+        .cloned()
+        .ok_or_else(|| {
+            ObservationJournalError::Configuration(
+                "authorization.changed is missing validated permissions".to_owned(),
+            )
+        })?;
+    let snapshot = serde_json::to_string(&json!({
+        "schemaVersion": AUTHORIZATION_SNAPSHOT_SCHEMA_VERSION,
+        "permissions": permissions,
+    }))?;
+    transaction.execute(
+        "INSERT INTO journal_meta (key, value)
+         VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![AUTHORIZATION_SNAPSHOT_META_KEY, snapshot],
+    )?;
+    Ok(())
+}
+
 fn goal_transition_version(
     observation: &RawObservationInputV2,
     field: &str,
@@ -1596,6 +1735,69 @@ fn validate_goal_transition(
         ));
     }
     Ok(())
+}
+
+fn authorization_permission_names(
+    previous: Option<&MonitoringPermissions>,
+    current: &MonitoringPermissions,
+) -> Vec<&'static str> {
+    authorization_permission_states(current)
+        .into_iter()
+        .filter_map(|(name, state)| {
+            let previous_state = previous.and_then(|permissions| {
+                authorization_permission_states(permissions)
+                    .into_iter()
+                    .find_map(|(candidate, state)| (candidate == name).then_some(state))
+            });
+            (previous_state != Some(state)).then_some(name)
+        })
+        .collect()
+}
+
+fn authorization_transition(
+    previous: Option<&MonitoringPermissions>,
+    current: &MonitoringPermissions,
+) -> &'static str {
+    let mut revoked = false;
+    let mut granted = false;
+    for (name, current_state) in authorization_permission_states(current) {
+        let previous_state = previous.and_then(|permissions| {
+            authorization_permission_states(permissions)
+                .into_iter()
+                .find_map(|(candidate, state)| (candidate == name).then_some(state))
+        });
+        if current_state == MonitoringPermissionState::Granted
+            && previous_state.is_some_and(|state| state != MonitoringPermissionState::Granted)
+        {
+            granted = true;
+        }
+        if (current_state == MonitoringPermissionState::Denied
+            && previous_state != Some(MonitoringPermissionState::Denied))
+            || (previous_state == Some(MonitoringPermissionState::Granted)
+                && current_state != MonitoringPermissionState::Granted)
+        {
+            revoked = true;
+        }
+    }
+    match (previous, revoked, granted) {
+        (None, true, _) => "revoked",
+        (None, false, _) => "baseline",
+        (Some(_), true, true) => "mixed",
+        (Some(_), true, false) => "revoked",
+        (Some(_), false, true) => "granted",
+        (Some(_), false, false) => "changed",
+    }
+}
+
+fn authorization_permission_states(
+    permissions: &MonitoringPermissions,
+) -> [(&'static str, MonitoringPermissionState); 4] {
+    [
+        ("accessibility", permissions.accessibility),
+        ("screenRecording", permissions.screen_recording),
+        ("inputMonitoring", permissions.input_monitoring),
+        ("automation", permissions.automation),
+    ]
 }
 
 fn project_observation(
@@ -1897,6 +2099,13 @@ fn project_observation(
                 raw_content_state,
             )
         }),
+        "authorization.changed" => Ok(base(
+            semantic_event_kinds::AUTHORIZATION_CHANGED,
+            SemanticCountClassV2::Boundary,
+            observation.metadata.clone(),
+            None,
+            SemanticContentStateV2::Available,
+        )),
         "application.processObservedBatch" => Ok(base(
             semantic_event_kinds::APPLICATION_PROCESS_OBSERVED_BATCH,
             SemanticCountClassV2::Ignored,
@@ -2754,6 +2963,48 @@ fn validate_kind_payload(input: &RawObservationInputV2) -> Result<(), Observatio
                 && exact_content(&["previous", "next"], &[])
                 && content.is_some()
         }
+        "authorization.changed" => {
+            let transition = metadata.get("transition").and_then(Value::as_str);
+            input.source.sensor == ObservationSensorV2::Workspace
+                && input.source.adapter_version == "observer-authorization.v2"
+                && input.subject.app_id == "system.authorization"
+                && input.subject.app_name == "macOS"
+                && input.subject.opaque_window_id.is_none()
+                && input.reliability == EvidenceReliabilityV2::High
+                && input.redactions.is_empty()
+                && exact_metadata(
+                    &["permissions", "changedPermissions", "transition", "reason"],
+                    &[],
+                )
+                && metadata
+                    .get("permissions")
+                    .is_some_and(is_authorization_permissions)
+                && metadata
+                    .get("changedPermissions")
+                    .is_some_and(is_changed_permission_list)
+                && transition.is_some_and(|transition| {
+                    matches!(
+                        transition,
+                        "baseline" | "changed" | "granted" | "revoked" | "mixed"
+                    )
+                })
+                && metadata
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| {
+                        matches!(
+                            reason,
+                            "startup_snapshot"
+                                | "runtime_change"
+                                | "manual_refresh"
+                                | "status_request"
+                                | "heartbeat_check"
+                                | "legacy_status"
+                        )
+                    })
+                && input.coverage == [CoverageLevelV2::Metadata]
+                && content.is_none()
+        }
         "application.processObservedBatch" => {
             exact_metadata(&["started", "exited"], &[])
                 && ["started", "exited"].iter().all(|field| {
@@ -3227,6 +3478,46 @@ fn exact_object_keys(object: &Map<String, Value>, required: &[&str], optional: &
         && object
             .keys()
             .all(|key| required.contains(&key.as_str()) || optional.contains(&key.as_str()))
+}
+
+fn is_authorization_permissions(value: &Value) -> bool {
+    let Some(permissions) = value.as_object() else {
+        return false;
+    };
+    exact_object_keys(
+        permissions,
+        &[
+            "accessibility",
+            "screenRecording",
+            "inputMonitoring",
+            "automation",
+        ],
+        &[],
+    ) && permissions.values().all(|state| {
+        state.as_str().is_some_and(|state| {
+            matches!(
+                state,
+                "unknown" | "granted" | "denied" | "not_determined" | "unsupported"
+            )
+        })
+    })
+}
+
+fn is_changed_permission_list(value: &Value) -> bool {
+    let Some(values) = value.as_array() else {
+        return false;
+    };
+    let mut unique = HashSet::new();
+    !values.is_empty()
+        && values.len() <= 4
+        && values.iter().all(|value| {
+            value.as_str().is_some_and(|permission| {
+                matches!(
+                    permission,
+                    "accessibility" | "screenRecording" | "inputMonitoring" | "automation"
+                ) && unique.insert(permission)
+            })
+        })
 }
 
 fn is_u32_json(value: &Value) -> bool {

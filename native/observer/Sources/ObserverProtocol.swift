@@ -135,6 +135,7 @@ final class FrameEmitter: @unchecked Sendable {
             type: "ready",
             fields: [
                 "adapterVersion": observerAdapterVersion,
+                "authorizationReason": "startup_snapshot",
                 "minimumMacOSVersion": "14.0",
                 "capabilities": [
                     "workspace": true,
@@ -150,8 +151,14 @@ final class FrameEmitter: @unchecked Sendable {
         )
     }
 
-    func emitPermissionStatus(_ snapshot: PermissionSnapshot) {
-        emitUnsequenced(type: "permissionStatus", fields: ["permissions": snapshot.dictionary])
+    func emitPermissionStatus(_ snapshot: PermissionSnapshot, reason: String) {
+        emitUnsequenced(
+            type: "permissionStatus",
+            fields: [
+                "authorizationReason": reason,
+                "permissions": snapshot.dictionary,
+            ]
+        )
     }
 
     func emitHeartbeat(state: String, permissionSnapshot: PermissionSnapshot) {
@@ -163,6 +170,7 @@ final class FrameEmitter: @unchecked Sendable {
             type: "heartbeat",
             fields: [
                 "state": state,
+                "authorizationReason": "heartbeat_check",
                 "permissions": permissionSnapshot.dictionary,
                 "unackedFrames": queuedFrames,
                 "unackedBytes": queuedBytes,

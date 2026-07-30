@@ -169,7 +169,7 @@ final class ObserverRuntime: @unchecked Sendable {
         case "status":
             let permissions = permissionSnapshot(prompt: false)
             lastPermissionSnapshot = permissions
-            emitter.emitPermissionStatus(permissions)
+            emitter.emitPermissionStatus(permissions, reason: "status_request")
             emitter.emitCommandResult(id: id, ok: true, state: state)
         case "refreshPermissions":
             let prompt = dictionary["prompt"] as? Bool ?? false
@@ -180,7 +180,7 @@ final class ObserverRuntime: @unchecked Sendable {
             let permissions = permissionSnapshot(prompt: prompt)
             let changed = permissions != lastPermissionSnapshot
             lastPermissionSnapshot = permissions
-            emitter.emitPermissionStatus(permissions)
+            emitter.emitPermissionStatus(permissions, reason: "manual_refresh")
             if changed, state == "running" {
                 stopMonitoring(nextState: "idle")
                 startMonitoring()
@@ -243,7 +243,7 @@ final class ObserverRuntime: @unchecked Sendable {
         let permissions = permissionSnapshot(prompt: false)
         if permissions != lastPermissionSnapshot {
             lastPermissionSnapshot = permissions
-            emitter.emitPermissionStatus(permissions)
+            emitter.emitPermissionStatus(permissions, reason: "runtime_change")
             if state == "running" {
                 stopMonitoring(nextState: "idle")
                 startMonitoring()
@@ -271,7 +271,7 @@ final class ObserverRuntime: @unchecked Sendable {
                 let permissions = self.permissionSnapshot(prompt: false)
                 let changed = permissions != self.lastPermissionSnapshot
                 self.lastPermissionSnapshot = permissions
-                self.emitter.emitPermissionStatus(permissions)
+                self.emitter.emitPermissionStatus(permissions, reason: "manual_refresh")
                 if changed, self.state == "running" {
                     self.stopMonitoring(nextState: "idle")
                     self.startMonitoring()

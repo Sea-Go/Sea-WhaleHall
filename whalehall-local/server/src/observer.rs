@@ -535,7 +535,8 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status, &settings_store).await {
+            if handle_idle_command(command, &mut settings, &status, &settings_store, &journal).await
+            {
                 break;
             }
             if manual_retry && settings.enabled && !settings.paused {
@@ -560,7 +561,8 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status, &settings_store).await {
+            if handle_idle_command(command, &mut settings, &status, &settings_store, &journal).await
+            {
                 break;
             }
             if manual_retry && settings.enabled && !settings.paused {
@@ -579,7 +581,8 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status, &settings_store).await {
+            if handle_idle_command(command, &mut settings, &status, &settings_store, &journal).await
+            {
                 break;
             }
             if manual_retry && settings.enabled && !settings.paused {
@@ -643,7 +646,15 @@ async fn run_supervisor(
             _ = tokio::time::sleep(delay) => {}
             command = commands.recv() => {
                 let Some(command) = command else { break; };
-                if handle_idle_command(command, &mut settings, &status, &settings_store).await {
+                if handle_idle_command(
+                    command,
+                    &mut settings,
+                    &status,
+                    &settings_store,
+                    &journal,
+                )
+                .await
+                {
                     break;
                 }
             }
@@ -1015,6 +1026,7 @@ async fn handle_idle_command(
     settings: &mut RuntimeSettings,
     status: &Arc<Mutex<MonitoringStatusResult>>,
     settings_store: &MonitoringSettingsStore,
+    journal: &ObservationJournal,
 ) -> bool {
     match command {
         SupervisorCommand::Configure { params, response } => {
@@ -1077,7 +1089,7 @@ async fn handle_idle_command(
             }
             let result = match settings.helper_path.as_deref() {
                 Some(helper_path) => {
-                    run_permission_probe(helper_path, status, resting_state, prompt).await
+                    run_permission_probe(helper_path, status, journal, resting_state, prompt).await
                 }
                 None => {
                     set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
@@ -1107,6 +1119,7 @@ fn command_requests_manual_retry(command: &SupervisorCommand) -> bool {
 async fn run_permission_probe(
     helper_path: &Path,
     status: &Arc<Mutex<MonitoringStatusResult>>,
+    journal: &ObservationJournal,
     resting_state: MonitoringState,
     prompt: bool,
 ) -> Result<MonitoringStatusResult, String> {
@@ -1160,7 +1173,7 @@ async fn run_permission_probe(
             if line.len() > MAX_HELPER_FRAME_BYTES {
                 return Err("observer_frame_too_large");
             }
-            match handle_permission_probe_frame(&line, status)? {
+            match handle_permission_probe_frame(&line, status, journal)? {
                 HelperFrameEvent::PermissionStatus => {
                     permission_status_received = true;
                 }
@@ -1245,6 +1258,13 @@ struct HelperFrameState {
     permission_frame_received: bool,
 }
 
+struct AuthorizationFrame {
+    boot_id: String,
+    observed_at_ms: i64,
+    permissions: MonitoringPermissions,
+    reason: String,
+}
+
 async fn handle_helper_frame(
     bytes: &[u8],
     journal: &ObservationJournal,
@@ -1325,7 +1345,16 @@ async fn handle_helper_frame(
                 HelperFrameEvent::Other
             };
             frame_state.last_heartbeat = Instant::now();
-            apply_permission_frame(status, &value)?;
+            let authorization = parse_authorization_frame(&value)?;
+            journal
+                .append_authorization_change(
+                    &authorization.boot_id,
+                    authorization.observed_at_ms,
+                    &authorization.permissions,
+                    &authorization.reason,
+                )
+                .map_err(|_| "observer_permission_persistence_failed")?;
+            apply_permission_frame(status, &authorization);
             frame_state.permission_frame_received = true;
             let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
             current.state = MonitoringState::Running;
@@ -1384,6 +1413,7 @@ async fn handle_helper_frame(
 fn handle_permission_probe_frame(
     bytes: &[u8],
     status: &Arc<Mutex<MonitoringStatusResult>>,
+    journal: &ObservationJournal,
 ) -> Result<HelperFrameEvent, &'static str> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| "observer_invalid_json")?;
     let frame_type = value
@@ -1392,7 +1422,16 @@ fn handle_permission_probe_frame(
         .ok_or("observer_missing_frame_type")?;
     match frame_type {
         "ready" | "heartbeat" | "permissionStatus" => {
-            apply_permission_frame(status, &value)?;
+            let authorization = parse_authorization_frame(&value)?;
+            journal
+                .append_authorization_change(
+                    &authorization.boot_id,
+                    authorization.observed_at_ms,
+                    &authorization.permissions,
+                    &authorization.reason,
+                )
+                .map_err(|_| "observer_permission_persistence_failed")?;
+            apply_permission_frame(status, &authorization);
             Ok(if frame_type == "permissionStatus" {
                 HelperFrameEvent::PermissionStatus
             } else {
@@ -1504,13 +1543,15 @@ async fn write_helper_message(stdin: &mut ChildStdin, value: &Value) -> io::Resu
     stdin.flush().await
 }
 
-fn apply_permission_frame(
-    status: &Arc<Mutex<MonitoringStatusResult>>,
-    value: &Value,
-) -> Result<(), &'static str> {
+fn parse_authorization_frame(value: &Value) -> Result<AuthorizationFrame, &'static str> {
     if value.get("schemaVersion").and_then(Value::as_str) != Some("observer-frame.v1") {
         return Err("observer_invalid_permission_frame");
     }
+    let frame_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|frame_type| matches!(*frame_type, "ready" | "heartbeat" | "permissionStatus"))
+        .ok_or("observer_invalid_permission_frame")?;
     let boot_id = value
         .get("bootId")
         .and_then(Value::as_str)
@@ -1521,6 +1562,27 @@ fn apply_permission_frame(
         .and_then(Value::as_i64)
         .filter(|value| *value >= 0)
         .ok_or("observer_invalid_permission_frame")?;
+    let reason = match value.get("authorizationReason") {
+        Some(Value::String(reason))
+            if matches!(
+                reason.as_str(),
+                "startup_snapshot"
+                    | "runtime_change"
+                    | "manual_refresh"
+                    | "status_request"
+                    | "heartbeat_check"
+            ) =>
+        {
+            reason.as_str()
+        }
+        None => match frame_type {
+            "ready" => "startup_snapshot",
+            "heartbeat" => "heartbeat_check",
+            "permissionStatus" => "legacy_status",
+            _ => unreachable!("permission frame type was validated"),
+        },
+        Some(_) => return Err("observer_invalid_permission_frame"),
+    };
     let permissions = value
         .get("permissions")
         .and_then(Value::as_object)
@@ -1532,22 +1594,30 @@ fn apply_permission_frame(
                 .and_then(Value::as_object)
         })
         .ok_or("observer_invalid_permission_frame")?;
-    let parsed = MonitoringPermissions {
-        accessibility: permission_state(permissions, "accessibility")
-            .ok_or("observer_invalid_permission_frame")?,
-        screen_recording: permission_state(permissions, "screenRecording")
-            .ok_or("observer_invalid_permission_frame")?,
-        input_monitoring: permission_state(permissions, "inputMonitoring")
-            .ok_or("observer_invalid_permission_frame")?,
-        automation: permission_state(permissions, "automation")
-            .ok_or("observer_invalid_permission_frame")?,
-    };
+    Ok(AuthorizationFrame {
+        boot_id: boot_id.to_owned(),
+        observed_at_ms,
+        permissions: MonitoringPermissions {
+            accessibility: permission_state(permissions, "accessibility")
+                .ok_or("observer_invalid_permission_frame")?,
+            screen_recording: permission_state(permissions, "screenRecording")
+                .ok_or("observer_invalid_permission_frame")?,
+            input_monitoring: permission_state(permissions, "inputMonitoring")
+                .ok_or("observer_invalid_permission_frame")?,
+            automation: permission_state(permissions, "automation")
+                .ok_or("observer_invalid_permission_frame")?,
+        },
+        reason: reason.to_owned(),
+    })
+}
+
+fn apply_permission_frame(status: &Arc<Mutex<MonitoringStatusResult>>, frame: &AuthorizationFrame) {
     let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
-    current.permissions = parsed;
+    current.permissions = frame.permissions.clone();
     current.permission_check_state = MonitoringPermissionCheckState::Current;
-    current.permissions_checked_at_ms = Some(observed_at_ms);
-    current.boot_id = Some(boot_id.to_owned());
-    current.last_heartbeat_at_ms = Some(observed_at_ms);
+    current.permissions_checked_at_ms = Some(frame.observed_at_ms);
+    current.boot_id = Some(frame.boot_id.clone());
+    current.last_heartbeat_at_ms = Some(frame.observed_at_ms);
     let preserve_gap = current.coverage.contains(&CoverageLevelV2::Unavailable);
     current.coverage = vec![CoverageLevelV2::Metadata];
     if current.capture_content
@@ -1569,7 +1639,6 @@ fn apply_permission_frame(
     if preserve_gap {
         push_coverage(&mut current.coverage, CoverageLevelV2::Unavailable);
     }
-    Ok(())
 }
 
 fn permission_state(
@@ -1956,6 +2025,19 @@ fn trim_line_end(bytes: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use whalehall_local_core::observations::{
+        ObservationJournalConfig, UnavailableObservationKeyProvider,
+    };
+
+    fn test_journal(directory: &Path) -> ObservationJournal {
+        let mut config = ObservationJournalConfig::new(
+            directory.join("observation-journal.sqlite3"),
+            Arc::new(UnavailableObservationKeyProvider),
+        );
+        config.device_id = Some("observer-test-device".to_owned());
+        config.session_id = Some("observer-test-session".to_owned());
+        ObservationJournal::open_with_config(config).expect("open test observation journal")
+    }
 
     fn test_runtime_settings() -> RuntimeSettings {
         RuntimeSettings {
@@ -2071,6 +2153,7 @@ mod tests {
     async fn idle_changes_persist_before_response_and_restore_after_restart() {
         let directory = tempfile::tempdir().expect("create monitoring settings directory");
         let store = MonitoringSettingsStore::new(directory.path());
+        let journal = test_journal(directory.path());
         let status = test_status();
         let mut settings = test_runtime_settings();
         let (configure_response, configured) = oneshot::channel();
@@ -2088,6 +2171,7 @@ mod tests {
                 &mut settings,
                 &status,
                 &store,
+                &journal,
             )
             .await
         );
@@ -2112,6 +2196,7 @@ mod tests {
                 &mut settings,
                 &status,
                 &store,
+                &journal,
             )
             .await
         );
@@ -2220,6 +2305,7 @@ mod tests {
         )
         .expect("block monitoring settings directory");
         let store = MonitoringSettingsStore::new(directory.path());
+        let journal = test_journal(directory.path());
         let status = test_status();
         let mut settings = test_runtime_settings();
         let original = settings.clone();
@@ -2238,6 +2324,7 @@ mod tests {
                 &mut settings,
                 &status,
                 &store,
+                &journal,
             )
             .await
         );
@@ -2481,12 +2568,15 @@ mod tests {
 
     #[test]
     fn permission_frames_expose_check_timestamp_and_probe_rejects_observations() {
+        let directory = tempfile::tempdir().expect("create authorization journal directory");
+        let journal = test_journal(directory.path());
         let status = test_status();
         let permission_frame = br#"{
             "type":"permissionStatus",
             "schemaVersion":"observer-frame.v1",
             "bootId":"boot-1",
             "observedAtMs":1800000000000,
+            "authorizationReason":"manual_refresh",
             "permissions":{
                 "accessibility":"authorized",
                 "screenRecording":"denied",
@@ -2495,7 +2585,7 @@ mod tests {
             }
         }"#;
         assert!(matches!(
-            handle_permission_probe_frame(permission_frame, &status),
+            handle_permission_probe_frame(permission_frame, &status, &journal),
             Ok(HelperFrameEvent::PermissionStatus)
         ));
         let snapshot = status_snapshot(&status);
@@ -2508,8 +2598,40 @@ mod tests {
             snapshot.permissions.accessibility,
             MonitoringPermissionState::Granted
         );
+        let legacy_frame = br#"{
+            "type":"permissionStatus",
+            "schemaVersion":"observer-frame.v1",
+            "bootId":"boot-legacy",
+            "observedAtMs":1800000000001,
+            "permissions":{
+                "accessibility":"denied",
+                "screenRecording":"denied",
+                "inputMonitoring":"not_determined",
+                "automation":"unsupported"
+            }
+        }"#;
+        assert!(matches!(
+            handle_permission_probe_frame(legacy_frame, &status, &journal),
+            Ok(HelperFrameEvent::PermissionStatus)
+        ));
+        let authorization_events = journal
+            .query_semantic(&whalehall_local_protocol::SemanticQueryParams {
+                after_cursor: None,
+                consumer_id: None,
+                limit: 100,
+                include_content: true,
+            })
+            .expect("query persisted authorization frames")
+            .events;
         assert_eq!(
-            handle_permission_probe_frame(br#"{"type":"observation"}"#, &status).err(),
+            authorization_events
+                .last()
+                .expect("legacy frame must be persisted")
+                .payload["reason"],
+            "legacy_status"
+        );
+        assert_eq!(
+            handle_permission_probe_frame(br#"{"type":"observation"}"#, &status, &journal).err(),
             Some("observer_probe_started_sensors")
         );
     }

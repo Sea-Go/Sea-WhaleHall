@@ -11,6 +11,7 @@ type ObserverFrame = {
 	sequence?: number;
 	ok?: boolean;
 	id?: string;
+	authorizationReason?: string;
 	capabilities?: Record<string, boolean>;
 	observation?: {
 		schemaVersion: string;
@@ -126,6 +127,7 @@ macOSTest(
 		const ready = await frames.next();
 		expect(ready.type).toBe("ready");
 		expect(ready.schemaVersion).toBe("observer-frame.v1");
+		expect(ready.authorizationReason).toBe("startup_snapshot");
 		expect(ready.capabilities?.storesScreenshots).toBe(false);
 		expect(ready.capabilities?.readsKeyValues).toBe(false);
 

@@ -61,6 +61,7 @@ pub mod semantic_event_kinds {
     pub const INPUT_ACTIVITY_BUCKET: &str = "input.activityBucket";
     pub const PRESENCE_CHANGED: &str = "presence.changed";
     pub const GOAL_CHANGED: &str = "goal.changed";
+    pub const AUTHORIZATION_CHANGED: &str = "authorization.changed";
     pub const APPLICATION_PROCESS_OBSERVED_BATCH: &str = "application.processObservedBatch";
     pub const COVERAGE_GAP: &str = "coverage.gap";
 }
@@ -821,6 +822,7 @@ mod tests {
             desktop_event_kinds::GOAL_CONTEXT_CHANGED,
             desktop_event_kinds::PRESENCE_LOCKED,
             semantic_event_kinds::APPLICATION_PROCESS_OBSERVED_BATCH,
+            semantic_event_kinds::AUTHORIZATION_CHANGED,
         ] {
             assert!(
                 !event_kind_contributes_to_reflection_count(kind),
