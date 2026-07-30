@@ -1,14 +1,17 @@
+mod observer;
+
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use whalehall_local_core::ToolHost;
 use whalehall_local_core::events::{EventAppendResult, EventJournal, EventJournalError};
+use whalehall_local_core::observations::{ObservationJournal, ObservationJournalError};
 use whalehall_local_core::sensors::accessibility_tree::{
     AccessibilityConfig, AccessibilityService, SystemAccessibilityProvider,
 };
@@ -31,13 +34,19 @@ use whalehall_local_core::sensors::vscode_edit_bridge::{
     VscodeEditBridgeConfig, VscodeEditBridgeService,
 };
 use whalehall_local_protocol::{
-    DesktopEventFrame, DesktopEventFrameKind, EventCommitParams, EventGoalChangeParams,
-    EventGoalChangeResult, EventQueryParams, MAX_JSONL_LINE_BYTES, OutboundMessage, Request,
-    Response, RuntimeHealth, ToolCallParams, ToolCallResult, ToolCancelParams, ToolCancelResult,
-    ToolListResult, error_codes,
+    AuditQueryFiveMinutesParams, AuditQueryFiveMinutesResult, DesktopEventFrame,
+    DesktopEventFrameKind, EventCommitParams, EventGoalChangeParams, EventGoalChangeResult,
+    EventQueryParams, MAX_JSONL_LINE_BYTES, MonitoringConfigureParams,
+    MonitoringRefreshPermissionsParams, OutboundMessage, Request, Response, RuntimeHealth,
+    SemanticCommitParams, SemanticEventFrame, SemanticEventFrameKind, SemanticQueryParams,
+    ToolCallParams, ToolCallResult, ToolCancelParams, ToolCancelResult, ToolListResult,
+    VaultOpenBatchParams, VaultSealBatchParams, error_codes,
 };
 
+use observer::{ObserverSupervisor, ObserverSupervisorConfig};
+
 const EVENT_RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const OBSERVATION_RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const STARTUP_GOAL_CHANGE_ENV: &str = "WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
 
 pub async fn serve<R, W>(reader: R, writer: W) -> io::Result<()>
@@ -56,7 +65,13 @@ where
     let editor_config = VscodeEditBridgeConfig::from_environment().map_err(io::Error::other)?;
     let event_journal = EventJournal::open(config.database_path.with_file_name("events.sqlite3"))
         .map_err(io::Error::other)?;
-    append_startup_goal_change_from_environment(&event_journal)?;
+    let observation_journal = ObservationJournal::open(
+        config
+            .database_path
+            .with_file_name("observation-journal.sqlite3"),
+    )
+    .map_err(io::Error::other)?;
+    append_startup_goal_change_to_journals_from_environment(&event_journal, &observation_journal)?;
     let activity = ActivityService::start_with_event_journal(
         config,
         Arc::new(SystemForegroundAppProvider),
@@ -74,10 +89,11 @@ where
             return Err(io::Error::other(error));
         }
     };
-    let presence = match PresenceService::start_with_event_journal(
+    let presence = match PresenceService::start_with_journals(
         presence_config,
         Arc::new(SystemPresenceProvider),
         Some(event_journal.clone()),
+        Some(observation_journal.clone()),
     ) {
         Ok(presence) => presence,
         Err(error) => {
@@ -158,6 +174,10 @@ where
         event_journal.database_path().display()
     );
     eprintln!(
+        "observation journal database: {}",
+        observation_journal.database_path().display()
+    );
+    eprintln!(
         "editor bridge database: {}",
         editor.database_path().display()
     );
@@ -173,11 +193,13 @@ where
             input_activity,
             editor,
             event_journal,
+            observation_journal,
         },
     )
     .await
 }
 
+#[cfg(test)]
 fn append_startup_goal_change_from_environment(
     event_journal: &EventJournal,
 ) -> io::Result<Option<EventAppendResult>> {
@@ -199,6 +221,30 @@ fn append_startup_goal_change_from_environment(
     append_startup_goal_change_json(event_journal, &serialized)
 }
 
+fn append_startup_goal_change_to_journals_from_environment(
+    event_journal: &EventJournal,
+    observation_journal: &ObservationJournal,
+) -> io::Result<Option<EventAppendResult>> {
+    let Some(serialized) = std::env::var_os(STARTUP_GOAL_CHANGE_ENV) else {
+        return Ok(None);
+    };
+    unsafe {
+        std::env::remove_var(STARTUP_GOAL_CHANGE_ENV);
+    }
+    let serialized = serialized.into_string().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Startup goal change environment value is not valid UTF-8.",
+        )
+    })?;
+    append_startup_goal_change_json_with_observations(
+        event_journal,
+        observation_journal,
+        &serialized,
+    )
+}
+
+#[cfg(test)]
 fn append_startup_goal_change_json(
     event_journal: &EventJournal,
     serialized: &str,
@@ -212,6 +258,50 @@ fn append_startup_goal_change_json(
     event_journal
         .reconcile_startup_goal_change(&params)
         .map_err(io::Error::other)
+}
+
+fn append_startup_goal_change_json_with_observations(
+    event_journal: &EventJournal,
+    observation_journal: &ObservationJournal,
+    serialized: &str,
+) -> io::Result<Option<EventAppendResult>> {
+    let intent: EventGoalChangeParams = serde_json::from_str(serialized).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid startup goal change parameters: {error}"),
+        )
+    })?;
+    let result = event_journal
+        .reconcile_startup_goal_change(&intent)
+        .map_err(io::Error::other)?;
+    if let Some(result) = result.as_ref() {
+        let materialized = EventGoalChangeParams {
+            previous: serde_json::from_value(result.event.payload["previous"].clone())
+                .map_err(|_| io::Error::other("Invalid materialized startup goal boundary"))?,
+            next: serde_json::from_value(result.event.payload["next"].clone())
+                .map_err(|_| io::Error::other("Invalid materialized startup goal boundary"))?,
+            occurred_at_ms: result.event.occurred_at_ms,
+            deduplication_key: intent.deduplication_key,
+        };
+        observation_journal
+            .append_goal_change(&materialized)
+            .map_err(|_| {
+                io::Error::other("Failed to synchronize startup goal with observation journal")
+            })?;
+    } else if intent.previous != intent.next {
+        observation_journal
+            .append_goal_change(&intent)
+            .map_err(|_| {
+                io::Error::other("Failed to synchronize startup goal with observation journal")
+            })?;
+    } else {
+        observation_journal
+            .reconcile_current_goal_version(intent.next.as_ref().map(|goal| goal.version))
+            .map_err(|_| {
+                io::Error::other("Failed to synchronize startup goal with observation journal")
+            })?;
+    }
+    Ok(result)
 }
 
 pub async fn serve_with_activity<R, W>(
@@ -239,6 +329,12 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let observation_journal = ObservationJournal::open(
+        activity
+            .database_path()
+            .with_file_name("observation-journal.sqlite3"),
+    )
+    .map_err(io::Error::other)?;
     let host = Arc::new(ToolHost::with_activity(activity.clone()));
     serve_session(
         reader,
@@ -246,6 +342,7 @@ where
         host,
         ResidentServices::activity_only(activity),
         event_journal,
+        observation_journal,
     )
     .await
 }
@@ -265,6 +362,12 @@ where
     let event_journal =
         EventJournal::open(activity.database_path().with_file_name("events.sqlite3"))
             .map_err(io::Error::other)?;
+    let observation_journal = ObservationJournal::open(
+        activity
+            .database_path()
+            .with_file_name("observation-journal.sqlite3"),
+    )
+    .map_err(io::Error::other)?;
     let host = Arc::new(ToolHost::with_services(
         activity.clone(),
         inventory.clone(),
@@ -285,6 +388,7 @@ where
             editor: None,
         },
         event_journal,
+        observation_journal,
     )
     .await
 }
@@ -305,6 +409,12 @@ where
     let event_journal =
         EventJournal::open(activity.database_path().with_file_name("events.sqlite3"))
             .map_err(io::Error::other)?;
+    let observation_journal = ObservationJournal::open(
+        activity
+            .database_path()
+            .with_file_name("observation-journal.sqlite3"),
+    )
+    .map_err(io::Error::other)?;
     let input_activity_config =
         InputActivityConfig::from_environment().map_err(io::Error::other)?;
     let input_activity = InputActivityService::start(
@@ -340,6 +450,7 @@ where
             input_activity,
             editor,
             event_journal,
+            observation_journal,
         },
     )
     .await
@@ -363,6 +474,7 @@ where
         input_activity,
         editor,
         event_journal,
+        observation_journal,
     } = services;
     let host = Arc::new(ToolHost::with_all_services(
         activity.clone(),
@@ -387,6 +499,7 @@ where
             editor: Some(editor),
         },
         event_journal,
+        observation_journal,
     )
     .await
 }
@@ -400,6 +513,7 @@ struct AllServicesWithEvents {
     input_activity: InputActivityService,
     editor: VscodeEditBridgeService,
     event_journal: EventJournal,
+    observation_journal: ObservationJournal,
 }
 
 struct ResidentServices {
@@ -410,6 +524,12 @@ struct ResidentServices {
     accessibility: Option<AccessibilityService>,
     input_activity: Option<InputActivityService>,
     editor: Option<VscodeEditBridgeService>,
+}
+
+#[derive(Clone)]
+struct ObservationServices {
+    journal: ObservationJournal,
+    observer: ObserverSupervisor,
 }
 
 impl ResidentServices {
@@ -454,6 +574,7 @@ async fn serve_session<R, W>(
     host: Arc<ToolHost>,
     services: ResidentServices,
     event_journal: EventJournal,
+    observation_journal: ObservationJournal,
 ) -> io::Result<()>
 where
     R: AsyncBufRead + Unpin,
@@ -461,6 +582,16 @@ where
 {
     let retention_task =
         EventRetentionTask::start(event_journal.clone(), EVENT_RETENTION_CLEANUP_INTERVAL);
+    let observation_retention_task = ObservationRetentionTask::start(
+        observation_journal.clone(),
+        OBSERVATION_RETENTION_CLEANUP_INTERVAL,
+    );
+    let observer_config = ObserverSupervisorConfig::from_environment().map_err(io::Error::other)?;
+    let observer = ObserverSupervisor::start(observer_config, observation_journal.clone());
+    let observation_services = ObservationServices {
+        journal: observation_journal.clone(),
+        observer: observer.clone(),
+    };
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_output = output_tx.clone();
@@ -489,6 +620,30 @@ where
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     // event.query is the durable recovery path for a lagged live subscriber.
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    let semantic_event_output = output_tx.clone();
+    let mut semantic_event_rx = observation_journal.subscribe();
+    let semantic_event_forwarder = tokio::spawn(async move {
+        loop {
+            match semantic_event_rx.recv().await {
+                Ok(event) => {
+                    if semantic_event_output
+                        .send(OutboundMessage::SemanticEvent(SemanticEventFrame {
+                            event: SemanticEventFrameKind::SemanticEvent,
+                            data: event,
+                        }))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // semantic.query is the durable recovery path.
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -567,17 +722,22 @@ where
             event_tx.clone(),
             output_tx.clone(),
             event_journal.clone(),
+            observation_services.clone(),
             &mut calls,
         );
     }
 
     while calls.join_next().await.is_some() {}
+    observer.shutdown().await;
+    observation_retention_task.shutdown().await;
     retention_task.shutdown().await;
     services.shutdown().await;
     drop(event_tx);
     let _ = event_forwarder.await;
     desktop_event_forwarder.abort();
     let _ = desktop_event_forwarder.await;
+    semantic_event_forwarder.abort();
+    let _ = semantic_event_forwarder.await;
     drop(output_tx);
     writer_task
         .await
@@ -588,6 +748,41 @@ where
 struct EventRetentionTask {
     stop: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+}
+
+struct ObservationRetentionTask {
+    stop: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl ObservationRetentionTask {
+    fn start(observation_journal: ObservationJournal, cleanup_interval: Duration) -> Self {
+        run_observation_retention_cleanup(&observation_journal);
+        let (stop, mut stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut ticker = interval_at(Instant::now() + cleanup_interval, cleanup_interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    _ = ticker.tick() => {
+                        run_observation_retention_cleanup(&observation_journal);
+                    }
+                }
+            }
+        });
+        Self {
+            stop: Some(stop),
+            task,
+        }
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let _ = self.task.await;
+    }
 }
 
 impl EventRetentionTask {
@@ -624,6 +819,13 @@ fn run_event_retention_cleanup(event_journal: &EventJournal) {
     }
 }
 
+fn run_observation_retention_cleanup(observation_journal: &ObservationJournal) {
+    if observation_journal.cleanup(server_now_ms()).is_err() {
+        // Deliberately omit database payloads and detailed SQLite text.
+        eprintln!("observation retention cleanup warning");
+    }
+}
+
 fn server_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -637,8 +839,13 @@ fn dispatch_request(
     events: mpsc::UnboundedSender<whalehall_local_protocol::ToolEvent>,
     output: mpsc::UnboundedSender<OutboundMessage>,
     event_journal: EventJournal,
+    observation_services: ObservationServices,
     calls: &mut JoinSet<()>,
 ) {
+    let ObservationServices {
+        journal: observation_journal,
+        observer,
+    } = observation_services;
     match request.method.as_str() {
         "runtime.health" => {
             let response = Response::success(
@@ -711,6 +918,190 @@ fn dispatch_request(
                 request.id, result,
             )));
         }
+        "monitoring.status" => {
+            if !is_empty_object(&request.params) {
+                let _ = output.send(OutboundMessage::Response(Response::failure(
+                    Some(request.id),
+                    error_codes::INVALID_ARGUMENTS,
+                    "monitoring.status accepts an empty params object",
+                )));
+                return;
+            }
+            let _ = output.send(OutboundMessage::Response(Response::success(
+                request.id,
+                observer.status(),
+            )));
+        }
+        "monitoring.configure" => {
+            let params: MonitoringConfigureParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid monitoring.configure parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            calls.spawn(async move {
+                let response = match observer.configure(params).await {
+                    Ok(result) => Response::success(request.id, result),
+                    Err(error) => {
+                        Response::failure(Some(request.id), error_codes::INVALID_ARGUMENTS, error)
+                    }
+                };
+                let _ = output.send(OutboundMessage::Response(response));
+            });
+        }
+        "monitoring.pause" | "monitoring.resume" => {
+            if !is_empty_object(&request.params) {
+                let _ = output.send(OutboundMessage::Response(Response::failure(
+                    Some(request.id),
+                    error_codes::INVALID_ARGUMENTS,
+                    "monitoring pause/resume accepts an empty params object",
+                )));
+                return;
+            }
+            let pause = request.method == "monitoring.pause";
+            calls.spawn(async move {
+                let result = if pause {
+                    observer.pause().await
+                } else {
+                    observer.resume().await
+                };
+                let response = match result {
+                    Ok(result) => Response::success(request.id, result),
+                    Err(error) => {
+                        Response::failure(Some(request.id), error_codes::INVALID_ARGUMENTS, error)
+                    }
+                };
+                let _ = output.send(OutboundMessage::Response(response));
+            });
+        }
+        "monitoring.refreshPermissions" => {
+            let params: MonitoringRefreshPermissionsParams =
+                match serde_json::from_value(request.params) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        let _ = output.send(OutboundMessage::Response(Response::failure(
+                            Some(request.id),
+                            error_codes::INVALID_ARGUMENTS,
+                            format!("Invalid monitoring.refreshPermissions parameters: {error}"),
+                        )));
+                        return;
+                    }
+                };
+            calls.spawn(async move {
+                let response = match observer.refresh_permissions(params).await {
+                    Ok(result) => Response::success(request.id, result),
+                    Err(error) => {
+                        Response::failure(Some(request.id), error_codes::INVALID_ARGUMENTS, error)
+                    }
+                };
+                let _ = output.send(OutboundMessage::Response(response));
+            });
+        }
+        "semantic.query" => {
+            let params: SemanticQueryParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid semantic.query parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match observation_journal.query_semantic(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => observation_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "semantic.commit" => {
+            let params: SemanticCommitParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid semantic.commit parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match observation_journal.commit_semantic(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => observation_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "audit.queryFiveMinutes" => {
+            let params: AuditQueryFiveMinutesParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid audit.queryFiveMinutes parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match observation_journal.query_five_minute_audit(&params) {
+                Ok(result) => Response::success(
+                    request.id,
+                    AuditQueryFiveMinutesResult {
+                        from_ms: result.from_ms,
+                        to_ms: result.to_ms,
+                        permissions: observer.status().permissions,
+                        coverage: result.coverage,
+                        raw_observations: result.raw_observations,
+                        semantic_events: result.semantic_events,
+                    },
+                ),
+                Err(error) => observation_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "vault.sealBatch" => {
+            let params: VaultSealBatchParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid vault.sealBatch parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match observation_journal.seal_vault_batch(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => observation_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "vault.openBatch" => {
+            let params: VaultOpenBatchParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid vault.openBatch parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match observation_journal.open_vault_batch(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => observation_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
         "event.query" => {
             let params: EventQueryParams = match serde_json::from_value(request.params) {
                 Ok(params) => params,
@@ -760,13 +1151,20 @@ fn dispatch_request(
                 }
             };
             let response = match event_journal.append_goal_change(&params) {
-                Ok(result) => Response::success(
-                    request.id,
-                    EventGoalChangeResult {
-                        event: result.event,
-                        inserted: result.inserted,
-                    },
-                ),
+                Ok(result) => match observation_journal.append_goal_change(&params) {
+                    Ok(_) => Response::success(
+                        request.id,
+                        EventGoalChangeResult {
+                            event: result.event,
+                            inserted: result.inserted,
+                        },
+                    ),
+                    // The legacy append happens first. Returning an error is
+                    // intentional: a retry with the same deduplication key
+                    // reuses the legacy row and completes the missing v2
+                    // mirror without creating duplicate boundaries.
+                    Err(error) => observation_error_response(request.id, error),
+                },
                 Err(error) => event_error_response(request.id, error),
             };
             let _ = output.send(OutboundMessage::Response(response));
@@ -797,6 +1195,28 @@ fn event_error_response(id: String, error: EventJournalError) -> Response {
     Response::failure(Some(id), code, error.to_string())
 }
 
+fn observation_error_response(id: String, error: ObservationJournalError) -> Response {
+    let code = match error {
+        ObservationJournalError::InvalidCursor(_) => error_codes::INVALID_CURSOR,
+        ObservationJournalError::CursorRegression { .. } => error_codes::CURSOR_REGRESSION,
+        ObservationJournalError::Configuration(_)
+        | ObservationJournalError::IdempotencyConflict
+        | ObservationJournalError::VaultConflict => error_codes::INVALID_ARGUMENTS,
+        ObservationJournalError::KeyUnavailable
+        | ObservationJournalError::VaultRecordUnavailable => error_codes::PERMISSION_DENIED,
+        ObservationJournalError::Io(_)
+        | ObservationJournalError::Sqlite(_)
+        | ObservationJournalError::Json(_)
+        | ObservationJournalError::Encryption
+        | ObservationJournalError::Authentication => error_codes::INTERNAL_ERROR,
+    };
+    Response::failure(Some(id), code, error.to_string())
+}
+
+fn is_empty_object(value: &Value) -> bool {
+    value.as_object().is_some_and(Map::is_empty)
+}
+
 async fn write_messages<W>(
     mut writer: W,
     mut receiver: mpsc::UnboundedReceiver<OutboundMessage>,
@@ -821,10 +1241,16 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncWriteExt, BufReader, duplex};
     use whalehall_local_core::events::{DesktopEventDraft, EventJournal, EventJournalConfig};
+    use whalehall_local_core::observations::{
+        MemoryObservationKeyProvider, ObservationJournalConfig,
+    };
     use whalehall_local_core::sensors::activity::{
         ActivityConfig, ActivityError, ActivityService, ForegroundApp, ForegroundAppProvider,
     };
-    use whalehall_local_protocol::{EventCommitParams, EventQueryParams, desktop_event_kinds};
+    use whalehall_local_protocol::{
+        EventCommitParams, EventQueryParams, SemanticQueryParams, desktop_event_kinds,
+        semantic_event_kinds,
+    };
 
     use super::*;
 
@@ -935,6 +1361,59 @@ mod tests {
     }
 
     #[test]
+    fn startup_goal_reconcile_is_idempotently_mirrored_to_v2_and_versions_following_events() {
+        let directory = tempfile::tempdir().expect("create startup v2 goal test directory");
+        let event_journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let observation_journal =
+            ObservationJournal::open_with_config(ObservationJournalConfig::new(
+                directory.path().join("observations.sqlite3"),
+                Arc::new(MemoryObservationKeyProvider::new([9; 32])),
+            ))
+            .expect("open observations");
+        let serialized = serde_json::json!({
+            "previous": null,
+            "next": {
+                "goalId": "goal-1",
+                "planId": null,
+                "version": 1,
+                "text": "Ship v2",
+                "activatedAtMs": 1_000
+            },
+            "occurredAtMs": 1_000,
+            "deduplicationKey": "startup-goal-1"
+        })
+        .to_string();
+
+        append_startup_goal_change_json_with_observations(
+            &event_journal,
+            &observation_journal,
+            &serialized,
+        )
+        .expect("mirror startup goal");
+        append_startup_goal_change_json_with_observations(
+            &event_journal,
+            &observation_journal,
+            &serialized,
+        )
+        .expect("replay startup goal");
+        observation_journal
+            .append_presence_change("presence:screen_locked:2000", "locked", 2_000, 2_000, None)
+            .expect("append following presence boundary");
+
+        let semantic = observation_journal
+            .query_semantic(&SemanticQueryParams {
+                include_content: true,
+                ..SemanticQueryParams::default()
+            })
+            .expect("query semantic events")
+            .events;
+        assert_eq!(semantic.len(), 2);
+        assert_eq!(semantic[0].kind, semantic_event_kinds::GOAL_CHANGED);
+        assert_eq!(semantic[1].goal_version, Some(1));
+    }
+
+    #[test]
     fn invalid_startup_goal_environment_is_removed_and_fails_closed() {
         let _environment_guard = STARTUP_GOAL_ENV_LOCK.lock().unwrap();
         let directory = tempfile::tempdir().expect("create invalid startup goal test directory");
@@ -1008,6 +1487,68 @@ mod tests {
         assert!(lines[2].contains("activity.status"));
         assert!(lines[2].contains("device.environment"));
         assert!(lines.iter().any(|line| line.contains("usage.sqlite3")));
+    }
+
+    #[tokio::test]
+    async fn exposes_monitoring_semantic_and_fixed_five_minute_audit_protocols() {
+        let (mut input, server_input) = duplex(32 * 1024);
+        let (server_output, output) = duplex(32 * 1024);
+        let (_directory, activity) = test_activity();
+        let server = tokio::spawn(serve_with_activity(
+            BufReader::new(server_input),
+            server_output,
+            activity,
+        ));
+        input
+            .write_all(b"{\"id\":\"monitor\",\"method\":\"monitoring.status\",\"params\":{}}\n")
+            .await
+            .expect("write monitoring request");
+        input
+            .write_all(
+                b"{\"id\":\"semantic\",\"method\":\"semantic.query\",\"params\":{\"limit\":10}}\n",
+            )
+            .await
+            .expect("write semantic query");
+        input
+            .write_all(
+                b"{\"id\":\"audit\",\"method\":\"audit.queryFiveMinutes\",\"params\":{\"fromMs\":0,\"toMs\":300000}}\n",
+            )
+            .await
+            .expect("write audit query");
+        input
+            .write_all(
+                b"{\"id\":\"invalid-audit\",\"method\":\"audit.queryFiveMinutes\",\"params\":{\"fromMs\":0,\"toMs\":299999}}\n",
+            )
+            .await
+            .expect("write invalid audit query");
+        input.shutdown().await.expect("close input");
+
+        let mut output = BufReader::new(output);
+        let mut frames = Vec::new();
+        loop {
+            let mut line = String::new();
+            if output.read_line(&mut line).await.expect("read response") == 0 {
+                break;
+            }
+            frames.push(serde_json::from_str::<Value>(&line).expect("parse JSONL response"));
+        }
+        server.await.expect("join server").expect("server result");
+        let by_id = |id: &str| {
+            frames
+                .iter()
+                .find(|frame| frame["id"] == id)
+                .unwrap_or_else(|| panic!("missing {id} response"))
+        };
+        assert_eq!(by_id("monitor")["ok"], true);
+        assert!(by_id("monitor")["result"]["permissions"].is_object());
+        assert_eq!(by_id("semantic")["result"]["events"], serde_json::json!([]));
+        assert_eq!(by_id("audit")["result"]["fromMs"], 0);
+        assert_eq!(by_id("audit")["result"]["toMs"], 300_000);
+        assert_eq!(
+            by_id("audit")["result"]["rawObservations"],
+            serde_json::json!([])
+        );
+        assert_eq!(by_id("invalid-audit")["ok"], false);
     }
 
     #[tokio::test]

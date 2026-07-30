@@ -516,6 +516,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		env: {
 			...nativeEnvironment,
 			WHALEHALL_DATA_DIR: dataDirectory,
+			WHALEHALL_RUNTIME_CHANNEL: "dev",
 			WHALEHALL_ACTIVITY_POLL_MS: "50",
 			// One immediate scan is enough for this protocol probe. A 50ms
 			// process scan creates a feedback loop with short-lived macOS
@@ -578,6 +579,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		if (
 			"event" in message &&
 			message.event !== "desktop.event" &&
+			message.event !== "semantic.event" &&
 			message.callId === "wait" &&
 			message.event === "tool.started"
 		) {
@@ -586,6 +588,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		if (
 			"event" in message &&
 			message.event !== "desktop.event" &&
+			message.event !== "semantic.event" &&
 			message.callId === "progress" &&
 			message.event === "tool.progress"
 		) {
@@ -594,6 +597,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		if (
 			"event" in message &&
 			message.event !== "desktop.event" &&
+			message.event !== "semantic.event" &&
 			message.callId === "wait" &&
 			message.event === "tool.cancelled"
 		) {
