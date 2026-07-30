@@ -1,5 +1,7 @@
 mod activity;
 pub mod events;
+pub mod legacy_migration;
+pub mod observations;
 pub mod sensors;
 mod tools;
 

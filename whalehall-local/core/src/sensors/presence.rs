@@ -23,11 +23,12 @@ use tokio_util::sync::CancellationToken;
 use whalehall_local_protocol::{DesktopEventSensitivity, desktop_event_kinds};
 
 use crate::events::{DesktopEventDraft, EventJournal, EventJournalError};
+use crate::observations::{ObservationJournal, ObservationJournalError};
 
 pub const DEFAULT_PRESENCE_POLL_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_AFK_THRESHOLD_MS: u64 = 5 * 60 * 1_000;
 pub const DEFAULT_SUSPEND_GAP_THRESHOLD_MS: u64 = 15_000;
-const PRESENCE_SCHEMA_VERSION: i64 = 2;
+const PRESENCE_SCHEMA_VERSION: i64 = 3;
 const MAX_QUERY_LIMIT: usize = 1_000;
 
 #[derive(Debug, Error)]
@@ -42,6 +43,8 @@ pub enum PresenceError {
     Collection(String),
     #[error("presence event publication failed: {0}")]
     EventJournal(#[from] EventJournalError),
+    #[error("presence semantic publication failed: {0}")]
+    ObservationJournal(#[from] ObservationJournalError),
 }
 
 #[derive(Clone, Debug)]
@@ -271,7 +274,20 @@ impl PresenceService {
         provider: Arc<dyn PresenceProvider>,
         event_journal: Option<EventJournal>,
     ) -> Result<Self, PresenceError> {
+        Self::start_with_journals(config, provider, event_journal, None)
+    }
+
+    pub fn start_with_journals(
+        config: PresenceConfig,
+        provider: Arc<dyn PresenceProvider>,
+        event_journal: Option<EventJournal>,
+        observation_journal: Option<ObservationJournal>,
+    ) -> Result<Self, PresenceError> {
         let store = PresenceStore::open(&config.database_path)?;
+        store.enable_pending_targets(PublicationTargets {
+            desktop: event_journal.is_some(),
+            observation: observation_journal.is_some(),
+        })?;
         let persisted = store.load_state()?.unwrap_or_default();
         let status = PresenceStatus {
             state: PresenceSensorState::Starting,
@@ -315,6 +331,7 @@ impl PresenceService {
             provider,
             tracker,
             event_journal,
+            observation_journal,
         ));
         *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
         Ok(Self { inner })
@@ -358,6 +375,7 @@ async fn run_presence_monitor(
     provider: Arc<dyn PresenceProvider>,
     mut tracker: PresenceTracker,
     event_journal: Option<EventJournal>,
+    observation_journal: Option<ObservationJournal>,
 ) {
     let mut ticker = interval(inner.config.poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -371,9 +389,11 @@ async fn run_presence_monitor(
                 break;
             }
             _ = ticker.tick() => {
-                let pending_publication_error = event_journal
-                    .as_ref()
-                    .and_then(|journal| flush_presence_event_outbox(&inner.store, journal).err());
+                let pending_publication_error = flush_configured_presence_outbox(
+                    &inner.store,
+                    event_journal.as_ref(),
+                    observation_journal.as_ref(),
+                );
                 let observed_at_ms = now_ms();
                 let observation = tokio::task::spawn_blocking({
                     let provider = provider.clone();
@@ -393,19 +413,24 @@ async fn run_presence_monitor(
                             &observation,
                             observed_at_ms,
                         );
-                        if let Err(error) = inner.store.record_sample(
+                        if let Err(error) = inner.store.record_sample_for_targets(
                             &candidate.persisted,
                             &events,
                             observed_at_ms,
-                            event_journal.is_some(),
+                            PublicationTargets {
+                                desktop: event_journal.is_some(),
+                                observation: observation_journal.is_some(),
+                            },
                         ) {
                             update_error_status(&inner, error.to_string());
                             continue;
                         }
                         tracker = candidate;
-                        let publication_error = event_journal
-                            .as_ref()
-                            .and_then(|journal| flush_presence_event_outbox(&inner.store, journal).err());
+                        let publication_error = flush_configured_presence_outbox(
+                            &inner.store,
+                            event_journal.as_ref(),
+                            observation_journal.as_ref(),
+                        );
                         update_observation_status(
                             &inner,
                             &tracker.persisted,
@@ -506,15 +531,77 @@ fn append_presence_outbox_record(
     }
 }
 
+#[cfg(test)]
 fn flush_presence_event_outbox(
     store: &PresenceStore,
     event_journal: &EventJournal,
 ) -> Result<(), PresenceError> {
+    flush_presence_event_outbox_for_targets(store, Some(event_journal), None)
+}
+
+fn flush_configured_presence_outbox(
+    store: &PresenceStore,
+    event_journal: Option<&EventJournal>,
+    observation_journal: Option<&ObservationJournal>,
+) -> Option<PresenceError> {
+    if event_journal.is_none() && observation_journal.is_none() {
+        return None;
+    }
+    flush_presence_event_outbox_for_targets(store, event_journal, observation_journal).err()
+}
+
+fn flush_presence_event_outbox_for_targets(
+    store: &PresenceStore,
+    event_journal: Option<&EventJournal>,
+    observation_journal: Option<&ObservationJournal>,
+) -> Result<(), PresenceError> {
     for record in store.pending_desktop_events(100)? {
-        append_presence_outbox_record(event_journal, &record)?;
-        store.delete_desktop_event(record.id)?;
+        let mut desktop_published = record.desktop_published;
+        let mut observation_published = record.observation_published;
+        if record.publish_desktop && !desktop_published {
+            let event_journal = event_journal.ok_or_else(|| {
+                PresenceError::Configuration(
+                    "presence desktop outbox target is unavailable".to_owned(),
+                )
+            })?;
+            append_presence_outbox_record(event_journal, &record)?;
+            store.mark_desktop_event_published(record.id)?;
+            desktop_published = true;
+        }
+        if record.publish_observation && !observation_published {
+            let observation_journal = observation_journal.ok_or_else(|| {
+                PresenceError::Configuration(
+                    "presence observation outbox target is unavailable".to_owned(),
+                )
+            })?;
+            observation_journal.append_presence_change(
+                &record.deduplication_key,
+                semantic_presence_state(record.event.event_type),
+                record.event.occurred_at_ms,
+                record.observed_at_ms,
+                record.event.idle_for_ms,
+            )?;
+            store.mark_observation_event_published(record.id)?;
+            observation_published = true;
+        }
+        if (!record.publish_desktop || desktop_published)
+            && (!record.publish_observation || observation_published)
+        {
+            store.delete_desktop_event(record.id)?;
+        }
     }
     Ok(())
+}
+
+fn semantic_presence_state(event_type: PresenceEventKind) -> &'static str {
+    match event_type {
+        PresenceEventKind::AfkStarted => "afk_started",
+        PresenceEventKind::AfkEnded => "afk_ended",
+        PresenceEventKind::ScreenLocked => "locked",
+        PresenceEventKind::ScreenUnlocked => "unlocked",
+        PresenceEventKind::SleepStarted => "sleep",
+        PresenceEventKind::WokeUp => "wake",
+    }
 }
 
 fn update_observation_status(
@@ -683,8 +770,19 @@ struct PresenceStore {
 #[derive(Clone, Debug)]
 struct PresenceEventOutboxRecord {
     id: i64,
+    deduplication_key: String,
     event: PendingPresenceEvent,
     observed_at_ms: i64,
+    publish_desktop: bool,
+    publish_observation: bool,
+    desktop_published: bool,
+    observation_published: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PublicationTargets {
+    desktop: bool,
+    observation: bool,
 }
 
 impl PresenceStore {
@@ -705,12 +803,31 @@ impl PresenceStore {
         &self.path
     }
 
+    #[cfg(test)]
     fn record_sample(
         &self,
         state: &PersistedPresenceState,
         events: &[PendingPresenceEvent],
         observed_at_ms: i64,
         enqueue_desktop_events: bool,
+    ) -> Result<(), PresenceError> {
+        self.record_sample_for_targets(
+            state,
+            events,
+            observed_at_ms,
+            PublicationTargets {
+                desktop: enqueue_desktop_events,
+                observation: false,
+            },
+        )
+    }
+
+    fn record_sample_for_targets(
+        &self,
+        state: &PersistedPresenceState,
+        events: &[PendingPresenceEvent],
+        observed_at_ms: i64,
+        targets: PublicationTargets,
     ) -> Result<(), PresenceError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -724,12 +841,19 @@ impl PresenceStore {
                     observed_at_ms
                 ],
             )?;
-            if enqueue_desktop_events {
+            if targets.desktop || targets.observation {
                 transaction.execute(
-                    "INSERT OR IGNORE INTO presence_event_outbox (
+                    "INSERT INTO presence_event_outbox (
                         event_type, occurred_at_ms, observed_at_ms, idle_for_ms,
-                        deduplication_key
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        deduplication_key, publish_desktop, publish_observation
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(deduplication_key) DO UPDATE SET
+                        publish_desktop = MAX(
+                            publish_desktop, excluded.publish_desktop
+                        ),
+                        publish_observation = MAX(
+                            publish_observation, excluded.publish_observation
+                        )",
                     params![
                         event.event_type.as_database_value(),
                         event.occurred_at_ms,
@@ -742,6 +866,8 @@ impl PresenceStore {
                             event.event_type.as_database_value(),
                             event.occurred_at_ms,
                         ),
+                        targets.desktop,
+                        targets.observation,
                     ],
                 )?;
             }
@@ -777,18 +903,36 @@ impl PresenceStore {
         Ok(())
     }
 
+    fn enable_pending_targets(&self, targets: PublicationTargets) -> Result<(), PresenceError> {
+        if !targets.desktop && !targets.observation {
+            return Ok(());
+        }
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE presence_event_outbox
+             SET publish_desktop = MAX(publish_desktop, ?1),
+                 publish_observation = MAX(publish_observation, ?2)",
+            params![targets.desktop, targets.observation],
+        )?;
+        Ok(())
+    }
+
     fn pending_desktop_events(
         &self,
         limit: usize,
     ) -> Result<Vec<PresenceEventOutboxRecord>, PresenceError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT id, event_type, occurred_at_ms, observed_at_ms, idle_for_ms
+            "SELECT id, event_type, occurred_at_ms, observed_at_ms, idle_for_ms,
+                    deduplication_key,
+                    publish_desktop, publish_observation, desktop_published,
+                    observation_published
              FROM presence_event_outbox ORDER BY id LIMIT ?1",
         )?;
         let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
             Ok(PresenceEventOutboxRecord {
                 id: row.get(0)?,
+                deduplication_key: row.get(5)?,
                 event: PendingPresenceEvent {
                     event_type: PresenceEventKind::from_database_value(&row.get::<_, String>(1)?)?,
                     occurred_at_ms: row.get(2)?,
@@ -797,9 +941,35 @@ impl PresenceStore {
                         .map(|value| u64::try_from(value).unwrap_or_default()),
                 },
                 observed_at_ms: row.get(3)?,
+                publish_desktop: row.get(6)?,
+                publish_observation: row.get(7)?,
+                desktop_published: row.get(8)?,
+                observation_published: row.get(9)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn mark_desktop_event_published(&self, id: i64) -> Result<(), PresenceError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE presence_event_outbox
+             SET desktop_published = 1
+             WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    fn mark_observation_event_published(&self, id: i64) -> Result<(), PresenceError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE presence_event_outbox
+             SET observation_published = 1
+             WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
     }
 
     fn delete_desktop_event(&self, id: i64) -> Result<(), PresenceError> {
@@ -936,12 +1106,32 @@ impl PresenceStore {
                 occurred_at_ms INTEGER NOT NULL,
                 observed_at_ms INTEGER NOT NULL,
                 idle_for_ms INTEGER,
-                deduplication_key TEXT NOT NULL UNIQUE
+                deduplication_key TEXT NOT NULL UNIQUE,
+                publish_desktop INTEGER NOT NULL DEFAULT 1,
+                publish_observation INTEGER NOT NULL DEFAULT 0,
+                desktop_published INTEGER NOT NULL DEFAULT 0,
+                observation_published INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS presence_event_outbox_order
-                ON presence_event_outbox(id);
-             PRAGMA user_version = 2;",
+                ON presence_event_outbox(id);",
         )?;
+        ensure_outbox_column(&connection, "publish_desktop", "INTEGER NOT NULL DEFAULT 1")?;
+        ensure_outbox_column(
+            &connection,
+            "publish_observation",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_outbox_column(
+            &connection,
+            "desktop_published",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_outbox_column(
+            &connection,
+            "observation_published",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        connection.pragma_update(None, "user_version", PRESENCE_SCHEMA_VERSION)?;
         Ok(())
     }
 
@@ -955,6 +1145,23 @@ impl PresenceStore {
         )?;
         Ok(connection)
     }
+}
+
+fn ensure_outbox_column(
+    connection: &Connection,
+    name: &str,
+    definition: &str,
+) -> Result<(), PresenceError> {
+    let mut statement = connection.prepare("PRAGMA table_info(presence_event_outbox)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == name) {
+        connection.execute_batch(&format!(
+            "ALTER TABLE presence_event_outbox ADD COLUMN {name} {definition};"
+        ))?;
+    }
+    Ok(())
 }
 
 fn duration_from_environment(
@@ -1314,9 +1521,12 @@ mod tests {
     use std::collections::VecDeque;
 
     use tempfile::TempDir;
-    use whalehall_local_protocol::EventQueryParams;
+    use whalehall_local_protocol::{
+        EventQueryParams, SemanticCountClassV2, SemanticQueryParams, semantic_event_kinds,
+    };
 
     use super::*;
+    use crate::observations::{MemoryObservationKeyProvider, ObservationJournalConfig};
 
     fn config(directory: &TempDir) -> PresenceConfig {
         PresenceConfig {
@@ -1509,6 +1719,80 @@ mod tests {
         let events = journal.query(&EventQueryParams::default()).unwrap().events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, desktop_event_kinds::PRESENCE_LOCKED);
+    }
+
+    #[test]
+    fn presence_outbox_durably_completes_both_legacy_and_v2_sinks() {
+        let directory = tempfile::tempdir().expect("create dual presence directory");
+        let store =
+            PresenceStore::open(directory.path().join("presence.sqlite3")).expect("open store");
+        let event_journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let observation_journal =
+            ObservationJournal::open_with_config(ObservationJournalConfig::new(
+                directory.path().join("observations.sqlite3"),
+                Arc::new(MemoryObservationKeyProvider::new([7; 32])),
+            ))
+            .expect("open observation journal");
+        observation_journal
+            .reconcile_current_goal_version(Some(7))
+            .expect("set current goal version");
+        let event = PendingPresenceEvent {
+            event_type: PresenceEventKind::ScreenLocked,
+            occurred_at_ms: 10_000,
+            idle_for_ms: None,
+        };
+        store
+            .record_sample_for_targets(
+                &PersistedPresenceState {
+                    observed_at_ms: Some(10_100),
+                    is_locked: Some(true),
+                    ..PersistedPresenceState::default()
+                },
+                std::slice::from_ref(&event),
+                10_100,
+                PublicationTargets {
+                    desktop: true,
+                    observation: true,
+                },
+            )
+            .expect("persist dual-sink outbox");
+
+        // The first attempt commits the legacy side and leaves the row pending
+        // because the v2 sink is unavailable. A later attempt resumes from the
+        // per-sink publication marker instead of duplicating the legacy event.
+        assert!(
+            flush_presence_event_outbox_for_targets(&store, Some(&event_journal), None,).is_err()
+        );
+        assert_eq!(store.pending_desktop_events(100).unwrap().len(), 1);
+        flush_presence_event_outbox_for_targets(
+            &store,
+            Some(&event_journal),
+            Some(&observation_journal),
+        )
+        .expect("complete v2 sink");
+        flush_presence_event_outbox_for_targets(
+            &store,
+            Some(&event_journal),
+            Some(&observation_journal),
+        )
+        .expect("idempotent empty replay");
+        assert!(store.pending_desktop_events(100).unwrap().is_empty());
+
+        let legacy = event_journal
+            .query(&EventQueryParams::default())
+            .expect("query legacy events")
+            .events;
+        assert_eq!(legacy.len(), 1);
+        let semantic = observation_journal
+            .query_semantic(&SemanticQueryParams::default())
+            .expect("query semantic events")
+            .events;
+        assert_eq!(semantic.len(), 1);
+        assert_eq!(semantic[0].kind, semantic_event_kinds::PRESENCE_CHANGED);
+        assert_eq!(semantic[0].payload["state"], "locked");
+        assert_eq!(semantic[0].goal_version, Some(7));
+        assert_eq!(semantic[0].count_class, SemanticCountClassV2::Boundary);
     }
 
     #[test]
