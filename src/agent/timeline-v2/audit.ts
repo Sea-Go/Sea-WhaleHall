@@ -66,14 +66,25 @@ export class TimelineFiveMinuteAuditExporter {
 			throw new Error("Five-minute audit range exceeds safe integer time.");
 		}
 		const includeDecryptedContent = options.includeDecryptedContent ?? false;
-		const [raw, derived] = await Promise.all([
+		const [raw, derivedResult] = await Promise.all([
 			this.raw.queryAuditRange({
 				fromMs,
 				toMs,
 				includeDecryptedContent,
 			}),
-			this.repository.readAuditRange(fromMs, toMs),
+			this.repository.readAuditRange(fromMs, toMs).then(
+				(value) => ({ available: true as const, value }),
+				() => ({
+					available: false as const,
+					value: {
+						facts: [],
+						episodes: [],
+						summaries: [],
+					},
+				}),
+			),
 		]);
+		const derived = derivedResult.value;
 		const validatedRawObservations = raw.rawObservations
 			.map((observation) =>
 				projectRawObservationForAudit(observation, includeDecryptedContent),
@@ -413,6 +424,9 @@ export class TimelineFiveMinuteAuditExporter {
 		const invalidRawObservationCount =
 			raw.rawObservations.length - validatedRawObservations.length;
 		const exportWarnings = [
+			...(!derivedResult.available
+				? ["production_derived_unavailable"]
+				: []),
 			...(rangeWasClipped ? ["candidate_records_omitted"] : []),
 			...(invalidRawObservationCount > 0
 				? ["invalid_raw_observation_omitted"]
@@ -439,6 +453,9 @@ export class TimelineFiveMinuteAuditExporter {
 			raw.coverage,
 			...semanticEvents.map((event) => event.coverage),
 			...projectedFacts.map((fact) => fact.coverage),
+			...(!derivedResult.available
+				? ([["unavailable"]] as const)
+				: []),
 		]);
 		return {
 			manifest: {

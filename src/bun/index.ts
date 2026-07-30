@@ -89,8 +89,26 @@ const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
 		}
 		// Pull and process only naturally sealed production windows. An audit
 		// capture must never force-seal or otherwise perturb collector state.
-		await runtime.service.pullNow();
-		await runtime.service.runJobsNow();
+		try {
+			await runtime.service.pullNow();
+			await runtime.service.runJobsNow();
+		} catch (error) {
+			// A redacted audit can still be complete at the raw/semantic
+			// boundary when the production-derived vault is temporarily
+			// unavailable (for example after an ad-hoc development re-sign).
+			// The exporter records that gap and creates audit-only projections.
+			console.warn(
+				"[audit-capture] production timeline settle deferred:",
+				error instanceof Error ? error.name : "UNKNOWN",
+			);
+		}
+		if (runtime.audit === null) {
+			throw new Error("Timeline v2 audit exporter is unavailable.");
+		}
+		// Build once without decrypted content before declaring READY. This
+		// verifies that the exact raw range is queryable while keeping text
+		// behind the later explicit export confirmation.
+		await runtime.audit.exportFiveMinutes(fromMs);
 	},
 	onError(error) {
 		console.error(

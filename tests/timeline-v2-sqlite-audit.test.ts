@@ -212,6 +212,59 @@ async function populate(
 }
 
 describe("Timeline v2 encrypted SQLite and audit", () => {
+	test("keeps redacted raw lineage exportable when production-derived vault data is unavailable", async () => {
+		const event = semantic(
+			1,
+			1_000,
+			"application.foregroundChanged",
+		);
+		const raw: RawFiveMinuteAuditSource = {
+			async queryAuditRange() {
+				return {
+					permissions: {
+						accessibility: "denied",
+						screenRecording: "denied",
+						inputMonitoring: "authorized",
+						automation: "authorized",
+					},
+					coverage: ["metadata"],
+					rawObservations: [rawObservation(1, 1_000)],
+					semanticEvents: [event],
+				};
+			},
+		};
+		const unavailableRepository = {
+			async readAuditRange() {
+				throw new Error("sealed production-derived data unavailable");
+			},
+		} as unknown as TimelineV2Repository;
+		const exported = await new TimelineFiveMinuteAuditExporter(
+			raw,
+			unavailableRepository,
+			() => 400_000,
+		).exportFiveMinutes(0);
+
+		expect(exported.manifest.exportWarnings).toContain(
+			"production_derived_unavailable",
+		);
+		expect(exported.manifest.exportWarnings).toContain(
+			"audit_only_provisional_projection",
+		);
+		expect(exported.coverage).toContain("unavailable");
+		expect(exported.manifest.sourceEpisodeCount).toBe(0);
+		expect(exported.manifest.sourceTimelineSummaryCount).toBe(0);
+		expect(exported.evidenceFacts).toHaveLength(1);
+		expect(exported.episodeSlices).toHaveLength(1);
+		expect(exported.timelineSlices).toHaveLength(1);
+		expect(exported.lineage).toContainEqual(
+			expect.objectContaining({
+				observationId: "observation-1",
+				eventId: "event-1",
+				status: "summarized",
+			}),
+		);
+	});
+
 	test("persists only vault references and recovers Timeline/AgentInput", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "whalehall-timeline-v2-"));
 		temporaryDirectories.push(directory);
