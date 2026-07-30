@@ -148,6 +148,8 @@ export function AuditExportControl({
 
 	const captureActive =
 		capture?.state === "collecting" || capture?.state === "settling";
+	const captureRangeExportable =
+		capture?.state === "ready" || capture?.state === "failed";
 
 	return (
 		<section
@@ -216,15 +218,17 @@ export function AuditExportControl({
 						disabled={
 							captureBusy ||
 							state.status === "exporting" ||
-							capture?.state !== "ready"
+							!captureRangeExportable
 						}
 						onClick={() => {
-							if (capture?.state === "ready") {
+							if (captureRangeExportable && capture) {
 								void exportFiveMinutes(capture.fromMs);
 							}
 						}}
 					>
-						导出本次范围
+						{capture?.state === "failed"
+							? "导出已采集范围（含缺口）"
+							: "导出本次范围"}
 					</Button>
 				</div>
 				{captureMessage ? (
@@ -284,7 +288,7 @@ function captureStatusLabel(
 		case "ready":
 			return "本次范围可导出";
 		case "failed":
-			return "本次范围处理失败";
+			return "本次范围处理有缺口";
 		case "cancelled":
 			return "本次采集已取消";
 		default:
