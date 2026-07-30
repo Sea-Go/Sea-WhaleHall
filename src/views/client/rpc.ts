@@ -47,6 +47,12 @@ export const clientApi = {
 		fromMs: number;
 		includeDecryptedContent: boolean;
 	}) => rpc.request.exportFiveMinuteAuditToFile(options),
+	startFiveMinuteAuditCapture: () =>
+		rpc.request.startFiveMinuteAuditCapture({}),
+	getFiveMinuteAuditCaptureStatus: () =>
+		rpc.request.getFiveMinuteAuditCaptureStatus({}),
+	cancelFiveMinuteAuditCapture: (captureId: string) =>
+		rpc.request.cancelFiveMinuteAuditCapture({ captureId }),
 	setPetVisible: (visible: boolean) => rpc.request.setPetVisible({ visible }),
 	presentPetEvent: (event: PetPresentationEvent) =>
 		rpc.request.presentPetEvent(event),

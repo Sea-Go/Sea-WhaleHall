@@ -20,6 +20,15 @@ const auditExportService: AuditExportService = {
 	async exportFiveMinutes() {
 		return { status: "cancelled", basename: null };
 	},
+	async startCapture() {
+		throw new Error("not used");
+	},
+	async getCaptureStatus() {
+		return null;
+	},
+	async cancelCapture() {
+		return null;
+	},
 };
 
 const user = {
@@ -141,8 +150,9 @@ describe("settings UI", () => {
 			calendar: ["默认视图", "显示周末", "每周从周一开始"],
 			privacy: [
 				"本地数据边界",
-				"最近五分钟审计包",
-				"选择文件夹并导出",
+				"五分钟审计包",
+				"开始采满五分钟",
+				"导出过去五分钟",
 				"包含可解密的文本内容",
 				"macOS 系统权限",
 				"辅助功能",

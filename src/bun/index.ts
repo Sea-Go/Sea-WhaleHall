@@ -31,6 +31,10 @@ import {
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
+import {
+	FileAuditCaptureStore,
+	FiveMinuteAuditCaptureCoordinator,
+} from "./five-minute-audit-capture";
 import { monitoringPermissionSettingsUrl } from "./monitoring-permission-settings";
 import type {
 	LocalRuntimeStatus,
@@ -67,6 +71,35 @@ let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
 let timelineRuntime: TimelineV2Runtime | null = null;
+const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
+	store: new FileAuditCaptureStore(
+		join(localDataPath, "audit-capture-session.v1.json"),
+	),
+	async settleRange(fromMs, toMs) {
+		if (
+			!Number.isSafeInteger(fromMs) ||
+			!Number.isSafeInteger(toMs) ||
+			toMs <= fromMs
+		) {
+			throw new Error("The audit capture range is invalid.");
+		}
+		const runtime = timelineRuntime;
+		if (runtime === null) {
+			throw new Error("Timeline v2 is unavailable.");
+		}
+		// Pull and process only naturally sealed production windows. An audit
+		// capture must never force-seal or otherwise perturb collector state.
+		await runtime.service.pullNow();
+		await runtime.service.runJobsNow();
+	},
+	onError(error) {
+		console.error(
+			"[audit-capture] local session failed:",
+			error instanceof Error ? error.name : "UNKNOWN",
+		);
+	},
+});
+await auditCaptureCoordinator.initialize();
 const STARTUP_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 45_000, 120_000, 300_000];
 
 let clientWindow: BrowserWindow;
@@ -144,6 +177,14 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						},
 					},
 				}),
+			startFiveMinuteAuditCapture: () =>
+				auditCaptureCoordinator.start(),
+			getFiveMinuteAuditCaptureStatus: async () => ({
+				capture: await auditCaptureCoordinator.status(),
+			}),
+			cancelFiveMinuteAuditCapture: async ({ captureId }) => ({
+				capture: await auditCaptureCoordinator.cancel(captureId),
+			}),
 			setPetVisible: ({ visible }): { visible: boolean } => {
 				petVisible = visible;
 				if (!visible) petStateArbiter.resetToRuntime(agent.getLocalStatus());
@@ -299,6 +340,7 @@ function shutdown(): Promise<void> {
 	if (shutdownPromise) return shutdownPromise;
 	shutdownPromise = (async () => {
 		cancelStartupRetryWait?.();
+		auditCaptureCoordinator.dispose();
 		// Startup owns both the initial native start and any reflection-service
 		// start. Waiting here prevents a late candidate from restarting the
 		// native sensor process after shutdown has already stopped it.

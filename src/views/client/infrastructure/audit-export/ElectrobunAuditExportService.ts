@@ -1,4 +1,5 @@
 import type {
+	FiveMinuteAuditCaptureStatus,
 	FiveMinuteAuditFileExportRequest,
 	FiveMinuteAuditFileExportResult,
 } from "../../../../shared/contracts";
@@ -8,6 +9,13 @@ export interface AuditExportTransport {
 	exportFiveMinuteAuditToFile(
 		request: FiveMinuteAuditFileExportRequest,
 	): Promise<FiveMinuteAuditFileExportResult>;
+	startFiveMinuteAuditCapture(): Promise<FiveMinuteAuditCaptureStatus>;
+	getFiveMinuteAuditCaptureStatus(): Promise<{
+		capture: FiveMinuteAuditCaptureStatus | null;
+	}>;
+	cancelFiveMinuteAuditCapture(captureId: string): Promise<{
+		capture: FiveMinuteAuditCaptureStatus | null;
+	}>;
 }
 
 export type ElectrobunAuditExportServiceOptions = {
@@ -33,6 +41,28 @@ export class ElectrobunAuditExportService implements AuditExportService {
 		const transport = await this.loadTransport();
 		return transport.exportFiveMinuteAuditToFile(request);
 	}
+
+	async startCapture(): Promise<FiveMinuteAuditCaptureStatus> {
+		if (!this.runtimeAvailable()) {
+			throw new Error("Electrobun runtime is not ready.");
+		}
+		const transport = await this.loadTransport();
+		return transport.startFiveMinuteAuditCapture();
+	}
+
+	async getCaptureStatus(): Promise<FiveMinuteAuditCaptureStatus | null> {
+		if (!this.runtimeAvailable()) return null;
+		const transport = await this.loadTransport();
+		return (await transport.getFiveMinuteAuditCaptureStatus()).capture;
+	}
+
+	async cancelCapture(
+		captureId: string,
+	): Promise<FiveMinuteAuditCaptureStatus | null> {
+		if (!this.runtimeAvailable()) return null;
+		const transport = await this.loadTransport();
+		return (await transport.cancelFiveMinuteAuditCapture(captureId)).capture;
+	}
 }
 
 async function loadClientTransport(): Promise<AuditExportTransport> {
@@ -40,6 +70,12 @@ async function loadClientTransport(): Promise<AuditExportTransport> {
 	return {
 		exportFiveMinuteAuditToFile: (request) =>
 			clientApi.exportFiveMinuteAuditToFile(request),
+		startFiveMinuteAuditCapture: () =>
+			clientApi.startFiveMinuteAuditCapture(),
+		getFiveMinuteAuditCaptureStatus: () =>
+			clientApi.getFiveMinuteAuditCaptureStatus(),
+		cancelFiveMinuteAuditCapture: (captureId) =>
+			clientApi.cancelFiveMinuteAuditCapture(captureId),
 	};
 }
 

@@ -13,16 +13,31 @@ describe("audit export UI", () => {
 			async exportFiveMinutes() {
 				throw new Error("not invoked while rendering");
 			},
+			async startCapture() {
+				throw new Error("not invoked while rendering");
+			},
+			async getCaptureStatus() {
+				return null;
+			},
+			async cancelCapture() {
+				return null;
+			},
 		};
 		const markup = renderToStaticMarkup(
 			<AuditExportControl service={service} nowMs={() => 600_000} />,
 		);
-		expect(markup).toContain("最近五分钟审计包");
+		expect(markup).toContain("五分钟审计包");
 		expect(markup).toContain("默认隐藏可见文本与网址");
 		expect(markup).toContain("episode slice");
 		expect(markup).toContain("timeline slice");
 		expect(markup).toContain("包含可解密的文本内容");
-		expect(markup).toContain("选择文件夹并导出");
+		expect(markup).toContain("开始采满五分钟");
+		expect(markup).toContain("取消");
+		expect(markup).toContain("刷新");
+		expect(markup).toContain("导出本次范围");
+		expect(markup).toContain("导出过去五分钟");
+		expect(markup).toContain("仅包含期间按 64 条/5 分钟或边界自然封窗");
+		expect(markup).toContain("不保证此时已有完整 Timeline");
 		expect(markup).toContain('type="checkbox"');
 		expect(markup).not.toContain("checked");
 		expect(markup).not.toContain("/Users/");

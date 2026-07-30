@@ -1,4 +1,5 @@
 import type {
+	FiveMinuteAuditCaptureStatus,
 	FiveMinuteAuditFileExportRequest,
 	FiveMinuteAuditFileExportResult,
 } from "../../../../shared/contracts";
@@ -7,6 +8,11 @@ export interface AuditExportService {
 	exportFiveMinutes(
 		request: FiveMinuteAuditFileExportRequest,
 	): Promise<FiveMinuteAuditFileExportResult>;
+	startCapture(): Promise<FiveMinuteAuditCaptureStatus>;
+	getCaptureStatus(): Promise<FiveMinuteAuditCaptureStatus | null>;
+	cancelCapture(
+		captureId: string,
+	): Promise<FiveMinuteAuditCaptureStatus | null>;
 }
 
 export function auditExportStatusMessage(

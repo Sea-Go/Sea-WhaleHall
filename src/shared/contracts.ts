@@ -92,6 +92,27 @@ export type FiveMinuteAuditFileExportResult = {
 	basename: string | null;
 };
 
+export type FiveMinuteAuditCaptureState =
+	| "collecting"
+	| "settling"
+	| "ready"
+	| "failed"
+	| "cancelled";
+
+/**
+ * Content-free renderer projection of a local five-minute capture session.
+ * Timeline completeness is deliberately qualified because production windows
+ * are never force-sealed for an audit.
+ */
+export type FiveMinuteAuditCaptureStatus = {
+	captureId: string;
+	state: FiveMinuteAuditCaptureState;
+	fromMs: number;
+	toMs: number;
+	updatedAtMs: number;
+	analysisCompleteness: "natural_windows_only";
+};
+
 export type MonitoringPermissionSettingsTarget =
 	| "accessibility"
 	| "screenRecording"
@@ -132,6 +153,18 @@ export type ClientRPC = {
 			exportFiveMinuteAuditToFile: {
 				params: FiveMinuteAuditFileExportRequest;
 				response: FiveMinuteAuditFileExportResult;
+			};
+			startFiveMinuteAuditCapture: {
+				params: Record<string, never>;
+				response: FiveMinuteAuditCaptureStatus;
+			};
+			getFiveMinuteAuditCaptureStatus: {
+				params: Record<string, never>;
+				response: { capture: FiveMinuteAuditCaptureStatus | null };
+			};
+			cancelFiveMinuteAuditCapture: {
+				params: { captureId: string };
+				response: { capture: FiveMinuteAuditCaptureStatus | null };
 			};
 			setPetVisible: {
 				params: { visible: boolean };

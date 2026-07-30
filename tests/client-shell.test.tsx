@@ -99,6 +99,15 @@ const auditExportService: AuditExportService = {
 	async exportFiveMinutes() {
 		return { status: "cancelled", basename: null };
 	},
+	async startCapture() {
+		throw new Error("not used");
+	},
+	async getCaptureStatus() {
+		return null;
+	},
+	async cancelCapture() {
+		return null;
+	},
 };
 
 describe("client app shell", () => {
