@@ -1,5 +1,16 @@
 import type { ElectrobunConfig } from "electrobun";
 
+/**
+ * Electrobun currently falls back to its default config when this module
+ * throws during loading. Release preconditions must therefore terminate the
+ * build process instead of throwing, otherwise an unsigned stable artifact
+ * can be produced after a visible configuration error.
+ */
+function failClosedReleaseBuild(message: string): never {
+	console.error(`[whalehall-release-gate] ${message}`);
+	process.exit(1);
+}
+
 function currentTarget(): { os: "macos" | "linux" | "win"; arch: "arm64" | "x64" } {
 	const os =
 		process.platform === "darwin"
@@ -14,6 +25,46 @@ function currentTarget(): { os: "macos" | "linux" | "win"; arch: "arm64" | "x64"
 const target = currentTarget();
 const nativeBinary = target.os === "win" ? "whalehall-local.exe" : "whalehall-local";
 const nativeSource = `.native/${target.os}-${target.arch}/${nativeBinary}`;
+const buildEnvironment =
+	process.argv
+		.find((argument) => argument.startsWith("--env="))
+		?.slice("--env=".length) ??
+	process.env.ELECTROBUN_BUILD_ENV ??
+	"dev";
+const stableMacBuild = target.os === "macos" && buildEnvironment === "stable";
+const releaseSigningRequired =
+	stableMacBuild ||
+	process.env.WHALEHALL_RELEASE_SIGNING_REQUIRED === "true";
+const macCodeSigningEnabled = Boolean(process.env.ELECTROBUN_DEVELOPER_ID?.trim());
+if (target.os === "macos" && releaseSigningRequired && !macCodeSigningEnabled) {
+	failClosedReleaseBuild(
+		"ELECTROBUN_DEVELOPER_ID is required for every stable or explicitly signed macOS build.",
+	);
+}
+if (
+	target.os === "macos" &&
+	releaseSigningRequired &&
+	!/^[A-Z0-9]{10}$/.test(process.env.WHALEHALL_APPLE_TEAM_ID?.trim() ?? "")
+) {
+	failClosedReleaseBuild(
+		"WHALEHALL_APPLE_TEAM_ID must be the 10-character Apple Team ID for a signed macOS build.",
+	);
+}
+if (
+	stableMacBuild &&
+	process.env.WHALEHALL_MACOS_NOTARIZE !== "true"
+) {
+	failClosedReleaseBuild(
+		"Stable macOS builds require WHALEHALL_MACOS_NOTARIZE=true; unsigned or unnotarized stable artifacts are forbidden.",
+	);
+}
+const nativeCopies: Record<string, string> = {
+	[nativeSource]: `native/${nativeBinary}`,
+};
+if (target.os === "macos") {
+	nativeCopies[`.native/macos-${target.arch}/WhaleHall Observer.app`] =
+		"native/WhaleHall Observer.app";
+}
 
 export default {
 	app: {
@@ -30,7 +81,7 @@ export default {
 		},
 		copy: {
 			"dist/views": "views",
-			[nativeSource]: `native/${nativeBinary}`,
+			...nativeCopies,
 		},
 		watch: [
 			"src/views",
@@ -38,12 +89,16 @@ export default {
 			"whalehall-local/protocol/src",
 			"whalehall-local/core/src",
 			"whalehall-local/server/src",
+			"native/observer",
 			"scripts",
 		],
 		watchIgnore: ["dist/**", ".native/**", "whalehall-local/target/**"],
 		mac: {
 			bundleCEF: false,
-			codesign: false,
+			codesign: macCodeSigningEnabled,
+			notarize:
+				macCodeSigningEnabled &&
+				process.env.WHALEHALL_MACOS_NOTARIZE === "true",
 			createDmg: true,
 		},
 		linux: {
