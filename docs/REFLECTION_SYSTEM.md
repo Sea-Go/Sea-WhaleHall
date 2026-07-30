@@ -162,14 +162,43 @@ manifest 逐字段完全一致时，runtime 才会从
 projector、tokenizer 或 artifact digest 任一不符都保留 cold-start，并只
 记录不含事实内容的状态码。
 
-分类请求只包含结构化 EvidenceFact 和可选 goal，不包含 Episode hypothesis、
-Qwen prompt 或 Qwen 输出。客户端同时执行 byte 上限和保守的 8,192-token
-上界检查，绝不裁剪；验证后的 serving projector 还必须用 artifact 内锁定
-的 tokenizer、`truncation=false` 精确计数，超限直接拒绝。响应严格校验
-schema version、correlation/input hash、artifact identity、12/4 概率全集与
-归一化、label 最大概率一致性，以及 confidence/entropy/OOD 边界；无 goal
-时 relevance label 和概率都必须为 `null`。请求 timeout 覆盖 response body，
-响应 byte 数也有独立硬上限。
+分类请求只包含结构化 EvidenceFact、封窗产生的 window/trigger context、
+最多五条 `contextOnlyFacts` 和可选 goal，不包含 Episode hypothesis、Qwen
+prompt 或 Qwen 输出。context 候选先按 `startedAtMs + factId` 排序，再从最新
+候选开始选取；选中正文的保守预算固定为
+`max(ceil(codepoints/4), ceil(UTF-8 bytes/3))` 合计不超过 96 token，超限
+候选直接不进入模型输入。server 对同一预算再次 fail-closed 校验。客户端只
+执行准确的 JSON byte 上限，不再用 UTF-8 byte 数冒充 tokenizer token 数。
+通过 manifest 验证的 server 必须先以 artifact
+内锁定的 tokenizer、`truncation=false` 做精确 preflight；超过 8,192 token
+时按事件边界贪心分块，并给每块加入最多五条且不超过 30 秒的紧邻前序
+overlap。容量不足时只能从最早 overlap 开始裁掉；一个 Fact 单独超限则直接
+拒绝，绝不静默截断。
+
+server 返回完整 core coverage、实际 overlap、每块 token 数和
+`timeline-event-sequence.v2` 投影 hash。客户端验证 core Fact 恰好一次且
+顺序不变、overlap 只能是合法紧邻集合的有序后缀，并用本地同构 projector
+复算每块 hash；合并规则固定为
+`core-fact-weighted-probability.v1`。响应还严格校验 schema version、
+correlation/input hash、`artifactId=modernbert_episode_<artifactSha256>`、
+12/4 概率全集与归一化、label 最大概率一致性，以及
+confidence/entropy/OOD 边界；无 goal 时 relevance label 和概率都必须为
+`null`。请求 timeout 覆盖 response body，响应 byte 数也有独立硬上限。
+推理 listener 返回 artifact、correlation、schema、transport 或 chunk 契约
+异常时，当前 artifact 验证状态立即失效，runtime 原子切回
+`deterministic-cold-start.v2` 完成该窗口；后续只发送不含 Fact 的 manifest
+复核，逐字段重新匹配后才恢复 ModernBERT。loopback manifest pin 仍不是强
+进程身份认证，GET→POST 之间的首次 listener 竞态只能在后续通过受监督 Unix
+socket、challenge-response 或本地 TLS pin 完全消除。
+
+ModernBERT 的 `confidence`、归一化 `entropy`、`oodScore`、`abstain` 和
+`modelVersion` 会作为完整 classification 快照依次保留在
+ActivityEpisode、TimelineSegment、TimelineSummary 和 AgentInput 中。Segment
+顶层的 `activity`/`goalRelevance` 是面向展示与 Agent 决策的安全投影：一旦
+校准后的 OOD 策略令 `abstain=true`，它们固定降级为
+`other_unknown`/`uncertain`（无目标时 relevance 仍为 `null`）。这类 Episode
+不会发送给 Qwen 生成活动或目标结论，只使用“活动类型暂不确定”的确定性模板
+和原始 EvidenceFact；因此下游不得从原始 top label 生成 refocus 等行动建议。
 
 ### TimelineJournal、vault 和本地 Outbox
 
@@ -189,7 +218,18 @@ summary 和 AgentInput 全部只保存 Rust vault `contentRef`。SQLite 明文�
 `AgentInputV1`。Outbox 初始状态始终为 `HELD_LOCAL`，没有 dispatcher 和
 网络上传。未来必须显式 release 后才进入
 `READY → LEASED → ACKED`；lease 到期可重领，Agent 按 idempotency key
-去重。
+去重。`agent-input.commit-result.v2` 只返回
+`agentInputId/state/ackedAtMs` 最小 ACK，不返回已解密 AgentInput；
+ACK 时只持久化 lease token 的 SHA-256，重复 commit 必须匹配原 token。
+Timeline SQLite schema v2 会原子迁移 v1 outbox；旧 ACK 因没有 token 摘要
+而安全拒绝幂等重试，不回退为任意 token 可读。
+
+`agent.input.query` 是 uncertainty schema 的 fail-closed 边界：返回前逐段检查
+classification 的 activity/relevance、confidence、entropy、OOD、abstain 和
+modelVersion，并验证 abstain 时只存在中性安全投影。早期已加密但缺少这些字段
+的本地 AgentInput 仍可保留用于审计；即使被显式 replay，也只会得到通用
+`QUERY_FAILED`，不会跨 adapter 交付。该检查不静默改写历史密文、不可变摘要或
+`payloadHash`，正式启用 dispatcher 前必须另行执行显式版本迁移。
 
 推理 Job 使用真实的持久化阶段：
 
@@ -320,17 +360,12 @@ flowchart LR
 - window builder 的不可变 `modelInput` 固定限制为估算 3,000 token 且
   32 KiB。超过时仍保留全部语义事件的 kind/时间骨架，并优先从最新
   主证据开始补充有界 payload；训练导出端使用同样的确定性规则。
-- Student 训练与线上 artifact runner 再使用制品内锁定并做 SHA-256
-  指纹校验的 ModernBERT fast tokenizer 精确计数，单序列编码
-  `modelInput`，不重复拼接 `goalText`，也不允许通用 tokenizer 截断。
-  超过制品 token 上限时仍须保留全部事件骨架，并按“最新主证据优先”
-  结构化裁剪；无法无损保留骨架则 fail closed。
-- Student 训练和线上推理进一步共用 artifact tokenizer 的精确预算：
-  以单序列直接编码不可变 `modelInput`，不再把 `goalText` 重复拼接成句对；
-  超过 8,192 token 时按
-  `all-skeletons-latest-primary-first.v1` 做结构化裁剪。所有事件骨架仍必须
-  保留，否则 fail closed。activity mask 由 fast tokenizer 对 `[EVENTS]`
-  之后文本的 offset mapping 生成。
+- Student 训练与线上 artifact runner 使用同一制品内锁定并做 SHA-256
+  指纹校验的 ModernBERT fast tokenizer，单序列编码 `modelInput`，不重复
+  拼接 `goalText`，也不允许 tokenizer 截断。超过 8,192 token 时使用上述
+  事件边界分块、overlap 与确定性合并协议；一个事件本身超限则 fail closed。
+  activity mask 由 fast tokenizer 对 `[EVENTS]` 之后文本的 offset mapping
+  生成。
 - runtime v2 固定上述输入合约和训练 tokenizer SHA-256；serving 仅从
   artifact 本地加载 tokenizer 并核对指纹，拒绝旧的 `longest_first`
   artifact。
@@ -342,7 +377,9 @@ flowchart LR
 仓库中没有伪造“已训练模型”。在完成真实授权数据、Teacher gate、GPU
 训练、校准、三种随机种子、消融和冻结测试之前，Timeline v2 保持
 deterministic cold-start。显式启用且完成 manifest 验证后，如 endpoint
-推理失败，对应持久化 job 才按现有恢复策略重试，不会把 Qwen 当作分类器。
+失去身份或响应契约不再匹配，runtime 立即失效该验证并用 deterministic
+cold-start 完成当前窗口；不会把 Qwen 当作分类器，也不会继续向未复核
+listener 发送后续 Fact。
 
 ## 事件计数与边界
 
@@ -356,7 +393,7 @@ deterministic cold-start。显式启用且完成 manifest 验证后，如 endpoi
 - goal、AFK、锁屏和睡眠为封窗边界，不计入 64；
 - `reflection.*`、`tool.*` 和 heartbeat 永不进入反思计数。
 
-Collector 没有事件时不创建五分钟 timer，不产生空反思。每个事件只属于一个窗口；上一窗口最多五条、30 秒、96 token 的内容只能作为 `contextOnly`，不重复计数或充当新证据。
+Collector 没有事件时不创建五分钟 timer，不产生空反思。每个事件只属于一个窗口；上一窗口最多五条、30 秒的候选只能作为 `contextOnly`，送模前按上述确定性估算从最新开始选到最多 96 token，不重复计数或充当新证据。
 
 边界优先级以 EventJournal 的持久化总序为准。封窗前服务会先拉取并物化
 当时可见的 durable high-watermark；该范围内时间戳相同的事件按
@@ -473,20 +510,36 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 
 运行时在发送任何窗口前只读检查 `/api/version` 和 `/api/tags`；版本、digest、参数规模或量化不匹配时 fail closed，不会静默换模型。请求固定使用 `/api/chat`、structured output、`think:false` 和 `temperature:0`。
 
-Timeline v2 没有 ModernBERT 默认 URL，也不会读取环境变量后自行启用。
+Timeline v2 没有 ModernBERT 默认 URL。Agent runtime 本身不会读取环境变量
+后自行启用。
 `createTimelineV2Runtime()` 只有收到
 `modernBert: { enabled: true, endpoint, manifestEndpoint,
 expectedArtifact, ... }` 才做一次纯元数据验证；未配置、显式关闭、URL
-不安全、manifest 不匹配或验证超时都继续 cold-start。loopback HTTP/HTTPS
+不安全、manifest 不匹配或验证超时都继续 cold-start。瞬态启动失败只按
+有界 schedule 重试；显式 refresh 会先降级，只有再次逐字段验证成功才提升。
+训练侧 runner 在 tokenizer、配置、权重和 calibration 全部载入后重新计算
+artifact tree manifest；若加载期间目录发生替换则拒绝启动，不能以旧 digest
+身份运行新权重。
+loopback HTTP/HTTPS
 默认允许；远端必须使用调用方给出的精确 origin allowlist，并默认要求
 HTTPS。只有显式 `allowInsecureRemote: true` 才允许 allowlist 内的远端
 HTTP。推理 URL 与 manifest URL 必须同 origin，禁止 credentials、query、
 fragment 和 redirect。
 
 authorization token 只能通过 runtime options 注入，不得写入仓库、训练
-runtime/manifest 或日志。更简单的远端验证方式是把服务端 loopback 端口经
+runtime/manifest 或日志。独立 v2 server 的标准入口从同名
+`WHALEHALL_TIMELINE_MODERNBERT_TOKEN` 环境变量读取 token（可通过严格的
+`--authorization-token-env` 改名），因此 Bun 与 serving 不会出现“客户端
+带 token、标准 server 却忽略”的假配置。更简单的远端验证方式是把服务端 loopback 端口经
 已有 SSH 控制路径转发到本机 loopback；这仍然需要显式 opt-in 与完整的
 预期 artifact manifest。
+
+当前 Bun composition 只接受
+`WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT`、
+`WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT` 和指向本机绝对路径普通
+文件的 `WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST` 三项同时存在；
+缺项、相对路径、symlink、坏 manifest 或非 loopback endpoint 都明确保持
+cold-start。Bun 不接通通用 classifier 的远端 allowlist/insecure 选项。
 
 截至 2026-07-30 的只读基线核对中，独立 `WhaleHall-Training` 工作区可从
 `episode_training_v2.py` 导出 v2 `runtime.json` 和模型/tokenizer 文件；

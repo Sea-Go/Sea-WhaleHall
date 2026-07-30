@@ -31,6 +31,7 @@ import {
 	nativeRuntimeSecurityEnvironment,
 	parseNativeRuntimeChannel,
 } from "./native-runtime-security";
+import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
@@ -61,6 +62,13 @@ const localRuntimeEnvironment: Record<string, string> = {
 	WHALEHALL_SESSION_ID: runtimeIdentity.sessionId,
 	...nativeRuntimeSecurityEnvironment(runtimeChannel),
 };
+const timelineModernBertConfiguration =
+	loadTimelineModernBertConfiguration(process.env);
+if (timelineModernBertConfiguration.code === "invalid_config") {
+	console.warn(
+		"WhaleHall Timeline v2 ModernBERT configuration is incomplete or invalid; deterministic cold-start remains active.",
+	);
+}
 
 const agent = new AgentRuntime(
 	new LocalToolClient(nativePath, {
@@ -430,6 +438,8 @@ startupPromise = (async () => {
 					dataDirectory: localDataPath,
 					initialGoal: candidate.service.getActiveGoalContext(),
 					rawAuditSource,
+					modernBert:
+						timelineModernBertConfiguration.modernBert,
 				});
 				await timelineCandidate.start();
 			} catch (error) {
