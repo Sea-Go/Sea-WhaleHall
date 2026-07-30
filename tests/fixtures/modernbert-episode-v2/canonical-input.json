@@ -1,0 +1,101 @@
+{
+  "input": {
+    "chunking": {
+      "maximumTokens": 8192,
+      "merge": "core-fact-weighted-probability.v1",
+      "overlapFacts": 5,
+      "overlapMs": 30000,
+      "strategy": "event-boundary-greedy.v1"
+    },
+    "contextOnlyFacts": [
+      {
+        "anchor": {
+          "appId": "com.google.Chrome",
+          "documentId": null,
+          "pageId": "page-1",
+          "windowId": "window-1"
+        },
+        "countClass": "context",
+        "coverage": [
+          "content",
+          "metadata"
+        ],
+        "endedAtMs": 750,
+        "factId": "fact-0",
+        "reliability": "high",
+        "renderedText": "可见页面证据 0",
+        "role": "primary",
+        "startedAtMs": 500,
+        "templateArgs": {
+          "appName": "Chrome",
+          "visibleCharacters": 88
+        },
+        "templateCode": "browser.visible_page"
+      }
+    ],
+    "facts": [
+      {
+        "anchor": {
+          "appId": "com.google.Chrome",
+          "documentId": null,
+          "pageId": "page-1",
+          "windowId": "window-1"
+        },
+        "countClass": "effective",
+        "coverage": [
+          "content",
+          "metadata"
+        ],
+        "endedAtMs": 2250,
+        "factId": "fact-1",
+        "reliability": "high",
+        "renderedText": "可见页面证据 1",
+        "role": "primary",
+        "startedAtMs": 2000,
+        "templateArgs": {
+          "appName": "Chrome",
+          "visibleCharacters": 88
+        },
+        "templateCode": "browser.visible_page"
+      },
+      {
+        "anchor": {
+          "appId": "com.google.Chrome",
+          "documentId": null,
+          "pageId": "page-1",
+          "windowId": "window-1"
+        },
+        "countClass": "effective",
+        "coverage": [
+          "content",
+          "metadata"
+        ],
+        "endedAtMs": 3250,
+        "factId": "fact-2",
+        "reliability": "high",
+        "renderedText": "可见页面证据 2",
+        "role": "primary",
+        "startedAtMs": 3000,
+        "templateArgs": {
+          "appName": "Chrome",
+          "visibleCharacters": 88
+        },
+        "templateCode": "browser.visible_page"
+      }
+    ],
+    "goal": {
+      "goalId": "goal-1",
+      "text": "核对 ModernBERT v2 契约",
+      "version": 3
+    },
+    "schemaVersion": "modernbert-episode-input.v2",
+    "window": {
+      "endedAtMs": 301000,
+      "startedAtMs": 1000,
+      "triggerReason": "max_wait",
+      "windowId": "window-fixture-1"
+    }
+  },
+  "expectedInputHash": "33fdc7f14b5e7d394edb5b06411ba60a34c47d5073ccc29ec65f77b55e4efb2a",
+  "expectedModelInputSha256": "dfdcebe8affac43d15d07fe6ef46e3410ccef2a043a2ab22e50a48e751806034"
+}

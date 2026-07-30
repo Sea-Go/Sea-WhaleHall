@@ -8,7 +8,10 @@ import type {
 	ActivityLabel,
 	GoalRelevanceLabel,
 } from "../reflection/types";
-import type { TimelineEpisodeClassifier } from "./episodes";
+import type {
+	TimelineEpisodeClassificationContext,
+	TimelineEpisodeClassifier,
+} from "./episodes";
 import {
 	TIMELINE_TAXONOMY_VERSION,
 	type EpisodeClassificationV2,
@@ -18,19 +21,26 @@ import {
 } from "./types";
 
 export const MODERNBERT_MANIFEST_SCHEMA_VERSION =
-	"modernbert-episode-serving-manifest.v1" as const;
+	"modernbert-episode-serving-manifest.v2" as const;
 export const MODERNBERT_RUNTIME_SCHEMA_VERSION =
 	"modernbert-episode-runtime.v1" as const;
 export const MODERNBERT_REQUEST_SCHEMA_VERSION =
-	"modernbert-episode-classification-request.v1" as const;
+	"modernbert-episode-classification-request.v2" as const;
 export const MODERNBERT_INPUT_SCHEMA_VERSION =
-	"modernbert-episode-input.v1" as const;
+	"modernbert-episode-input.v2" as const;
 export const MODERNBERT_RESPONSE_SCHEMA_VERSION =
-	"modernbert-episode-classification-response.v1" as const;
+	"modernbert-episode-classification-response.v2" as const;
 export const MODERNBERT_MODEL_INPUT_FORMAT =
 	"timeline-event-sequence.v2" as const;
 export const MODERNBERT_EVIDENCE_PROJECTOR_VERSION =
 	"evidence-projector.v2" as const;
+export const MODERNBERT_CHUNKING_STRATEGY =
+	"event-boundary-greedy.v1" as const;
+export const MODERNBERT_CHUNK_MERGE_VERSION =
+	"core-fact-weighted-probability.v1" as const;
+export const MODERNBERT_CHUNK_OVERLAP_FACTS = 5 as const;
+export const MODERNBERT_CHUNK_OVERLAP_MS = 30_000 as const;
+export const MODERNBERT_CONTEXT_ONLY_MAXIMUM_TOKENS = 96 as const;
 
 export const MODERNBERT_ACTIVITY_LABELS = [
 	"development",
@@ -78,9 +88,7 @@ const MAX_GOAL_TEXT_CHARACTERS = 1_000;
 const PROBABILITY_SUM_TOLERANCE = 1e-6;
 const MODERNBERT_MAXIMUM_TOKENS = 8_192;
 const MODERNBERT_EMBEDDING_DIMENSIONS = 256;
-const PROJECTED_INPUT_FIXED_TOKEN_RESERVE = 256;
-const PROJECTED_INPUT_PER_FACT_TOKEN_RESERVE = 96;
-const PROJECTED_INPUT_GOAL_TOKEN_RESERVE = 64;
+const MAX_CONTEXT_ONLY_FACTS = 5;
 const UNREADY_CALIBRATION_VERSIONS = new Set([
 	"uncalibrated",
 	"unknown",
@@ -144,6 +152,13 @@ export type ModernBertArtifactManifestV1 = {
 	maximumInputBytes: number;
 };
 
+export function validatePinnedModernBertArtifactManifest(
+	value: unknown,
+): ModernBertArtifactManifestV1 {
+	validateManifest(value, "invalid_config");
+	return structuredClone(value);
+}
+
 export type ModernBertFetchLike = (
 	input: string | URL | Request,
 	init?: RequestInit,
@@ -158,6 +173,11 @@ export type ModernBertClassifierOptions = {
 	authorizationToken?: string;
 	timeoutMs?: number;
 	maximumResponseBytes?: number;
+	/**
+	 * Runtime-only startup retry schedule. At most five bounded attempts are
+	 * accepted; it is not sent to the serving endpoint.
+	 */
+	verificationRetryDelaysMs?: readonly number[];
 	fetch?: ModernBertFetchLike;
 	hasher?: ReflectionHasher;
 };
@@ -217,16 +237,31 @@ export type ModernBertInputFact = {
 	reliability: EvidenceFactV2["reliability"];
 	coverage: EvidenceFactV2["coverage"];
 	anchor: EvidenceFactV2["anchor"];
+	countClass: "effective" | "boundary" | "context";
 };
 
 export type ModernBertEpisodeInput = {
 	schemaVersion: typeof MODERNBERT_INPUT_SCHEMA_VERSION;
+	window: {
+		windowId: string;
+		triggerReason: TimelineEpisodeClassificationContext["triggerReason"];
+		startedAtMs: number;
+		endedAtMs: number;
+	};
 	facts: ModernBertInputFact[];
+	contextOnlyFacts: ModernBertInputFact[];
 	goal: {
 		goalId: string;
 		version: number;
 		text: string;
 	} | null;
+	chunking: {
+		strategy: typeof MODERNBERT_CHUNKING_STRATEGY;
+		maximumTokens: number;
+		overlapFacts: typeof MODERNBERT_CHUNK_OVERLAP_FACTS;
+		overlapMs: typeof MODERNBERT_CHUNK_OVERLAP_MS;
+		merge: typeof MODERNBERT_CHUNK_MERGE_VERSION;
+	};
 };
 
 export type ModernBertClassificationRequest = {
@@ -242,6 +277,20 @@ export type ModernBertClassificationResponse = {
 	correlationId: string;
 	inputHash: string;
 	artifact: ModernBertArtifactIdentity;
+	analysis: {
+		projectorVersion: typeof MODERNBERT_EVIDENCE_PROJECTOR_VERSION;
+		strategy: typeof MODERNBERT_CHUNKING_STRATEGY;
+		merge: typeof MODERNBERT_CHUNK_MERGE_VERSION;
+		projectedTokenCount: number;
+		chunkCount: number;
+		chunks: Array<{
+			chunkIndex: number;
+			coreFactIds: string[];
+			overlapFactIds: string[];
+			tokenCount: number;
+			modelInputHash: string;
+		}>;
+	};
 	classification: {
 		activity: ActivityLabel;
 		activityProbabilities: Record<ActivityLabel, number>;
@@ -310,6 +359,19 @@ export class ModernBertEpisodeClassifier
 
 	async verifyArtifact(): Promise<void> {
 		if (this.verified) return;
+		await this.runVerification();
+	}
+
+	/**
+	 * Re-fetches the pinned manifest without sending EvidenceFact content.
+	 * Classification is demoted until the exact artifact is verified again.
+	 */
+	async refreshArtifact(): Promise<void> {
+		this.verified = false;
+		await this.runVerification();
+	}
+
+	private async runVerification(): Promise<void> {
 		if (!this.verification) {
 			this.verification = this.verifyArtifactOnce().finally(() => {
 				this.verification = null;
@@ -321,6 +383,7 @@ export class ModernBertEpisodeClassifier
 	async classify(
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
+		context?: TimelineEpisodeClassificationContext,
 	): Promise<EpisodeClassificationV2> {
 		if (!this.verified) {
 			throw new ModernBertClassifierError(
@@ -328,31 +391,24 @@ export class ModernBertEpisodeClassifier
 				"ModernBERT artifact metadata has not been verified.",
 			);
 		}
-		const input = buildInput(facts, goal, this.expectedArtifact);
+		if (context === undefined) {
+			throw new ModernBertClassifierError(
+				"invalid_input",
+				"ModernBERT requires authoritative sealed-window context.",
+			);
+		}
+		const input = buildInput(
+			facts,
+			goal,
+			context,
+			this.expectedArtifact,
+		);
 		const inputJson = canonicalJson(input);
 		const inputBytes = new TextEncoder().encode(inputJson).byteLength;
 		if (inputBytes > this.expectedArtifact.maximumInputBytes) {
 			throw new ModernBertClassifierError(
 				"input_too_large",
 				"ModernBERT episode input exceeds the pinned artifact byte budget.",
-			);
-		}
-		// A UTF-8 byte is a conservative upper bound for one tokenizer token.
-		// Reserve additional tokens for the deterministic server-side
-		// timeline-event-sequence.v2 projection. The verified server must still
-		// run the pinned tokenizer with truncation disabled and reject overflow.
-		const conservativeTokenUpperBound =
-			inputBytes +
-			PROJECTED_INPUT_FIXED_TOKEN_RESERVE +
-			facts.length * PROJECTED_INPUT_PER_FACT_TOKEN_RESERVE +
-			(goal === null ? 0 : PROJECTED_INPUT_GOAL_TOKEN_RESERVE);
-		if (
-			conservativeTokenUpperBound >
-			this.expectedArtifact.runtime.maximumTokens
-		) {
-			throw new ModernBertClassifierError(
-				"input_too_large",
-				"ModernBERT episode input exceeds the pinned token budget.",
 			);
 		}
 		const inputHash = await this.hasher.sha256(inputJson);
@@ -384,45 +440,61 @@ export class ModernBertEpisodeClassifier
 			artifact: artifactIdentity(this.expectedArtifact),
 			input,
 		};
-		const value = await this.fetchJson(this.endpoint, {
-			method: "POST",
-			headers: {
-				...this.headers,
-				"content-type": "application/json",
-			},
-			body: canonicalJson(request),
-			redirect: "error",
-		});
-		const response = validateClassificationResponse(
-			value,
-			goal !== null,
-		);
-		if (
-			response.correlationId !== correlationId ||
-			response.inputHash !== inputHash
-		) {
-			throw new ModernBertClassifierError(
-				"correlation_mismatch",
-				"ModernBERT response correlation did not match the request.",
+		try {
+			const value = await this.fetchJson(this.endpoint, {
+				method: "POST",
+				headers: {
+					...this.headers,
+					"content-type": "application/json",
+				},
+				body: canonicalJson(request),
+				redirect: "error",
+			});
+			const response = validateClassificationResponse(
+				value,
+				goal !== null,
 			);
-		}
-		if (
-			canonicalJson(response.artifact) !==
-			canonicalJson(artifactIdentity(this.expectedArtifact))
-		) {
-			throw new ModernBertClassifierError(
-				"artifact_response_mismatch",
-				"ModernBERT response did not identify the verified artifact.",
+			if (
+				response.correlationId !== correlationId ||
+				response.inputHash !== inputHash
+			) {
+				throw new ModernBertClassifierError(
+					"correlation_mismatch",
+					"ModernBERT response correlation did not match the request.",
+					true,
+				);
+			}
+			if (
+				canonicalJson(response.artifact) !==
+				canonicalJson(artifactIdentity(this.expectedArtifact))
+			) {
+				throw new ModernBertClassifierError(
+					"artifact_response_mismatch",
+					"ModernBERT response did not identify the verified artifact.",
+					true,
+				);
+			}
+			await validateChunkAnalysis(
+				response.analysis,
+				input,
+				this.expectedArtifact,
+				this.hasher,
 			);
+			return {
+				activity: response.classification.activity,
+				goalRelevance: response.classification.goalRelevance,
+				confidence: response.classification.confidence,
+				entropy: response.classification.entropy,
+				oodScore: response.classification.oodScore,
+				abstain: response.classification.abstain,
+				modelVersion: this.expectedArtifact.runtime.modelVersion,
+			};
+		} catch (error) {
+			if (invalidatesVerifiedArtifact(error)) {
+				this.verified = false;
+			}
+			throw error;
 		}
-		return {
-			activity: response.classification.activity,
-			goalRelevance: response.classification.goalRelevance,
-			confidence: response.classification.confidence,
-			oodScore: response.classification.oodScore,
-			abstain: response.classification.abstain,
-			modelVersion: this.expectedArtifact.runtime.modelVersion,
-		};
 	}
 
 	private async verifyArtifactOnce(): Promise<void> {
@@ -485,6 +557,14 @@ export class ModernBertEpisodeClassifier
 						);
 					}
 					if (!response.ok) {
+						if (response.status === 413) {
+							throw new ModernBertClassifierError(
+								"input_too_large",
+								"ModernBERT exact-token preflight rejected an oversized event.",
+								false,
+								response.status,
+							);
+						}
 						throw new ModernBertClassifierError(
 							"http_error",
 							"ModernBERT endpoint returned an unsuccessful status.",
@@ -522,6 +602,16 @@ export class ModernBertEpisodeClassifier
 			if (timer !== null) clearTimeout(timer);
 		}
 	}
+}
+
+function invalidatesVerifiedArtifact(error: unknown): boolean {
+	if (!(error instanceof ModernBertClassifierError)) return true;
+	return ![
+		"artifact_not_verified",
+		"invalid_config",
+		"invalid_input",
+		"input_too_large",
+	].includes(error.code);
 }
 
 function normalizeEndpoints(options: ModernBertClassifierOptions): {
@@ -660,6 +750,7 @@ function requestHeaders(
 function buildInput(
 	facts: readonly EvidenceFactV2[],
 	goal: ActiveGoalContextV1 | null,
+	context: TimelineEpisodeClassificationContext,
 	manifest: ModernBertArtifactManifestV1,
 ): ModernBertEpisodeInput {
 	if (
@@ -672,25 +763,131 @@ function buildInput(
 			"ModernBERT episode fact count is outside the pinned bounds.",
 		);
 	}
+	if (
+		context.contextOnlyFacts.length > MAX_CONTEXT_ONLY_FACTS ||
+		!isBoundedIdentifier(context.windowId, 256) ||
+		!isTriggerReason(context.triggerReason) ||
+		!isNonNegativeInteger(context.startedAtMs) ||
+		!isNonNegativeInteger(context.endedAtMs) ||
+		context.endedAtMs < context.startedAtMs ||
+		!isNonNegativeInteger(context.eventCount) ||
+		context.eventCount < 1
+	) {
+		throw new ModernBertClassifierError(
+			"invalid_input",
+			"ModernBERT sealed-window context is invalid.",
+		);
+	}
 	const seenFactIds = new Set<string>();
-	const inputFacts = facts.map((fact) => {
-		validateFact(fact, seenFactIds);
-		return {
-			factId: fact.factId,
-			startedAtMs: fact.startedAtMs,
-			endedAtMs: fact.endedAtMs,
-			templateCode: fact.templateCode,
-			templateArgs: structuredClone(fact.templateArgs),
-			renderedText: fact.renderedText,
-			role: fact.role,
-			reliability: fact.reliability,
-			coverage: [...fact.coverage],
-			anchor: structuredClone(fact.anchor),
-		};
-	});
-	for (let index = 1; index < inputFacts.length; index += 1) {
-		const previous = inputFacts[index - 1];
-		const current = inputFacts[index];
+	const contextOnlyCandidates = context.contextOnlyFacts
+		.map((fact) => inputFact(fact, "context", seenFactIds))
+		.sort(
+			(left, right) =>
+				left.startedAtMs - right.startedAtMs ||
+				left.factId.localeCompare(right.factId),
+		);
+	const inputFacts = facts.map((fact) =>
+		inputFact(
+			fact,
+			fact.role === "boundary" ? "boundary" : "effective",
+			seenFactIds,
+		),
+	);
+	const contextOnlyFacts = selectContextOnlyFacts(
+		contextOnlyCandidates,
+	);
+	if (
+		inputFacts.length + contextOnlyFacts.length >
+		manifest.maximumFacts
+	) {
+		throw new ModernBertClassifierError(
+			"invalid_input",
+			"ModernBERT total fact count is outside the pinned bounds.",
+		);
+	}
+	assertDeterministicFactOrder(contextOnlyFacts);
+	assertDeterministicFactOrder(inputFacts);
+	if (goal !== null) validateGoal(goal);
+	return {
+		schemaVersion: MODERNBERT_INPUT_SCHEMA_VERSION,
+		window: {
+			windowId: context.windowId,
+			triggerReason: context.triggerReason,
+			startedAtMs: context.startedAtMs,
+			endedAtMs: context.endedAtMs,
+		},
+		facts: inputFacts,
+		contextOnlyFacts,
+		goal: goal
+			? {
+					goalId: goal.goalId,
+					version: goal.version,
+					text: goal.text,
+				}
+			: null,
+		chunking: {
+			strategy: MODERNBERT_CHUNKING_STRATEGY,
+			maximumTokens: manifest.runtime.maximumTokens,
+			overlapFacts: MODERNBERT_CHUNK_OVERLAP_FACTS,
+			overlapMs: MODERNBERT_CHUNK_OVERLAP_MS,
+			merge: MODERNBERT_CHUNK_MERGE_VERSION,
+		},
+	};
+}
+
+function selectContextOnlyFacts(
+	candidates: readonly ModernBertInputFact[],
+): ModernBertInputFact[] {
+	let remainingTokens = MODERNBERT_CONTEXT_ONLY_MAXIMUM_TOKENS;
+	const selected: ModernBertInputFact[] = [];
+	for (let index = candidates.length - 1; index >= 0; index -= 1) {
+		const candidate = candidates[index];
+		if (!candidate) continue;
+		const estimatedTokens = estimateModernBertContextTokens(
+			candidate.renderedText,
+		);
+		if (estimatedTokens > remainingTokens) continue;
+		selected.push(candidate);
+		remainingTokens -= estimatedTokens;
+	}
+	return selected.reverse();
+}
+
+export function estimateModernBertContextTokens(text: string): number {
+	const characterEstimate = Math.ceil(Array.from(text).length / 4);
+	const byteEstimate = Math.ceil(
+		new TextEncoder().encode(text).byteLength / 3,
+	);
+	return Math.max(characterEstimate, byteEstimate);
+}
+
+function inputFact(
+	fact: EvidenceFactV2,
+	countClass: ModernBertInputFact["countClass"],
+	seenFactIds: Set<string>,
+): ModernBertInputFact {
+	validateFact(fact, seenFactIds);
+	return {
+		factId: fact.factId,
+		startedAtMs: fact.startedAtMs,
+		endedAtMs: fact.endedAtMs,
+		templateCode: fact.templateCode,
+		templateArgs: structuredClone(fact.templateArgs),
+		renderedText: fact.renderedText,
+		role: fact.role,
+		reliability: fact.reliability,
+		coverage: [...fact.coverage],
+		anchor: structuredClone(fact.anchor),
+		countClass,
+	};
+}
+
+function assertDeterministicFactOrder(
+	facts: readonly ModernBertInputFact[],
+): void {
+	for (let index = 1; index < facts.length; index += 1) {
+		const previous = facts[index - 1];
+		const current = facts[index];
 		if (
 			!previous ||
 			!current ||
@@ -704,18 +901,6 @@ function buildInput(
 			);
 		}
 	}
-	if (goal !== null) validateGoal(goal);
-	return {
-		schemaVersion: MODERNBERT_INPUT_SCHEMA_VERSION,
-		facts: inputFacts,
-		goal: goal
-			? {
-					goalId: goal.goalId,
-					version: goal.version,
-					text: goal.text,
-				}
-			: null,
-	};
 }
 
 function validateFact(
@@ -797,6 +982,213 @@ function validateGoal(goal: ActiveGoalContextV1): void {
 	}
 }
 
+const TEMPLATE_EVENT_KIND: Readonly<Record<FactTemplateCode, string>> = {
+	"application.foreground": "application.foregroundChanged",
+	"application.visible_content": "application.visibleContentChanged",
+	"application.text_value": "application.textValueChanged",
+	"browser.visible_page": "browser.visiblePageChanged",
+	"ui.focus": "ui.focusChanged",
+	"ui.control_activated": "ui.controlActivated",
+	"input.activity": "input.activityBucket",
+	"presence.changed": "presence.changed",
+	"goal.changed": "goal.changed",
+	"coverage.unavailable": "coverage.unavailable",
+};
+
+/**
+ * Exact TypeScript mirror of the training serializer's
+ * timeline-event-sequence.v2 projection. Tokenization remains authoritative
+ * on the verified artifact server because its tokenizer digest is pinned.
+ */
+export function projectModernBertModelInput(
+	input: ModernBertEpisodeInput,
+	selectedFacts: readonly ModernBertInputFact[] = input.facts,
+): string {
+	const events = [...input.contextOnlyFacts, ...selectedFacts];
+	if (events.length < 1) {
+		throw new ModernBertClassifierError(
+			"invalid_input",
+			"ModernBERT model projection requires at least one fact.",
+		);
+	}
+	const lines = [
+		`[CONTRACT] ${MODERNBERT_MODEL_INPUT_FORMAT}`,
+		`[TIMELINE] ${canonicalJson({
+			timelineId: input.window.windowId,
+			triggerReason: input.window.triggerReason,
+			range: [
+				input.window.startedAtMs,
+				input.window.endedAtMs,
+			],
+		})}`,
+		`[GOAL] ${canonicalJson(input.goal)}`,
+		"[EVENTS]",
+	];
+	for (const fact of events) {
+		const appId = fact.anchor.appId ?? "unknown";
+		const appNameValue = fact.templateArgs.appName;
+		const appName =
+			typeof appNameValue === "string" && appNameValue.length > 0
+				? appNameValue
+				: appId;
+		const anchor =
+			fact.anchor.pageId ??
+			fact.anchor.documentId ??
+			fact.anchor.windowId ??
+			fact.anchor.appId;
+		lines.push(
+			`[EVT] ${canonicalJson({
+				eventId: fact.factId,
+				kind:
+					TEMPLATE_EVENT_KIND[
+						fact.templateCode as FactTemplateCode
+					] ?? "evidence.fact",
+				interval: [fact.startedAtMs, fact.endedAtMs],
+				app: {
+					id: appId,
+					name: appName,
+				},
+				anchor,
+				fact: {
+					code: fact.templateCode,
+					text: fact.renderedText,
+				},
+				reliability: fact.reliability,
+				coverage: fact.coverage,
+				countClass: fact.countClass,
+			})}`,
+		);
+	}
+	return lines.join("\n");
+}
+
+async function validateChunkAnalysis(
+	analysis: ModernBertClassificationResponse["analysis"],
+	input: ModernBertEpisodeInput,
+	manifest: ModernBertArtifactManifestV1,
+	hasher: ReflectionHasher,
+): Promise<void> {
+	const factsById = new Map(
+		input.facts.map((fact) => [fact.factId, fact] as const),
+	);
+	let nextCoreIndex = 0;
+	for (const chunk of analysis.chunks) {
+		if (chunk.tokenCount > manifest.runtime.maximumTokens) {
+			throw chunkSchemaMismatch(
+				"ModernBERT chunk exceeds the pinned exact-token limit.",
+			);
+		}
+		const expectedCore = input.facts.slice(
+			nextCoreIndex,
+			nextCoreIndex + chunk.coreFactIds.length,
+		);
+		if (
+			expectedCore.length !== chunk.coreFactIds.length ||
+			!exactStringArray(
+				chunk.coreFactIds,
+				expectedCore.map((fact) => fact.factId),
+			)
+		) {
+			throw chunkSchemaMismatch(
+				"ModernBERT chunk core coverage is incomplete or reordered.",
+			);
+		}
+		const expectedOverlap = expectedChunkOverlap(
+			input.facts,
+			nextCoreIndex,
+		);
+		const eligibleOverlapIds = expectedOverlap.map(
+			(fact) => fact.factId,
+		);
+		const expectedSuffix = eligibleOverlapIds.slice(
+			eligibleOverlapIds.length -
+				chunk.overlapFactIds.length,
+		);
+		if (!exactStringArray(chunk.overlapFactIds, expectedSuffix)) {
+			throw chunkSchemaMismatch(
+				"ModernBERT chunk overlap does not match the pinned policy.",
+			);
+		}
+		const selectedOverlap = chunk.overlapFactIds.map(
+			(factId) => factsById.get(factId)!,
+		);
+		const selected = [...selectedOverlap, ...expectedCore];
+		const modelInputHash = await hasher.sha256(
+			projectModernBertModelInput(input, selected),
+		);
+		if (
+			!isSha256(modelInputHash) ||
+			modelInputHash !== chunk.modelInputHash
+		) {
+			throw chunkSchemaMismatch(
+				"ModernBERT chunk projector hash does not match the application projection.",
+			);
+		}
+		nextCoreIndex += expectedCore.length;
+	}
+	if (nextCoreIndex !== input.facts.length) {
+		throw chunkSchemaMismatch(
+			"ModernBERT chunk plan did not cover every core fact exactly once.",
+		);
+	}
+	if (
+		analysis.projectedTokenCount <=
+			manifest.runtime.maximumTokens &&
+		analysis.chunkCount !== 1
+	) {
+		throw chunkSchemaMismatch(
+			"ModernBERT split an input that fits the pinned token budget.",
+		);
+	}
+	if (
+		analysis.chunkCount === 1 &&
+		analysis.chunks[0]?.tokenCount !==
+			analysis.projectedTokenCount
+	) {
+		throw chunkSchemaMismatch(
+			"ModernBERT unchunked token counts are inconsistent.",
+		);
+	}
+	for (const contextFact of input.contextOnlyFacts) {
+		if (factsById.has(contextFact.factId)) {
+			throw chunkSchemaMismatch(
+				"ModernBERT context-only fact was counted as core evidence.",
+			);
+		}
+	}
+}
+
+function expectedChunkOverlap(
+	facts: readonly ModernBertInputFact[],
+	coreStartIndex: number,
+): ModernBertInputFact[] {
+	if (coreStartIndex === 0) return [];
+	const firstCore = facts[coreStartIndex];
+	if (!firstCore) return [];
+	const earliestByCount = Math.max(
+		0,
+		coreStartIndex - MODERNBERT_CHUNK_OVERLAP_FACTS,
+	);
+	const cutoff = firstCore.startedAtMs - MODERNBERT_CHUNK_OVERLAP_MS;
+	let earliestByTime = coreStartIndex;
+	while (
+		earliestByTime > 0 &&
+		(facts[earliestByTime - 1]?.endedAtMs ?? -1) >= cutoff
+	) {
+		earliestByTime -= 1;
+	}
+	const earliest = Math.max(earliestByCount, earliestByTime);
+	return facts.slice(earliest, coreStartIndex);
+}
+
+function chunkSchemaMismatch(message: string): ModernBertClassifierError {
+	return new ModernBertClassifierError(
+		"schema_mismatch",
+		message,
+		true,
+	);
+}
+
 function validateManifest(
 	value: unknown,
 	code: "invalid_config" | "artifact_manifest_mismatch",
@@ -817,6 +1209,8 @@ function validateManifest(
 		value.schemaVersion !== MODERNBERT_MANIFEST_SCHEMA_VERSION ||
 		!isBoundedIdentifier(value.artifactId, 256) ||
 		!isSha256(value.artifactSha256) ||
+		value.artifactId !==
+			modernBertArtifactId(value.artifactSha256) ||
 		!isEpisodeRuntime(value.runtime) ||
 		value.requestSchemaVersion !== MODERNBERT_REQUEST_SCHEMA_VERSION ||
 		value.inputSchemaVersion !== MODERNBERT_INPUT_SCHEMA_VERSION ||
@@ -848,12 +1242,14 @@ function validateClassificationResponse(
 			"correlationId",
 			"inputHash",
 			"artifact",
+			"analysis",
 			"classification",
 		]) ||
 		value.schemaVersion !== MODERNBERT_RESPONSE_SCHEMA_VERSION ||
 		!isCorrelationId(value.correlationId) ||
 		!isSha256(value.inputHash) ||
 		!isArtifactIdentity(value.artifact) ||
+		!isChunkAnalysis(value.analysis) ||
 		!isRecord(value.classification) ||
 		!hasExactKeys(value.classification, [
 			"activity",
@@ -914,6 +1310,57 @@ function validateClassificationResponse(
 		);
 	}
 	return value as ModernBertClassificationResponse;
+}
+
+function isChunkAnalysis(
+	value: unknown,
+): value is ModernBertClassificationResponse["analysis"] {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, [
+			"projectorVersion",
+			"strategy",
+			"merge",
+			"projectedTokenCount",
+			"chunkCount",
+			"chunks",
+		]) ||
+		value.projectorVersion !== MODERNBERT_EVIDENCE_PROJECTOR_VERSION ||
+		value.strategy !== MODERNBERT_CHUNKING_STRATEGY ||
+		value.merge !== MODERNBERT_CHUNK_MERGE_VERSION ||
+		!isPositiveInteger(value.projectedTokenCount) ||
+		!isPositiveInteger(value.chunkCount) ||
+		!Array.isArray(value.chunks) ||
+		value.chunks.length !== value.chunkCount
+	) {
+		return false;
+	}
+	return value.chunks.every(
+		(chunk, index) =>
+			isRecord(chunk) &&
+			hasExactKeys(chunk, [
+				"chunkIndex",
+				"coreFactIds",
+				"overlapFactIds",
+				"tokenCount",
+				"modelInputHash",
+			]) &&
+			chunk.chunkIndex === index &&
+			isBoundedStringArray(
+				chunk.coreFactIds,
+				1,
+				MAX_FACTS,
+				160,
+			) &&
+			isBoundedStringArray(
+				chunk.overlapFactIds,
+				0,
+				MODERNBERT_CHUNK_OVERLAP_FACTS,
+				160,
+			) &&
+			isPositiveInteger(chunk.tokenCount) &&
+			isSha256(chunk.modelInputHash),
+	);
 }
 
 function isEpisodeRuntime(
@@ -1017,6 +1464,8 @@ function isArtifactIdentity(
 		]) &&
 		isBoundedIdentifier(value.artifactId, 256) &&
 		isSha256(value.artifactSha256) &&
+		value.artifactId ===
+			modernBertArtifactId(value.artifactSha256) &&
 		isSha256(value.tokenizerSha256) &&
 		isBoundedIdentifier(value.modelVersion, 256) &&
 		value.taxonomyVersion === TIMELINE_TAXONOMY_VERSION &&
@@ -1025,6 +1474,10 @@ function isArtifactIdentity(
 		value.projectorVersion === MODERNBERT_EVIDENCE_PROJECTOR_VERSION &&
 		isReadyCalibrationVersion(value.calibrationVersion)
 	);
+}
+
+function modernBertArtifactId(artifactSha256: string): string {
+	return `modernbert_episode_${artifactSha256}`;
 }
 
 async function readBoundedJson(
@@ -1197,6 +1650,17 @@ function isGoalRelevanceLabel(
 	return (
 		typeof value === "string" &&
 		(MODERNBERT_GOAL_RELEVANCE_LABELS as readonly string[]).includes(value)
+	);
+}
+
+function isTriggerReason(
+	value: unknown,
+): value is TimelineEpisodeClassificationContext["triggerReason"] {
+	return (
+		value === "event_count" ||
+		value === "max_wait" ||
+		value === "goal_boundary" ||
+		value === "presence_boundary"
 	);
 }
 

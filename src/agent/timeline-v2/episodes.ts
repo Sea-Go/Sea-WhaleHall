@@ -17,10 +17,20 @@ export const EPISODE_CROSS_WINDOW_GAP_MS = 90_000;
 export const EPISODE_CROSS_WINDOW_SIMILARITY = 0.8;
 export const EPISODE_MAX_PRIMARY_SEGMENTS = 8;
 
+export type TimelineEpisodeClassificationContext = {
+	windowId: TimelineWindowV2["windowId"];
+	triggerReason: TimelineWindowV2["triggerReason"];
+	startedAtMs: TimelineWindowV2["startedAtMs"];
+	endedAtMs: TimelineWindowV2["endedAtMs"];
+	eventCount: TimelineWindowV2["eventCount"];
+	contextOnlyFacts: readonly EvidenceFactV2[];
+};
+
 export interface TimelineEpisodeClassifier {
 	classify(
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
+		context?: TimelineEpisodeClassificationContext,
 	): Promise<EpisodeClassificationV2>;
 }
 
@@ -61,6 +71,7 @@ export class DeterministicEpisodeAssembler {
 		window: TimelineWindowV2,
 		facts: readonly EvidenceFactV2[],
 		previousEpisode: ActivityEpisodeV2 | null,
+		contextOnlyFacts: readonly EvidenceFactV2[] = [],
 	): Promise<ActivityEpisodeV2[]> {
 		const segments = segmentFacts(facts);
 		const episodes: ActivityEpisodeV2[] = [];
@@ -70,12 +81,29 @@ export class DeterministicEpisodeAssembler {
 			const classificationFacts = segment.facts.filter(
 				(fact) => !segment.supportingFactIds.has(fact.factId),
 			);
-			const classification = await this.classifier.classify(
+			const classified = await this.classifier.classify(
 				classificationFacts.length > 0
 					? classificationFacts
 					: segment.facts,
 				window.goal,
+				{
+					windowId: window.windowId,
+					triggerReason: window.triggerReason,
+					startedAtMs: window.startedAtMs,
+					endedAtMs: window.endedAtMs,
+					eventCount: window.eventCount,
+					contextOnlyFacts,
+				},
 			);
+			// Relevance has no meaning without an active goal, even if a custom
+			// classifier violates the interface contract.
+			const classification: EpisodeClassificationV2 = {
+				...classified,
+				goalRelevance:
+					window.goal === null
+						? null
+						: classified.goalRelevance,
+			};
 			const anchor = segmentAnchor(segment.facts);
 			const evidenceFactIds = segment.facts
 				.filter(
@@ -180,14 +208,28 @@ export class DeterministicEpisodeAssembler {
 				),
 			});
 		}
-		const hypotheses = await this.hypotheses.generate(
-			episodes,
-			facts,
-			window.goal,
+		const hypothesisEligibleEpisodes = episodes.filter(
+			(episode) => !episode.classification.abstain,
 		);
+		const hypotheses =
+			hypothesisEligibleEpisodes.length === 0
+				? new Map<string, ActivityEpisodeV2["hypothesis"]>()
+				: await this.hypotheses.generate(
+						hypothesisEligibleEpisodes,
+						facts,
+						window.goal,
+					);
 		for (const episode of episodes) {
 			const hypothesis = hypotheses.get(episode.episodeId);
-			if (hypothesis) episode.hypothesis = hypothesis;
+			if (episode.classification.abstain) {
+				episode.hypothesis = {
+					text: "可能在进行当前可见操作（活动类型暂不确定）",
+					citedFactIds: episode.evidenceFactIds.slice(0, 1),
+					generator: "deterministic-template.v2",
+				};
+			} else if (hypothesis) {
+				episode.hypothesis = hypothesis;
+			}
 		}
 		return episodes;
 	}
@@ -223,6 +265,7 @@ export class HeuristicTimelineEpisodeClassifier
 	async classify(
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
+		_context?: TimelineEpisodeClassificationContext,
 	): Promise<EpisodeClassificationV2> {
 		const appCorpus = facts
 			.flatMap((fact) => [
@@ -311,6 +354,7 @@ export class HeuristicTimelineEpisodeClassifier
 			activity,
 			goalRelevance: goal ? "uncertain" : null,
 			confidence: uncertain ? 0.35 : 0.6,
+			entropy: uncertain ? 1 : 0.8,
 			oodScore: uncertain ? 0.9 : 0.45,
 			abstain: uncertain,
 			modelVersion: "deterministic-cold-start.v2",

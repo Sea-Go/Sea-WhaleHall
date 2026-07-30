@@ -204,6 +204,7 @@ export type EpisodeClassificationV2 = {
 	activity: ActivityLabel;
 	goalRelevance: GoalRelevanceLabel | null;
 	confidence: number;
+	entropy: number;
 	oodScore: number;
 	abstain: boolean;
 	modelVersion: string;
@@ -232,8 +233,15 @@ export type TimelineSegmentV2 = {
 	episodeRevisionId: string;
 	startedAtMs: number;
 	endedAtMs: number;
+	/**
+	 * Safe presentation labels. An abstained classification is projected to
+	 * other_unknown / uncertain so downstream Agents cannot mistake the raw
+	 * top labels for an actionable conclusion.
+	 */
 	activity: ActivityLabel;
 	goalRelevance: GoalRelevanceLabel | null;
+	/** Exact calibrated model output, retained for audit and routing. */
+	classification: EpisodeClassificationV2;
 	hypothesis: EpisodeHypothesisV2;
 	evidence: EvidenceFactV2[];
 };

@@ -50,6 +50,10 @@ export class TimelineV2Processor {
 
 	async process(window: TimelineWindowV2): Promise<PersistTimelineResult> {
 		const facts = await this.evidence.render(window.events);
+		const contextOnlyFacts =
+			window.contextOnly.length > 0
+				? await this.evidence.render(window.contextOnly)
+				: [];
 		// Cursor order is authoritative, while occurredAtMs can move backwards
 		// for delayed AX/OCR observations. Inspect the latest immutable episode
 		// even when its end timestamp is newer than this window's first fact so
@@ -63,6 +67,7 @@ export class TimelineV2Processor {
 			window,
 			facts,
 			previousEpisode,
+			contextOnlyFacts,
 		);
 		const correctedResult = await correctionTarget(
 			this.repository,
@@ -103,8 +108,16 @@ export class TimelineV2Processor {
 			episodeRevisionId: episode.revisionId,
 			startedAtMs: episode.startedAtMs,
 			endedAtMs: episode.endedAtMs,
-			activity: episode.classification.activity,
-			goalRelevance: episode.classification.goalRelevance,
+			activity: episode.classification.abstain
+				? "other_unknown"
+				: episode.classification.activity,
+			goalRelevance:
+				window.goal === null
+					? null
+					: episode.classification.abstain
+						? "uncertain"
+						: episode.classification.goalRelevance,
+			classification: structuredClone(episode.classification),
 			hypothesis: structuredClone(episode.hypothesis),
 			evidence: unique([
 				...episode.evidenceFactIds,

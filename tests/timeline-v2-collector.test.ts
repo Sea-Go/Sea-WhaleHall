@@ -56,6 +56,7 @@ class FakeClock implements ReflectionClock {
 function event(
 	index: number,
 	atMs: number,
+	observedAtMs = atMs,
 ): SemanticEventV2 {
 	return {
 		schemaVersion: "semantic-event.v2",
@@ -66,7 +67,7 @@ function event(
 		kind: "application.foregroundChanged",
 		source: "observer.workspace",
 		occurredAtMs: atMs,
-		observedAtMs: atMs,
+		observedAtMs,
 		goalVersion: null,
 		countClass: "effective",
 		reliability: "high",
@@ -152,17 +153,49 @@ describe("TimelineV2Collector dual trigger", () => {
 		});
 		expect(runtime.clock.timerCount).toBe(1);
 
-		const sealed = await runtime.collector.ingest(event(64, 64));
+		const sealed = await runtime.collector.ingest(event(64, 64, 5_064));
 		expect(sealed).toMatchObject({
 			triggerReason: "event_count",
 			eventCount: 64,
+			endedAtMs: 5_064,
 			firstCursor: "sec2_0000000000000001",
 			lastCursor: "sec2_0000000000000040",
 		});
+		expect(
+			sealed!.events.every(
+				(item) => item.observedAtMs <= sealed!.endedAtMs,
+			),
+		).toBe(true);
 		expect(runtime.collector.getState()).toBe("ACTIVE_EMPTY");
 		expect((await runtime.repository.getJob(sealed!.windowId))?.state).toBe(
 			"READY",
 		);
+	});
+
+	test("sealed interval contains delayed event and observation timestamps", async () => {
+		const runtime = collector();
+		await runtime.collector.recover();
+		await runtime.collector.ingest(event(1, 1_000));
+		for (let index = 2; index <= 63; index += 1) {
+			await runtime.collector.ingest(event(index, 1_000 + index));
+		}
+
+		const sealed = await runtime.collector.ingest(
+			event(64, 900, 5_064),
+		);
+		expect(sealed).toMatchObject({
+			triggerReason: "event_count",
+			startedAtMs: 900,
+			endedAtMs: 5_064,
+			deadlineAtMs: 301_000,
+		});
+		expect(
+			sealed!.events.every(
+				(item) =>
+					item.occurredAtMs >= sealed!.startedAtMs &&
+					item.observedAtMs <= sealed!.endedAtMs,
+			),
+		).toBe(true);
 	});
 
 	test("first effective event starts one timer and 300000ms seals sparse data", async () => {

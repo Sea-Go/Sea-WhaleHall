@@ -625,6 +625,14 @@ async function buildTimelineWindow(
 		triggerReason: request.reason,
 	});
 	const windowId = `timeline_window_${await hasher.sha256(identity)}`;
+	const earliestOccurredAtMs = events.reduce(
+		(earliest, event) => Math.min(earliest, event.occurredAtMs),
+		request.open.startedAtMs,
+	);
+	const latestObservedAtMs = events.reduce(
+		(latest, event) => Math.max(latest, event.observedAtMs),
+		earliestOccurredAtMs,
+	);
 	return {
 		schemaVersion: TIMELINE_WINDOW_SCHEMA_VERSION,
 		windowId,
@@ -634,8 +642,8 @@ async function buildTimelineWindow(
 		triggerReason: request.reason,
 		goal: structuredClone(request.open.goal),
 		goalVersion: request.open.goalVersion,
-		startedAtMs: request.open.startedAtMs,
-		endedAtMs: Math.max(request.open.startedAtMs, request.endedAtMs),
+		startedAtMs: earliestOccurredAtMs,
+		endedAtMs: Math.max(request.endedAtMs, latestObservedAtMs),
 		deadlineAtMs: request.open.deadlineAtMs,
 		eventCount: request.open.effectiveEventCount,
 		firstCursor: first.cursor,

@@ -15,8 +15,11 @@ import {
 	MODERNBERT_REQUEST_SCHEMA_VERSION,
 	MODERNBERT_RESPONSE_SCHEMA_VERSION,
 	MODERNBERT_RUNTIME_SCHEMA_VERSION,
+	ModernBertClassifierError,
+	SwitchableTimelineEpisodeClassifier,
 	createTimelineV2Runtime,
 	type ModernBertArtifactManifestV1,
+	type ModernBertEpisodeClassifier,
 	type TimelineV2Runtime,
 } from "../src/agent/timeline-v2";
 
@@ -65,7 +68,7 @@ function lockedMetadata(input: string | URL | Request): Response | null {
 function modernBertManifest(): ModernBertArtifactManifestV1 {
 	return {
 		schemaVersion: MODERNBERT_MANIFEST_SCHEMA_VERSION,
-		artifactId: "runtime-test-artifact",
+		artifactId: `modernbert_episode_${"a".repeat(64)}`,
 		artifactSha256: "a".repeat(64),
 		runtime: {
 			schemaVersion: MODERNBERT_RUNTIME_SCHEMA_VERSION,
@@ -230,6 +233,131 @@ describe("Timeline v2 model runtime readiness", () => {
 			artifactVerified: true,
 			activeClassifier: "modernbert",
 			modelVersion: "modernbert-runtime-test",
+			code: null,
+		});
+	});
+
+	test("atomically falls back when an active artifact loses trust", async () => {
+		const invalidations: unknown[] = [];
+		let modernCalls = 0;
+		const fakeModernBert = {
+			artifactVerified: false,
+			async classify() {
+				modernCalls += 1;
+				throw new ModernBertClassifierError(
+					"artifact_response_mismatch",
+					"swapped listener",
+					true,
+				);
+			},
+		} as unknown as ModernBertEpisodeClassifier;
+		const classifier = new SwitchableTimelineEpisodeClassifier(
+			(error) => invalidations.push(error),
+		);
+		classifier.useModernBert(fakeModernBert);
+
+		await expect(classifier.classify([], null)).resolves.toMatchObject({
+			activity: "other_unknown",
+			abstain: true,
+			modelVersion: "deterministic-cold-start.v2",
+		});
+		await expect(classifier.classify([], null)).resolves.toMatchObject({
+			modelVersion: "deterministic-cold-start.v2",
+		});
+		expect(modernCalls).toBe(1);
+		expect(invalidations).toHaveLength(1);
+	});
+
+	test("promotes after one bounded transient manifest retry", async () => {
+		const expected = modernBertManifest();
+		let manifestCalls = 0;
+		let releaseSecondCall: (() => void) | null = null;
+		const secondCall = new Promise<void>((resolve) => {
+			releaseSecondCall = resolve;
+		});
+		const runtime = await createTimelineV2Runtime({
+			agent: {} as AgentRuntime,
+			dataDirectory: dataDirectory(),
+			verifyTeacher: false,
+			onError: () => {},
+			modernBert: {
+				enabled: true,
+				endpoint:
+					"http://127.0.0.1:9417/v2/episodes:classify",
+				manifestEndpoint:
+					"http://127.0.0.1:9417/v2/manifest",
+				expectedArtifact: expected,
+				verificationRetryDelaysMs: [1],
+				fetch: async () => {
+					manifestCalls += 1;
+					if (manifestCalls === 1) {
+						throw new Error("transient startup failure");
+					}
+					releaseSecondCall?.();
+					return Response.json(expected);
+				},
+			},
+		});
+		runtimes.push(runtime);
+		expect(runtime.episodeClassifier).toMatchObject({
+			artifactVerified: false,
+			activeClassifier: "deterministic-cold-start",
+			code: "modernbert.transport_error",
+		});
+
+		await secondCall;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(manifestCalls).toBe(2);
+		expect(runtime.episodeClassifier).toEqual({
+			configured: true,
+			artifactVerified: true,
+			activeClassifier: "modernbert",
+			modelVersion: "modernbert-runtime-test",
+			code: null,
+		});
+	});
+
+	test("explicit metadata refresh demotes on failure and can safely promote later", async () => {
+		const expected = modernBertManifest();
+		let mode: "ready" | "offline" = "ready";
+		const runtime = await createTimelineV2Runtime({
+			agent: {} as AgentRuntime,
+			dataDirectory: dataDirectory(),
+			verifyTeacher: false,
+			onError: () => {},
+			modernBert: {
+				enabled: true,
+				endpoint:
+					"http://127.0.0.1:9417/v2/episodes:classify",
+				manifestEndpoint:
+					"http://127.0.0.1:9417/v2/manifest",
+				expectedArtifact: expected,
+				verificationRetryDelaysMs: [],
+				fetch: async () => {
+					if (mode === "offline") {
+						throw new Error("offline");
+					}
+					return Response.json(expected);
+				},
+			},
+		});
+		runtimes.push(runtime);
+		expect(runtime.episodeClassifier.artifactVerified).toBeTrue();
+
+		mode = "offline";
+		await expect(
+			runtime.refreshEpisodeClassifier(),
+		).resolves.toMatchObject({
+			artifactVerified: false,
+			activeClassifier: "deterministic-cold-start",
+			code: "modernbert.transport_error",
+		});
+		mode = "ready";
+		await expect(
+			runtime.refreshEpisodeClassifier(),
+		).resolves.toMatchObject({
+			artifactVerified: true,
+			activeClassifier: "modernbert",
 			code: null,
 		});
 	});

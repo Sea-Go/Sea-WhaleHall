@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import type { ActiveGoalContextV1 } from "../src/agent/reflection/types";
+import { canonicalJson } from "../src/agent/reflection/hash";
 import {
 	MODERNBERT_ACTIVITY_LABELS,
+	MODERNBERT_CHUNKING_STRATEGY,
+	MODERNBERT_CHUNK_MERGE_VERSION,
+	MODERNBERT_CONTEXT_ONLY_MAXIMUM_TOKENS,
 	MODERNBERT_EVIDENCE_PROJECTOR_VERSION,
 	MODERNBERT_GOAL_RELEVANCE_LABELS,
 	MODERNBERT_INPUT_SCHEMA_VERSION,
@@ -12,9 +17,14 @@ import {
 	MODERNBERT_RUNTIME_SCHEMA_VERSION,
 	ModernBertClassifierError,
 	ModernBertEpisodeClassifier,
+	estimateModernBertContextTokens,
+	projectModernBertModelInput,
 	type EvidenceFactV2,
 	type ModernBertArtifactManifestV1,
+	type ModernBertClassificationRequest,
 	type ModernBertClassifierOptions,
+	type ModernBertEpisodeInput,
+	type TimelineEpisodeClassificationContext,
 } from "../src/agent/timeline-v2";
 
 const MANIFEST_URL = "http://127.0.0.1:9417/manifest";
@@ -25,7 +35,7 @@ function manifest(
 ): ModernBertArtifactManifestV1 {
 	return {
 		schemaVersion: MODERNBERT_MANIFEST_SCHEMA_VERSION,
-		artifactId: "episode-artifact-2026-07",
+		artifactId: `modernbert_episode_${"a".repeat(64)}`,
 		artifactSha256: "a".repeat(64),
 		runtime: {
 			schemaVersion: MODERNBERT_RUNTIME_SCHEMA_VERSION,
@@ -109,6 +119,20 @@ function goal(): ActiveGoalContextV1 {
 	};
 }
 
+function classificationContext(
+	overrides: Partial<TimelineEpisodeClassificationContext> = {},
+): TimelineEpisodeClassificationContext {
+	return {
+		windowId: "timeline-window-1",
+		triggerReason: "event_count",
+		startedAtMs: 1_000,
+		endedAtMs: 20_000,
+		eventCount: 64,
+		contextOnlyFacts: [],
+		...overrides,
+	};
+}
+
 function activityProbabilities(): Record<
 	(typeof MODERNBERT_ACTIVITY_LABELS)[number],
 	number
@@ -141,27 +165,41 @@ function relevanceProbabilities(): Record<
 	};
 }
 
-type CapturedRequest = {
-	schemaVersion: string;
-	correlationId: string;
-	inputHash: string;
-	artifact: Record<string, unknown>;
-	input: {
-		schemaVersion: string;
-		facts: unknown[];
-		goal: unknown;
-	};
-};
+type CapturedRequest = ModernBertClassificationRequest;
+
+function sha256(value: string): string {
+	return new Bun.CryptoHasher("sha256")
+		.update(value)
+		.digest("hex");
+}
 
 function validResponse(
 	request: CapturedRequest,
 	hasGoal: boolean,
 ): Record<string, unknown> {
+	const coreFactIds = request.input.facts.map((fact) => fact.factId);
+	const modelInput = projectModernBertModelInput(request.input);
 	return {
 		schemaVersion: MODERNBERT_RESPONSE_SCHEMA_VERSION,
 		correlationId: request.correlationId,
 		inputHash: request.inputHash,
 		artifact: request.artifact,
+		analysis: {
+			projectorVersion: MODERNBERT_EVIDENCE_PROJECTOR_VERSION,
+			strategy: MODERNBERT_CHUNKING_STRATEGY,
+			merge: MODERNBERT_CHUNK_MERGE_VERSION,
+			projectedTokenCount: 256,
+			chunkCount: 1,
+			chunks: [
+				{
+					chunkIndex: 0,
+					coreFactIds,
+					overlapFactIds: [],
+					tokenCount: 256,
+					modelInputHash: sha256(modelInput),
+				},
+			],
+		},
 		classification: {
 			activity: "development",
 			activityProbabilities: activityProbabilities(),
@@ -175,6 +213,54 @@ function validResponse(
 			abstain: false,
 		},
 	};
+}
+
+function chunkedResponse(
+	request: CapturedRequest,
+	hasGoal: boolean,
+	coreEndIndex: number,
+): Record<string, unknown> {
+	const response = validResponse(request, hasGoal);
+	const firstCore = request.input.facts.slice(0, coreEndIndex);
+	const secondCore = request.input.facts.slice(coreEndIndex);
+	const overlap = request.input.facts.slice(
+		Math.max(0, coreEndIndex - 5),
+		coreEndIndex,
+	).slice(-3);
+	response.analysis = {
+		projectorVersion: MODERNBERT_EVIDENCE_PROJECTOR_VERSION,
+		strategy: MODERNBERT_CHUNKING_STRATEGY,
+		merge: MODERNBERT_CHUNK_MERGE_VERSION,
+		projectedTokenCount: 8_700,
+		chunkCount: 2,
+		chunks: [
+			{
+				chunkIndex: 0,
+				coreFactIds: firstCore.map((fact) => fact.factId),
+				overlapFactIds: [],
+				tokenCount: 7_900,
+				modelInputHash: sha256(
+					projectModernBertModelInput(
+						request.input,
+						firstCore,
+					),
+				),
+			},
+			{
+				chunkIndex: 1,
+				coreFactIds: secondCore.map((fact) => fact.factId),
+				overlapFactIds: overlap.map((fact) => fact.factId),
+				tokenCount: 7_200,
+				modelInputHash: sha256(
+					projectModernBertModelInput(request.input, [
+						...overlap,
+						...secondCore,
+					]),
+				),
+			},
+		],
+	};
+	return response;
 }
 
 function options(
@@ -204,6 +290,25 @@ async function classifierError(
 }
 
 describe("Timeline v2 ModernBERT episode classifier", () => {
+	test("matches the checked-in Python serving projector fixture byte for byte", () => {
+		const fixture = JSON.parse(
+			readFileSync(
+				`${import.meta.dir}/fixtures/modernbert-episode-v2/canonical-input.json`,
+				"utf8",
+			),
+		) as {
+			input: ModernBertEpisodeInput;
+			expectedInputHash: string;
+			expectedModelInputSha256: string;
+		};
+		expect(sha256(canonicalJson(fixture.input))).toBe(
+			fixture.expectedInputHash,
+		);
+		expect(
+			sha256(projectModernBertModelInput(fixture.input)),
+		).toBe(fixture.expectedModelInputSha256);
+	});
+
 	test("verifies the exact v2 artifact then sends only bounded facts and goal", async () => {
 		const expected = manifest();
 		let captured: CapturedRequest | null = null;
@@ -224,16 +329,25 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 
 		expect(classifier.artifactVerified).toBeFalse();
 		await expect(
-			classifier.classify([fact()], goal()),
+			classifier.classify(
+				[fact()],
+				goal(),
+				classificationContext(),
+			),
 		).rejects.toMatchObject({ code: "artifact_not_verified" });
 		await classifier.verifyArtifact();
 		expect(classifier.artifactVerified).toBeTrue();
-		const result = await classifier.classify([fact()], goal());
+		const result = await classifier.classify(
+			[fact()],
+			goal(),
+			classificationContext(),
+		);
 
 		expect(result).toEqual({
 			activity: "development",
 			goalRelevance: "direct",
 			confidence: 0.7,
+			entropy: 0.4,
 			oodScore: 0.2,
 			abstain: false,
 			modelVersion: expected.runtime.modelVersion,
@@ -253,6 +367,13 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		);
 		expect(captured!.input).toMatchObject({
 			schemaVersion: MODERNBERT_INPUT_SCHEMA_VERSION,
+			window: {
+				windowId: "timeline-window-1",
+				triggerReason: "event_count",
+				startedAtMs: 1_000,
+				endedAtMs: 20_000,
+			},
+			contextOnlyFacts: [],
 			goal: {
 				goalId: "goal-1",
 				version: 3,
@@ -287,6 +408,7 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 				} else {
 					response.artifact = {
 						...request.artifact,
+						artifactId: `modernbert_episode_${"f".repeat(64)}`,
 						artifactSha256: "f".repeat(64),
 					};
 				}
@@ -297,21 +419,38 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 
 		expect(
 			(await classifierError(() =>
-				classifier.classify([fact()], goal()),
+				classifier.classify(
+					[fact()],
+					goal(),
+					classificationContext(),
+				),
 			)).code,
 		).toBe("correlation_mismatch");
+		expect(classifier.artifactVerified).toBeFalse();
+		await classifier.verifyArtifact();
 		postMode = "input_hash";
 		expect(
 			(await classifierError(() =>
-				classifier.classify([fact()], goal()),
+				classifier.classify(
+					[fact()],
+					goal(),
+					classificationContext(),
+				),
 			)).code,
 		).toBe("correlation_mismatch");
+		expect(classifier.artifactVerified).toBeFalse();
+		await classifier.verifyArtifact();
 		postMode = "artifact";
 		expect(
 			(await classifierError(() =>
-				classifier.classify([fact()], goal()),
+				classifier.classify(
+					[fact()],
+					goal(),
+					classificationContext(),
+				),
 			)).code,
 		).toBe("artifact_response_mismatch");
+		expect(classifier.artifactVerified).toBeFalse();
 		expect(postCalls).toBe(3);
 
 		const forgedManifest = {
@@ -335,6 +474,73 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		).toBe("artifact_manifest_mismatch");
 		expect(unverified.artifactVerified).toBeFalse();
 		expect(forgedPosts).toBe(0);
+	});
+
+	test("invalidates a stale verified listener before any later fact POST", async () => {
+		const expected = manifest();
+		let servingExpectedArtifact = false;
+		let manifestCalls = 0;
+		let postCalls = 0;
+		const classifier = new ModernBertEpisodeClassifier(
+			options(async (input, init) => {
+				if (String(input) === MANIFEST_URL) {
+					manifestCalls += 1;
+					return Response.json(expected);
+				}
+				expect(init?.method).toBe("POST");
+				postCalls += 1;
+				const request = JSON.parse(
+					String(init?.body),
+				) as CapturedRequest;
+				const response = validResponse(request, true);
+				if (!servingExpectedArtifact) {
+					response.artifact = {
+						...request.artifact,
+						artifactId: `modernbert_episode_${"c".repeat(64)}`,
+						artifactSha256: "c".repeat(64),
+					};
+				}
+				return Response.json(response);
+			}, expected),
+		);
+		await classifier.verifyArtifact();
+
+		expect(
+			(await classifierError(() =>
+				classifier.classify(
+					[fact()],
+					goal(),
+					classificationContext(),
+				),
+			)).code,
+		).toBe("artifact_response_mismatch");
+		expect(classifier.artifactVerified).toBeFalse();
+		expect(postCalls).toBe(1);
+
+		expect(
+			(await classifierError(() =>
+				classifier.classify(
+					[fact()],
+					goal(),
+					classificationContext(),
+				),
+			)).code,
+		).toBe("artifact_not_verified");
+		expect(postCalls).toBe(1);
+
+		servingExpectedArtifact = true;
+		await classifier.verifyArtifact();
+		await expect(
+			classifier.classify(
+				[fact()],
+				goal(),
+				classificationContext(),
+			),
+		).resolves.toMatchObject({
+			modelVersion: expected.runtime.modelVersion,
+		});
+		expect(manifestCalls).toBe(2);
+		expect(postCalls).toBe(2);
 	});
 
 	test("strictly validates probability keys, sums, labels, and scalar bounds", async () => {
@@ -405,9 +611,16 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		);
 		await classifier.verifyArtifact();
 		for (const _mutation of mutations) {
+			if (!classifier.artifactVerified) {
+				await classifier.verifyArtifact();
+			}
 			expect(
 				(await classifierError(() =>
-					classifier.classify([fact()], goal()),
+					classifier.classify(
+						[fact()],
+						goal(),
+						classificationContext(),
+					),
 				)).code,
 			).toBe("schema_mismatch");
 		}
@@ -438,7 +651,13 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 			}, expected),
 		);
 		await classifier.verifyArtifact();
-		expect(await classifier.classify([fact()], null)).toMatchObject({
+		expect(
+			await classifier.classify(
+				[fact()],
+				null,
+				classificationContext(),
+			),
+		).toMatchObject({
 			goalRelevance: null,
 		});
 		expect(capturedGoal).toBeNull();
@@ -446,7 +665,11 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		forgeRelevance = true;
 		expect(
 			(await classifierError(() =>
-				classifier.classify([fact()], null),
+				classifier.classify(
+					[fact()],
+					null,
+					classificationContext(),
+				),
 			)).code,
 		).toBe("schema_mismatch");
 	});
@@ -486,7 +709,11 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		await oversized.verifyArtifact();
 		expect(
 			(await classifierError(() =>
-				oversized.classify([fact()], goal()),
+				oversized.classify(
+					[fact()],
+					goal(),
+					classificationContext(),
+				),
 			)).code,
 		).toBe("response_too_large");
 
@@ -514,7 +741,11 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		await slowBody.verifyArtifact();
 		expect(
 			(await classifierError(() =>
-				slowBody.classify([fact()], goal()),
+				slowBody.classify(
+					[fact()],
+					goal(),
+					classificationContext(),
+				),
 			)).code,
 		).toBe("request_timeout");
 		expect(inferenceCall).toBeTrue();
@@ -537,13 +768,17 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		);
 		await unreadableBody.verifyArtifact();
 		const bodyError = await classifierError(() =>
-			unreadableBody.classify([fact()], goal()),
+			unreadableBody.classify(
+				[fact()],
+				goal(),
+				classificationContext(),
+			),
 		);
 		expect(bodyError.code).toBe("transport_error");
 		expect(bodyError.message).not.toContain("secret body failure");
 	});
 
-	test("rejects over-budget facts instead of truncating or sending them", async () => {
+	test("rejects byte/fact overflow but delegates exact token chunking without truncation", async () => {
 		const expected = manifest({
 			maximumFacts: 1,
 			maximumInputBytes: 600,
@@ -561,7 +796,11 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		await classifier.verifyArtifact();
 		expect(
 			(await classifierError(() =>
-				classifier.classify([fact(1), fact(2)], goal()),
+				classifier.classify(
+					[fact(1), fact(2)],
+					goal(),
+					classificationContext(),
+				),
 			)).code,
 		).toBe("invalid_input");
 		expect(
@@ -573,6 +812,7 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 						}),
 					],
 					goal(),
+					classificationContext(),
 				),
 			)).code,
 		).toBe("input_too_large");
@@ -586,21 +826,153 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		});
 		let tokenPosts = 0;
 		const tokenBounded = new ModernBertEpisodeClassifier(
-			options(async (input) => {
+			options(async (input, init) => {
 				if (String(input) === MANIFEST_URL) {
 					return Response.json(tokenExpected);
 				}
 				tokenPosts += 1;
-				return Response.json({});
+				const request = JSON.parse(
+					String(init?.body),
+				) as CapturedRequest;
+				return Response.json(validResponse(request, false));
 			}, tokenExpected),
 		);
 		await tokenBounded.verifyArtifact();
+		const sixtyFourFacts = Array.from({ length: 64 }, (_, index) =>
+			fact(index + 1, {
+				renderedText: `可见语义事件 ${index + 1}`,
+			}),
+		);
+		await expect(
+			tokenBounded.classify(
+				sixtyFourFacts,
+				null,
+				classificationContext(),
+			),
+		).resolves.toMatchObject({ activity: "development" });
+		expect(tokenPosts).toBe(1);
+
+		const exactOverflow = new ModernBertEpisodeClassifier(
+			options(async (input) =>
+				String(input) === MANIFEST_URL
+					? Response.json(tokenExpected)
+					: new Response(null, { status: 413 }),
+			tokenExpected),
+		);
+		await exactOverflow.verifyArtifact();
 		expect(
 			(await classifierError(() =>
-				tokenBounded.classify([fact()], null),
+				exactOverflow.classify(
+					[fact()],
+					null,
+					classificationContext(),
+				),
 			)).code,
 		).toBe("input_too_large");
-		expect(tokenPosts).toBe(0);
+	});
+
+	test("passes authoritative window/context and validates complete event-boundary chunks", async () => {
+		const expected = manifest();
+		let tamperOverlap = false;
+		let captured: CapturedRequest | null = null;
+		const classifier = new ModernBertEpisodeClassifier(
+			options(async (input, init) => {
+				if (String(input) === MANIFEST_URL) {
+					return Response.json(expected);
+				}
+				captured = JSON.parse(
+					String(init?.body),
+				) as CapturedRequest;
+				const response = chunkedResponse(captured, true, 6);
+				if (tamperOverlap) {
+					const analysis = response.analysis as {
+						chunks: Array<{ overlapFactIds: string[] }>;
+					};
+					analysis.chunks[1]!.overlapFactIds = ["fact-1"];
+				}
+				return Response.json(response);
+			}, expected),
+		);
+		await classifier.verifyArtifact();
+		const facts = Array.from({ length: 10 }, (_, index) =>
+			fact(index + 1),
+		);
+		const contextFact = fact(0, {
+			factId: "context-later",
+			eventIds: ["context-event-later"],
+			sourceObservationIds: ["context-observation-later"],
+			startedAtMs: 1_000,
+			endedAtMs: 1_000,
+			renderedText: "上一窗口较晚到达的只读上下文",
+		});
+		const delayedContextFact = fact(0, {
+			factId: "context-earlier",
+			eventIds: ["context-event-earlier"],
+			sourceObservationIds: ["context-observation-earlier"],
+			startedAtMs: 900,
+			endedAtMs: 900,
+			renderedText: "上一窗口延迟到达的只读上下文",
+		});
+		const oversizedContextFact = fact(0, {
+			factId: "context-oversized",
+			eventIds: ["context-event-oversized"],
+			sourceObservationIds: ["context-observation-oversized"],
+			startedAtMs: 1_100,
+			endedAtMs: 1_100,
+			renderedText: "超".repeat(400),
+		});
+		await expect(
+			classifier.classify(facts, goal(), {
+				...classificationContext(),
+				triggerReason: "max_wait",
+				contextOnlyFacts: [
+					contextFact,
+					oversizedContextFact,
+					delayedContextFact,
+				],
+			}),
+		).resolves.toMatchObject({
+			activity: "development",
+			entropy: 0.4,
+		});
+		expect(captured!.input.window.triggerReason).toBe("max_wait");
+		expect(
+			captured!.input.contextOnlyFacts.map((item) => item.factId),
+		).toEqual(["context-earlier", "context-later"]);
+		expect(
+			captured!.input.contextOnlyFacts.reduce(
+				(total, item) =>
+					total +
+					estimateModernBertContextTokens(item.renderedText),
+				0,
+			),
+		).toBeLessThanOrEqual(
+			MODERNBERT_CONTEXT_ONLY_MAXIMUM_TOKENS,
+		);
+		expect(
+			captured!.input.contextOnlyFacts[0]?.countClass,
+		).toBe("context");
+		const projected = projectModernBertModelInput(
+			captured!.input,
+			captured!.input.facts.slice(0, 6),
+		);
+		expect(projected).toContain('"triggerReason":"max_wait"');
+		expect(projected).toContain('"countClass":"context"');
+
+		tamperOverlap = true;
+		expect(
+			(await classifierError(() =>
+				classifier.classify(facts, goal(), {
+					...classificationContext(),
+					triggerReason: "max_wait",
+					contextOnlyFacts: [
+						contextFact,
+						oversizedContextFact,
+						delayedContextFact,
+					],
+				}),
+			)).code,
+		).toBe("schema_mismatch");
 	});
 
 	test("allows loopback by default and requires an exact HTTPS allowlist remotely", () => {

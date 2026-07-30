@@ -18,6 +18,7 @@ import {
 import { TimelineAgentInputAdapterV1 } from "./agent-input-adapter";
 import {
 	HeuristicTimelineEpisodeClassifier,
+	type TimelineEpisodeClassificationContext,
 	type TimelineEpisodeClassifier,
 } from "./episodes";
 import {
@@ -35,7 +36,21 @@ import {
 import { RuntimeTimelineVault } from "./runtime-vault";
 import { TimelineV2Service } from "./service";
 import { SqliteTimelineV2Repository } from "./sqlite-repository";
-import type { TimelineInferenceDiagnosticV2 } from "./types";
+import type {
+	EpisodeClassificationV2,
+	EvidenceFactV2,
+	TimelineInferenceDiagnosticV2,
+} from "./types";
+
+const MODERNBERT_VERIFICATION_RETRY_DELAYS_MS = [
+	5_000,
+	15_000,
+	45_000,
+	120_000,
+	300_000,
+] as const;
+const MODERNBERT_MAX_VERIFICATION_RETRIES = 5;
+const MODERNBERT_MAX_VERIFICATION_RETRY_MS = 300_000;
 
 export type TimelineEpisodeClassifierRuntimeStatus = {
 	configured: boolean;
@@ -65,9 +80,59 @@ export type TimelineV2Runtime = {
 	 * that the production structured-output probe succeeded.
 	 */
 	teacherVerified: boolean;
+	/**
+	 * Metadata-only re-verification. It demotes classification before the
+	 * request and promotes only after the exact pinned manifest matches.
+	 */
+	refreshEpisodeClassifier(): Promise<TimelineEpisodeClassifierRuntimeStatus>;
 	start(): Promise<void>;
 	close(): Promise<void>;
 };
+
+export class SwitchableTimelineEpisodeClassifier
+	implements TimelineEpisodeClassifier
+{
+	private readonly fallback = new HeuristicTimelineEpisodeClassifier();
+	private active: TimelineEpisodeClassifier = this.fallback;
+	private modernBert: ModernBertEpisodeClassifier | null = null;
+
+	constructor(
+		private readonly onModernBertInvalidated: (
+			error: unknown,
+		) => void = () => {},
+	) {}
+
+	useModernBert(classifier: ModernBertEpisodeClassifier): void {
+		this.modernBert = classifier;
+		this.active = classifier;
+	}
+
+	useFallback(): void {
+		this.active = this.fallback;
+	}
+
+	async classify(
+		facts: readonly EvidenceFactV2[],
+		goal: ActiveGoalContextV1 | null,
+		context?: TimelineEpisodeClassificationContext,
+	): Promise<EpisodeClassificationV2> {
+		const active = this.active;
+		try {
+			return await active.classify(facts, goal, context);
+		} catch (error) {
+			if (
+				active === this.modernBert &&
+				this.active === active &&
+				!this.modernBert.artifactVerified
+			) {
+				this.useFallback();
+				this.onModernBertInvalidated(error);
+				return this.fallback.classify(facts, goal, context);
+			}
+			throw error;
+		}
+	}
+}
 
 export type CreateTimelineV2RuntimeOptions = {
 	agent: AgentRuntime;
@@ -108,6 +173,8 @@ export async function createTimelineV2Runtime(
 				"[timeline-v2]",
 				error instanceof Error ? error.message : "unknown error",
 			));
+	const verificationRetryDelays =
+		modernBertVerificationRetryDelays(options.modernBert);
 	const identity = loadOrCreateReflectionIdentity(
 		join(options.dataDirectory, "reflection-identity.v1.json"),
 	);
@@ -119,8 +186,10 @@ export async function createTimelineV2Runtime(
 	let modelLockVerified = false;
 	let inferenceReady = false;
 	const diagnostics: TimelineInferenceDiagnosticV2[] = [];
-	let classifier: TimelineEpisodeClassifier =
-		new HeuristicTimelineEpisodeClassifier();
+	let handleModernBertInvalidation: (error: unknown) => void = () => {};
+	const classifier = new SwitchableTimelineEpisodeClassifier((error) =>
+		handleModernBertInvalidation(error),
+	);
 	let episodeClassifier: TimelineEpisodeClassifierRuntimeStatus = {
 		configured: false,
 		artifactVerified: false,
@@ -128,33 +197,96 @@ export async function createTimelineV2Runtime(
 		modelVersion: "deterministic-cold-start.v2",
 		code: "disabled",
 	};
+	let modernBert: ModernBertEpisodeClassifier | null = null;
+	let verificationRetryTimer: ReturnType<typeof setTimeout> | null =
+		null;
+	let verificationRetryIndex = 0;
+	let runtimeClosed = false;
+	const cancelVerificationRetry = (): void => {
+		if (verificationRetryTimer !== null) {
+			clearTimeout(verificationRetryTimer);
+			verificationRetryTimer = null;
+		}
+	};
+	const promoteModernBert = (): void => {
+		if (modernBert === null) return;
+		cancelVerificationRetry();
+		verificationRetryIndex = 0;
+		classifier.useModernBert(modernBert);
+		episodeClassifier = {
+			configured: true,
+			artifactVerified: true,
+			activeClassifier: "modernbert",
+			modelVersion: modernBert.modelVersion,
+			code: null,
+		};
+	};
+	const demoteModernBert = (error: unknown): void => {
+		classifier.useFallback();
+		episodeClassifier = {
+			configured: true,
+			artifactVerified: false,
+			activeClassifier: "deterministic-cold-start",
+			modelVersion: "deterministic-cold-start.v2",
+			code: modernBertStatusCode(error),
+		};
+	};
+	const scheduleVerificationRetry = (
+		error: unknown,
+		forceMetadataRetry = false,
+	): void => {
+		if (
+			runtimeClosed ||
+			modernBert === null ||
+			!(error instanceof ModernBertClassifierError) ||
+			(!forceMetadataRetry && !error.retryable) ||
+			verificationRetryTimer !== null ||
+			verificationRetryIndex >= verificationRetryDelays.length
+		) {
+			return;
+		}
+		const delayMs =
+			verificationRetryDelays[verificationRetryIndex++]!;
+		verificationRetryTimer = setTimeout(() => {
+			verificationRetryTimer = null;
+			if (runtimeClosed || modernBert === null) return;
+			void modernBert.verifyArtifact().then(
+				() => promoteModernBert(),
+				(retryError: unknown) => {
+					demoteModernBert(retryError);
+					onError(retryError);
+					scheduleVerificationRetry(
+						retryError,
+						forceMetadataRetry,
+					);
+				},
+			);
+		}, delayMs);
+	};
+	handleModernBertInvalidation = (error) => {
+		demoteModernBert(error);
+		try {
+			onError(error);
+		} catch {
+			// Diagnostics must not prevent the privacy-preserving demotion.
+		}
+		scheduleVerificationRetry(error, true);
+	};
 	let hypotheses: TimelineHypothesisGenerator =
 		new DeterministicTimelineHypothesisGenerator();
 	if (options.modernBert?.enabled === true) {
 		try {
-			const modernBert = new ModernBertEpisodeClassifier(
+			modernBert = new ModernBertEpisodeClassifier(
 				options.modernBert,
 			);
 			await modernBert.verifyArtifact();
-			classifier = modernBert;
-			episodeClassifier = {
-				configured: true,
-				artifactVerified: true,
-				activeClassifier: "modernbert",
-				modelVersion: modernBert.modelVersion,
-				code: null,
-			};
+			promoteModernBert();
 		} catch (error) {
 			// Keep classification on the explicit cold-start implementation.
 			// An unverified endpoint never receives EvidenceFact content.
-			episodeClassifier = {
-				configured: true,
-				artifactVerified: false,
-				activeClassifier: "deterministic-cold-start",
-				modelVersion: "deterministic-cold-start.v2",
-				code: modernBertStatusCode(error),
-			};
+			demoteModernBert(error);
 			onError(error);
+			scheduleVerificationRetry(error);
 		}
 	}
 	if (options.verifyTeacher !== false) {
@@ -222,21 +354,70 @@ export async function createTimelineV2Runtime(
 			repository,
 			audit,
 			agentInput,
-			episodeClassifier,
+			get episodeClassifier() {
+				return structuredClone(episodeClassifier);
+			},
 			modelLockVerified,
 			inferenceReady,
 			diagnostics,
 			teacherVerified: modelLockVerified,
+			async refreshEpisodeClassifier() {
+				cancelVerificationRetry();
+				verificationRetryIndex = 0;
+				if (modernBert === null) {
+					return structuredClone(episodeClassifier);
+				}
+				classifier.useFallback();
+				try {
+					await modernBert.refreshArtifact();
+					promoteModernBert();
+				} catch (error) {
+					demoteModernBert(error);
+					onError(error);
+					scheduleVerificationRetry(error);
+				}
+				return structuredClone(episodeClassifier);
+			},
 			start: () => service.start(),
 			async close() {
+				runtimeClosed = true;
+				cancelVerificationRetry();
 				await service.stop();
 				repository.close();
 			},
 		};
 	} catch (error) {
+		runtimeClosed = true;
+		cancelVerificationRetry();
 		repository.close();
 		throw error;
 	}
+}
+
+function modernBertVerificationRetryDelays(
+	options: ModernBertRuntimeOptIn | undefined,
+): readonly number[] {
+	if (options?.enabled !== true) return [];
+	const configured = options.verificationRetryDelaysMs;
+	if (configured === undefined) {
+		return MODERNBERT_VERIFICATION_RETRY_DELAYS_MS;
+	}
+	if (
+		configured.length >
+			MODERNBERT_MAX_VERIFICATION_RETRIES ||
+		configured.some(
+			(delayMs) =>
+				!Number.isSafeInteger(delayMs) ||
+				delayMs < 1 ||
+				delayMs > MODERNBERT_MAX_VERIFICATION_RETRY_MS,
+		)
+	) {
+		throw new ModernBertClassifierError(
+			"invalid_config",
+			"ModernBERT verification retry schedule is invalid.",
+		);
+	}
+	return [...configured];
 }
 
 function modernBertStatusCode(

@@ -343,6 +343,7 @@ describe("Qwen cited hypothesis guard", () => {
 				activity: "research",
 				goalRelevance: null,
 				confidence: 0.6,
+				entropy: 0.5,
 				oodScore: 0.4,
 				abstain: false,
 				modelVersion: "test",
@@ -356,8 +357,10 @@ describe("Qwen cited hypothesis guard", () => {
 			supportingFactIds: [],
 			coverage: ["content"],
 		};
+		let callCount = 0;
 		const client = {
 			generateJson: async <T>(request: OllamaJsonRequest<T>): Promise<T> => {
+				callCount += 1;
 				const invalid = {
 					episodes: [
 						{
@@ -390,6 +393,35 @@ describe("Qwen cited hypothesis guard", () => {
 					affectedEpisodeCount: 1,
 				},
 			],
+		});
+		expect(callCount).toBe(1);
+
+		const abstained = {
+			...episode,
+			classification: {
+				...episode.classification,
+				activity: "development" as const,
+				goalRelevance: "unrelated" as const,
+				confidence: 0.2,
+				entropy: 0.95,
+				oodScore: 0.98,
+				abstain: true,
+			},
+		};
+		const neutral = await new QwenCitedHypothesisGenerator(
+			client,
+		).generate([abstained], [fact], {
+			goalId: "goal-1",
+			planId: null,
+			version: 1,
+			text: "完成 Timeline",
+			activatedAtMs: 500,
+		});
+		expect(callCount).toBe(1);
+		expect(neutral.get("episode-1")).toEqual({
+			text: "可能在进行当前可见操作（活动类型暂不确定）",
+			citedFactIds: ["fact-1"],
+			generator: "deterministic-template.v2",
 		});
 	});
 
@@ -429,6 +461,7 @@ describe("Qwen cited hypothesis guard", () => {
 				activity: "research",
 				goalRelevance: null,
 				confidence: 0.6,
+				entropy: 0.5,
 				oodScore: 0.4,
 				abstain: false,
 				modelVersion: "test",

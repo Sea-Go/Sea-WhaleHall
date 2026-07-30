@@ -353,4 +353,119 @@ describe("Timeline v2 real-capture regressions", () => {
 		});
 		expect(result.agentInput.period).toEqual(result.summary.period);
 	});
+
+	test("preserves calibrated uncertainty while neutralizing abstained conclusions", async () => {
+		const hasher = new WebCryptoReflectionHasher();
+		const repository = new InMemoryTimelineV2Repository();
+		const goal = {
+			goalId: "goal-1",
+			planId: null,
+			version: 1,
+			text: "完成 WhaleHall Timeline",
+			activatedAtMs: 500,
+		};
+		const window = {
+			...windowFor([browserEvent(1, 1_000)], 2_000),
+			goal,
+			goalVersion: goal.version,
+		};
+		const classification = {
+			activity: "development" as const,
+			goalRelevance: "unrelated" as const,
+			confidence: 0.31,
+			entropy: 0.92,
+			oodScore: 0.96,
+			abstain: true,
+			modelVersion: "modernbert-episode-v2-test",
+		};
+		let hypothesisCalls = 0;
+		const processor = new TimelineV2Processor({
+			repository,
+			evidence: new DeterministicEvidenceRenderer(hasher),
+			episodes: new DeterministicEpisodeAssembler({
+				hasher,
+				classifier: {
+					classify: async () => ({ ...classification }),
+				},
+				hypotheses: {
+					generate: async (episodes) => {
+						hypothesisCalls += 1;
+						return new Map(
+							episodes.map((episode) => [
+								episode.episodeId,
+								{
+									text: "可能在偏离目标进行软件开发",
+									citedFactIds:
+										episode.evidenceFactIds.slice(0, 1),
+									generator:
+										"qwen3:4b-cited.v2" as const,
+								},
+							]),
+						);
+					},
+				},
+			}),
+			hasher,
+			clock: { nowMs: () => 2_000 },
+			formatTime: String,
+		});
+
+		const result = await processor.process(window);
+		expect(hypothesisCalls).toBe(0);
+		expect(result.episodes[0]?.classification).toEqual(classification);
+		expect(result.episodes[0]?.hypothesis).toMatchObject({
+			text: "可能在进行当前可见操作（活动类型暂不确定）",
+			generator: "deterministic-template.v2",
+		});
+		expect(result.summary.segments[0]).toMatchObject({
+			activity: "other_unknown",
+			goalRelevance: "uncertain",
+			classification,
+			hypothesis: {
+				text: "可能在进行当前可见操作（活动类型暂不确定）",
+			},
+		});
+		expect(result.summary.renderedText).not.toContain("软件开发");
+		expect(result.summary.renderedText).not.toContain("偏离目标");
+		expect(result.agentInput.segments[0]).toEqual(
+			result.summary.segments[0],
+		);
+	});
+
+	test("forces no-goal relevance to null before Summary and AgentInput", async () => {
+		const hasher = new WebCryptoReflectionHasher();
+		const processor = new TimelineV2Processor({
+			repository: new InMemoryTimelineV2Repository(),
+			evidence: new DeterministicEvidenceRenderer(hasher),
+			episodes: new DeterministicEpisodeAssembler({
+				hasher,
+				classifier: {
+					classify: async () => ({
+						activity: "development",
+						goalRelevance: "unrelated",
+						confidence: 0.9,
+						entropy: 0.1,
+						oodScore: 0.05,
+						abstain: false,
+						modelVersion: "contract-violating-test-double",
+					}),
+				},
+				hypotheses:
+					new DeterministicTimelineHypothesisGenerator(),
+			}),
+			hasher,
+			clock: { nowMs: () => 2_000 },
+			formatTime: String,
+		});
+
+		const result = await processor.process(
+			windowFor([browserEvent(1, 1_000)], 2_000),
+		);
+		expect(result.episodes[0]?.classification.goalRelevance).toBeNull();
+		expect(result.summary.segments[0]?.goalRelevance).toBeNull();
+		expect(
+			result.summary.segments[0]?.classification.goalRelevance,
+		).toBeNull();
+		expect(result.agentInput.segments[0]?.goalRelevance).toBeNull();
+	});
 });

@@ -65,18 +65,22 @@ export class QwenCitedHypothesisGenerator
 	): Promise<Map<string, EpisodeHypothesisV2>> {
 		if (episodes.length === 0) return new Map();
 		const generated = deterministicHypotheses(episodes, facts);
+		const eligibleEpisodes = episodes.filter(
+			(episode) => !episode.classification.abstain,
+		);
+		if (eligibleEpisodes.length === 0) return generated;
 		let packs: QwenHypothesisPack[];
 		try {
-			packs = buildHypothesisPacks(episodes, facts, goal);
+			packs = buildHypothesisPacks(eligibleEpisodes, facts, goal);
 		} catch {
 			addDiagnostic(
 				generated,
-				episodes,
+				eligibleEpisodes,
 				timelineDiagnostic(
 					"generation",
 					"input_unavailable",
 					false,
-					episodes.length,
+					eligibleEpisodes.length,
 				),
 			);
 			return generated;
@@ -296,6 +300,7 @@ export async function probeQwenHypothesisReadiness(
 			activity: "other_unknown",
 			goalRelevance: null,
 			confidence: 0,
+			entropy: 1,
 			oodScore: 1,
 			abstain: true,
 			modelVersion: "probe",
@@ -330,9 +335,9 @@ export function buildHypothesisPacks(
 	goal: ActiveGoalContextV1 | null,
 ): QwenHypothesisPack[] {
 	const factById = new Map(facts.map((fact) => [fact.factId, fact]));
-	const units = episodes.map((episode) =>
-		boundedPromptUnit(episode, factById, goal),
-	);
+	const units = episodes
+		.filter((episode) => !episode.classification.abstain)
+		.map((episode) => boundedPromptUnit(episode, factById, goal));
 	const packs: QwenHypothesisPack[] = [];
 	let current: typeof units = [];
 	for (const unit of units) {
@@ -518,7 +523,11 @@ function deterministicHypotheses(
 			return [
 				episode.episodeId,
 				{
-					text: hypothesisTemplate(episode.classification.activity),
+					text: episode.classification.abstain
+						? "可能在进行当前可见操作（活动类型暂不确定）"
+						: hypothesisTemplate(
+								episode.classification.activity,
+							),
 					citedFactIds,
 					generator: "deterministic-template.v2" as const,
 				},
