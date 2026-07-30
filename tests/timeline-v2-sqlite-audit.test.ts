@@ -1,10 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import {
-	existsSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -21,6 +16,7 @@ import {
 	TimelineV2Processor,
 	type RawFiveMinuteAuditSource,
 	type SemanticEventV2,
+	type TimelineV2Repository,
 	type TimelineVault,
 	type TimelineVaultOpenRequest,
 	type TimelineVaultSealRequest,
@@ -133,11 +129,41 @@ function semantic(
 			role: "AXTextArea",
 			insertedChars: 8,
 			deletedChars: 0,
+			deltaAvailable: true,
 			inputMethod: "unknown",
 			label: "代码编辑区",
 			addedText: "秘密文本 ABC-123",
 			finalValue: "秘密文本 ABC-123",
 		},
+	};
+}
+
+function rawObservation(
+	index: number,
+	atMs: number,
+	overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+	return {
+		schemaVersion: "raw-observation.v2",
+		observationId: `observation-${index}`,
+		cursor: `raw2_${index.toString(16).padStart(16, "0")}`,
+		deviceId: "device-1",
+		sessionId: "session-1",
+		kind: "workspace.foregroundChanged",
+		interval: { startedAtMs: atMs, endedAtMs: atMs },
+		source: { sensor: "workspace", adapterVersion: "audit-test.v2" },
+		subject: {
+			appId: "com.microsoft.VSCode",
+			appName: "Visual Studio Code",
+			opaqueWindowId: "window-1",
+		},
+		reliability: "high",
+		coverage: ["metadata"],
+		redactions: [],
+		metadata: { processId: 42 },
+		contentState: "available",
+		dedupHash: `raw-hash-${index}`,
+		...overrides,
 	};
 }
 
@@ -165,8 +191,7 @@ async function populate(
 	const evidence = new DeterministicEvidenceRenderer(hasher);
 	const episodes = new DeterministicEpisodeAssembler({
 		hasher,
-		hypotheses:
-			new DeterministicTimelineHypothesisGenerator(),
+		hypotheses: new DeterministicTimelineHypothesisGenerator(),
 	});
 	const processor = new TimelineV2Processor({
 		repository,
@@ -188,9 +213,7 @@ async function populate(
 
 describe("Timeline v2 encrypted SQLite and audit", () => {
 	test("persists only vault references and recovers Timeline/AgentInput", async () => {
-		const directory = mkdtempSync(
-			join(tmpdir(), "whalehall-timeline-v2-"),
-		);
+		const directory = mkdtempSync(join(tmpdir(), "whalehall-timeline-v2-"));
 		temporaryDirectories.push(directory);
 		const path = join(directory, "timeline-v2.sqlite3");
 		const vault = new MemoryVault();
@@ -220,11 +243,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 		});
 		expect(held.inputs[0]?.state).toBe("HELD_LOCAL");
 
-		const sqliteBytes = [
-			path,
-			`${path}-wal`,
-			`${path}-shm`,
-		]
+		const sqliteBytes = [path, `${path}-wal`, `${path}-shm`]
 			.filter(existsSync)
 			.map((file) => readFileSync(file))
 			.map((buffer) => buffer.toString("utf8"))
@@ -236,16 +255,14 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 			vault.seals.some(
 				(seal) =>
 					seal.purpose === "timeline.window.v2" &&
-					seal.expiresAtMs ===
-						clock.nowMs() + 7 * 24 * 60 * 60 * 1000,
+					seal.expiresAtMs === clock.nowMs() + 7 * 24 * 60 * 60 * 1000,
 			),
 		).toBeTrue();
 		expect(
 			vault.seals.some(
 				(seal) =>
 					seal.purpose === "timeline.summary.v2" &&
-					seal.expiresAtMs ===
-						clock.nowMs() + 30 * 24 * 60 * 60 * 1000,
+					seal.expiresAtMs === clock.nowMs() + 30 * 24 * 60 * 60 * 1000,
 			),
 		).toBeTrue();
 		repository.close();
@@ -266,9 +283,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 	});
 
 	test("exports exactly five minutes with full lineage and redacts by default", async () => {
-		const directory = mkdtempSync(
-			join(tmpdir(), "whalehall-timeline-v2-"),
-		);
+		const directory = mkdtempSync(join(tmpdir(), "whalehall-timeline-v2-"));
 		temporaryDirectories.push(directory);
 		const path = join(directory, "timeline-v2.sqlite3");
 		const vault = new MemoryVault();
@@ -293,57 +308,196 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 				permissions: { accessibility: true },
 				coverage: ["content"],
 				rawObservations: [
-					{
-						observationId: "observation-1",
-						interval: { startedAtMs: 100_000, endedAtMs: 100_000 },
-						content: includeDecryptedContent
+					rawObservation(1, 100_000, {
+						subject: {
+							appId: "com.microsoft.VSCode",
+							appName: "仅在范围外的原始敏感标题",
+							opaqueWindowId: "window-1",
+						},
+					}),
+					rawObservation(2, 100_010, {
+						kind: "ax.valueChanged",
+						source: {
+							sensor: "ax",
+							adapterVersion: "audit-test.v2",
+						},
+						coverage: ["content", "metadata"],
+						metadata: {
+							processId: 42,
+							protectedInput: false,
+							focusedRole: "AXTextArea",
+							opaqueControlId: "editor",
+							finalValueAvailable: true,
+						},
+						contentState: "available",
+						...(includeDecryptedContent
 							? {
-									visibleText: "仅在范围外的原始敏感标题",
-									screenshotBytes: "绝不能导出的像素",
+									content: {
+										finalValue: "秘密文本 ABC-123",
+										inputOrigin: "unknown",
+									},
 								}
-							: "[redacted]",
-						screenshotBytes: "绝不能导出的顶层像素",
-					},
-					{
-						observationId: "observation-2",
-						interval: { startedAtMs: 100_010, endedAtMs: 100_010 },
-					},
-					{
-						observationId: "observation-3",
-						interval: { startedAtMs: 100_000, endedAtMs: 100_000 },
-					},
-					{
-						observationId: "observation-4",
-						interval: { startedAtMs: 100_020, endedAtMs: 100_020 },
-					},
+							: {}),
+					}),
+					rawObservation(3, 100_000, {
+						kind: "application.processObservedBatch",
+						subject: {
+							appId: "system.processes",
+							appName: "Processes",
+						},
+						metadata: {
+							started: [
+								{
+									processId: 42,
+									appId: "com.example.App",
+									appName: "Example",
+								},
+							],
+							exited: [],
+						},
+					}),
+					rawObservation(4, 100_020),
+					rawObservation(5, 100_030, {
+						kind: "ax.focusChanged",
+						source: {
+							sensor: "ax",
+							adapterVersion: "audit-test.v2",
+						},
+						metadata: {
+							processId: 42,
+							protectedInput: false,
+						},
+						content: {
+							screenshot_bytes: "绝不能导出的像素",
+							temporaryFilePath: "绝不能导出的临时路径",
+							screenCapturePath: "绝不能导出的屏幕路径",
+						},
+						screenshot_bytes: "绝不能导出的顶层像素",
+					}),
+					rawObservation(6, 100_040, {
+						kind: "input.activityBucket",
+						interval: {
+							startedAtMs: 100_040,
+							endedAtMs: 105_040,
+						},
+						source: {
+							sensor: "cg_activity",
+							adapterVersion: "audit-test.v2",
+						},
+						metadata: {
+							keyCount: 1,
+							clickCount: 0,
+							scrollDelta: 0,
+							mouseDistance: 1,
+							coalescedBucketCount: 1,
+						},
+					}),
+					rawObservation(7, 100_050, {
+						source: {
+							sensor: "ax",
+							adapterVersion: "audit-test.v2",
+						},
+					}),
+					rawObservation(8, 100_060, {
+						kind: "input.activityBucket",
+						interval: {
+							startedAtMs: 100_060,
+							endedAtMs: 110_060,
+						},
+						source: {
+							sensor: "cg_activity",
+							adapterVersion: "audit-test.v2",
+						},
+						metadata: {
+							keyCount: 2,
+							clickCount: 0,
+							scrollDelta: 0,
+							mouseDistance: 2,
+							coalescedBucketCount: 2,
+						},
+					}),
 				],
 				semanticEvents: [...populated.events, ignoredEvent],
 			}),
 		};
+		const sourceRange = await repository.readAuditRange(0, 300_000);
+		const sourceEpisode = sourceRange.episodes[0]!;
+		const sourceSummary = sourceRange.summaries[0]!;
+		const sourceFirstFactId = sourceRange.facts[0]!.factId;
+		const sourceSecondFact = sourceRange.facts[1]!;
+		sourceEpisode.classification.activity = "commerce";
+		sourceEpisode.classification.goalRelevance = "direct";
+		sourceEpisode.hypothesis = {
+			text: "Qwen source inference must not survive a range slice",
+			citedFactIds: [sourceFirstFactId],
+			generator: "qwen3:4b-cited.v2",
+		};
+		sourceSummary.segments[0]!.activity = "commerce";
+		sourceSummary.segments[0]!.goalRelevance = "direct";
+		sourceSummary.segments[0]!.hypothesis = structuredClone(
+			sourceEpisode.hypothesis,
+		);
+		sourceSummary.segments[0]!.evidence = [structuredClone(sourceSecondFact)];
+		const auditRepository = {
+			readAuditRange: async () => structuredClone(sourceRange),
+		} as unknown as TimelineV2Repository;
 		const exporter = new TimelineFiveMinuteAuditExporter(
 			raw,
-			repository,
+			auditRepository,
 			clock.nowMs.bind(clock),
 		);
 		const redacted = await exporter.exportFiveMinutes(0);
 		expect(redacted.manifest.toMs).toBe(300_000);
 		expect(redacted.manifest.decryptedContentIncluded).toBeFalse();
 		expect(JSON.stringify(redacted)).not.toContain("秘密文本 ABC-123");
+		const redactedRawMetadataObservation = redacted.rawObservations.find(
+			(observation) => observation.observationId === "observation-1",
+		);
+		expect(redactedRawMetadataObservation).toMatchObject({
+			contentState: "available",
+			coverage: ["metadata"],
+			metadata: { processId: 42 },
+		});
+		const redactedRawTextObservation = redacted.rawObservations.find(
+			(observation) => observation.observationId === "observation-2",
+		);
+		expect(redactedRawTextObservation).toMatchObject({
+			contentState: "available",
+			coverage: ["content", "metadata"],
+		});
+		expect(redactedRawTextObservation).not.toHaveProperty("content");
+		expect(
+			redacted.rawObservations.find(
+				(observation) => observation.observationId === "observation-3",
+			),
+		).toMatchObject({
+			metadata: {
+				started: [{ appName: "Example" }],
+			},
+		});
 		expect(redacted.lineage.length).toBeGreaterThan(0);
 		expect(redacted.lineage).toContainEqual({
 			observationId: "observation-3",
 			eventId: "event-3",
 			factId: null,
-			episodeRevisionId: null,
-			timelineId: null,
+			sourceEpisodeId: null,
+			sourceEpisodeRevisionId: null,
+			episodeSliceId: null,
+			sourceTimelineId: null,
+			timelineSliceId: null,
+			timelineSegmentSliceId: null,
 			status: "ignored",
 		});
 		expect(redacted.lineage).toContainEqual({
 			observationId: "observation-4",
 			eventId: null,
 			factId: null,
-			episodeRevisionId: null,
-			timelineId: null,
+			sourceEpisodeId: null,
+			sourceEpisodeRevisionId: null,
+			episodeSliceId: null,
+			sourceTimelineId: null,
+			timelineSliceId: null,
+			timelineSegmentSliceId: null,
 			status: "unreferenced_raw",
 		});
 
@@ -352,38 +506,161 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 		});
 		expect(JSON.stringify(decrypted)).toContain("秘密文本 ABC-123");
 		expect(JSON.stringify(decrypted)).not.toContain("绝不能导出的像素");
-		expect(JSON.stringify(decrypted)).not.toContain(
-			"绝不能导出的顶层像素",
+		expect(JSON.stringify(decrypted)).not.toContain("绝不能导出的顶层像素");
+		expect(JSON.stringify(decrypted)).not.toContain("绝不能导出的临时路径");
+		expect(JSON.stringify(decrypted)).not.toContain("绝不能导出的屏幕路径");
+		expect(
+			decrypted.rawObservations.map(
+				(observation) =>
+					(observation as { observationId: string }).observationId,
+			),
+		).not.toContain("observation-6");
+		expect(
+			decrypted.rawObservations.map(
+				(observation) =>
+					(observation as { observationId: string }).observationId,
+			),
+		).not.toContain("observation-7");
+		expect(
+			decrypted.rawObservations.map(
+				(observation) =>
+					(observation as { observationId: string }).observationId,
+			),
+		).toContain("observation-8");
+		expect(decrypted.manifest.timelineSliceCount).toBe(1);
+		expect(decrypted.manifest.sourceTimelineSummaryCount).toBe(1);
+		expect(decrypted.episodeSlices).toHaveLength(1);
+		expect(decrypted.timelineSlices).toHaveLength(1);
+		const fullEpisodeSlice = decrypted.episodeSlices[0]!;
+		const fullTimelineSlice = decrypted.timelineSlices[0]!;
+		expect(fullEpisodeSlice).toMatchObject({
+			inferenceScope: "range_recomputed",
+			classification: {
+				activity: "development",
+				goalRelevance: null,
+			},
+			hypothesis: {
+				generator: "deterministic-template.v2",
+			},
+		});
+		expect(fullEpisodeSlice.episodeSliceId).not.toBe(
+			fullEpisodeSlice.sourceEpisodeRevisionId,
 		);
-		expect(decrypted.manifest.timelineCount).toBe(1);
+		expect(fullTimelineSlice.segments[0]?.segmentSliceId).not.toBe(
+			fullTimelineSlice.segments[0]?.sourceEpisodeRevisionId,
+		);
+		expect(fullTimelineSlice.segments[0]?.evidenceFactIds).toEqual([
+			sourceSecondFact.factId,
+		]);
+		expect(
+			decrypted.lineage.find((entry) => entry.factId === sourceFirstFactId),
+		).toMatchObject({
+			episodeSliceId: fullEpisodeSlice.episodeSliceId,
+			timelineSliceId: null,
+			timelineSegmentSliceId: null,
+			status: "episode_only",
+		});
+		expect(decrypted.manifest.rawObservationCount).toBe(
+			decrypted.rawObservations.length,
+		);
+		expect(decrypted.manifest.includedCounts).toEqual({
+			rawObservations: decrypted.rawObservations.length,
+			semanticEvents: decrypted.semanticEvents.length,
+			evidenceFacts: decrypted.evidenceFacts.length,
+			sourceEpisodes: decrypted.episodes.length,
+			episodeSlices: decrypted.episodeSlices.length,
+			sourceTimelineSummaries: decrypted.timelineSummaries.length,
+			timelineSlices: decrypted.timelineSlices.length,
+		});
 		expect(decrypted.manifest.rangeBoundaryOmissions).toEqual({
-			rawObservations: 0,
+			rawObservations: 3,
 			semanticEvents: 0,
 			evidenceFacts: 0,
-			episodes: 0,
-			timelines: 0,
+			sourceEpisodes: 0,
+			episodeSlices: 0,
+			sourceTimelineSummaries: 0,
+			timelineSlices: 0,
 		});
+		const rawIds = new Set(
+			decrypted.rawObservations.map((observation) =>
+				String((observation as { observationId: string }).observationId),
+			),
+		);
+		const eventIds = new Set(
+			decrypted.semanticEvents.map((event) => event.eventId),
+		);
+		const factIds = new Set(decrypted.evidenceFacts.map((fact) => fact.factId));
+		const episodeSliceIds = new Set(
+			decrypted.episodeSlices.map((slice) => slice.episodeSliceId),
+		);
+		const timelineSliceIds = new Set(
+			decrypted.timelineSlices.map((slice) => slice.timelineSliceId),
+		);
+		const segmentSliceIds = new Set(
+			decrypted.timelineSlices.flatMap((slice) =>
+				slice.segments.map((segment) => segment.segmentSliceId),
+			),
+		);
+		for (const entry of decrypted.lineage) {
+			expect(rawIds.has(entry.observationId)).toBeTrue();
+			if (entry.eventId) {
+				expect(eventIds.has(entry.eventId)).toBeTrue();
+			}
+			if (entry.factId) {
+				expect(factIds.has(entry.factId)).toBeTrue();
+			}
+			if (entry.episodeSliceId) {
+				expect(episodeSliceIds.has(entry.episodeSliceId)).toBeTrue();
+			}
+			if (entry.timelineSliceId) {
+				expect(timelineSliceIds.has(entry.timelineSliceId)).toBeTrue();
+			}
+			if (entry.timelineSegmentSliceId) {
+				expect(segmentSliceIds.has(entry.timelineSegmentSliceId)).toBeTrue();
+			}
+		}
 
 		const clipped = await exporter.exportFiveMinutes(100_005, {
 			includeDecryptedContent: true,
 		});
-		expect(JSON.stringify(clipped)).not.toContain(
-			"仅在范围外的原始敏感标题",
-		);
+		expect(JSON.stringify(clipped)).not.toContain("仅在范围外的原始敏感标题");
 		expect(JSON.stringify(clipped)).not.toContain(
 			"绝不能出现在 SQLite 的敏感项目",
 		);
-		expect(clipped.manifest.timelineCount).toBe(0);
-		expect(clipped.manifest.rangeBoundaryOmissions?.rawObservations).toBe(2);
-		expect(clipped.manifest.rangeBoundaryOmissions?.timelines).toBe(1);
-		expect(clipped.coverage).toContain("unavailable");
+		expect(clipped.manifest.timelineSliceCount).toBe(1);
+		expect(clipped.timelineSummaries).toHaveLength(0);
+		expect(clipped.episodeSlices).toHaveLength(1);
+		expect(clipped.timelineSlices).toHaveLength(1);
+		expect(clipped.timelineSlices[0]).toMatchObject({
+			clippedAtStart: true,
+			clippedAtEnd: false,
+		});
+		const clippedEpisodeSlice = clipped.episodeSlices[0]!;
+		expect(clippedEpisodeSlice.inferenceScope).toBe("range_recomputed");
+		expect(clippedEpisodeSlice.classification.activity).toBe("development");
+		expect(clippedEpisodeSlice.classification.goalRelevance).toBeNull();
+		expect(clippedEpisodeSlice.hypothesis.generator).toBe(
+			"deterministic-template.v2",
+		);
+		expect(clippedEpisodeSlice.hypothesis.citedFactIds).not.toContain(
+			sourceFirstFactId,
+		);
+		expect(
+			clippedEpisodeSlice.hypothesis.citedFactIds.every((factId) =>
+				clipped.evidenceFacts.some((fact) => fact.factId === factId),
+			),
+		).toBeTrue();
+		expect(clipped.manifest.rangeBoundaryOmissions.rawObservations).toBe(5);
+		expect(clipped.manifest.rangeBoundaryOmissions.timelineSlices).toBe(0);
+		expect(clipped.manifest.exportWarnings).toContain(
+			"derived_timeline_clipped_to_exact_range",
+		);
+		expect(clipped.coverage).not.toContain("unavailable");
 		repository.close();
 	});
 
 	test("reopens RESULT_PERSISTED and COMMITTING jobs by finalizing without inference", async () => {
-		const directory = mkdtempSync(
-			join(tmpdir(), "whalehall-timeline-v2-"),
-		);
+		const directory = mkdtempSync(join(tmpdir(), "whalehall-timeline-v2-"));
 		temporaryDirectories.push(directory);
 		const path = join(directory, "timeline-v2.sqlite3");
 		const vault = new MemoryVault();
@@ -402,9 +679,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 		] as const) {
 			const database = new Database(path, { strict: true });
 			database
-				.query(
-					"UPDATE timeline_jobs SET state = ? WHERE window_id = ?",
-				)
+				.query("UPDATE timeline_jobs SET state = ? WHERE window_id = ?")
 				.run(recoverableState, windowId);
 			database.close();
 
@@ -419,8 +694,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 				evidence: new DeterministicEvidenceRenderer(hasher),
 				episodes: new DeterministicEpisodeAssembler({
 					hasher,
-					hypotheses:
-						new DeterministicTimelineHypothesisGenerator(),
+					hypotheses: new DeterministicTimelineHypothesisGenerator(),
 				}),
 				hasher,
 				clock,
@@ -493,10 +767,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 		expect(collector.getSnapshot().revision).toBeGreaterThan(0);
 		// Derived material remains available for the 30-day policy.
 		expect(await afterRawExpiry.getTimelineResult(windowId)).not.toBeNull();
-		const auditAfterRawExpiry = await afterRawExpiry.readAuditRange(
-			0,
-			300_000,
-		);
+		const auditAfterRawExpiry = await afterRawExpiry.readAuditRange(0, 300_000);
 		expect(auditAfterRawExpiry.windows).toHaveLength(0);
 		expect(auditAfterRawExpiry.facts.length).toBeGreaterThan(0);
 		expect(auditAfterRawExpiry.episodes.length).toBeGreaterThan(0);

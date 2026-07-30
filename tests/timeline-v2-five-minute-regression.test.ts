@@ -51,7 +51,7 @@ function replayEvent(index: number, atMs: number): SemanticEventV2 {
 		goalVersion: null,
 		countClass: "effective" as const,
 		reliability: "high" as const,
-		coverage: ["content", "metadata"] as const,
+		coverage: ["content", "metadata"] as SemanticEventV2["coverage"],
 		contentState: "available" as const,
 		sourceObservationIds: [`replay-observation-${index}`],
 		taxonomyVersion: "activity-taxonomy.v2",
