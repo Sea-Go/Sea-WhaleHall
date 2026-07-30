@@ -76,7 +76,7 @@ export interface PreferencesSnapshot {
 export function createDefaultPreferences(): PreferenceValues {
 	return {
 		appearance: {
-			theme: "orange",
+			theme: "observatory",
 			density: "comfortable",
 			reduceMotion: false,
 		},
@@ -199,7 +199,7 @@ function parsePreferenceValues(
 			: allowLegacyTheme && appearance.theme === "ocean"
 				? "observatory"
 			: allowLegacyTheme && appearance.theme === undefined
-				? "orange"
+				? "observatory"
 				: null;
 	if (
 		theme === null ||

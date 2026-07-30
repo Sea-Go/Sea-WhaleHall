@@ -56,7 +56,7 @@ describe("PreferencesController", () => {
 		expect(state.snapshot.version).toBe(1);
 		expect(state.snapshot.savedAtMs).toBe(1_800_000_000_000);
 		expect(state.snapshot.values.appearance).toEqual({
-			theme: "orange",
+			theme: "observatory",
 			density: "compact",
 			reduceMotion: true,
 		});
@@ -228,7 +228,7 @@ describe("PreferencesController", () => {
 		expect(state.snapshot.values.appearance.theme).toBe("firefly");
 	});
 
-	test("migrates theme-less preferences to orange without losing other values", async () => {
+	test("migrates theme-less preferences to observatory without losing other values", async () => {
 		const defaults = createDefaultPreferences();
 		const legacySnapshot = JSON.stringify({
 			values: {
@@ -267,7 +267,7 @@ describe("PreferencesController", () => {
 		if (!("snapshot" in state)) throw new Error("Expected preferences");
 		expect(state.snapshot.version).toBe(4);
 		expect(state.snapshot.values.appearance).toEqual({
-			theme: "orange",
+			theme: "observatory",
 			density: "compact",
 			reduceMotion: true,
 		});
