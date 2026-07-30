@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { buildObserverApp } from "../../../scripts/build-native";
 
@@ -55,6 +57,55 @@ afterEach(() => {
 });
 
 const macOSTest = process.platform === "darwin" ? test : test.skip;
+
+macOSTest(
+	"keeps AX flush, privacy, and visible-editable policies deterministic",
+	() => {
+		const temporaryDirectory = mkdtempSync(
+			resolve(tmpdir(), "whalehall-observer-policy-"),
+		);
+		try {
+			const sourceDirectory = resolve(import.meta.dir, "../Sources");
+			const sources = readdirSync(sourceDirectory)
+				.filter((name) => name.endsWith(".swift") && name !== "Main.swift")
+				.sort()
+				.map((name) => resolve(sourceDirectory, name));
+			const executable = resolve(temporaryDirectory, "accessibility-policy-tests");
+			const architecture = process.arch === "arm64" ? "arm64" : "x86_64";
+			const compile = Bun.spawnSync([
+				"xcrun",
+				"swiftc",
+				"-swift-version",
+				"6",
+				"-parse-as-library",
+				"-target",
+				`${architecture}-apple-macos14.0`,
+				"-framework",
+				"AppKit",
+				"-framework",
+				"ApplicationServices",
+				"-framework",
+				"CoreGraphics",
+				"-framework",
+				"ScreenCaptureKit",
+				"-framework",
+				"Vision",
+				...sources,
+				resolve(import.meta.dir, "AccessibilityMonitorPolicyTests.swift"),
+				"-o",
+				executable,
+			]);
+			expect(new TextDecoder().decode(compile.stderr)).toBe("");
+			expect(compile.exitCode).toBe(0);
+			const run = Bun.spawnSync([executable]);
+			expect(new TextDecoder().decode(run.stderr)).toBe("");
+			expect(run.exitCode).toBe(0);
+		} finally {
+			rmSync(temporaryDirectory, { force: true, recursive: true });
+		}
+	},
+	20_000,
+);
 
 macOSTest(
 	"builds the bundled helper and exchanges privacy-safe JSONL frames",

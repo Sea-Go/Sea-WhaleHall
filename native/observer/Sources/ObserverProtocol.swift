@@ -23,10 +23,10 @@ func bounded(_ value: String?, limit: Int) -> String? {
     return String(sanitized.prefix(limit))
 }
 
-func opaqueIdentifier(_ components: [String]) -> String {
+func opaqueIdentifier(_ components: [String], prefix: String = "ow1") -> String {
     let digest = SHA256.hash(data: Data(components.joined(separator: "\u{001F}").utf8))
-    let prefix = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
-    return "ow1_\(prefix)"
+    let encoded = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    return "\(prefix)_\(encoded)"
 }
 
 struct ObserverConfiguration {

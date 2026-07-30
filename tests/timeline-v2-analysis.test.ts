@@ -76,6 +76,49 @@ function visibleContentEvent(
 	};
 }
 
+function textValueEvent(
+	index: number,
+	options: {
+		deltaAvailable: boolean;
+		insertedChars: number;
+		deletedChars: number;
+		addedText?: string;
+		finalValue?: string;
+		contentState?: SemanticEventV2["contentState"];
+	},
+): SemanticEventV2 {
+	return {
+		...browserEvent(index, index * 1_000),
+		kind: "application.textValueChanged",
+		source: "observer.ax",
+		contentState: options.contentState ?? "available",
+		coverage:
+			options.contentState === "unavailable"
+				? ["unavailable"]
+				: ["content", "metadata"],
+		payload: {
+			appId: "com.example.Editor",
+			appName: "Editor",
+			opaqueWindowId: "editor-window",
+			opaqueControlId: "editor-control",
+			role: "AXTextArea",
+			insertedChars: options.insertedChars,
+			deletedChars: options.deletedChars,
+			deltaAvailable: options.deltaAvailable,
+			inputMethod: "unknown",
+			...(options.contentState === "unavailable"
+				? {}
+				: { label: "编辑区" }),
+			...(options.addedText === undefined
+				? {}
+				: { addedText: options.addedText }),
+			...(options.finalValue === undefined
+				? {}
+				: { finalValue: options.finalValue }),
+		},
+	};
+}
+
 function fact(index: number): EvidenceFactV2 {
 	const startedAtMs = index * 15_000;
 	return {
@@ -167,6 +210,63 @@ describe("Timeline v2 real-capture regressions", () => {
 				null,
 			);
 		expect(classification.activity).toBe("research");
+	});
+
+	test("renders text changes according to whether a real delta is available", async () => {
+		const renderer = new DeterministicEvidenceRenderer(
+			new WebCryptoReflectionHasher(),
+		);
+		const [missingBaseline, unavailable, inserted, cleared, deleted] =
+			await renderer.render([
+				textValueEvent(1, {
+					deltaAvailable: false,
+					insertedChars: 0,
+					deletedChars: 0,
+					finalValue: "already present",
+				}),
+				textValueEvent(2, {
+					deltaAvailable: false,
+					insertedChars: 0,
+					deletedChars: 0,
+					contentState: "unavailable",
+				}),
+				textValueEvent(3, {
+					deltaAvailable: true,
+					insertedChars: 1,
+					deletedChars: 0,
+					addedText: "!",
+					finalValue: "draft!",
+				}),
+				textValueEvent(4, {
+					deltaAvailable: true,
+					insertedChars: 0,
+					deletedChars: 3,
+					finalValue: "",
+				}),
+				textValueEvent(5, {
+					deltaAvailable: true,
+					insertedChars: 0,
+					deletedChars: 1,
+					finalValue: "ab",
+				}),
+			]);
+
+		expect(missingBaseline?.renderedText).toBe(
+			"Editor的“编辑区”控件最终显示为“already present”，因缺少基线无法判断增删或输入方式",
+		);
+		expect(missingBaseline?.templateArgs.deltaAvailable).toBeFalse();
+		expect(unavailable?.renderedText).toBe(
+			"Editor的焦点控件最终值不可用，无法判断增删或输入方式",
+		);
+		expect(inserted?.renderedText).toBe(
+			"Editor的“编辑区”控件最终增加了文本“!”，输入方式未知",
+		);
+		expect(cleared?.renderedText).toBe(
+			"Editor的“编辑区”控件最终清空了内容（删除 3 字符），输入方式未知",
+		);
+		expect(deleted?.renderedText).toBe(
+			"Editor的“编辑区”控件最终删除了 1 个字符，当前显示为“ab”，输入方式未知",
+		);
 	});
 
 	test("bounds a fragmented processing window to eight primary episodes without losing facts", async () => {

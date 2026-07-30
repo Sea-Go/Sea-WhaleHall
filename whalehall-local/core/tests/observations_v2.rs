@@ -74,6 +74,65 @@ fn browser_observation(at_ms: i64, title: &str) -> RawObservationInputV2 {
     }
 }
 
+fn ax_text_observation(
+    at_ms: i64,
+    kind: &str,
+    opaque_control_id: &str,
+    final_value: Option<&str>,
+    final_value_available: bool,
+) -> RawObservationInputV2 {
+    let coverage = if final_value.is_some() {
+        vec![CoverageLevelV2::Content]
+    } else if final_value_available {
+        vec![CoverageLevelV2::Metadata]
+    } else {
+        vec![CoverageLevelV2::Unavailable]
+    };
+    let redactions = if final_value_available {
+        Vec::new()
+    } else {
+        vec!["final_value_unavailable".to_owned()]
+    };
+    let content = final_value.map(|final_value| {
+        if kind == "ax.valueChanged" {
+            json!({
+                "finalValue": final_value,
+                "inputOrigin": "unknown",
+            })
+        } else {
+            json!({"finalValue": final_value})
+        }
+    });
+    RawObservationInputV2 {
+        schema_version: RAW_OBSERVATION_SCHEMA_VERSION.to_owned(),
+        kind: kind.to_owned(),
+        interval: ObservationIntervalV2 {
+            started_at_ms: at_ms,
+            ended_at_ms: at_ms,
+        },
+        source: ObservationSourceV2 {
+            sensor: ObservationSensorV2::Ax,
+            adapter_version: "observer-test.v2".to_owned(),
+        },
+        subject: ObservationSubjectV2 {
+            app_id: "com.example.Editor".to_owned(),
+            app_name: "Editor".to_owned(),
+            opaque_window_id: Some("window-opaque-editor".to_owned()),
+        },
+        reliability: EvidenceReliabilityV2::High,
+        coverage,
+        redactions,
+        metadata: json!({
+            "processId": 42,
+            "protectedInput": false,
+            "focusedRole": "AXTextArea",
+            "opaqueControlId": opaque_control_id,
+            "finalValueAvailable": final_value_available,
+        }),
+        content,
+    }
+}
+
 fn query_all(
     journal: &ObservationJournal,
     include_content: bool,
@@ -144,6 +203,188 @@ fn encrypted_content_round_trips_without_plaintext_in_sqlite_or_sidecars() {
         assert_file_does_not_contain(&path, b"should-be-sanitized");
         assert_file_does_not_contain(&path, b"example.com");
     }
+}
+
+#[test]
+fn ax_focus_seeds_per_control_text_baselines_and_first_values_are_not_insertions() {
+    let directory = tempfile::tempdir().expect("create test directory");
+    let journal = memory_journal(&directory, Duration::from_secs(7 * 24 * 60 * 60));
+
+    let focus_a = journal
+        .ingest(
+            "ax-focus-a",
+            ax_text_observation(
+                1_000,
+                "ax.focusChanged",
+                "oc1_control_a",
+                Some("alpha"),
+                true,
+            ),
+        )
+        .expect("seed control A baseline");
+    assert_eq!(
+        focus_a.semantic_event.payload["opaqueControlId"],
+        "oc1_control_a"
+    );
+
+    journal
+        .ingest(
+            "ax-focus-b",
+            ax_text_observation(
+                1_100,
+                "ax.focusChanged",
+                "oc1_control_b",
+                Some("bravo"),
+                true,
+            ),
+        )
+        .expect("seed control B baseline");
+
+    let mut moved_window_value = ax_text_observation(
+        1_200,
+        "ax.valueChanged",
+        "oc1_control_a",
+        Some("alpha!"),
+        true,
+    );
+    moved_window_value.subject.opaque_window_id = Some("window-opaque-editor-moved".to_owned());
+    let changed_a = journal
+        .ingest("ax-value-a", moved_window_value)
+        .expect("project control A delta after window identity changes");
+    assert_eq!(
+        changed_a.semantic_event.payload["opaqueControlId"],
+        "oc1_control_a"
+    );
+    assert_eq!(changed_a.semantic_event.payload["insertedChars"], 1);
+    assert_eq!(changed_a.semantic_event.payload["deletedChars"], 0);
+    assert_eq!(changed_a.semantic_event.payload["deltaAvailable"], true);
+
+    let changed_b = journal
+        .ingest(
+            "ax-value-b",
+            ax_text_observation(
+                1_300,
+                "ax.valueChanged",
+                "oc1_control_b",
+                Some("bravo?"),
+                true,
+            ),
+        )
+        .expect("project control B delta");
+    assert_eq!(changed_b.semantic_event.payload["insertedChars"], 1);
+    assert_eq!(changed_b.semantic_event.payload["deletedChars"], 0);
+    assert_eq!(changed_b.semantic_event.payload["deltaAvailable"], true);
+
+    let first_value = journal
+        .ingest(
+            "ax-value-without-focus",
+            ax_text_observation(
+                1_400,
+                "ax.valueChanged",
+                "oc1_control_c",
+                Some("already present"),
+                true,
+            ),
+        )
+        .expect("establish missing control baseline");
+    assert_eq!(first_value.semantic_event.payload["insertedChars"], 0);
+    assert_eq!(first_value.semantic_event.payload["deletedChars"], 0);
+    assert_eq!(first_value.semantic_event.payload["deltaAvailable"], false);
+
+    let events = query_all(&journal, true);
+    let focus_a_event = events
+        .iter()
+        .find(|event| event.event_id == focus_a.semantic_event.event_id)
+        .expect("find decrypted focus baseline event");
+    assert!(focus_a_event.payload.get("finalValue").is_none());
+    assert!(focus_a_event.payload.get("insertedChars").is_none());
+    let changed_a = events
+        .iter()
+        .find(|event| event.event_id == changed_a.semantic_event.event_id)
+        .expect("find decrypted control A event");
+    assert_eq!(changed_a.payload["addedText"], "!");
+    let first_value = events
+        .iter()
+        .find(|event| event.event_id == first_value.semantic_event.event_id)
+        .expect("find first value event");
+    assert!(first_value.payload.get("addedText").is_none());
+    assert_eq!(first_value.payload["finalValue"], "already present");
+}
+
+#[test]
+fn ax_empty_and_unavailable_final_values_preserve_delta_baseline_and_coverage() {
+    let directory = tempfile::tempdir().expect("create test directory");
+    let journal = memory_journal(&directory, Duration::from_secs(7 * 24 * 60 * 60));
+
+    journal
+        .ingest(
+            "ax-empty-focus",
+            ax_text_observation(2_000, "ax.focusChanged", "oc1_editor", Some("abc"), true),
+        )
+        .expect("seed text before deletion");
+    let emptied = journal
+        .ingest(
+            "ax-empty-value",
+            ax_text_observation(2_100, "ax.valueChanged", "oc1_editor", Some(""), true),
+        )
+        .expect("project deletion to an empty final value");
+    assert_eq!(emptied.semantic_event.payload["insertedChars"], 0);
+    assert_eq!(emptied.semantic_event.payload["deletedChars"], 3);
+    assert_eq!(emptied.semantic_event.payload["deltaAvailable"], true);
+
+    let unavailable = journal
+        .ingest(
+            "ax-unavailable-value",
+            ax_text_observation(2_200, "ax.valueChanged", "oc1_editor", None, false),
+        )
+        .expect("retain unavailable final-value diagnostic");
+    assert_eq!(
+        unavailable.semantic_event.content_state,
+        SemanticContentStateV2::Unavailable
+    );
+    assert!(
+        unavailable
+            .semantic_event
+            .coverage
+            .contains(&CoverageLevelV2::Unavailable)
+    );
+    assert_eq!(unavailable.semantic_event.payload["insertedChars"], 0);
+    assert_eq!(unavailable.semantic_event.payload["deletedChars"], 0);
+    assert_eq!(unavailable.semantic_event.payload["deltaAvailable"], false);
+
+    let resumed = journal
+        .ingest(
+            "ax-value-after-unavailable",
+            ax_text_observation(2_300, "ax.valueChanged", "oc1_editor", Some("x"), true),
+        )
+        .expect("resume from the last available empty baseline");
+    assert_eq!(resumed.semantic_event.payload["insertedChars"], 1);
+    assert_eq!(resumed.semantic_event.payload["deletedChars"], 0);
+    assert_eq!(resumed.semantic_event.payload["deltaAvailable"], true);
+
+    let metadata_only = journal
+        .ingest(
+            "ax-metadata-only-value",
+            ax_text_observation(2_400, "ax.valueChanged", "oc1_metadata", None, true),
+        )
+        .expect("accept content-disabled value notification");
+    assert_eq!(
+        metadata_only.semantic_event.content_state,
+        SemanticContentStateV2::Available
+    );
+    assert_eq!(metadata_only.semantic_event.payload["insertedChars"], 0);
+    assert_eq!(metadata_only.semantic_event.payload["deletedChars"], 0);
+    assert_eq!(
+        metadata_only.semantic_event.payload["deltaAvailable"],
+        false
+    );
+
+    let events = query_all(&journal, true);
+    let emptied = events
+        .iter()
+        .find(|event| event.event_id == emptied.semantic_event.event_id)
+        .expect("find decrypted empty-value event");
+    assert_eq!(emptied.payload["finalValue"], "");
 }
 
 #[test]

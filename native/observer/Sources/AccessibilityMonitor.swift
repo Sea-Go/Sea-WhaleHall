@@ -10,14 +10,173 @@ struct AccessibilitySnapshot {
     let windowTitle: String?
     let windowBounds: CGRect?
     let opaqueWindowIdentifier: String?
+    let opaqueControlIdentifier: String?
     let focusedRole: String?
     let focusedSubrole: String?
     let focusedLabel: String?
     let finalValue: String?
+    let finalValueAvailable: Bool?
     let selectedText: String?
     let visibleText: String?
     let protectedInput: Bool
     let observedAtMs: Int64
+}
+
+enum AccessibilitySnapshotScheduleAction: Equatable {
+    case schedule
+    case ignore
+    case flushThenSchedule
+}
+
+struct AccessibilityTextFlushPolicy {
+    static let quietMilliseconds: Int64 = 2_000
+    static let maximumMilliseconds: Int64 = 10_000
+
+    static func action(
+        pendingNotification: String,
+        incomingNotification: String
+    ) -> AccessibilitySnapshotScheduleAction {
+        guard pendingNotification == "ax.valueChanged" else {
+            return .schedule
+        }
+        if incomingNotification == "ax.valueChanged" {
+            return .schedule
+        }
+        if incomingNotification == "ax.focusChanged" {
+            return .flushThenSchedule
+        }
+        // Pointer movement, scrolling, safety refreshes, and window/title
+        // notifications are not evidence of additional text editing. They
+        // must not extend the two-second final-value silence window.
+        return .ignore
+    }
+
+    static func delayMilliseconds(startedAtMs: Int64, nowMs: Int64) -> Int64 {
+        let elapsedMs = max(0, nowMs - startedAtMs)
+        return min(
+            quietMilliseconds,
+            max(0, maximumMilliseconds - elapsedMs)
+        )
+    }
+}
+
+enum AccessibilityCaptureGateState: Equatable {
+    case awaitingFocusBaseline
+    case allowed
+    case blocked
+}
+
+enum AccessibilityCaptureGateEffect: Equatable {
+    case preservePending
+    case discardPending
+}
+
+struct AccessibilityCaptureGate {
+    private(set) var state: AccessibilityCaptureGateState = .awaitingFocusBaseline
+
+    var acceptsNonFocusSnapshots: Bool {
+        state == .allowed
+    }
+
+    mutating func reset() {
+        state = .awaitingFocusBaseline
+    }
+
+    mutating func beginFocusBaseline() -> AccessibilityCaptureGateEffect {
+        state = .awaitingFocusBaseline
+        return .discardPending
+    }
+
+    mutating func applyDecision(
+        allowed: Bool,
+        focusBaselineEstablished: Bool
+    ) -> AccessibilityCaptureGateEffect {
+        guard allowed else {
+            state = .blocked
+            return .discardPending
+        }
+        if state == .allowed || focusBaselineEstablished {
+            state = .allowed
+        }
+        return .preservePending
+    }
+}
+
+struct AccessibilityEditableCandidateDescriptor {
+    let hidden: Bool
+    let bounds: CGRect?
+    let accessibilityFocused: Bool
+    let systemFocused: Bool
+}
+
+struct AccessibilityEditableSelectionPolicy {
+    static func isValidBounds(_ bounds: CGRect?) -> Bool {
+        guard let bounds else {
+            return false
+        }
+        return bounds.origin.x.isFinite
+            && bounds.origin.y.isFinite
+            && bounds.size.width.isFinite
+            && bounds.size.height.isFinite
+            && bounds.size.width > 0
+            && bounds.size.height > 0
+            && !bounds.isNull
+            && !bounds.isInfinite
+    }
+
+    static func isVisible(
+        _ candidate: AccessibilityEditableCandidateDescriptor,
+        within windowBounds: CGRect?
+    ) -> Bool {
+        guard !candidate.hidden,
+              isValidBounds(windowBounds),
+              isValidBounds(candidate.bounds),
+              let windowBounds,
+              let candidateBounds = candidate.bounds
+        else {
+            return false
+        }
+        let intersection = candidateBounds.intersection(windowBounds)
+        return !intersection.isNull && !intersection.isEmpty
+    }
+
+    static func selectedIndex(
+        candidates: [AccessibilityEditableCandidateDescriptor],
+        within windowBounds: CGRect?
+    ) -> Int? {
+        let visibleIndices = candidates.indices.filter {
+            isVisible(candidates[$0], within: windowBounds)
+        }
+        let systemFocused = visibleIndices.filter {
+            candidates[$0].systemFocused
+        }
+        if systemFocused.count == 1 {
+            return systemFocused[0]
+        }
+        guard systemFocused.isEmpty else {
+            return nil
+        }
+
+        let accessibilityFocused = visibleIndices.filter {
+            candidates[$0].accessibilityFocused
+        }
+        if accessibilityFocused.count == 1 {
+            return accessibilityFocused[0]
+        }
+        guard accessibilityFocused.isEmpty else {
+            return nil
+        }
+        return visibleIndices.count == 1 ? visibleIndices[0] : nil
+    }
+}
+
+private enum AccessibilityFinalValueRead {
+    case available(String)
+    case unavailable
+}
+
+private struct SendableAccessibilityElement: @unchecked Sendable {
+    let value: AXUIElement
 }
 
 @MainActor
@@ -33,10 +192,9 @@ final class AccessibilityMonitor {
     private var safetyRefreshTimer: Timer?
     private var observedWindow: AXUIElement?
     private var observedFocusedElement: AXUIElement?
+    private var pendingSourceElement: AXUIElement?
     private var valueBurstStartedAtMs: Int64?
-
-    private let valueBurstQuietMs: Int64 = 2_000
-    private let valueBurstMaximumMs: Int64 = 10_000
+    private var captureGate = AccessibilityCaptureGate()
 
     init(onSnapshot: @escaping SnapshotHandler) {
         self.onSnapshot = onSnapshot
@@ -85,7 +243,9 @@ final class AccessibilityMonitor {
             AXObserverGetRunLoopSource(createdObserver),
             .commonModes
         )
-        scheduleSnapshot(kind: "ax.visibleContentChanged", delay: 0.15)
+        // The first focused editable control establishes the projector's text
+        // baseline before any value-change notification can be interpreted.
+        scheduleSnapshot(kind: "ax.focusChanged", delay: 0.15)
         safetyRefreshTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) {
             [weak self] _ in
             MainActor.assumeIsolated {
@@ -95,8 +255,7 @@ final class AccessibilityMonitor {
     }
 
     func detach() {
-        snapshotTimer?.invalidate()
-        snapshotTimer = nil
+        discardPendingSnapshot()
         safetyRefreshTimer?.invalidate()
         safetyRefreshTimer = nil
         if let observer {
@@ -111,25 +270,75 @@ final class AccessibilityMonitor {
         runningApplication = nil
         observedWindow = nil
         observedFocusedElement = nil
-        valueBurstStartedAtMs = nil
+        captureGate.reset()
     }
 
-    func scheduleSnapshot(kind: String, delay: TimeInterval = 0.15) {
+    func applyCaptureDecision(
+        allowed: Bool,
+        focusBaselineEstablished: Bool
+    ) {
+        let effect = captureGate.applyDecision(
+            allowed: allowed,
+            focusBaselineEstablished: focusBaselineEstablished
+        )
+        if effect == .discardPending {
+            // A denied/private context is sticky for AX final-value capture.
+            // Destroy both the plaintext-bearing source reference and its
+            // timer; only a later allowed focus baseline may reopen the gate.
+            discardPendingSnapshot()
+        }
+    }
+
+    func scheduleSnapshot(
+        kind: String,
+        delay: TimeInterval = 0.15,
+        sourceElement: AXUIElement? = nil
+    ) {
+        if kind == "ax.focusChanged" {
+            if AccessibilityTextFlushPolicy.action(
+                pendingNotification: pendingNotification,
+                incomingNotification: kind
+            ) == .flushThenSchedule,
+                captureGate.acceptsNonFocusSnapshots
+            {
+                captureSnapshot()
+            }
+            if captureGate.beginFocusBaseline() == .discardPending {
+                discardPendingSnapshot()
+            }
+        } else {
+            guard captureGate.acceptsNonFocusSnapshots else {
+                return
+            }
+            if AccessibilityTextFlushPolicy.action(
+                pendingNotification: pendingNotification,
+                incomingNotification: kind
+            ) == .ignore
+            {
+                return
+            }
+        }
+
         let nowMs = epochMilliseconds()
         if kind == "ax.valueChanged" {
             pendingNotification = kind
             valueBurstStartedAtMs = valueBurstStartedAtMs ?? nowMs
-        } else if pendingNotification != "ax.valueChanged" {
+        } else {
             pendingNotification = kind
+            valueBurstStartedAtMs = nil
+        }
+        if let sourceElement {
+            pendingSourceElement = sourceElement
         }
         let effectiveDelay: TimeInterval
         if pendingNotification == "ax.valueChanged",
            let valueBurstStartedAtMs
         {
-            let elapsedMs = max(0, nowMs - valueBurstStartedAtMs)
-            let forceRemainingMs = max(0, valueBurstMaximumMs - elapsedMs)
             effectiveDelay = TimeInterval(
-                min(valueBurstQuietMs, forceRemainingMs)
+                AccessibilityTextFlushPolicy.delayMilliseconds(
+                    startedAtMs: valueBurstStartedAtMs,
+                    nowMs: nowMs
+                )
             ) / 1_000
         } else {
             effectiveDelay = delay
@@ -143,6 +352,14 @@ final class AccessibilityMonitor {
                 self?.captureSnapshot()
             }
         }
+    }
+
+    private func discardPendingSnapshot() {
+        snapshotTimer?.invalidate()
+        snapshotTimer = nil
+        pendingNotification = "ax.visibleContentChanged"
+        pendingSourceElement = nil
+        valueBurstStartedAtMs = nil
     }
 
     func hitTest(point: CGPoint) -> (role: String?, label: String?)? {
@@ -166,7 +383,7 @@ final class AccessibilityMonitor {
         return (bounded(role, limit: 128), bounded(label, limit: 1_024))
     }
 
-    fileprivate func received(notification: String) {
+    fileprivate func received(notification: String, sourceElement: AXUIElement) {
         let kind: String
         switch notification {
         case kAXFocusedUIElementChangedNotification, kAXFocusedWindowChangedNotification:
@@ -176,30 +393,58 @@ final class AccessibilityMonitor {
         default:
             kind = "ax.visibleContentChanged"
         }
-        scheduleSnapshot(kind: kind)
+        scheduleSnapshot(kind: kind, sourceElement: sourceElement)
     }
 
     private func captureSnapshot() {
+        // A focus boundary may flush a pending value synchronously, before its
+        // timer fires. Invalidate that timer up front so it cannot later reuse
+        // a newly established focus baseline or a recovered privacy context.
+        snapshotTimer?.invalidate()
+        snapshotTimer = nil
         guard let application = runningApplication,
               let applicationElement,
               application.processIdentifier > 0
         else {
             return
         }
+        let notification = pendingNotification
+        let callbackSourceElement = pendingSourceElement
         let focusedWindow = attributeElement(applicationElement, kAXFocusedWindowAttribute)
-        let focusedElement = attributeElement(applicationElement, kAXFocusedUIElementAttribute)
-        updateObservedElements(window: focusedWindow, focusedElement: focusedElement)
+        let windowBounds = focusedWindow.flatMap(elementBounds)
+        let systemFocusedElement = attributeElement(
+            applicationElement,
+            kAXFocusedUIElementAttribute
+        )
+        let editableElement = resolveEditableElement(
+            callbackSource: callbackSourceElement,
+            systemFocusedElement: systemFocusedElement,
+            focusedWindowBounds: windowBounds
+        )
+        let focusedElement = editableElement ?? systemFocusedElement
+        updateObservedElements(
+            window: focusedWindow,
+            focusedElement: editableElement ?? systemFocusedElement
+        )
         let root = focusedWindow ?? applicationElement
         let windowTitle = focusedWindow.flatMap { attributeString($0, kAXTitleAttribute) }
         let focusedRole = focusedElement.flatMap { attributeString($0, kAXRoleAttribute) }
         let focusedSubrole = focusedElement.flatMap { attributeString($0, kAXSubroleAttribute) }
         let protectedInput = focusedElement.map(PrivacyPolicy.isProtected(element:)) ?? false
+        let editableValueExpected = notification == "ax.valueChanged"
+            || [callbackSourceElement, systemFocusedElement]
+                .compactMap { $0 }
+                .contains {
+                    isEditable($0) || isEditableContainer($0)
+                }
         let focusedLabel: String?
         let finalValue: String?
+        let finalValueAvailable: Bool?
         let selectedText: String?
         if protectedInput {
             focusedLabel = nil
             finalValue = nil
+            finalValueAvailable = nil
             selectedText = nil
         } else {
             focusedLabel = focusedElement.flatMap {
@@ -207,23 +452,24 @@ final class AccessibilityMonitor {
                     ?? attributeString($0, kAXDescriptionAttribute)
                     ?? attributeString($0, kAXHelpAttribute)
             }
-            finalValue = focusedElement.flatMap { attributeString($0, kAXValueAttribute) }
-            selectedText = focusedElement.flatMap {
+            if let editableElement {
+                switch readFinalValue(editableElement) {
+                case let .available(value):
+                    finalValue = value
+                    finalValueAvailable = true
+                case .unavailable:
+                    finalValue = nil
+                    finalValueAvailable = false
+                }
+            } else {
+                finalValue = nil
+                finalValueAvailable = editableValueExpected ? false : nil
+            }
+            selectedText = editableElement.flatMap {
                 attributeString($0, kAXSelectedTextAttribute)
             }
         }
 
-        let windowBounds: CGRect?
-        if let focusedWindow,
-           let point = attributePoint(focusedWindow, kAXPositionAttribute),
-           let size = attributeSize(focusedWindow, kAXSizeAttribute),
-           size.width > 0,
-           size.height > 0
-        {
-            windowBounds = CGRect(origin: point, size: size)
-        } else {
-            windowBounds = nil
-        }
         // AX trees can contain off-screen editor buffers and collapsed/hidden
         // descendants. Text is only eligible when the element exposes geometry
         // intersecting the currently focused window. If that window cannot be
@@ -235,6 +481,16 @@ final class AccessibilityMonitor {
         let appIdentifier = application.bundleIdentifier
             ?? "pid:\(application.processIdentifier)"
         let appName = application.localizedName ?? "Unknown Application"
+        let controlIdentifier: String?
+        if let editableElement {
+            controlIdentifier = opaqueControlIdentifier(
+                for: editableElement,
+                appIdentifier: appIdentifier,
+                fallbackProcessIdentifier: application.processIdentifier
+            )
+        } else {
+            controlIdentifier = nil
+        }
         let opaqueWindowIdentifier = windowBounds.map {
             opaqueIdentifier([
                 appIdentifier,
@@ -248,24 +504,252 @@ final class AccessibilityMonitor {
             processIdentifier: application.processIdentifier,
             appIdentifier: bounded(appIdentifier, limit: 256) ?? "unknown",
             appName: bounded(appName, limit: 256) ?? "Unknown Application",
-            notification: pendingNotification,
+            notification: notification,
             windowTitle: bounded(windowTitle, limit: 2_048),
             windowBounds: windowBounds,
             opaqueWindowIdentifier: opaqueWindowIdentifier,
+            opaqueControlIdentifier: controlIdentifier,
             focusedRole: bounded(focusedRole, limit: 128),
             focusedSubrole: bounded(focusedSubrole, limit: 128),
             focusedLabel: bounded(focusedLabel, limit: 1_024),
-            finalValue: bounded(finalValue, limit: 4_096),
+            finalValue: finalValue,
+            finalValueAvailable: finalValueAvailable,
             selectedText: bounded(selectedText, limit: 4_096),
             visibleText: bounded(visibleText, limit: 16_384),
             protectedInput: protectedInput,
             observedAtMs: epochMilliseconds()
         )
-        if pendingNotification == "ax.valueChanged" {
+        if notification == "ax.valueChanged" {
             valueBurstStartedAtMs = nil
         }
         pendingNotification = "ax.visibleContentChanged"
+        pendingSourceElement = nil
         onSnapshot(snapshot)
+    }
+
+    private func resolveEditableElement(
+        callbackSource: AXUIElement?,
+        systemFocusedElement: AXUIElement?,
+        focusedWindowBounds: CGRect?
+    ) -> AXUIElement? {
+        guard AccessibilityEditableSelectionPolicy.isValidBounds(
+            focusedWindowBounds
+        ) else {
+            return nil
+        }
+        if let callbackSource,
+           !isEditableContainer(callbackSource),
+           isVisibleEditable(
+                callbackSource,
+                within: focusedWindowBounds,
+                systemFocusedElement: systemFocusedElement
+           )
+        {
+            return callbackSource
+        }
+        if let systemFocusedElement,
+           !isEditableContainer(systemFocusedElement),
+           isVisibleEditable(
+                systemFocusedElement,
+                within: focusedWindowBounds,
+                systemFocusedElement: systemFocusedElement
+           )
+        {
+            return systemFocusedElement
+        }
+
+        var containers: [AXUIElement] = []
+        for element in [callbackSource, systemFocusedElement].compactMap({ $0 })
+        where isEditableContainer(element)
+        {
+            if !containers.contains(where: { CFEqual($0, element) }) {
+                containers.append(element)
+            }
+        }
+        for container in containers {
+            if let descendant = editableDescendant(
+                of: container,
+                systemFocusedElement: systemFocusedElement,
+                focusedWindowBounds: focusedWindowBounds
+            ) {
+                return descendant
+            }
+        }
+        return nil
+    }
+
+    private func editableDescendant(
+        of root: AXUIElement,
+        systemFocusedElement: AXUIElement?,
+        focusedWindowBounds: CGRect?
+    ) -> AXUIElement? {
+        guard attributeBool(root, kAXHiddenAttribute) != true else {
+            return nil
+        }
+        var queue = childElements(of: root)
+        var index = 0
+        var visited = Set<CFHashCode>()
+        var candidates: [(
+            element: AXUIElement,
+            descriptor: AccessibilityEditableCandidateDescriptor
+        )] = []
+
+        while index < queue.count, visited.count < 160 {
+            let element = queue[index]
+            index += 1
+            let elementHash = CFHash(element)
+            guard visited.insert(elementHash).inserted else {
+                continue
+            }
+            if attributeBool(element, kAXHiddenAttribute) == true {
+                continue
+            }
+            if isEditable(element) {
+                candidates.append((
+                    element: element,
+                    descriptor: editableCandidateDescriptor(
+                        for: element,
+                        systemFocusedElement: systemFocusedElement
+                    )
+                ))
+            }
+            queue.append(contentsOf: childElements(of: element))
+        }
+        let descriptors = candidates.map(\.descriptor)
+        guard let selectedIndex = AccessibilityEditableSelectionPolicy.selectedIndex(
+            candidates: descriptors,
+            within: focusedWindowBounds
+        )
+        else {
+            return nil
+        }
+        return candidates[selectedIndex].element
+    }
+
+    private func childElements(of element: AXUIElement) -> [AXUIElement] {
+        let visibleChildren = attributeElements(element, kAXVisibleChildrenAttribute)
+        let allChildren = attributeElements(element, kAXChildrenAttribute)
+        guard !visibleChildren.isEmpty else {
+            return allChildren
+        }
+        return visibleChildren + allChildren.filter { child in
+            !visibleChildren.contains(where: { CFEqual($0, child) })
+        }
+    }
+
+    private func isEditableContainer(_ element: AXUIElement) -> Bool {
+        let role = attributeString(element, kAXRoleAttribute)?.lowercased() ?? ""
+        return role == "axwebarea" || role == "axgroup"
+    }
+
+    private func isEditable(_ element: AXUIElement) -> Bool {
+        let role = attributeString(element, kAXRoleAttribute)?.lowercased() ?? ""
+        let subrole = attributeString(element, kAXSubroleAttribute)?.lowercased() ?? ""
+        if role == "axtextfield"
+            || role == "axtextarea"
+            || role == "axcombobox"
+            || role == "axsearchfield"
+            || subrole.contains("searchfield")
+            || subrole.contains("securetextfield")
+        {
+            return true
+        }
+        return false
+    }
+
+    private func isVisibleEditable(
+        _ element: AXUIElement,
+        within focusedWindowBounds: CGRect?,
+        systemFocusedElement: AXUIElement?
+    ) -> Bool {
+        isEditable(element)
+            && AccessibilityEditableSelectionPolicy.isVisible(
+                editableCandidateDescriptor(
+                    for: element,
+                    systemFocusedElement: systemFocusedElement
+                ),
+                within: focusedWindowBounds
+            )
+    }
+
+    private func editableCandidateDescriptor(
+        for element: AXUIElement,
+        systemFocusedElement: AXUIElement?
+    ) -> AccessibilityEditableCandidateDescriptor {
+        AccessibilityEditableCandidateDescriptor(
+            hidden: attributeBool(element, kAXHiddenAttribute) == true,
+            bounds: elementBounds(element),
+            accessibilityFocused:
+                attributeBool(element, kAXFocusedAttribute) == true,
+            systemFocused:
+                systemFocusedElement.map({ CFEqual(element, $0) }) == true
+        )
+    }
+
+    private func elementBounds(_ element: AXUIElement) -> CGRect? {
+        guard let point = attributePoint(element, kAXPositionAttribute),
+              let size = attributeSize(element, kAXSizeAttribute)
+        else {
+            return nil
+        }
+        let bounds = CGRect(origin: point, size: size)
+        return AccessibilityEditableSelectionPolicy.isValidBounds(bounds)
+            ? bounds
+            : nil
+    }
+
+    private func readFinalValue(_ element: AXUIElement) -> AccessibilityFinalValueRead {
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            &rawValue
+        ) == .success,
+            let rawValue
+        else {
+            return .unavailable
+        }
+        let value: String
+        if let text = rawValue as? String {
+            value = text
+        } else if let text = rawValue as? NSAttributedString {
+            value = text.string
+        } else if let number = rawValue as? NSNumber {
+            value = number.stringValue
+        } else {
+            return .unavailable
+        }
+        // Empty and whitespace-only strings are valid final values: they are
+        // required to represent a user deleting all text. Only NUL is removed.
+        return .available(
+            String(
+                value
+                    .replacingOccurrences(of: "\u{0000}", with: "")
+                    .prefix(4_096)
+            )
+        )
+    }
+
+    private func opaqueControlIdentifier(
+        for element: AXUIElement,
+        appIdentifier: String,
+        fallbackProcessIdentifier: pid_t
+    ) -> String {
+        var processIdentifier = fallbackProcessIdentifier
+        _ = AXUIElementGetPid(element, &processIdentifier)
+        let role = attributeString(element, kAXRoleAttribute) ?? "unknown"
+        let subrole = attributeString(element, kAXSubroleAttribute) ?? "none"
+        return opaqueIdentifier(
+            [
+                "control-v1",
+                appIdentifier,
+                String(processIdentifier),
+                role,
+                subrole,
+                String(CFHash(element)),
+            ],
+            prefix: "oc1"
+        )
     }
 
     private func updateObservedElements(
@@ -414,7 +898,7 @@ final class AccessibilityMonitor {
 
 private func accessibilityObserverCallback(
     _: AXObserver,
-    _: AXUIElement,
+    sourceElement: AXUIElement,
     notification: CFString,
     refcon: UnsafeMutableRawPointer?
 ) {
@@ -423,7 +907,15 @@ private func accessibilityObserverCallback(
     }
     let monitor = Unmanaged<AccessibilityMonitor>.fromOpaque(refcon).takeUnretainedValue()
     let notificationName = notification as String
-    Task { @MainActor in
-        monitor.received(notification: notificationName)
+    let source = SendableAccessibilityElement(value: sourceElement)
+    // The observer source is installed on the main run loop, so the callback
+    // is main-actor isolated in practice. Keeping the AX source element is
+    // necessary for Electron/WebArea notifications whose application-level
+    // focused element is only a container.
+    MainActor.assumeIsolated {
+        monitor.received(
+            notification: notificationName,
+            sourceElement: source.value
+        )
     }
 }

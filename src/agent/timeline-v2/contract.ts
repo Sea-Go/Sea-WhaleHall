@@ -179,6 +179,7 @@ function payloadMatchesKind(
 						"role",
 						"insertedChars",
 						"deletedChars",
+						"deltaAvailable",
 						"inputMethod",
 					],
 					[
@@ -199,6 +200,11 @@ function payloadMatchesKind(
 				optionalStringField(payload, "finalValue", 16_384) &&
 				isNonNegativeIntegerField(payload, "insertedChars") &&
 				isNonNegativeIntegerField(payload, "deletedChars") &&
+				typeof payload.deltaAvailable === "boolean" &&
+				(payload.deltaAvailable === true ||
+					(payload.insertedChars === 0 &&
+						payload.deletedChars === 0 &&
+						payload.addedText === undefined)) &&
 				payload.inputMethod === "unknown"
 			);
 		case "browser.visiblePageChanged":

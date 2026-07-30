@@ -51,6 +51,29 @@ function semanticEvent(): SemanticEventV2 {
 	};
 }
 
+function textValueEvent(
+	deltaAvailable: boolean,
+): SemanticEventV2 {
+	return {
+		...semanticEvent(),
+		kind: "application.textValueChanged",
+		source: "observer.ax",
+		payload: {
+			appId: "com.example.Editor",
+			appName: "Editor",
+			opaqueWindowId: "window-1",
+			opaqueControlId: "control-1",
+			role: "AXTextArea",
+			insertedChars: deltaAvailable ? 1 : 0,
+			deletedChars: 0,
+			deltaAvailable,
+			inputMethod: "unknown",
+			finalValue: "draft",
+			...(deltaAvailable ? { addedText: "t" } : {}),
+		},
+	};
+}
+
 describe("semantic-event.v2 protocol mirror", () => {
 	test("accepts the exact Rust contract and parses semantic push frames", () => {
 		const event = semanticEvent();
@@ -127,6 +150,43 @@ describe("semantic-event.v2 protocol mirror", () => {
 			isSemanticEventV2({
 				...event,
 				payload: { application: "secret.example" },
+			}),
+		).toBeFalse();
+	});
+
+	test("requires an explicit and internally consistent text delta availability", () => {
+		const knownDelta = textValueEvent(true);
+		const missingBaseline = textValueEvent(false);
+		expect(isSemanticEventV2(knownDelta)).toBeTrue();
+		expect(isSemanticEventV2(missingBaseline)).toBeTrue();
+
+		const withoutAvailability = Object.fromEntries(
+			Object.entries(missingBaseline.payload).filter(
+				([key]) => key !== "deltaAvailable",
+			),
+		);
+		expect(
+			isSemanticEventV2({
+				...missingBaseline,
+				payload: withoutAvailability,
+			}),
+		).toBeFalse();
+		expect(
+			isSemanticEventV2({
+				...missingBaseline,
+				payload: {
+					...missingBaseline.payload,
+					insertedChars: 1,
+				},
+			}),
+		).toBeFalse();
+		expect(
+			isSemanticEventV2({
+				...missingBaseline,
+				payload: {
+					...missingBaseline.payload,
+					addedText: "invented",
+				},
 			}),
 		).toBeFalse();
 	});

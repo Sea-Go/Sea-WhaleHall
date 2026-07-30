@@ -97,8 +97,17 @@ function renderTemplate(event: SemanticEventV2): RenderedTemplate {
 			const finalValue = contentValue(event, "finalValue");
 			const insertedChars = numberValue(event, "insertedChars") ?? 0;
 			const deletedChars = numberValue(event, "deletedChars") ?? 0;
+			const deltaAvailable = booleanValue(event, "deltaAvailable") === true;
 			const control = label ? `“${label}”控件` : "焦点控件";
-			const detail = addedText ?? finalValue;
+			const renderedText = textValueChangeDescription({
+				appName: appName ?? "当前应用",
+				control,
+				addedText,
+				finalValue,
+				insertedChars,
+				deletedChars,
+				deltaAvailable,
+			});
 			return {
 				templateCode: "application.text_value",
 				templateArgs: compactArgs({
@@ -108,11 +117,10 @@ function renderTemplate(event: SemanticEventV2): RenderedTemplate {
 					finalValue,
 					insertedChars,
 					deletedChars,
+					deltaAvailable,
 					inputMethod: "unknown",
 				}),
-				text: detail
-					? `${appName ?? "当前应用"}的${control}最终增加了文本“${detail}”，输入方式未知`
-					: `${appName ?? "当前应用"}的${control}最终内容发生变化（增加 ${insertedChars} 字符、删除 ${deletedChars} 字符），输入方式未知`,
+				text: renderedText,
 			};
 		}
 		case "browser.visiblePageChanged": {
@@ -212,6 +220,50 @@ function renderTemplate(event: SemanticEventV2): RenderedTemplate {
 		case "coverage.gap":
 			throw new Error("Coverage gaps cannot become EvidenceFact.");
 	}
+}
+
+function textValueChangeDescription(input: {
+	appName: string;
+	control: string;
+	addedText: string | null;
+	finalValue: string | null;
+	insertedChars: number;
+	deletedChars: number;
+	deltaAvailable: boolean;
+}): string {
+	const {
+		appName,
+		control,
+		addedText,
+		finalValue,
+		insertedChars,
+		deletedChars,
+		deltaAvailable,
+	} = input;
+	const subject = `${appName}的${control}`;
+	if (!deltaAvailable) {
+		if (finalValue !== null) {
+			const displayed = finalValue
+				? `“${finalValue}”`
+				: "空内容";
+			return `${subject}最终显示为${displayed}，因缺少基线无法判断增删或输入方式`;
+		}
+		return `${subject}最终值不可用，无法判断增删或输入方式`;
+	}
+	if (insertedChars > 0 && addedText) {
+		const deletionDetail =
+			deletedChars > 0 ? `（同时删除 ${deletedChars} 字符）` : "";
+		return `${subject}最终增加了文本“${addedText}”${deletionDetail}，输入方式未知`;
+	}
+	if (insertedChars === 0 && deletedChars > 0) {
+		if (finalValue === "") {
+			return `${subject}最终清空了内容（删除 ${deletedChars} 字符），输入方式未知`;
+		}
+		const finalDetail =
+			finalValue !== null ? `，当前显示为“${finalValue}”` : "";
+		return `${subject}最终删除了 ${deletedChars} 个字符${finalDetail}，输入方式未知`;
+	}
+	return `${subject}最终内容发生变化（增加 ${insertedChars} 字符、删除 ${deletedChars} 字符），输入方式未知`;
 }
 
 function unavailableContentTemplate(
@@ -350,6 +402,11 @@ function contentValue(event: SemanticEventV2, key: string): string | null {
 function numberValue(event: SemanticEventV2, key: string): number | null {
 	const value = event.payload[key];
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function booleanValue(event: SemanticEventV2, key: string): boolean | null {
+	const value = event.payload[key];
+	return typeof value === "boolean" ? value : null;
 }
 
 function recordValue(

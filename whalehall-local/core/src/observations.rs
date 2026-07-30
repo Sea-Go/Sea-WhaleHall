@@ -1666,6 +1666,26 @@ fn project_observation(
                 .or_else(|| metadata.get("focusedSubrole").and_then(Value::as_str))
                 .unwrap_or("unknown");
             metadata_payload.insert("role".to_owned(), Value::String(role.to_owned()));
+            let control_id = metadata.get("opaqueControlId").and_then(Value::as_str);
+            if let Some(control_id) = control_id {
+                metadata_payload.insert(
+                    "opaqueControlId".to_owned(),
+                    Value::String(control_id.to_owned()),
+                );
+            }
+            if let Some(current_value) = content
+                .and_then(|content| content.get("finalValue"))
+                .and_then(Value::as_str)
+            {
+                let state_key = text_projector_state_key(&observation.subject, role, control_id);
+                update_projector_state(
+                    transaction,
+                    &state_key,
+                    &digest_hex(current_value.as_bytes()),
+                    raw_content.map(|value| value.content_ref.as_str()),
+                    observation.interval.ended_at_ms,
+                )?;
+            }
             let mut semantic_content = Map::new();
             copy_string(content, "focusedLabel", &mut semantic_content, "label");
             Ok(base(
@@ -1684,10 +1704,12 @@ fn project_observation(
                 .unwrap_or("unknown");
             let current_value = content
                 .and_then(|content| content.get("finalValue"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let state_key = projector_state_key("text", &observation.subject, role);
-            let previous_value = if let (Some(key), Some(_)) = (key, raw_content) {
+                .and_then(Value::as_str);
+            let control_id = metadata.get("opaqueControlId").and_then(Value::as_str);
+            let state_key = text_projector_state_key(&observation.subject, role, control_id);
+            let previous_value = if current_value.is_some()
+                && let (Some(key), Some(_)) = (key, raw_content)
+            {
                 load_projector_previous_content(transaction, &state_key, key)?.and_then(|value| {
                     value
                         .get("finalValue")
@@ -1697,11 +1719,26 @@ fn project_observation(
             } else {
                 None
             };
+            let delta_available = previous_value.is_some() && current_value.is_some();
             let (inserted_chars, deleted_chars, added_text) =
-                text_delta(previous_value.as_deref(), current_value);
+                match (previous_value.as_deref(), current_value) {
+                    (Some(previous_value), Some(current_value)) => {
+                        text_delta(Some(previous_value), current_value)
+                    }
+                    // Missing prior state is a baseline, never evidence that
+                    // the complete current value was newly inserted.
+                    _ => (0, 0, String::new()),
+                };
             metadata_payload.insert("role".to_owned(), Value::String(role.to_owned()));
+            if let Some(control_id) = control_id {
+                metadata_payload.insert(
+                    "opaqueControlId".to_owned(),
+                    Value::String(control_id.to_owned()),
+                );
+            }
             metadata_payload.insert("insertedChars".to_owned(), json!(inserted_chars));
             metadata_payload.insert("deletedChars".to_owned(), json!(deleted_chars));
+            metadata_payload.insert("deltaAvailable".to_owned(), json!(delta_available));
             metadata_payload.insert(
                 "inputMethod".to_owned(),
                 Value::String("unknown".to_owned()),
@@ -1711,19 +1748,21 @@ fn project_observation(
             if !added_text.is_empty() {
                 semantic_content.insert("addedText".to_owned(), Value::String(added_text));
             }
-            if !current_value.is_empty() {
+            if let Some(current_value) = current_value {
                 semantic_content.insert(
                     "finalValue".to_owned(),
                     Value::String(current_value.to_owned()),
                 );
             }
-            update_projector_state(
-                transaction,
-                &state_key,
-                &digest_hex(current_value.as_bytes()),
-                raw_content.map(|value| value.content_ref.as_str()),
-                observation.interval.ended_at_ms,
-            )?;
+            if let Some(current_value) = current_value {
+                update_projector_state(
+                    transaction,
+                    &state_key,
+                    &digest_hex(current_value.as_bytes()),
+                    raw_content.map(|value| value.content_ref.as_str()),
+                    observation.interval.ended_at_ms,
+                )?;
+            }
             Ok(base(
                 semantic_event_kinds::APPLICATION_TEXT_VALUE_CHANGED,
                 SemanticCountClassV2::Effective,
@@ -2422,6 +2461,17 @@ fn projector_state_key(
     )
 }
 
+fn text_projector_state_key(
+    subject: &ObservationSubjectV2,
+    role: &str,
+    opaque_control_id: Option<&str>,
+) -> String {
+    if let Some(opaque_control_id) = opaque_control_id {
+        return deterministic_id("ps2", &["text", &subject.app_id, opaque_control_id]);
+    }
+    projector_state_key("text", subject, role)
+}
+
 fn text_delta(previous: Option<&str>, current: &str) -> (usize, usize, String) {
     let previous = previous.unwrap_or_default().chars().collect::<Vec<_>>();
     let current_chars = current.chars().collect::<Vec<_>>();
@@ -2544,7 +2594,12 @@ fn validate_kind_payload(input: &RawObservationInputV2) -> Result<(), Observatio
             input.source.sensor == ObservationSensorV2::Ax
                 && exact_metadata(
                     &["processId", "protectedInput"],
-                    &["focusedRole", "focusedSubrole"],
+                    &[
+                        "focusedRole",
+                        "focusedSubrole",
+                        "opaqueControlId",
+                        "finalValueAvailable",
+                    ],
                 )
                 && metadata.get("processId").is_some_and(is_u32_json)
                 && metadata
@@ -2553,6 +2608,10 @@ fn validate_kind_payload(input: &RawObservationInputV2) -> Result<(), Observatio
                     .is_some()
                 && optional_bounded_string(metadata, "focusedRole", 256)
                 && optional_bounded_string(metadata, "focusedSubrole", 256)
+                && optional_bounded_string(metadata, "opaqueControlId", 512)
+                && metadata
+                    .get("finalValueAvailable")
+                    .is_none_or(|value| value.as_bool().is_some())
                 && exact_content(
                     &[],
                     &[
@@ -2567,18 +2626,24 @@ fn validate_kind_payload(input: &RawObservationInputV2) -> Result<(), Observatio
                 && content.is_none_or(|content| {
                     optional_bounded_string(content, "windowTitle", 2_048)
                         && optional_bounded_string(content, "focusedLabel", 2_048)
-                        && optional_bounded_string(content, "finalValue", 16_384)
+                        && optional_bounded_string_allow_empty(content, "finalValue", 16_384)
                         && optional_bounded_string(content, "selectedText", 16_384)
                         && optional_bounded_string(content, "visibleText", 16_384)
                         && content
                             .get("inputOrigin")
                             .is_none_or(|value| value.as_str() == Some("unknown"))
                 })
+                && !(metadata.get("finalValueAvailable").and_then(Value::as_bool) == Some(false)
+                    && content
+                        .and_then(|value| value.get("finalValue"))
+                        .and_then(Value::as_str)
+                        .is_some())
                 && (input.kind != "ax.valueChanged"
                     || content
                         .and_then(|value| value.get("finalValue"))
                         .and_then(Value::as_str)
-                        .is_some())
+                        .is_some()
+                    || !input.coverage.contains(&CoverageLevelV2::Content))
         }
         "screen.visibleTextChanged" => {
             input.source.sensor == ObservationSensorV2::Ocr
@@ -3194,6 +3259,18 @@ fn optional_bounded_string(object: &Map<String, Value>, key: &str, maximum: usiz
         value
             .as_str()
             .is_some_and(|value| is_bounded_text(value, maximum))
+    })
+}
+
+fn optional_bounded_string_allow_empty(
+    object: &Map<String, Value>,
+    key: &str,
+    maximum: usize,
+) -> bool {
+    object.get(key).is_none_or(|value| {
+        value
+            .as_str()
+            .is_some_and(|value| value.chars().count() <= maximum && !value.contains('\0'))
     })
 }
 

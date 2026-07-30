@@ -465,10 +465,13 @@ final class ObserverRuntime: @unchecked Sendable {
         } else {
             decision = baseDecision
         }
-        let observationKind = snapshot.notification == "ax.valueChanged"
-            && snapshot.finalValue == nil
-            ? "ax.visibleContentChanged"
-            : snapshot.notification
+        let observationKind = snapshot.notification
+        let finalValueUnavailable = snapshot.finalValueAvailable == false
+            && !snapshot.protectedInput
+        accessibilityMonitor.applyCaptureDecision(
+            allowed: decision.allowed,
+            focusBaselineEstablished: observationKind == "ax.focusChanged"
+        )
         activeCaptureAllowed = decision.allowed
         inputMonitor.setCollectionEnabled(decision.allowed)
         if !decision.allowed,
@@ -500,7 +503,9 @@ final class ObserverRuntime: @unchecked Sendable {
             }
             if let finalValue = snapshot.finalValue {
                 content["finalValue"] = finalValue
-                content["inputOrigin"] = "unknown"
+                if observationKind == "ax.valueChanged" {
+                    content["inputOrigin"] = "unknown"
+                }
             }
             if let selectedText = snapshot.selectedText {
                 content["selectedText"] = selectedText
@@ -519,11 +524,33 @@ final class ObserverRuntime: @unchecked Sendable {
         if let subrole = snapshot.focusedSubrole {
             metadata["focusedSubrole"] = subrole
         }
-        let coverage = contentAllowed && !content.isEmpty
-            ? ["content"]
-            : decision.allowed ? ["metadata"] : ["redacted"]
+        if let opaqueControlIdentifier = snapshot.opaqueControlIdentifier {
+            metadata["opaqueControlId"] = opaqueControlIdentifier
+        }
+        if let finalValueAvailable = snapshot.finalValueAvailable {
+            metadata["finalValueAvailable"] = finalValueAvailable
+        }
+        var observationRedactions = decision.redactions
+        if finalValueUnavailable,
+           !observationRedactions.contains("final_value_unavailable")
+        {
+            observationRedactions.append("final_value_unavailable")
+        }
+        let coverage: [String]
+        if decision.allowed && finalValueUnavailable {
+            coverage = ["unavailable"]
+        } else if contentAllowed && !content.isEmpty {
+            coverage = ["content"]
+        } else if decision.allowed {
+            coverage = ["metadata"]
+        } else {
+            coverage = ["redacted"]
+        }
         let dedupKey = "\(observationKind):\(snapshot.appIdentifier):"
-            + "\(snapshot.opaqueWindowIdentifier ?? "none"):\(content)"
+            + "\(snapshot.opaqueWindowIdentifier ?? "none"):"
+            + "\(snapshot.opaqueControlIdentifier ?? "none"):"
+            + "\(snapshot.finalValueAvailable.map { $0 ? "true" : "false" } ?? "not_applicable"):"
+            + "\(content)"
         let browserVisibleContentWillBeMerged = browserSupported
             && browserPage != nil
             && observationKind == "ax.visibleContentChanged"
@@ -540,7 +567,7 @@ final class ObserverRuntime: @unchecked Sendable {
                     opaqueWindowIdentifier: snapshot.opaqueWindowIdentifier,
                     reliability: "high",
                     coverage: coverage,
-                    redactions: decision.redactions,
+                    redactions: observationRedactions,
                     metadata: metadata,
                     content: contentAllowed ? content : nil
                 )

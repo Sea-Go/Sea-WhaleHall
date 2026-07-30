@@ -142,6 +142,7 @@ function textChange(
 			role: "AXTextArea",
 			insertedChars: text.length,
 			deletedChars: 0,
+			deltaAvailable: true,
 			inputMethod: "unknown",
 			label: "代码编辑区",
 			addedText: text,
