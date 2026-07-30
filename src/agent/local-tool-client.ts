@@ -1,5 +1,6 @@
 import {
 	LOCAL_CONTROL_TIMEOUT_MS,
+	LOCAL_PERMISSION_REFRESH_TIMEOUT_MS,
 	LOCAL_TOOL_TIMEOUT_MS,
 	MAX_JSONL_LINE_BYTES,
 	isDesktopEvent,
@@ -418,6 +419,7 @@ export class LocalToolClient implements LocalToolProcess {
 		return this.requestMonitoringStatus(
 			"monitoring.refreshPermissions",
 			options,
+			LOCAL_PERMISSION_REFRESH_TIMEOUT_MS,
 		);
 	}
 
@@ -671,8 +673,14 @@ export class LocalToolClient implements LocalToolProcess {
 			| "monitoring.resume"
 			| "monitoring.refreshPermissions",
 		params: Record<string, unknown>,
+		timeoutMs?: number,
 	): Promise<LocalMonitoringStatus> {
-		const result = await this.request<unknown>(method, params);
+		const result = await this.request<unknown>(
+			method,
+			params,
+			crypto.randomUUID(),
+			timeoutMs,
+		);
 		if (!isLocalMonitoringStatus(result)) {
 			throw this.protocolFailure(
 				`${method} returned an invalid monitoring status.`,

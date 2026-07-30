@@ -1,5 +1,6 @@
 import type {
 	MonitoringConfiguration,
+	MonitoringPermissionId,
 	MonitoringSnapshot,
 } from "./domain";
 
@@ -11,6 +12,7 @@ export interface MonitoringService {
 	pause(): Promise<MonitoringSnapshot>;
 	resume(): Promise<MonitoringSnapshot>;
 	refreshPermissions(): Promise<MonitoringSnapshot>;
+	openPermissionSettings(permission: MonitoringPermissionId): Promise<void>;
 }
 
 export function monitoringFailureMessage(reason: unknown): string {

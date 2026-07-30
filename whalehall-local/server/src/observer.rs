@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -14,9 +14,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use whalehall_local_core::observations::{ObservationJournal, ObservationKeyStorageMode};
 use whalehall_local_protocol::{
-    CoverageLevelV2, MonitoringConfigureParams, MonitoringPermissionState, MonitoringPermissions,
-    MonitoringRefreshPermissionsParams, MonitoringState, MonitoringStatusResult,
-    RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2,
+    CoverageLevelV2, MonitoringConfigureParams, MonitoringPermissionCheckState,
+    MonitoringPermissionState, MonitoringPermissions, MonitoringRefreshPermissionsParams,
+    MonitoringState, MonitoringStatusResult, RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2,
 };
 
 const HELPER_PATH_ENV: &str = "WHALEHALL_OBSERVER_HELPER_PATH";
@@ -31,6 +31,8 @@ const DEV_LEGACY_KEYCHAIN_WARNING: &str = "dev_legacy_keychain_in_use";
 const MAX_HELPER_FRAME_BYTES: usize = 512 * 1024;
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_TICK: Duration = Duration::from_secs(5);
+const PERMISSION_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+const PERMISSION_REFRESH_COMMAND_ID: &str = "refresh-permissions";
 const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
 const FAILURE_LIMIT: usize = 5;
 const RESTART_DELAYS: &[Duration] = &[
@@ -120,6 +122,8 @@ impl ObserverSupervisor {
             last_acked_sequence: None,
             last_heartbeat_at_ms: None,
             permissions: MonitoringPermissions::default(),
+            permission_check_state: MonitoringPermissionCheckState::Unchecked,
+            permissions_checked_at_ms: None,
             coverage: vec![CoverageLevelV2::Metadata],
             last_error: key_warning,
         }));
@@ -220,11 +224,25 @@ struct RuntimeSettings {
     helper_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionOutcome {
     Restart,
     Reconfigure,
     Disabled,
     Shutdown,
+}
+
+struct PendingPermissionRefresh {
+    permission_status_received: bool,
+    command_result_received: bool,
+    deadline: Instant,
+    response: oneshot::Sender<Result<MonitoringStatusResult, String>>,
+}
+
+enum HelperFrameEvent {
+    Other,
+    PermissionStatus,
+    CommandResult { id: String, ok: bool },
 }
 
 #[derive(Default)]
@@ -336,6 +354,8 @@ async fn run_supervisor(
         };
 
         set_state(&status, MonitoringState::Starting, None);
+        let permission_check_before_start = status_snapshot(&status).permission_check_state;
+        set_permission_check_state(&status, MonitoringPermissionCheckState::Checking);
         let failed = match spawn_helper(&helper_path).await {
             Ok((child, stderr_task)) => {
                 let session_started = Instant::now();
@@ -346,6 +366,7 @@ async fn run_supervisor(
                     &status,
                     &mut settings,
                     &mut commands,
+                    permission_check_before_start,
                 )
                 .await
                 {
@@ -364,6 +385,7 @@ async fn run_supervisor(
                 }
             }
             Err(_) => {
+                set_permission_check_state(&status, MonitoringPermissionCheckState::Failed);
                 set_state(
                     &status,
                     MonitoringState::Degraded,
@@ -399,15 +421,18 @@ async fn run_helper_session(
     status: &Arc<Mutex<MonitoringStatusResult>>,
     settings: &mut RuntimeSettings,
     commands: &mut mpsc::Receiver<SupervisorCommand>,
+    permission_check_before_start: MonitoringPermissionCheckState,
 ) -> SessionOutcome {
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill().await;
         stderr_task.abort();
+        set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
         return SessionOutcome::Restart;
     };
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.kill().await;
         stderr_task.abort();
+        set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
         return SessionOutcome::Restart;
     };
     {
@@ -425,6 +450,12 @@ async fn run_helper_session(
     {
         let _ = child.kill().await;
         stderr_task.abort();
+        {
+            let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+            current.helper_pid = None;
+            current.boot_id = None;
+            current.permission_check_state = MonitoringPermissionCheckState::Failed;
+        }
         return SessionOutcome::Restart;
     }
 
@@ -436,12 +467,25 @@ async fn run_helper_session(
         last_sequence: 0,
         last_observation_at_ms: None,
         last_heartbeat: Instant::now(),
+        permission_frame_received: false,
     };
+    let mut pending_permission_refresh: Option<PendingPermissionRefresh> = None;
     let mut line = Vec::new();
 
     let outcome = loop {
         line.clear();
+        let permission_refresh_deadline = pending_permission_refresh
+            .as_ref()
+            .map(|pending| pending.deadline);
         tokio::select! {
+            biased;
+            _ = wait_for_permission_refresh_deadline(permission_refresh_deadline) => {
+                fail_pending_permission_refresh(
+                    status,
+                    &mut pending_permission_refresh,
+                    "observer_permission_refresh_timeout",
+                );
+            }
             read = stdout.read_until(b'\n', &mut line) => {
                 match read {
                     Ok(0) | Err(_) => break SessionOutcome::Restart,
@@ -458,7 +502,13 @@ async fn run_helper_session(
                             &mut stdin,
                             &mut frame_state,
                         ).await {
-                            Ok(()) => {}
+                            Ok(event) => {
+                                handle_permission_refresh_event(
+                                    event,
+                                    status,
+                                    &mut pending_permission_refresh,
+                                );
+                            }
                             Err(code) => {
                                 set_state(status, MonitoringState::Degraded, Some(code));
                                 break SessionOutcome::Restart;
@@ -482,6 +532,7 @@ async fn run_helper_session(
                     settings,
                     status,
                     &mut stdin,
+                    &mut pending_permission_refresh,
                 ).await {
                     RunningCommandOutcome::Continue => {}
                     RunningCommandOutcome::Reconfigure => {
@@ -494,6 +545,17 @@ async fn run_helper_session(
         }
     };
 
+    settle_permission_check_after_session(
+        status,
+        outcome,
+        frame_state.permission_frame_received,
+        permission_check_before_start,
+    );
+    fail_pending_permission_refresh(
+        status,
+        &mut pending_permission_refresh,
+        "observer_permission_refresh_interrupted",
+    );
     let _ = send_simple_command(&mut stdin, "shutdown-parent", "shutdown", false).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     if child.id().is_some() {
@@ -522,6 +584,7 @@ async fn handle_running_command(
     settings: &mut RuntimeSettings,
     status: &Arc<Mutex<MonitoringStatusResult>>,
     stdin: &mut ChildStdin,
+    pending_permission_refresh: &mut Option<PendingPermissionRefresh>,
 ) -> RunningCommandOutcome {
     match command {
         SupervisorCommand::Configure { params, response } => {
@@ -570,18 +633,118 @@ async fn handle_running_command(
             RunningCommandOutcome::Continue
         }
         SupervisorCommand::RefreshPermissions { prompt, response } => {
-            let result =
-                send_simple_command(stdin, "refresh-permissions", "refreshPermissions", prompt)
-                    .await
-                    .map(|()| status_snapshot(status))
-                    .map_err(|_| "observer_permission_refresh_failed".to_owned());
-            let _ = response.send(result);
+            if pending_permission_refresh.is_some() {
+                let _ = response.send(Err(
+                    "observer_permission_refresh_already_in_progress".to_owned()
+                ));
+                return RunningCommandOutcome::Continue;
+            }
+            set_permission_check_state(status, MonitoringPermissionCheckState::Checking);
+            if send_simple_command(
+                stdin,
+                PERMISSION_REFRESH_COMMAND_ID,
+                "refreshPermissions",
+                prompt,
+            )
+            .await
+            .is_err()
+            {
+                set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
+                let _ = response.send(Err("observer_permission_refresh_failed".to_owned()));
+                return RunningCommandOutcome::Continue;
+            }
+            *pending_permission_refresh = Some(PendingPermissionRefresh {
+                permission_status_received: false,
+                command_result_received: false,
+                deadline: Instant::now() + PERMISSION_REFRESH_TIMEOUT,
+                response,
+            });
             RunningCommandOutcome::Continue
         }
         SupervisorCommand::Shutdown { response } => {
             let _ = response.send(());
             RunningCommandOutcome::Shutdown
         }
+    }
+}
+
+fn handle_permission_refresh_event(
+    event: HelperFrameEvent,
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+    pending: &mut Option<PendingPermissionRefresh>,
+) {
+    let Some(refresh) = pending.as_mut() else {
+        return;
+    };
+    match event {
+        HelperFrameEvent::PermissionStatus => {
+            refresh.permission_status_received = true;
+        }
+        HelperFrameEvent::CommandResult { id, ok } if id == PERMISSION_REFRESH_COMMAND_ID => {
+            if !ok {
+                fail_pending_permission_refresh(
+                    status,
+                    pending,
+                    "observer_permission_refresh_rejected",
+                );
+                return;
+            }
+            refresh.command_result_received = true;
+        }
+        HelperFrameEvent::Other | HelperFrameEvent::CommandResult { .. } => {}
+    }
+    if refresh.permission_status_received && refresh.command_result_received {
+        let Some(refresh) = pending.take() else {
+            return;
+        };
+        let _ = refresh.response.send(Ok(status_snapshot(status)));
+    }
+}
+
+fn fail_pending_permission_refresh(
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+    pending: &mut Option<PendingPermissionRefresh>,
+    code: &'static str,
+) {
+    let Some(refresh) = pending.take() else {
+        return;
+    };
+    set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
+    let _ = refresh.response.send(Err(code.to_owned()));
+}
+
+async fn wait_for_permission_refresh_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+fn settle_permission_check_after_session(
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+    outcome: SessionOutcome,
+    permission_frame_received: bool,
+    permission_check_before_start: MonitoringPermissionCheckState,
+) {
+    if permission_frame_received {
+        return;
+    }
+    let next = match outcome {
+        SessionOutcome::Restart => MonitoringPermissionCheckState::Failed,
+        SessionOutcome::Reconfigure | SessionOutcome::Disabled | SessionOutcome::Shutdown => {
+            if permission_check_before_start == MonitoringPermissionCheckState::Current {
+                MonitoringPermissionCheckState::Current
+            } else {
+                MonitoringPermissionCheckState::Unchecked
+            }
+        }
+    };
+    let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+    current.permission_check_state = next;
+    if next == MonitoringPermissionCheckState::Unchecked {
+        current.permissions_checked_at_ms = None;
     }
 }
 
@@ -625,13 +788,22 @@ async fn handle_idle_command(
             }
             false
         }
-        SupervisorCommand::RefreshPermissions { response, .. } => {
-            if settings.enabled && !settings.paused {
-                set_state(status, MonitoringState::Starting, None);
-                let _ = response.send(Ok(status_snapshot(status)));
-            } else {
-                let _ = response.send(Err("observer_helper_not_running".to_owned()));
+        SupervisorCommand::RefreshPermissions { prompt, response } => {
+            let resting_state = status_snapshot(status).state;
+            if settings.helper_path.is_none() {
+                settings.helper_path = resolve_helper_path().ok().flatten();
+                update_configuration_status(status, settings);
             }
+            let result = match settings.helper_path.as_deref() {
+                Some(helper_path) => {
+                    run_permission_probe(helper_path, status, resting_state, prompt).await
+                }
+                None => {
+                    set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
+                    Err("observer_helper_unavailable".to_owned())
+                }
+            };
+            let _ = response.send(result);
             false
         }
         SupervisorCommand::Shutdown { response } => {
@@ -649,6 +821,114 @@ fn command_requests_manual_retry(command: &SupervisorCommand) -> bool {
         command,
         SupervisorCommand::Resume { .. } | SupervisorCommand::RefreshPermissions { .. }
     )
+}
+
+async fn run_permission_probe(
+    helper_path: &Path,
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+    resting_state: MonitoringState,
+    prompt: bool,
+) -> Result<MonitoringStatusResult, String> {
+    let previous_error = status_snapshot(status).last_error;
+    set_permission_check_state(status, MonitoringPermissionCheckState::Checking);
+    let (mut child, stderr_task) = match spawn_helper(helper_path).await {
+        Ok(session) => session,
+        Err(_) => {
+            set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
+            return Err("observer_helper_start_failed".to_owned());
+        }
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill().await;
+        stderr_task.abort();
+        set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
+        return Err("observer_probe_stdout_unavailable".to_owned());
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill().await;
+        stderr_task.abort();
+        set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
+        return Err("observer_probe_stdin_unavailable".to_owned());
+    };
+    {
+        let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+        current.helper_pid = child.id();
+        current.boot_id = None;
+    }
+
+    let probe = async {
+        send_simple_command(
+            &mut stdin,
+            PERMISSION_REFRESH_COMMAND_ID,
+            "refreshPermissions",
+            prompt,
+        )
+        .await
+        .map_err(|_| "observer_permission_refresh_failed")?;
+        let mut stdout = BufReader::new(stdout);
+        let mut line = Vec::new();
+        let mut permission_status_received = false;
+        let mut command_result_received = false;
+        loop {
+            line.clear();
+            match stdout.read_until(b'\n', &mut line).await {
+                Ok(0) | Err(_) => return Err("observer_probe_ended_early"),
+                Ok(_) => {}
+            }
+            trim_line_end(&mut line);
+            if line.len() > MAX_HELPER_FRAME_BYTES {
+                return Err("observer_frame_too_large");
+            }
+            match handle_permission_probe_frame(&line, status)? {
+                HelperFrameEvent::PermissionStatus => {
+                    permission_status_received = true;
+                }
+                HelperFrameEvent::CommandResult { id, ok }
+                    if id == PERMISSION_REFRESH_COMMAND_ID =>
+                {
+                    if !ok {
+                        return Err("observer_permission_refresh_rejected");
+                    }
+                    command_result_received = true;
+                }
+                HelperFrameEvent::Other | HelperFrameEvent::CommandResult { .. } => {}
+            }
+            if permission_status_received && command_result_received {
+                return Ok(());
+            }
+        }
+    };
+
+    let result = match tokio::time::timeout(PERMISSION_REFRESH_TIMEOUT, probe).await {
+        Ok(result) => result.map_err(ToOwned::to_owned),
+        Err(_) => Err("observer_permission_refresh_timeout".to_owned()),
+    };
+    let _ = send_simple_command(&mut stdin, "shutdown-probe", "shutdown", false).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    if child.id().is_some() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+    stderr_task.abort();
+    let _ = stderr_task.await;
+
+    {
+        let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+        current.helper_pid = None;
+        current.boot_id = None;
+        current.state = resting_state;
+        match &result {
+            Ok(()) => {
+                current.permission_check_state = MonitoringPermissionCheckState::Current;
+                current.last_error = previous_error;
+            }
+            Err(code) => {
+                current.permission_check_state = MonitoringPermissionCheckState::Failed;
+                current.last_error = Some(code.clone());
+            }
+        }
+    }
+    result.map(|()| status_snapshot(status))
 }
 
 #[derive(Deserialize)]
@@ -681,6 +961,7 @@ struct HelperFrameState {
     last_sequence: u64,
     last_observation_at_ms: Option<i64>,
     last_heartbeat: Instant,
+    permission_frame_received: bool,
 }
 
 async fn handle_helper_frame(
@@ -689,7 +970,7 @@ async fn handle_helper_frame(
     status: &Arc<Mutex<MonitoringStatusResult>>,
     stdin: &mut ChildStdin,
     frame_state: &mut HelperFrameState,
-) -> Result<(), &'static str> {
+) -> Result<HelperFrameEvent, &'static str> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| "observer_invalid_json")?;
     let frame_type = value
         .get("type")
@@ -754,14 +1035,21 @@ async fn handle_helper_frame(
             current.boot_id = Some(frame.boot_id);
             current.last_sequence = Some(frame_state.last_sequence);
             current.last_acked_sequence = Some(frame_state.last_sequence);
+            Ok(HelperFrameEvent::Other)
         }
         "ready" | "heartbeat" | "permissionStatus" => {
+            let event = if frame_type == "permissionStatus" {
+                HelperFrameEvent::PermissionStatus
+            } else {
+                HelperFrameEvent::Other
+            };
             frame_state.last_heartbeat = Instant::now();
-            update_permissions(status, &value);
+            apply_permission_frame(status, &value)?;
+            frame_state.permission_frame_received = true;
             let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
             current.state = MonitoringState::Running;
-            current.last_heartbeat_at_ms = Some(now_ms());
             current.last_error = observation_key_warning(journal).map(ToOwned::to_owned);
+            Ok(event)
         }
         "gap" => {
             let frame: GapFrame =
@@ -790,6 +1078,7 @@ async fn handle_helper_frame(
             let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
             push_coverage(&mut current.coverage, CoverageLevelV2::Unavailable);
             current.last_error = Some("observer_reported_gap".to_owned());
+            Ok(HelperFrameEvent::Other)
         }
         "error" => {
             let recoverable = value
@@ -801,11 +1090,42 @@ async fn handle_helper_frame(
             if !recoverable {
                 return Err("observer_unrecoverable_error");
             }
+            Ok(HelperFrameEvent::Other)
         }
-        "commandResult" => {}
-        _ => return Err("observer_unknown_frame"),
+        "commandResult" => {
+            let (id, ok) = parse_command_result_frame(&value)?;
+            Ok(HelperFrameEvent::CommandResult { id, ok })
+        }
+        _ => Err("observer_unknown_frame"),
     }
-    Ok(())
+}
+
+fn handle_permission_probe_frame(
+    bytes: &[u8],
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+) -> Result<HelperFrameEvent, &'static str> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| "observer_invalid_json")?;
+    let frame_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or("observer_missing_frame_type")?;
+    match frame_type {
+        "ready" | "heartbeat" | "permissionStatus" => {
+            apply_permission_frame(status, &value)?;
+            Ok(if frame_type == "permissionStatus" {
+                HelperFrameEvent::PermissionStatus
+            } else {
+                HelperFrameEvent::Other
+            })
+        }
+        "commandResult" => {
+            let (id, ok) = parse_command_result_frame(&value)?;
+            Ok(HelperFrameEvent::CommandResult { id, ok })
+        }
+        "error" => Err("observer_probe_reported_error"),
+        "observation" | "gap" => Err("observer_probe_started_sensors"),
+        _ => Err("observer_unknown_frame"),
+    }
 }
 
 async fn spawn_helper(helper_path: &Path) -> io::Result<(Child, JoinHandle<()>)> {
@@ -903,7 +1223,23 @@ async fn write_helper_message(stdin: &mut ChildStdin, value: &Value) -> io::Resu
     stdin.flush().await
 }
 
-fn update_permissions(status: &Arc<Mutex<MonitoringStatusResult>>, value: &Value) {
+fn apply_permission_frame(
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+    value: &Value,
+) -> Result<(), &'static str> {
+    if value.get("schemaVersion").and_then(Value::as_str) != Some("observer-frame.v1") {
+        return Err("observer_invalid_permission_frame");
+    }
+    let boot_id = value
+        .get("bootId")
+        .and_then(Value::as_str)
+        .ok_or("observer_invalid_permission_frame")?;
+    validate_boot_id(boot_id).map_err(|_| "observer_invalid_boot_id")?;
+    let observed_at_ms = value
+        .get("observedAtMs")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or("observer_invalid_permission_frame")?;
     let permissions = value
         .get("permissions")
         .and_then(Value::as_object)
@@ -913,15 +1249,24 @@ fn update_permissions(status: &Arc<Mutex<MonitoringStatusResult>>, value: &Value
                 .and_then(Value::as_object)
                 .and_then(|data| data.get("permissions"))
                 .and_then(Value::as_object)
-        });
-    let Some(permissions) = permissions else {
-        return;
+        })
+        .ok_or("observer_invalid_permission_frame")?;
+    let parsed = MonitoringPermissions {
+        accessibility: permission_state(permissions, "accessibility")
+            .ok_or("observer_invalid_permission_frame")?,
+        screen_recording: permission_state(permissions, "screenRecording")
+            .ok_or("observer_invalid_permission_frame")?,
+        input_monitoring: permission_state(permissions, "inputMonitoring")
+            .ok_or("observer_invalid_permission_frame")?,
+        automation: permission_state(permissions, "automation")
+            .ok_or("observer_invalid_permission_frame")?,
     };
     let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
-    current.permissions.accessibility = permission_state(permissions, "accessibility");
-    current.permissions.screen_recording = permission_state(permissions, "screenRecording");
-    current.permissions.input_monitoring = permission_state(permissions, "inputMonitoring");
-    current.permissions.automation = permission_state(permissions, "automation");
+    current.permissions = parsed;
+    current.permission_check_state = MonitoringPermissionCheckState::Current;
+    current.permissions_checked_at_ms = Some(observed_at_ms);
+    current.boot_id = Some(boot_id.to_owned());
+    current.last_heartbeat_at_ms = Some(observed_at_ms);
     let preserve_gap = current.coverage.contains(&CoverageLevelV2::Unavailable);
     current.coverage = vec![CoverageLevelV2::Metadata];
     if current.capture_content
@@ -943,16 +1288,47 @@ fn update_permissions(status: &Arc<Mutex<MonitoringStatusResult>>, value: &Value
     if preserve_gap {
         push_coverage(&mut current.coverage, CoverageLevelV2::Unavailable);
     }
+    Ok(())
 }
 
-fn permission_state(permissions: &Map<String, Value>, key: &str) -> MonitoringPermissionState {
+fn permission_state(
+    permissions: &Map<String, Value>,
+    key: &str,
+) -> Option<MonitoringPermissionState> {
     match permissions.get(key).and_then(Value::as_str) {
-        Some("authorized" | "granted") => MonitoringPermissionState::Granted,
-        Some("denied") => MonitoringPermissionState::Denied,
-        Some("not_determined" | "notDetermined") => MonitoringPermissionState::NotDetermined,
-        Some("unsupported") => MonitoringPermissionState::Unsupported,
-        _ => MonitoringPermissionState::Unknown,
+        Some("unknown") => Some(MonitoringPermissionState::Unknown),
+        Some("authorized" | "granted") => Some(MonitoringPermissionState::Granted),
+        Some("denied") => Some(MonitoringPermissionState::Denied),
+        Some("not_determined" | "notDetermined") => Some(MonitoringPermissionState::NotDetermined),
+        Some("unsupported" | "unavailable") => Some(MonitoringPermissionState::Unsupported),
+        _ => None,
     }
+}
+
+fn parse_command_result_frame(value: &Value) -> Result<(String, bool), &'static str> {
+    if value.get("schemaVersion").and_then(Value::as_str) != Some("observer-frame.v1")
+        || value
+            .get("observedAtMs")
+            .and_then(Value::as_i64)
+            .is_none_or(|value| value < 0)
+    {
+        return Err("observer_invalid_command_result");
+    }
+    let boot_id = value
+        .get("bootId")
+        .and_then(Value::as_str)
+        .ok_or("observer_invalid_command_result")?;
+    validate_boot_id(boot_id).map_err(|_| "observer_invalid_boot_id")?;
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or("observer_invalid_command_result")?;
+    let ok = value
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or("observer_invalid_command_result")?;
+    Ok((id.to_owned(), ok))
 }
 
 fn update_configuration_status(
@@ -983,6 +1359,14 @@ fn set_state(
     if !preserve_key_warning {
         current.last_error = error_code.map(ToOwned::to_owned);
     }
+}
+
+fn set_permission_check_state(
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+    state: MonitoringPermissionCheckState,
+) {
+    let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+    current.permission_check_state = state;
 }
 
 fn status_snapshot(status: &Arc<Mutex<MonitoringStatusResult>>) -> MonitoringStatusResult {
@@ -1245,16 +1629,29 @@ fn trim_line_end(bytes: &mut Vec<u8>) {
     }
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_status() -> Arc<Mutex<MonitoringStatusResult>> {
+        Arc::new(Mutex::new(MonitoringStatusResult {
+            state: MonitoringState::Starting,
+            enabled: false,
+            capture_content: false,
+            excluded_bundle_ids: Vec::new(),
+            helper_pid: None,
+            helper_path_available: false,
+            boot_id: None,
+            last_sequence: None,
+            last_acked_sequence: None,
+            last_heartbeat_at_ms: None,
+            permissions: MonitoringPermissions::default(),
+            permission_check_state: MonitoringPermissionCheckState::Unchecked,
+            permissions_checked_at_ms: None,
+            coverage: vec![CoverageLevelV2::Metadata],
+            last_error: None,
+        }))
+    }
 
     #[test]
     fn runtime_channel_parser_accepts_only_electrobun_channels() {
@@ -1322,21 +1719,11 @@ mod tests {
 
     #[test]
     fn state_updates_preserve_dev_keychain_warning_until_a_real_error_occurs() {
-        let status = Arc::new(Mutex::new(MonitoringStatusResult {
-            state: MonitoringState::Starting,
-            enabled: false,
-            capture_content: false,
-            excluded_bundle_ids: Vec::new(),
-            helper_pid: None,
-            helper_path_available: false,
-            boot_id: None,
-            last_sequence: None,
-            last_acked_sequence: None,
-            last_heartbeat_at_ms: None,
-            permissions: MonitoringPermissions::default(),
-            coverage: vec![CoverageLevelV2::Metadata],
-            last_error: Some(DEV_LEGACY_KEYCHAIN_WARNING.to_owned()),
-        }));
+        let status = test_status();
+        status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .last_error = Some(DEV_LEGACY_KEYCHAIN_WARNING.to_owned());
         set_state(&status, MonitoringState::Disabled, None);
         assert_eq!(
             status_snapshot(&status).last_error.as_deref(),
@@ -1350,6 +1737,159 @@ mod tests {
         assert_eq!(
             status_snapshot(&status).last_error.as_deref(),
             Some("observer_helper_start_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_refresh_waits_for_matching_status_and_command_result() {
+        let status = test_status();
+        {
+            let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+            current.permission_check_state = MonitoringPermissionCheckState::Current;
+            current.permissions_checked_at_ms = Some(1_800_000_000_000);
+        }
+        let (response, completed) = oneshot::channel();
+        let mut pending = Some(PendingPermissionRefresh {
+            permission_status_received: false,
+            command_result_received: false,
+            deadline: Instant::now() + PERMISSION_REFRESH_TIMEOUT,
+            response,
+        });
+
+        handle_permission_refresh_event(
+            HelperFrameEvent::CommandResult {
+                id: "unrelated-command".to_owned(),
+                ok: true,
+            },
+            &status,
+            &mut pending,
+        );
+        handle_permission_refresh_event(HelperFrameEvent::PermissionStatus, &status, &mut pending);
+        assert!(pending.is_some());
+
+        handle_permission_refresh_event(
+            HelperFrameEvent::CommandResult {
+                id: PERMISSION_REFRESH_COMMAND_ID.to_owned(),
+                ok: true,
+            },
+            &status,
+            &mut pending,
+        );
+        assert!(pending.is_none());
+        let result = completed.await.expect("refresh response").expect("success");
+        assert_eq!(
+            result.permission_check_state,
+            MonitoringPermissionCheckState::Current
+        );
+    }
+
+    #[test]
+    fn permission_check_converges_when_session_exits_before_its_first_permission_frame() {
+        let status = test_status();
+        set_permission_check_state(&status, MonitoringPermissionCheckState::Checking);
+        settle_permission_check_after_session(
+            &status,
+            SessionOutcome::Restart,
+            false,
+            MonitoringPermissionCheckState::Unchecked,
+        );
+        assert_eq!(
+            status_snapshot(&status).permission_check_state,
+            MonitoringPermissionCheckState::Failed
+        );
+
+        for outcome in [
+            SessionOutcome::Reconfigure,
+            SessionOutcome::Disabled,
+            SessionOutcome::Shutdown,
+        ] {
+            set_permission_check_state(&status, MonitoringPermissionCheckState::Checking);
+            settle_permission_check_after_session(
+                &status,
+                outcome,
+                false,
+                MonitoringPermissionCheckState::Unchecked,
+            );
+            let snapshot = status_snapshot(&status);
+            assert_eq!(
+                snapshot.permission_check_state,
+                MonitoringPermissionCheckState::Unchecked
+            );
+            assert_eq!(snapshot.permissions_checked_at_ms, None);
+        }
+
+        {
+            let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+            current.permission_check_state = MonitoringPermissionCheckState::Checking;
+            current.permissions_checked_at_ms = Some(1_800_000_000_000);
+        }
+        settle_permission_check_after_session(
+            &status,
+            SessionOutcome::Disabled,
+            false,
+            MonitoringPermissionCheckState::Current,
+        );
+        let snapshot = status_snapshot(&status);
+        assert_eq!(
+            snapshot.permission_check_state,
+            MonitoringPermissionCheckState::Current
+        );
+        assert_eq!(snapshot.permissions_checked_at_ms, Some(1_800_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn permission_refresh_deadline_does_not_wait_for_the_health_tick() {
+        let deadline = Instant::now();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                wait_for_permission_refresh_deadline(Some(deadline)),
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                wait_for_permission_refresh_deadline(None),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn permission_frames_expose_check_timestamp_and_probe_rejects_observations() {
+        let status = test_status();
+        let permission_frame = br#"{
+            "type":"permissionStatus",
+            "schemaVersion":"observer-frame.v1",
+            "bootId":"boot-1",
+            "observedAtMs":1800000000000,
+            "permissions":{
+                "accessibility":"authorized",
+                "screenRecording":"denied",
+                "inputMonitoring":"not_determined",
+                "automation":"unsupported"
+            }
+        }"#;
+        assert!(matches!(
+            handle_permission_probe_frame(permission_frame, &status),
+            Ok(HelperFrameEvent::PermissionStatus)
+        ));
+        let snapshot = status_snapshot(&status);
+        assert_eq!(
+            snapshot.permission_check_state,
+            MonitoringPermissionCheckState::Current
+        );
+        assert_eq!(snapshot.permissions_checked_at_ms, Some(1_800_000_000_000));
+        assert_eq!(
+            snapshot.permissions.accessibility,
+            MonitoringPermissionState::Granted
+        );
+        assert_eq!(
+            handle_permission_probe_frame(br#"{"type":"observation"}"#, &status).err(),
+            Some("observer_probe_started_sensors")
         );
     }
 }

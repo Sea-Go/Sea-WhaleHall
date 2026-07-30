@@ -22,6 +22,7 @@ import {
 import type { AuthUser } from "../auth/public";
 import {
 	MonitoringExclusionsControl,
+	MonitoringPermissionsControl,
 	type MonitoringController,
 } from "../monitoring/public";
 import {
@@ -700,6 +701,7 @@ function PrivacySettings({
 			description="这里控制派生洞察与保留偏好；内置观察器只能从侧栏显式启用，并始终受 macOS 系统权限约束。"
 		>
 			<AuditExportControl service={auditExportService} />
+			<MonitoringPermissionsControl controller={monitoringController} />
 			<MonitoringExclusionsControl controller={monitoringController} />
 			<SettingRow
 				title="使用活动汇总生成洞察"

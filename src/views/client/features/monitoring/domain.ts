@@ -22,6 +22,12 @@ export interface MonitoringPermissionStatus {
 	detail: string | null;
 }
 
+export type MonitoringPermissionCheckState =
+	| "unchecked"
+	| "checking"
+	| "current"
+	| "failed";
+
 export type MonitoringRunState =
 	| "starting"
 	| "running"
@@ -38,6 +44,8 @@ export interface MonitoringSnapshot {
 	paused: boolean;
 	observerConnected: boolean;
 	permissions: MonitoringPermissionStatus[];
+	permissionCheckState: MonitoringPermissionCheckState;
+	permissionsCheckedAtMs: number | null;
 	excludedAppIds: string[];
 	lastObservationAtMs: number | null;
 	coverageGaps: string[];
@@ -70,7 +78,10 @@ export function missingRequiredPermissions(
 	snapshot: MonitoringSnapshot,
 ): MonitoringPermissionStatus[] {
 	return snapshot.permissions.filter(
-		(permission) => permission.required && permission.state !== "granted",
+		(permission) =>
+			permission.required &&
+			(permission.state === "denied" ||
+				permission.state === "notDetermined"),
 	);
 }
 
@@ -87,6 +98,17 @@ export function isMonitoringSnapshot(
 		typeof value.paused !== "boolean" ||
 		typeof value.observerConnected !== "boolean" ||
 		!Array.isArray(value.permissions) ||
+		!isPermissionCheckState(value.permissionCheckState) ||
+		!(
+			value.permissionsCheckedAtMs === null ||
+			(typeof value.permissionsCheckedAtMs === "number" &&
+				Number.isSafeInteger(value.permissionsCheckedAtMs) &&
+				value.permissionsCheckedAtMs >= 0)
+		) ||
+		(value.permissionCheckState === "unchecked" &&
+			value.permissionsCheckedAtMs !== null) ||
+		(value.permissionCheckState === "current" &&
+			value.permissionsCheckedAtMs === null) ||
 		!Array.isArray(value.excludedAppIds) ||
 		!Array.isArray(value.coverageGaps) ||
 		!(
@@ -116,6 +138,17 @@ function isPermissionStatus(value: unknown): value is MonitoringPermissionStatus
 			value.state === "unavailable") &&
 		typeof value.required === "boolean" &&
 		(value.detail === null || typeof value.detail === "string")
+	);
+}
+
+function isPermissionCheckState(
+	value: unknown,
+): value is MonitoringPermissionCheckState {
+	return (
+		value === "unchecked" ||
+		value === "checking" ||
+		value === "current" ||
+		value === "failed"
 	);
 }
 

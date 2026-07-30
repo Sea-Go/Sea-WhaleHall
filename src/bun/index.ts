@@ -31,6 +31,7 @@ import {
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
+import { monitoringPermissionSettingsUrl } from "./monitoring-permission-settings";
 import type {
 	LocalRuntimeStatus,
 	LocalToolEvent,
@@ -104,6 +105,15 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 			resumeMonitoring: () => agent.resumeMonitoring(),
 			refreshMonitoringPermissions: (options) =>
 				agent.refreshMonitoringPermissions(options),
+			openMonitoringPermissionSettings: ({ permission }) => {
+				const url = monitoringPermissionSettingsUrl(permission);
+				return {
+					opened:
+						process.platform === "darwin" &&
+						url !== null &&
+						Utils.openExternal(url),
+				};
+			},
 			exportFiveMinuteAuditToFile: (request) =>
 				exportFiveMinuteAuditToFile(request, {
 					getExporter: () => timelineRuntime?.audit ?? null,

@@ -29,6 +29,8 @@ function nativeStatus(
 			inputMonitoring: "not_determined",
 			automation: "unknown",
 		},
+		permissionCheckState: "current",
+		permissionsCheckedAtMs: 1_800_000_000_000,
 		coverage: ["metadata", "denied"],
 		lastError: null,
 		...overrides,
@@ -82,6 +84,7 @@ describe("ElectrobunMonitoringService", () => {
 		const calls: {
 			configured?: LocalMonitoringConfigure;
 			refreshPrompt?: boolean;
+			openedPermission?: string;
 		} = {};
 		const transport: MonitoringTransport = {
 			async status() {
@@ -105,6 +108,10 @@ describe("ElectrobunMonitoringService", () => {
 				calls.refreshPrompt = prompt;
 				return nativeStatus();
 			},
+			async openPermissionSettings(permission) {
+				calls.openedPermission = permission;
+				return { opened: true };
+			},
 		};
 		const service = new ElectrobunMonitoringService({
 			runtimeAvailable: () => true,
@@ -116,11 +123,13 @@ describe("ElectrobunMonitoringService", () => {
 			excludedAppIds: ["com.example.private"],
 		});
 		await service.refreshPermissions();
+		await service.openPermissionSettings("screenRecording");
 		expect(calls.configured).toEqual({
 			enabled: true,
 			captureContent: false,
 			excludedBundleIds: ["com.example.private"],
 		});
 		expect(calls.refreshPrompt).toBe(true);
+		expect(calls.openedPermission).toBe("screenRecording");
 	});
 });

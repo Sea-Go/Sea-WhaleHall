@@ -1,0 +1,168 @@
+.monitoring-permissions {
+	display: grid;
+	gap: var(--space-3);
+	padding: var(--space-4);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-lg);
+	background: var(--color-surface);
+}
+
+.monitoring-permissions__heading {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: var(--space-4);
+}
+
+.monitoring-permissions__heading > div:first-child {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+}
+
+.monitoring-permissions__heading strong,
+.monitoring-permission-card strong {
+	color: var(--color-text-primary);
+	font-size: var(--font-size-sm);
+	font-weight: var(--font-weight-semibold);
+}
+
+.monitoring-permissions__heading p,
+.monitoring-permission-card p,
+.monitoring-permissions__error {
+	margin: 0;
+	color: var(--color-text-subtle);
+	font-size: var(--font-size-xs);
+	line-height: 1.55;
+}
+
+.monitoring-permissions__check {
+	display: grid;
+	flex: 0 0 auto;
+	justify-items: end;
+	gap: var(--space-1);
+}
+
+.monitoring-permissions__check > span {
+	color: var(--color-text-subtle);
+	font-size: 11px;
+}
+
+.monitoring-permissions button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--space-1);
+	min-height: 30px;
+	padding: 0 var(--space-2);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-md);
+	color: var(--color-text-secondary);
+	background: var(--color-surface-elevated);
+	font: inherit;
+	font-size: var(--font-size-xs);
+	cursor: pointer;
+}
+
+.monitoring-permissions button:hover:not(:disabled) {
+	border-color: var(--color-border-strong);
+	color: var(--color-text-primary);
+	background: var(--color-surface-hover);
+}
+
+.monitoring-permissions button:active:not(:disabled) {
+	background: var(--color-surface-pressed);
+}
+
+.monitoring-permissions button:focus-visible {
+	outline: none;
+	box-shadow: var(--focus-ring);
+}
+
+.monitoring-permissions button:disabled {
+	color: var(--color-text-disabled);
+	cursor: not-allowed;
+	opacity: 0.7;
+}
+
+.monitoring-permissions__grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: var(--space-2);
+}
+
+.monitoring-permission-card {
+	display: grid;
+	align-content: start;
+	gap: var(--space-2);
+	min-width: 0;
+	padding: var(--space-3);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-md);
+	background: var(--color-surface-elevated);
+}
+
+.monitoring-permission-card__title {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: var(--space-2);
+}
+
+.monitoring-permission-card__title > div {
+	display: grid;
+	gap: 2px;
+}
+
+.monitoring-permission-card__title > div > span {
+	color: var(--color-text-subtle);
+	font-size: 10px;
+}
+
+.monitoring-permission-card__state {
+	display: inline-flex;
+	flex: 0 0 auto;
+	align-items: center;
+	gap: 4px;
+	color: var(--color-text-subtle);
+	font-size: 11px;
+}
+
+.monitoring-permission-card--granted .monitoring-permission-card__state {
+	color: var(--color-success);
+}
+
+.monitoring-permission-card--denied .monitoring-permission-card__state,
+.monitoring-permission-card--notDetermined .monitoring-permission-card__state {
+	color: var(--color-warning);
+}
+
+.monitoring-permission-card button {
+	justify-self: start;
+}
+
+.monitoring-permissions__error {
+	color: var(--color-error);
+}
+
+.monitoring-permissions__refreshing {
+	animation: monitoring-permissions-spin 0.9s linear infinite;
+}
+
+@keyframes monitoring-permissions-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@media (max-width: 1240px) {
+	.monitoring-permissions__grid {
+		grid-template-columns: 1fr;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monitoring-permissions__refreshing {
+		animation: none;
+	}
+}

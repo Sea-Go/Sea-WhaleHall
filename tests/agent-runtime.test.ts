@@ -263,6 +263,8 @@ function monitoringStatus(
 			inputMonitoring: "granted",
 			automation: "granted",
 		},
+		permissionCheckState: "current",
+		permissionsCheckedAtMs: 1_800_000_000_000,
 		coverage: ["content", "metadata"],
 		lastError: null,
 		...overrides,

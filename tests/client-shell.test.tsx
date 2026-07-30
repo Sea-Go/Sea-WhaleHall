@@ -63,6 +63,8 @@ const monitoringSnapshot: MonitoringSnapshot = {
 	captureContent: true,
 	paused: false,
 	observerConnected: true,
+	permissionCheckState: "current",
+	permissionsCheckedAtMs: 1_800_000_000_000,
 	permissions: [
 		{ id: "accessibility", state: "granted", required: true, detail: null },
 		{ id: "screenRecording", state: "granted", required: true, detail: null },
@@ -89,6 +91,7 @@ const monitoringService: MonitoringService = {
 	async refreshPermissions() {
 		return monitoringSnapshot;
 	},
+	async openPermissionSettings() {},
 };
 const monitoringController = new MonitoringController(monitoringService);
 await monitoringController.load();

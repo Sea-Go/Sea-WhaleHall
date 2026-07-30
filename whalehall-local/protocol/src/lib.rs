@@ -566,6 +566,15 @@ pub enum MonitoringPermissionState {
     Unsupported,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitoringPermissionCheckState {
+    Unchecked,
+    Checking,
+    Current,
+    Failed,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitoringPermissions {
@@ -600,6 +609,8 @@ pub struct MonitoringStatusResult {
     pub last_acked_sequence: Option<u64>,
     pub last_heartbeat_at_ms: Option<i64>,
     pub permissions: MonitoringPermissions,
+    pub permission_check_state: MonitoringPermissionCheckState,
+    pub permissions_checked_at_ms: Option<i64>,
     pub coverage: Vec<CoverageLevelV2>,
     pub last_error: Option<String>,
 }

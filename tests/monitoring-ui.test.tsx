@@ -16,6 +16,8 @@ function monitoringSnapshot(): MonitoringSnapshot {
 		captureContent: true,
 		paused: false,
 		observerConnected: true,
+		permissionCheckState: "current",
+		permissionsCheckedAtMs: 1_800_000_000_000,
 		permissions: [
 			{
 				id: "accessibility",
@@ -80,6 +82,7 @@ describe("monitoring status UI", () => {
 			async refreshPermissions() {
 				return monitoringSnapshot();
 			},
+			async openPermissionSettings() {},
 		};
 		const controller = new MonitoringController(service);
 		await controller.load();
@@ -88,7 +91,7 @@ describe("monitoring status UI", () => {
 		);
 		expect(markup).toContain("权限不完整");
 		expect(markup).toContain("缺少 2 项系统权限");
-		expect(markup).toContain("打开隐私设置");
+		expect(markup).toContain("查看权限详情");
 		expect(markup).toContain("暂停观察");
 		expect(markup).not.toContain("screen_recording_denied");
 	});
@@ -115,6 +118,7 @@ describe("monitoring status UI", () => {
 			async refreshPermissions() {
 				throw new Error("must not refresh while disabled");
 			},
+			async openPermissionSettings() {},
 		};
 		const controller = new MonitoringController(service);
 		await controller.load();
@@ -123,8 +127,44 @@ describe("monitoring status UI", () => {
 		);
 		expect(markup).toContain("未启用");
 		expect(markup).toContain("启用本机观察");
-		expect(markup).toContain("隐私设置");
+		expect(markup).toContain("数据与隐私");
 		expect(markup).not.toContain("暂停观察");
 		expect(markup).not.toContain("恢复观察");
+	});
+
+	test("does not report unchecked permission values as missing", async () => {
+		const unchecked = {
+			...monitoringSnapshot(),
+			permissionCheckState: "unchecked" as const,
+			permissionsCheckedAtMs: null,
+			permissions: monitoringSnapshot().permissions.map((permission) => ({
+				...permission,
+				state: "unknown" as const,
+			})),
+		};
+		const service: MonitoringService = {
+			async status() {
+				return unchecked;
+			},
+			async configure() {
+				return unchecked;
+			},
+			async pause() {
+				return unchecked;
+			},
+			async resume() {
+				return unchecked;
+			},
+			async refreshPermissions() {
+				return unchecked;
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		const markup = renderToStaticMarkup(
+			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
+		);
+		expect(markup).not.toContain("缺少 4 项系统权限");
 	});
 });

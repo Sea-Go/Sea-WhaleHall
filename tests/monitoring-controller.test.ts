@@ -15,6 +15,8 @@ function snapshot(
 		captureContent: true,
 		paused: false,
 		observerConnected: true,
+		permissionCheckState: "current",
+		permissionsCheckedAtMs: 1_800_000_000_000,
 		permissions: [
 			{
 				id: "accessibility",
@@ -75,6 +77,7 @@ describe("MonitoringController", () => {
 			async refreshPermissions() {
 				return current;
 			},
+			async openPermissionSettings() {},
 		};
 		const controller = new MonitoringController(service);
 		await controller.load();
@@ -113,6 +116,7 @@ describe("MonitoringController", () => {
 			async refreshPermissions() {
 				throw new Error("system settings unavailable");
 			},
+			async openPermissionSettings() {},
 		};
 		const controller = new MonitoringController(service);
 		await controller.load();
@@ -145,6 +149,7 @@ describe("MonitoringController", () => {
 			async refreshPermissions() {
 				return snapshot();
 			},
+			async openPermissionSettings() {},
 		};
 		const controller = new MonitoringController(service);
 		const first = controller.load();
@@ -183,6 +188,7 @@ describe("MonitoringController", () => {
 			async refreshPermissions() {
 				throw new Error("disabled observer cannot refresh");
 			},
+			async openPermissionSettings() {},
 		};
 		const controller = new MonitoringController(service);
 		await controller.load();

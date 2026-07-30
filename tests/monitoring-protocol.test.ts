@@ -27,6 +27,8 @@ function status(
 			inputMonitoring: "granted",
 			automation: "not_determined",
 		},
+		permissionCheckState: "current",
+		permissionsCheckedAtMs: 1_800_000_000_000,
 		coverage: ["content", "metadata"],
 		lastError: null,
 		...overrides,
@@ -54,6 +56,22 @@ describe("monitoring local protocol", () => {
 		).toBeFalse();
 		expect(
 			isLocalMonitoringStatus(status({ bootId: "boot/id" })),
+		).toBeFalse();
+		expect(
+			isLocalMonitoringStatus(
+				status({
+					permissionCheckState: "unchecked",
+					permissionsCheckedAtMs: 1,
+				}),
+			),
+		).toBeFalse();
+		expect(
+			isLocalMonitoringStatus(
+				status({
+					permissionCheckState: "current",
+					permissionsCheckedAtMs: null,
+				}),
+			),
 		).toBeFalse();
 		expect(
 			isLocalMonitoringStatus(

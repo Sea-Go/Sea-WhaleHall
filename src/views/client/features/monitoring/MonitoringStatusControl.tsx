@@ -1,7 +1,6 @@
 import {
 	Pause,
 	Play,
-	RefreshCw,
 	ShieldAlert,
 	ShieldCheck,
 } from "lucide-react";
@@ -115,7 +114,7 @@ export function MonitoringStatusControl({
 						</button>
 						<button type="button" onClick={onOpenPrivacy} disabled={updating}>
 							<ShieldCheck size={14} aria-hidden="true" />
-							隐私设置
+							数据与隐私
 						</button>
 					</>
 				) : missing.length > 0 ? (
@@ -123,14 +122,11 @@ export function MonitoringStatusControl({
 						type="button"
 						onClick={() => {
 							onOpenPrivacy();
-							if (snapshot.observerConnected) {
-								void controller.refreshPermissions();
-							}
 						}}
 						disabled={updating}
 					>
-						<RefreshCw size={14} aria-hidden="true" />
-						打开隐私设置
+						<ShieldCheck size={14} aria-hidden="true" />
+						查看权限详情
 					</button>
 				) : null}
 				{snapshot.enabled ? (

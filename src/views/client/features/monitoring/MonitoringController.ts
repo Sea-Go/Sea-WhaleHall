@@ -1,5 +1,6 @@
 import type {
 	MonitoringConfiguration,
+	MonitoringPermissionId,
 	MonitoringSnapshot,
 } from "./domain";
 import {
@@ -12,7 +13,8 @@ export type MonitoringOperation =
 	| "enable"
 	| "pause"
 	| "resume"
-	| "refreshPermissions";
+	| "refreshPermissions"
+	| "openPermissionSettings";
 
 export type MonitoringState =
 	| { status: "idle" }
@@ -108,6 +110,19 @@ export class MonitoringController {
 			"refreshPermissions",
 			() => this.service.refreshPermissions(),
 		);
+	}
+
+	openPermissionSettings(
+		permission: MonitoringPermissionId,
+	): Promise<MonitoringSnapshot | null> {
+		return this.perform("openPermissionSettings", async () => {
+			const snapshot = snapshotFromState(this.state);
+			if (snapshot === null) {
+				throw new Error("Monitoring status is unavailable.");
+			}
+			await this.service.openPermissionSettings(permission);
+			return snapshot;
+		});
 	}
 
 	private perform(

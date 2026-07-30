@@ -19,6 +19,9 @@ export interface MonitoringTransport {
 	pause(): Promise<LocalMonitoringStatus>;
 	resume(): Promise<LocalMonitoringStatus>;
 	refreshPermissions(prompt: boolean): Promise<LocalMonitoringStatus>;
+	openPermissionSettings(
+		permission: MonitoringPermissionId,
+	): Promise<{ opened: boolean }>;
 }
 
 export interface ElectrobunMonitoringServiceOptions {
@@ -72,6 +75,19 @@ export class ElectrobunMonitoringService implements MonitoringService {
 		const transport = await this.loadTransport();
 		return toMonitoringSnapshot(await transport.refreshPermissions(true));
 	}
+
+	async openPermissionSettings(
+		permission: MonitoringPermissionId,
+	): Promise<void> {
+		if (!this.runtimeAvailable()) {
+			throw new Error("macOS System Settings is unavailable.");
+		}
+		const transport = await this.loadTransport();
+		const result = await transport.openPermissionSettings(permission);
+		if (!result.opened) {
+			throw new Error("Unable to open macOS System Settings.");
+		}
+	}
 }
 
 export function toMonitoringSnapshot(
@@ -101,6 +117,8 @@ export function toMonitoringSnapshot(
 		captureContent: status.captureContent,
 		paused: status.state === "paused",
 		observerConnected,
+		permissionCheckState: status.permissionCheckState,
+		permissionsCheckedAtMs: status.permissionsCheckedAtMs,
 		permissions: [
 			permission(
 				"accessibility",
@@ -141,6 +159,8 @@ async function loadClientTransport(): Promise<MonitoringTransport> {
 		resume: () => clientApi.resumeMonitoring(),
 		refreshPermissions: (prompt) =>
 			clientApi.refreshMonitoringPermissions(prompt),
+		openPermissionSettings: (permission) =>
+			clientApi.openMonitoringPermissionSettings(permission),
 	};
 }
 
@@ -152,6 +172,8 @@ function unavailableSnapshot(): MonitoringSnapshot {
 		captureContent: false,
 		paused: false,
 		observerConnected: false,
+		permissionCheckState: "unchecked",
+		permissionsCheckedAtMs: null,
 		permissions: [
 			permission("accessibility", "unsupported", true),
 			permission("screenRecording", "unsupported", true),

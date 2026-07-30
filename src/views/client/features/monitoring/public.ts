@@ -10,6 +10,10 @@ export {
 	type MonitoringExclusionsControlProps,
 } from "./MonitoringExclusionsControl";
 export {
+	MonitoringPermissionsControl,
+	type MonitoringPermissionsControlProps,
+} from "./MonitoringPermissionsControl";
+export {
 	MonitoringStatusControl,
 	type MonitoringStatusControlProps,
 } from "./MonitoringStatusControl";
@@ -19,6 +23,7 @@ export {
 	missingRequiredPermissions,
 	monitoringStatusLabel,
 	type MonitoringPermissionId,
+	type MonitoringPermissionCheckState,
 	type MonitoringPermissionState,
 	type MonitoringPermissionStatus,
 	type MonitoringConfiguration,

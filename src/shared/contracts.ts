@@ -5,6 +5,7 @@ import type { ActiveGoalContextV1 } from './goal-context';
 import type {
 	LocalRuntimeStatus,
 	LocalMonitoringConfigure,
+	LocalMonitoringPermissionCheckState,
 	LocalMonitoringPermissionState,
 	LocalMonitoringRefreshPermissions,
 	LocalMonitoringStatus,
@@ -13,6 +14,7 @@ import type {
 export type {
 	LocalRuntimeStatus,
 	LocalMonitoringConfigure,
+	LocalMonitoringPermissionCheckState,
 	LocalMonitoringPermissionState,
 	LocalMonitoringRefreshPermissions,
 	LocalMonitoringStatus,
@@ -90,6 +92,12 @@ export type FiveMinuteAuditFileExportResult = {
 	basename: string | null;
 };
 
+export type MonitoringPermissionSettingsTarget =
+	| "accessibility"
+	| "screenRecording"
+	| "inputMonitoring"
+	| "browserAutomation";
+
 export type ClientRPC = {
 	bun: RPCSchema<{
 		requests: {
@@ -116,6 +124,10 @@ export type ClientRPC = {
 			refreshMonitoringPermissions: {
 				params: LocalMonitoringRefreshPermissions;
 				response: LocalMonitoringStatus;
+			};
+			openMonitoringPermissionSettings: {
+				params: { permission: MonitoringPermissionSettingsTarget };
+				response: { opened: boolean };
 			};
 			exportFiveMinuteAuditToFile: {
 				params: FiveMinuteAuditFileExportRequest;

@@ -59,6 +59,8 @@ async function createMonitoringController(): Promise<MonitoringController> {
 		captureContent: true,
 		paused: false,
 		observerConnected: true,
+		permissionCheckState: "current",
+		permissionsCheckedAtMs: 1_800_000_000_000,
 		permissions: [
 			{ id: "accessibility", state: "granted", required: true, detail: null },
 			{ id: "screenRecording", state: "granted", required: true, detail: null },
@@ -91,6 +93,7 @@ async function createMonitoringController(): Promise<MonitoringController> {
 		async refreshPermissions() {
 			return current;
 		},
+		async openPermissionSettings() {},
 	};
 	const controller = new MonitoringController(service);
 	await controller.load();
@@ -141,6 +144,12 @@ describe("settings UI", () => {
 				"最近五分钟审计包",
 				"选择文件夹并导出",
 				"包含可解密的文本内容",
+				"macOS 系统权限",
+				"辅助功能",
+				"屏幕录制",
+				"输入监控",
+				"自动化",
+				"在系统设置中查看",
 				"按应用排除",
 				"当前排除 1 个应用",
 				"com.example.private",

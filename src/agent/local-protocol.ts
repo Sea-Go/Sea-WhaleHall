@@ -12,6 +12,7 @@ import type {
 
 export const MAX_JSONL_LINE_BYTES = 1024 * 1024;
 export const LOCAL_CONTROL_TIMEOUT_MS = 5000;
+export const LOCAL_PERMISSION_REFRESH_TIMEOUT_MS = 32_000;
 export const LOCAL_TOOL_TIMEOUT_MS = 30_000;
 
 export type LocalMethod =
@@ -165,6 +166,12 @@ export type LocalMonitoringPermissionState =
 	| "not_determined"
 	| "unsupported";
 
+export type LocalMonitoringPermissionCheckState =
+	| "unchecked"
+	| "checking"
+	| "current"
+	| "failed";
+
 export type LocalMonitoringPermissions = {
 	accessibility: LocalMonitoringPermissionState;
 	screenRecording: LocalMonitoringPermissionState;
@@ -184,6 +191,8 @@ export type LocalMonitoringStatus = {
 	lastAckedSequence: number | null;
 	lastHeartbeatAtMs: number | null;
 	permissions: LocalMonitoringPermissions;
+	permissionCheckState: LocalMonitoringPermissionCheckState;
+	permissionsCheckedAtMs: number | null;
 	coverage: CoverageLevel[];
 	lastError: string | null;
 };
@@ -465,6 +474,8 @@ export function isLocalMonitoringStatus(
 			"lastAckedSequence",
 			"lastHeartbeatAtMs",
 			"permissions",
+			"permissionCheckState",
+			"permissionsCheckedAtMs",
 			"coverage",
 			"lastError",
 		]) ||
@@ -492,6 +503,12 @@ export function isLocalMonitoringStatus(
 		!isNullableNonNegativeSafeInteger(value.lastAckedSequence) ||
 		!isNullableNonNegativeSafeInteger(value.lastHeartbeatAtMs) ||
 		!isMonitoringPermissions(value.permissions) ||
+		!isMonitoringPermissionCheckState(value.permissionCheckState) ||
+		!isNullableNonNegativeSafeInteger(value.permissionsCheckedAtMs) ||
+		(value.permissionCheckState === "unchecked" &&
+			value.permissionsCheckedAtMs !== null) ||
+		(value.permissionCheckState === "current" &&
+			value.permissionsCheckedAtMs === null) ||
 		!Array.isArray(value.coverage) ||
 		value.coverage.length > 5 ||
 		!value.coverage.every(isCoverageLevel) ||
@@ -990,6 +1007,17 @@ function isMonitoringPermissionState(
 		value === "denied" ||
 		value === "not_determined" ||
 		value === "unsupported"
+	);
+}
+
+function isMonitoringPermissionCheckState(
+	value: unknown,
+): value is LocalMonitoringPermissionCheckState {
+	return (
+		value === "unchecked" ||
+		value === "checking" ||
+		value === "current" ||
+		value === "failed"
 	);
 }
 

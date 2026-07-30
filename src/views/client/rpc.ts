@@ -4,6 +4,7 @@ import type {
 	ActiveGoalContextV1,
 	LocalMonitoringConfigure,
 	LocalRuntimeStatus,
+	MonitoringPermissionSettingsTarget,
 	PetPresentationEvent,
 } from "../../shared/contracts";
 
@@ -39,6 +40,9 @@ export const clientApi = {
 	resumeMonitoring: () => rpc.request.resumeMonitoring({}),
 	refreshMonitoringPermissions: (prompt = false) =>
 		rpc.request.refreshMonitoringPermissions({ prompt }),
+	openMonitoringPermissionSettings: (
+		permission: MonitoringPermissionSettingsTarget,
+	) => rpc.request.openMonitoringPermissionSettings({ permission }),
 	exportFiveMinuteAuditToFile: (options: {
 		fromMs: number;
 		includeDecryptedContent: boolean;
