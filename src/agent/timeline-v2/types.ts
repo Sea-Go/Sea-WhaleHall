@@ -364,7 +364,7 @@ export type TimelineSliceV3 = {
 	timelineSliceId: string;
 	sourceTimelineId: string;
 	sourceWindowId: string;
-	triggerReason: ReflectionTriggerReason;
+	triggerReason: ReflectionTriggerReason | "audit_range";
 	triggeredAtMs: number;
 	deadlineAtMs: number;
 	sourcePeriod: { startedAtMs: number; endedAtMs: number };

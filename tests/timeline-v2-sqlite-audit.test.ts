@@ -568,6 +568,10 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 		expect(JSON.stringify(decrypted)).not.toContain(
 			"授权边界绝不能携带窗口标题",
 		);
+		expect(decrypted.evidenceFacts).toHaveLength(sourceRange.facts.length);
+		expect(decrypted.manifest.exportWarnings).not.toContain(
+			"audit_only_provisional_projection",
+		);
 		expect(
 			decrypted.rawObservations.map(
 				(observation) =>
@@ -740,6 +744,297 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 		);
 		expect(clipped.coverage).not.toContain("unavailable");
 		repository.close();
+	});
+
+	test("projects unsealed in-range semantic events into an audit-only meeting timeline", async () => {
+		const clock = new Clock();
+		const activityEvents = [
+			semantic(21, 120_000, "application.foregroundChanged"),
+			semantic(22, 120_010, "application.textValueChanged"),
+		].map((event) => ({ ...event, goalVersion: 7 }));
+		const goalContent = {
+			previous: {
+				goalId: "goal-previous",
+				planId: null,
+				version: 7,
+				text: "检查 WhaleHall 审计",
+				activatedAtMs: 110_000,
+			},
+			next: {
+				goalId: "goal-1",
+				planId: null,
+				version: 8,
+				text: "完成 WhaleHall 审计",
+				activatedAtMs: 120_020,
+			},
+		};
+		const goalEvent: SemanticEventV2 = {
+			...activityEvents[1]!,
+			eventId: "event-23",
+			cursor: "sec2_0000000000000017",
+			source: "workspace.goal.v2",
+			occurredAtMs: 120_020,
+			observedAtMs: 120_020,
+			kind: "goal.changed",
+			countClass: "boundary",
+			sourceObservationIds: ["observation-23"],
+			payload: structuredClone(goalContent),
+		};
+		const authorizationEvent: SemanticEventV2 = {
+			...activityEvents[1]!,
+			eventId: "event-24",
+			cursor: "sec2_0000000000000018",
+			source: "workspace.observer-authorization.v2",
+			occurredAtMs: 120_030,
+			observedAtMs: 120_030,
+			kind: "authorization.changed",
+			countClass: "boundary",
+			coverage: ["metadata"],
+			sourceObservationIds: ["observation-24"],
+			payload: {
+				permissions: {
+					accessibility: "granted",
+					screenRecording: "granted",
+					inputMonitoring: "granted",
+					automation: "granted",
+				},
+				changedPermissions: ["accessibility"],
+				transition: "granted",
+				reason: "runtime_change",
+			},
+		};
+		const ignoredEvent: SemanticEventV2 = {
+			...activityEvents[1]!,
+			eventId: "event-25",
+			cursor: "sec2_0000000000000019",
+			source: "workspace.process-inventory.v1",
+			occurredAtMs: 120_040,
+			observedAtMs: 120_040,
+			kind: "application.processObservedBatch",
+			countClass: "ignored",
+			coverage: ["metadata"],
+			sourceObservationIds: ["observation-25"],
+			payload: { started: [], exited: [] },
+		};
+		const events = [
+			...activityEvents,
+			goalEvent,
+			authorizationEvent,
+			ignoredEvent,
+		];
+		const raw: RawFiveMinuteAuditSource = {
+			queryAuditRange: async ({ includeDecryptedContent }) => ({
+				permissions: {
+					accessibility: "granted",
+					screenRecording: "granted",
+				},
+				coverage: ["content", "metadata"],
+				rawObservations: [
+					rawObservation(21, 120_000),
+					rawObservation(22, 120_010, {
+						kind: "ax.valueChanged",
+						source: {
+							sensor: "ax",
+							adapterVersion: "audit-test.v2",
+						},
+						coverage: ["content", "metadata"],
+						metadata: {
+							processId: 42,
+							protectedInput: false,
+							focusedRole: "AXTextArea",
+							opaqueControlId: "editor",
+							finalValueAvailable: true,
+						},
+						...(includeDecryptedContent
+							? {
+									content: {
+										finalValue: "秘密文本 ABC-123",
+										inputOrigin: "unknown",
+									},
+								}
+							: {}),
+					}),
+					rawObservation(23, 120_020, {
+						kind: "goal.changed",
+						metadata: {},
+						...(includeDecryptedContent
+							? { content: structuredClone(goalContent) }
+							: {}),
+					}),
+					rawObservation(24, 120_030, {
+						kind: "authorization.changed",
+						source: {
+							sensor: "workspace",
+							adapterVersion: "observer-authorization.v2",
+						},
+						subject: {
+							appId: "system.authorization",
+							appName: "macOS",
+							opaqueWindowId: null,
+						},
+						metadata: structuredClone(authorizationEvent.payload),
+					}),
+					rawObservation(25, 120_040, {
+						kind: "application.processObservedBatch",
+						subject: {
+							appId: "system.processes",
+							appName: "Processes",
+						},
+						metadata: { started: [], exited: [] },
+					}),
+				],
+				semanticEvents: structuredClone(events),
+			}),
+		};
+		const sourceRange = {
+			windows: [],
+			facts: [],
+			episodes: [],
+			summaries: [],
+		};
+		const sourceSnapshot = structuredClone(sourceRange);
+		const auditRepository = {
+			readAuditRange: async () => structuredClone(sourceRange),
+		} as unknown as TimelineV2Repository;
+		const exporter = new TimelineFiveMinuteAuditExporter(
+			raw,
+			auditRepository,
+			clock.nowMs.bind(clock),
+		);
+
+		const exported = await exporter.exportFiveMinutes(0, {
+			includeDecryptedContent: true,
+		});
+		const repeated = await exporter.exportFiveMinutes(0, {
+			includeDecryptedContent: true,
+		});
+
+		expect(sourceRange).toEqual(sourceSnapshot);
+		expect(exported.episodes).toHaveLength(0);
+		expect(exported.timelineSummaries).toHaveLength(0);
+		expect(exported.evidenceFacts).toHaveLength(3);
+		expect(
+			exported.evidenceFacts.every((fact) =>
+				fact.factId.startsWith("audit_only_fact_"),
+			),
+		).toBeTrue();
+		expect(
+			new Set(exported.evidenceFacts.map((fact) => fact.factId)).size,
+		).toBe(3);
+		expect(
+			exported.evidenceFacts.flatMap((fact) => fact.eventIds).sort(),
+		).toEqual(["event-21", "event-22", "event-23"]);
+		expect(repeated.evidenceFacts.map((fact) => fact.factId)).toEqual(
+			exported.evidenceFacts.map((fact) => fact.factId),
+		);
+
+		expect(exported.episodeSlices).toHaveLength(1);
+		expect(exported.timelineSlices).toHaveLength(1);
+		const episode = exported.episodeSlices[0]!;
+		const timeline = exported.timelineSlices[0]!;
+			expect(episode).toMatchObject({
+				sourceWindowIds: [],
+				inferenceScope: "range_recomputed",
+				goalVersion: 7,
+			classification: {
+				activity: "development",
+				goalRelevance: null,
+			},
+			hypothesis: {
+				generator: "deterministic-template.v2",
+			},
+		});
+		expect(episode.episodeSliceId).toStartWith("audit_only_episode_slice_");
+		expect(episode.sourceEpisodeId).toStartWith("audit_only_episode_");
+			expect(timeline).toMatchObject({
+				triggerReason: "audit_range",
+				inferenceScope: "range_recomputed",
+				goalVersion: 7,
+			sourceSegmentCount: 1,
+			includedSegmentCount: 1,
+		});
+		expect(timeline.timelineSliceId).toStartWith(
+			"audit_only_timeline_slice_",
+		);
+		expect(timeline.sourceTimelineId).toStartWith("audit_only_timeline_");
+		expect(timeline.sourceWindowId).toStartWith(
+			"audit_only_unsealed_range_",
+		);
+		expect(repeated.timelineSlices[0]?.timelineSliceId).toBe(
+			timeline.timelineSliceId,
+		);
+		expect(timeline.renderedText).toContain(
+			"可能在进行软件开发或排查技术问题",
+		);
+		expect(timeline.renderedText).toContain("前台切换到 Visual Studio Code");
+		expect(timeline.renderedText).toContain("最终增加了文本");
+		expect(timeline.renderedText).not.toContain("Qwen");
+		expect(timeline.segments[0]!.evidenceFactIds).toEqual(
+			exported.evidenceFacts
+				.filter((fact) => fact.role !== "boundary")
+				.map((fact) => fact.factId),
+		);
+		expect(exported.manifest.exportWarnings).toContain(
+			"audit_only_provisional_projection",
+		);
+		expect(exported.manifest.includedCounts).toMatchObject({
+			evidenceFacts: 3,
+			sourceEpisodes: 0,
+			episodeSlices: 1,
+			sourceTimelineSummaries: 0,
+			timelineSlices: 1,
+		});
+		expect(
+			exported.lineage.filter((entry) => entry.status === "summarized"),
+		).toHaveLength(2);
+		const goalLineage = exported.lineage.find(
+			(entry) => entry.eventId === "event-23",
+		);
+		expect(goalLineage).toMatchObject({
+			observationId: "observation-23",
+			eventId: "event-23",
+			sourceEpisodeId: null,
+			sourceEpisodeRevisionId: null,
+			episodeSliceId: null,
+			sourceTimelineId: null,
+			timelineSliceId: null,
+			timelineSegmentSliceId: null,
+			status: "fact_only",
+		});
+		expect(goalLineage?.factId).toStartWith("audit_only_fact_");
+		expect(exported.lineage).toContainEqual({
+			observationId: "observation-24",
+			eventId: "event-24",
+			factId: null,
+			sourceEpisodeId: null,
+			sourceEpisodeRevisionId: null,
+			episodeSliceId: null,
+			sourceTimelineId: null,
+			timelineSliceId: null,
+			timelineSegmentSliceId: null,
+			status: "semantic_only",
+		});
+		expect(exported.lineage).toContainEqual({
+			observationId: "observation-25",
+			eventId: "event-25",
+			factId: null,
+			sourceEpisodeId: null,
+			sourceEpisodeRevisionId: null,
+			episodeSliceId: null,
+			sourceTimelineId: null,
+			timelineSliceId: null,
+			timelineSegmentSliceId: null,
+			status: "ignored",
+		});
+		for (const entry of exported.lineage) {
+			if (entry.status !== "summarized") continue;
+			expect(entry.factId).toStartWith("audit_only_fact_");
+			expect(entry.episodeSliceId).toBe(episode.episodeSliceId);
+			expect(entry.timelineSliceId).toBe(timeline.timelineSliceId);
+			expect(entry.timelineSegmentSliceId).toBe(
+				timeline.segments[0]!.segmentSliceId,
+			);
+		}
 	});
 
 	test("reopens RESULT_PERSISTED and COMMITTING jobs by finalizing without inference", async () => {

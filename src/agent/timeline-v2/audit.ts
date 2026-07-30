@@ -1,4 +1,11 @@
-import { mergeCoverage } from "./evidence";
+import {
+	canonicalJson,
+	WebCryptoReflectionHasher,
+} from "../reflection/hash";
+import {
+	DeterministicEvidenceRenderer,
+	mergeCoverage,
+} from "./evidence";
 import { HeuristicTimelineEpisodeClassifier } from "./episodes";
 import type { TimelineV2Repository } from "./repository";
 import {
@@ -109,9 +116,18 @@ export class TimelineFiveMinuteAuditExporter {
 					scopedObservationIds.has(identifier),
 				),
 		);
+		const provisionalFacts = await buildAuditOnlyFacts({
+			events: scopedSemanticEvents,
+			existingFacts: scopedFacts,
+			fromMs,
+			toMs,
+		});
+		const projectedFacts = [...scopedFacts, ...provisionalFacts].sort(
+			compareFacts,
+		);
 		const facts = includeDecryptedContent
-			? structuredClone(scopedFacts)
-			: scopedFacts.map((fact) => ({
+			? structuredClone(projectedFacts)
+			: projectedFacts.map((fact) => ({
 					...structuredClone(fact),
 					renderedText: "[redacted]",
 					templateArgs: redactTemplateArgs(fact.templateArgs),
@@ -169,21 +185,52 @@ export class TimelineFiveMinuteAuditExporter {
 						})),
 					})),
 				}));
-		const episodeSlices = await buildEpisodeSlices({
+		const sourceEpisodeSlices = await buildEpisodeSlices({
 			episodes: derived.episodes,
-			facts: scopedFacts,
+			facts: projectedFacts,
 			fromMs,
 			toMs,
 			includeDecryptedContent,
 		});
-		const timelineSlices = buildTimelineSlices({
+		const factsInSourceEpisodeSlices = new Set(
+			sourceEpisodeSlices.flatMap((slice) => [
+				...slice.evidenceFactIds,
+				...slice.supportingFactIds,
+			]),
+		);
+		const provisionalEpisodeSlices = await buildAuditOnlyEpisodeSlices({
+			facts: projectedFacts.filter(
+				(fact) => !factsInSourceEpisodeSlices.has(fact.factId),
+			),
+			events: scopedSemanticEvents,
+			fromMs,
+			toMs,
+			includeDecryptedContent,
+		});
+		const episodeSlices = [
+			...sourceEpisodeSlices,
+			...provisionalEpisodeSlices,
+		].sort(compareEpisodeSlices);
+		const sourceTimelineSlices = buildTimelineSlices({
 			summaries: derived.summaries,
 			episodeSlices,
-			facts: scopedFacts,
+			facts: projectedFacts,
 			fromMs,
 			toMs,
 			includeDecryptedContent,
 		});
+		const provisionalTimelineSlices = await buildAuditOnlyTimelineSlices({
+			episodeSlices: provisionalEpisodeSlices,
+			facts: projectedFacts,
+			events: scopedSemanticEvents,
+			fromMs,
+			toMs,
+			includeDecryptedContent,
+		});
+		const timelineSlices = [
+			...sourceTimelineSlices,
+			...provisionalTimelineSlices,
+		].sort(compareTimelineSlices);
 		const lineage: TimelineAuditBundleV3["lineage"] = [];
 		const seenLineage = new Set<string>();
 		const factsByEvent = new Map<string, typeof facts>();
@@ -342,11 +389,13 @@ export class TimelineFiveMinuteAuditExporter {
 		const candidateCounts: TimelineAuditCountsV3 = {
 			rawObservations: raw.rawObservations.length,
 			semanticEvents: raw.semanticEvents.length,
-			evidenceFacts: derived.facts.length,
+			evidenceFacts: derived.facts.length + provisionalFacts.length,
 			sourceEpisodes: derived.episodes.length,
-			episodeSlices: derived.episodes.length,
+			episodeSlices:
+				derived.episodes.length + provisionalEpisodeSlices.length,
 			sourceTimelineSummaries: derived.summaries.length,
-			timelineSlices: derived.summaries.length,
+			timelineSlices:
+				derived.summaries.length + provisionalTimelineSlices.length,
 		};
 		const includedCounts: TimelineAuditCountsV3 = {
 			rawObservations: rawObservations.length,
@@ -368,6 +417,11 @@ export class TimelineFiveMinuteAuditExporter {
 			...(invalidRawObservationCount > 0
 				? ["invalid_raw_observation_omitted"]
 				: []),
+			...(provisionalFacts.length > 0 ||
+			provisionalEpisodeSlices.length > 0 ||
+			provisionalTimelineSlices.length > 0
+				? ["audit_only_provisional_projection"]
+				: []),
 			...(episodeSlices.some(
 				(slice) =>
 					slice.clippedAtStart || slice.clippedAtEnd || slice.evidencePruned,
@@ -384,7 +438,7 @@ export class TimelineFiveMinuteAuditExporter {
 		const coverage = mergeCoverage([
 			raw.coverage,
 			...semanticEvents.map((event) => event.coverage),
-			...facts.map((fact) => fact.coverage),
+			...projectedFacts.map((fact) => fact.coverage),
 		]);
 		return {
 			manifest: {
@@ -419,6 +473,322 @@ export class TimelineFiveMinuteAuditExporter {
 			lineage,
 		};
 	}
+}
+
+async function buildAuditOnlyFacts(options: {
+	events: readonly SemanticEventV2[];
+	existingFacts: readonly EvidenceFactV2[];
+	fromMs: number;
+	toMs: number;
+}): Promise<EvidenceFactV2[]> {
+	const existingEventIds = new Set(
+		options.existingFacts.flatMap((fact) => fact.eventIds),
+	);
+	const missingEvents = options.events.filter(
+		(event) =>
+			!existingEventIds.has(event.eventId) &&
+			auditFactCanBeRendered(event),
+	);
+	if (missingEvents.length === 0) return [];
+
+	const hasher = new WebCryptoReflectionHasher();
+	const renderer = new DeterministicEvidenceRenderer(hasher);
+	const rendered = await renderer.render(missingEvents);
+	const facts: EvidenceFactV2[] = [];
+	for (const fact of rendered) {
+		const digest = await hasher.sha256(
+			canonicalJson({
+				schemaVersion: "audit-only-fact.v1",
+				fromMs: options.fromMs,
+				toMs: options.toMs,
+				eventIds: fact.eventIds,
+			}),
+		);
+		facts.push({
+			...fact,
+			factId: `audit_only_fact_${digest}`,
+		});
+	}
+	return facts.sort(compareFacts);
+}
+
+function auditFactCanBeRendered(event: SemanticEventV2): boolean {
+	if (
+		event.countClass !== "effective" &&
+		event.countClass !== "boundary"
+	) {
+		return false;
+	}
+	switch (event.kind) {
+		case "application.foregroundChanged":
+		case "application.visibleContentChanged":
+		case "application.textValueChanged":
+		case "browser.visiblePageChanged":
+		case "ui.focusChanged":
+		case "ui.controlActivated":
+		case "input.activityBucket":
+		case "presence.changed":
+		case "goal.changed":
+			return true;
+		case "authorization.changed":
+		case "application.processObservedBatch":
+		case "coverage.gap":
+			return false;
+	}
+}
+
+async function buildAuditOnlyEpisodeSlices(options: {
+	facts: readonly EvidenceFactV2[];
+	events: readonly SemanticEventV2[];
+	fromMs: number;
+	toMs: number;
+	includeDecryptedContent: boolean;
+}): Promise<EpisodeSliceV3[]> {
+	const classifier = new HeuristicTimelineEpisodeClassifier();
+	const hasher = new WebCryptoReflectionHasher();
+	const goalVersionByEventId = new Map(
+		options.events.map((event) => [event.eventId, event.goalVersion] as const),
+	);
+	const slices: EpisodeSliceV3[] = [];
+	for (const segment of segmentAuditOnlyFacts(options.facts)) {
+		const primaryFacts = segment.filter((fact) => fact.role === "primary");
+		const classification = await classifier.classify(
+			primaryFacts.length > 0 ? primaryFacts : segment,
+			null,
+		);
+		classification.goalRelevance = null;
+		const evidenceFactIds = primaryFacts.map((fact) => fact.factId);
+		const supportingFactIds = segment
+			.filter((fact) => fact.role !== "primary")
+			.map((fact) => fact.factId);
+		if (evidenceFactIds.length === 0) {
+			const promoted = supportingFactIds.shift();
+			if (promoted) evidenceFactIds.push(promoted);
+		}
+		const period = factPeriod(segment);
+		const goalVersion = commonGoalVersion(segment, goalVersionByEventId);
+		const digest = await hasher.sha256(
+			canonicalJson({
+				schemaVersion: "audit-only-episode-slice.v1",
+				fromMs: options.fromMs,
+				toMs: options.toMs,
+				goalVersion,
+				evidenceFactIds,
+				supportingFactIds,
+			}),
+		);
+		const citedFactId =
+			evidenceFactIds[0] ?? supportingFactIds[0] ?? segment[0]!.factId;
+		slices.push({
+			schemaVersion: EPISODE_SLICE_SCHEMA_VERSION,
+			episodeSliceId: `audit_only_episode_slice_${digest}`,
+			sourceEpisodeId: `audit_only_episode_${digest}`,
+			sourceEpisodeRevisionId: `audit_only_episode_revision_${digest}`,
+			sourceWindowIds: [],
+			sourcePeriod: period,
+			period,
+			clippedAtStart: false,
+			clippedAtEnd: false,
+			evidencePruned: false,
+			goalVersion,
+			inferenceScope: "range_recomputed",
+			classification,
+			hypothesis: {
+				text: options.includeDecryptedContent
+					? auditHypothesisTemplate(classification.activity)
+					: "[redacted]",
+				citedFactIds: [citedFactId],
+				generator: "deterministic-template.v2",
+			},
+			evidenceFactIds,
+			supportingFactIds,
+			coverage: mergeCoverage(segment.map((fact) => fact.coverage)),
+		});
+	}
+	return slices.sort(compareEpisodeSlices);
+}
+
+function segmentAuditOnlyFacts(
+	facts: readonly EvidenceFactV2[],
+): EvidenceFactV2[][] {
+	const ordered = [...facts].sort(compareFacts);
+	const segments: EvidenceFactV2[][] = [];
+	let current: EvidenceFactV2[] = [];
+	const flush = () => {
+		if (current.length > 0) segments.push(current);
+		current = [];
+	};
+	for (const fact of ordered) {
+		if (fact.role === "boundary") {
+			flush();
+			continue;
+		}
+		const previous = current.at(-1);
+		const primaryAnchor = [...current]
+			.reverse()
+			.find((candidate) => candidate.role === "primary")?.anchor;
+		if (
+			previous &&
+			(fact.startedAtMs - previous.endedAtMs >= 30_000 ||
+				(fact.role === "primary" &&
+					primaryAnchor !== undefined &&
+					!auditAnchorsAreCompatible(primaryAnchor, fact.anchor)))
+		) {
+			flush();
+		}
+		current.push(fact);
+	}
+	flush();
+	return segments;
+}
+
+function auditAnchorsAreCompatible(
+	left: EvidenceFactV2["anchor"],
+	right: EvidenceFactV2["anchor"],
+): boolean {
+	return (
+		auditAnchorPartIsCompatible(left.appId, right.appId) &&
+		auditAnchorPartIsCompatible(left.windowId, right.windowId) &&
+		auditAnchorPartIsCompatible(left.documentId, right.documentId) &&
+		auditAnchorPartIsCompatible(left.pageId, right.pageId)
+	);
+}
+
+function auditAnchorPartIsCompatible(
+	left: string | null,
+	right: string | null,
+): boolean {
+	return left === null || right === null || left === right;
+}
+
+function commonGoalVersion(
+	facts: readonly EvidenceFactV2[],
+	goalVersionByEventId: ReadonlyMap<string, number | null>,
+): number | null {
+	const versions = unique(
+		facts.flatMap((fact) =>
+			fact.eventIds.flatMap((eventId) => {
+				const version = goalVersionByEventId.get(eventId);
+				return version === undefined ? [] : [version];
+			}),
+		),
+	);
+	return versions.length === 1 ? versions[0]! : null;
+}
+
+async function buildAuditOnlyTimelineSlices(options: {
+	episodeSlices: readonly EpisodeSliceV3[];
+	facts: readonly EvidenceFactV2[];
+	events: readonly SemanticEventV2[];
+	fromMs: number;
+	toMs: number;
+	includeDecryptedContent: boolean;
+}): Promise<TimelineSliceV3[]> {
+	if (options.episodeSlices.length === 0) return [];
+	const factById = new Map(
+		options.facts.map((fact) => [fact.factId, fact] as const),
+	);
+	const orderedEpisodes = [...options.episodeSlices].sort(compareEpisodeSlices);
+	const segments: TimelineSegmentSliceV3[] = orderedEpisodes.map(
+		(episodeSlice, index) => {
+			const evidenceFactIds = unique([
+				...episodeSlice.evidenceFactIds,
+				...episodeSlice.supportingFactIds,
+			]).filter((factId) => factById.has(factId));
+			return {
+				segmentSliceId: `audit_only_timeline_segment_${index}_${episodeSlice.episodeSliceId.slice(-24)}`,
+				episodeSliceId: episodeSlice.episodeSliceId,
+				sourceEpisodeId: episodeSlice.sourceEpisodeId,
+				sourceEpisodeRevisionId: episodeSlice.sourceEpisodeRevisionId,
+				sourcePeriod: structuredClone(episodeSlice.period),
+				period: structuredClone(episodeSlice.period),
+				clippedAtStart: false,
+				clippedAtEnd: false,
+				evidencePruned: false,
+				evidenceFactIds,
+			};
+		},
+	);
+	const period = {
+		startedAtMs: Math.min(
+			...orderedEpisodes.map((episode) => episode.period.startedAtMs),
+		),
+		endedAtMs: Math.max(
+			...orderedEpisodes.map((episode) => episode.period.endedAtMs),
+		),
+	};
+	const hasher = new WebCryptoReflectionHasher();
+	const digest = await hasher.sha256(
+		canonicalJson({
+			schemaVersion: "audit-only-timeline-slice.v1",
+			fromMs: options.fromMs,
+			toMs: options.toMs,
+			episodeSliceIds: orderedEpisodes.map(
+				(episode) => episode.episodeSliceId,
+			),
+			segments: segments.map((segment) => ({
+				segmentSliceId: segment.segmentSliceId,
+				evidenceFactIds: segment.evidenceFactIds,
+			})),
+		}),
+	);
+	const episodeByRevisionId = new Map(
+		orderedEpisodes.map(
+			(episode) => [episode.sourceEpisodeRevisionId, episode] as const,
+		),
+	);
+	const includedFacts = segments
+		.flatMap((segment) => segment.evidenceFactIds)
+		.map((factId) => factById.get(factId))
+		.filter((fact): fact is EvidenceFactV2 => fact !== undefined);
+	const goalVersions = unique(
+		orderedEpisodes.map((episode) => episode.goalVersion),
+	);
+	return [
+		{
+			schemaVersion: TIMELINE_SLICE_SCHEMA_VERSION,
+			timelineSliceId: `audit_only_timeline_slice_${digest}`,
+			sourceTimelineId: `audit_only_timeline_${digest}`,
+			sourceWindowId: `audit_only_unsealed_range_${digest}`,
+			triggerReason: "audit_range",
+			triggeredAtMs: options.toMs,
+			deadlineAtMs: options.toMs,
+			sourcePeriod: period,
+			period,
+			clippedAtStart: false,
+			clippedAtEnd: false,
+			evidencePruned: false,
+			goalVersion: goalVersions.length === 1 ? goalVersions[0]! : null,
+			inferenceScope: "range_recomputed",
+			sourceSegmentCount: segments.length,
+			includedSegmentCount: segments.length,
+			segments,
+			coverage: mergeCoverage(includedFacts.map((fact) => fact.coverage)),
+			renderedText: options.includeDecryptedContent
+				? renderSliceText(segments, episodeByRevisionId, factById)
+				: "[redacted]",
+			modelVersions: unique(
+				orderedEpisodes.flatMap((episode) => [
+					episode.classification.modelVersion,
+					episode.hypothesis.generator,
+				]),
+			),
+			inferenceDiagnostics: [],
+			taxonomyVersion: singleVersion(
+				options.events.map((event) => event.taxonomyVersion),
+				"audit-range-mixed-taxonomy",
+			),
+			projectorVersion: singleVersion(
+				options.events.map((event) => event.projectorVersion),
+				"audit-range-mixed-projector",
+			),
+		},
+	];
+}
+
+function singleVersion(values: readonly string[], mixed: string): string {
+	const versions = unique(values);
+	return versions.length === 1 ? versions[0]! : mixed;
 }
 
 async function buildEpisodeSlices(options: {
@@ -720,6 +1090,26 @@ function compareFacts(left: EvidenceFactV2, right: EvidenceFactV2): number {
 	return (
 		left.startedAtMs - right.startedAtMs ||
 		left.factId.localeCompare(right.factId)
+	);
+}
+
+function compareEpisodeSlices(
+	left: EpisodeSliceV3,
+	right: EpisodeSliceV3,
+): number {
+	return (
+		left.period.startedAtMs - right.period.startedAtMs ||
+		left.episodeSliceId.localeCompare(right.episodeSliceId)
+	);
+}
+
+function compareTimelineSlices(
+	left: TimelineSliceV3,
+	right: TimelineSliceV3,
+): number {
+	return (
+		left.period.startedAtMs - right.period.startedAtMs ||
+		left.timelineSliceId.localeCompare(right.timelineSliceId)
 	);
 }
 

@@ -222,6 +222,24 @@ Audit v3 不会把改写后的内容冒充不可变 episode revision 或 timelin
 manifest 分别记录 source episode、episode slice、source timeline summary 和
 timeline slice 数量，所有 included count 与实际数组逐项一致。
 
+如果范围内的 SemanticEvent 尚未进入封窗后的生产结果，审计导出会在内存中用
+同一个 `DeterministicEvidenceRenderer` 补出缺失的可渲染 Fact，并为它们分配
+确定性的 `audit_only_fact_*` ID；已由源 Fact 覆盖的 event 不会重复投影。
+`ignored`、coverage gap 和 `authorization.changed` 不参与该投影。补出的 Fact
+按边界、30 秒静默和可见 anchor 变化做保守分段；boundary 会结束当前分段并
+保留为 Fact/lineage，但不会单独伪造成活动 Episode。其余分段再由 cold-start
+heuristic 分类器形成 `audit_only_episode_*` / `audit_only_timeline_*` slice。其
+`inferenceScope` 固定为 `range_recomputed`、`triggerReason` 固定为
+`audit_range`；同一分段的 event 具有一致 goal version 时保留该版本，但由于
+没有目标正文，`goalRelevance` 始终为 `null`。顶层假设只用 deterministic
+中文模板，不调用或复用 Qwen 文本及引用。会议纪要子项仍逐条来自包内 Fact。
+
+这些对象只存在于本次 JSON 包，不写回 Timeline repository，也不冒充 source
+episode revision、source window 或 source summary。manifest 的 source counts
+保持为真实持久化对象数量，audit-only 对象只增加 Fact/slice counts，并显式加入
+`audit_only_provisional_projection` warning。所有 `audit_only_*` 引用必须在包内
+闭合；重复导出同一范围会得到相同 ID。
+
 Raw observation 在 TypeScript 导出边界按 `raw-observation.v2` schema 和已知 kind
 执行严格字段 allow-list；未知 schema/kind、额外字段或错误 payload 直接省略，
 不依赖截图/路径关键词黑名单。`authorization.changed` 还必须是 point interval、
