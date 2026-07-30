@@ -135,214 +135,324 @@
 }
 
 :root[data-ui-theme="orange"] {
-	--color-background: #160e09;
-	--color-sidebar: #1b1009;
-	--color-surface: #1c130e;
-	--color-surface-muted: #140d09;
-	--color-surface-elevated: #271910;
-	--color-surface-hover: rgba(246, 157, 82, 0.09);
-	--color-surface-pressed: rgba(246, 157, 82, 0.15);
-	--color-surface-active: rgba(239, 142, 66, 0.16);
-	--color-surface-overlay: rgba(28, 19, 14, 0.95);
-	--color-sidebar-card: rgba(40, 23, 13, 0.66);
-	--color-border: rgba(224, 169, 124, 0.15);
-	--color-border-muted: rgba(224, 169, 124, 0.11);
-	--color-border-strong: rgba(238, 175, 122, 0.27);
-	--color-border-hover: rgba(248, 184, 130, 0.4);
-	--color-text-primary: #f6eee8;
-	--color-text-secondary: #c4aa99;
-	--color-text-subtle: #896f60;
-	--color-text-disabled: #6b574c;
-	--color-text-inverse: #251006;
-	--color-accent: #f39a51;
-	--color-accent-strong: #ffc17b;
-	--color-accent-soft: rgba(238, 143, 68, 0.15);
-	--color-accent-border: rgba(255, 183, 116, 0.23);
-	--color-accent-glow: rgba(235, 124, 44, 0.2);
-	--color-empty-glow: rgba(239, 139, 60, 0.13);
-	--color-contour: rgba(241, 157, 89, 0.16);
-	--color-selection: rgba(243, 154, 81, 0.3);
-	--color-calendar-plan: #f2a05d;
-	--color-calendar-plan-surface: rgba(177, 91, 32, 0.3);
-	--color-calendar-plan-border: rgba(246, 168, 103, 0.54);
-	--color-calendar-grid-line: rgba(224, 169, 124, 0.13);
-	--color-calendar-grid-minor: rgba(224, 169, 124, 0.07);
-	--color-report-completed: #f2a05d;
-	--color-report-building: #f2a05d;
-	--color-report-grid: rgba(224, 169, 124, 0.11);
-	--shadow-popover: 0 22px 60px rgba(31, 12, 3, 0.48);
-	--shadow-subtle: 0 14px 38px rgba(31, 12, 3, 0.2);
-	--focus-ring: 0 0 0 3px rgba(243, 154, 81, 0.27);
+	--color-background: #fbf4e8;
+	--color-sidebar: #fff9ef;
+	--color-surface: #fffdf8;
+	--color-surface-muted: #f8eddd;
+	--color-surface-elevated: #fff9ef;
+	--color-surface-hover: rgba(211, 93, 25, 0.075);
+	--color-surface-pressed: rgba(211, 93, 25, 0.12);
+	--color-surface-active: rgba(232, 109, 31, 0.1);
+	--color-surface-overlay: rgba(255, 253, 248, 0.96);
+	--color-modal-scrim: rgba(66, 38, 20, 0.36);
+	--color-sidebar-card: rgba(255, 250, 241, 0.8);
+	--color-weekend-overlay: rgba(118, 75, 43, 0.018);
+	--color-border: rgba(118, 75, 43, 0.16);
+	--color-border-muted: rgba(118, 75, 43, 0.11);
+	--color-border-strong: rgba(184, 92, 34, 0.3);
+	--color-border-hover: rgba(211, 93, 25, 0.44);
+	--color-text-primary: #3f2c21;
+	--color-text-secondary: #705545;
+	--color-text-subtle: #987865;
+	--color-text-disabled: #b5a090;
+	--color-text-inverse: #fffaf2;
+	--color-accent: #e66b1f;
+	--color-accent-strong: #c94f10;
+	--color-accent-soft: rgba(230, 107, 31, 0.11);
+	--color-accent-border: rgba(218, 91, 20, 0.25);
+	--color-accent-glow: rgba(245, 137, 55, 0.2);
+	--color-empty-glow: rgba(250, 153, 74, 0.17);
+	--color-contour: rgba(213, 100, 34, 0.18);
+	--color-selection: rgba(242, 133, 55, 0.25);
+	--color-success: #277657;
+	--color-warning: #96631d;
+	--color-error: #b93f3d;
+	--color-error-border: rgba(185, 63, 61, 0.25);
+	--color-error-soft: rgba(185, 63, 61, 0.08);
+	--color-conflict: #b4493d;
+	--color-calendar-external: #596aa7;
+	--color-calendar-plan: #d75d18;
+	--color-calendar-plan-surface: rgba(226, 101, 27, 0.15);
+	--color-calendar-plan-border: rgba(201, 78, 13, 0.42);
+	--color-calendar-manual: #9b6a22;
+	--color-calendar-manual-surface: rgba(171, 115, 36, 0.13);
+	--color-calendar-manual-border: rgba(150, 98, 29, 0.36);
+	--color-calendar-external-surface: rgba(82, 99, 160, 0.13);
+	--color-calendar-external-border: rgba(76, 92, 150, 0.36);
+	--color-calendar-break: #397c61;
+	--color-calendar-break-surface: rgba(55, 124, 96, 0.12);
+	--color-calendar-break-border: rgba(47, 111, 84, 0.34);
+	--color-calendar-conflict-surface: rgba(185, 63, 61, 0.08);
+	--color-calendar-warning-surface: rgba(150, 99, 29, 0.09);
+	--color-calendar-grid-line: rgba(118, 75, 43, 0.15);
+	--color-calendar-grid-minor: rgba(118, 75, 43, 0.075);
+	--color-calendar-now: #c94f10;
+	--color-report-completed: #d75d18;
+	--color-report-planned: #596aa7;
+	--color-report-building: #d75d18;
+	--color-report-planning: #596aa7;
+	--color-report-learning: #9b6a22;
+	--color-report-communication: #8f609e;
+	--color-report-recovery: #397c61;
+	--color-report-unknown: #987865;
+	--color-report-grid: rgba(118, 75, 43, 0.12);
+	--shadow-popover: 0 22px 58px rgba(91, 49, 20, 0.2);
+	--shadow-subtle: 0 14px 36px rgba(91, 49, 20, 0.1);
+	--shadow-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+	--focus-ring: 0 0 0 3px rgba(230, 107, 31, 0.22);
 	--theme-shell-background:
-		radial-gradient(circle at 82% -10%, rgba(236, 123, 41, 0.19), transparent 36%),
-		linear-gradient(155deg, #160e09 0%, #120b08 100%);
+		radial-gradient(circle at 94% 4%, rgba(255, 174, 85, 0.17), transparent 27%),
+		linear-gradient(150deg, #fffaf0 0%, #fbf4e8 56%, #f7ead8 100%);
 	--theme-sidebar-background:
-		radial-gradient(circle at 18% 0%, rgba(242, 139, 55, 0.2), transparent 36%),
-		#1b1009;
+		radial-gradient(circle at 12% 3%, rgba(255, 172, 79, 0.2), transparent 26%),
+		linear-gradient(180deg, rgba(255, 250, 241, 0.98), rgba(250, 238, 220, 0.98));
 	--theme-auth-background:
-		radial-gradient(circle at 24% 12%, rgba(239, 132, 46, 0.24), transparent 35%),
-		linear-gradient(145deg, #1b1009, #160e09);
+		radial-gradient(circle at 16% 10%, rgba(255, 202, 126, 0.32), transparent 24%),
+		radial-gradient(circle at 82% 76%, rgba(249, 133, 46, 0.18), transparent 34%),
+		linear-gradient(145deg, #fffaf0, #f7ead7);
 	--theme-settings-background:
-		radial-gradient(circle at 90% -12%, rgba(240, 135, 49, 0.16), transparent 38%),
-		#160e09;
+		radial-gradient(circle at 94% -8%, rgba(246, 145, 61, 0.16), transparent 34%),
+		linear-gradient(155deg, #fbf4e8, #f8eedf);
 }
 
-:root[data-ui-theme="whale-fall"] {
-	--color-background: #050b15;
-	--color-sidebar: #07101d;
-	--color-surface: #0a1422;
-	--color-surface-muted: #070f1b;
-	--color-surface-elevated: #101d30;
-	--color-surface-hover: rgba(114, 156, 220, 0.09);
-	--color-surface-pressed: rgba(114, 156, 220, 0.14);
-	--color-surface-active: rgba(91, 133, 199, 0.16);
-	--color-surface-overlay: rgba(10, 20, 34, 0.95);
-	--color-sidebar-card: rgba(10, 23, 42, 0.66);
-	--color-border: rgba(139, 168, 214, 0.15);
-	--color-border-muted: rgba(139, 168, 214, 0.1);
-	--color-border-strong: rgba(137, 177, 235, 0.25);
-	--color-border-hover: rgba(146, 187, 245, 0.38);
-	--color-text-primary: #e9eef8;
-	--color-text-secondary: #a5b3ca;
-	--color-text-subtle: #64748f;
-	--color-text-disabled: #4e5d74;
-	--color-text-inverse: #07101e;
-	--color-accent: #78a9ee;
-	--color-accent-strong: #aecbff;
-	--color-accent-soft: rgba(89, 132, 199, 0.16);
-	--color-accent-border: rgba(141, 183, 244, 0.23);
-	--color-accent-glow: rgba(73, 115, 180, 0.2);
-	--color-empty-glow: rgba(94, 109, 195, 0.14);
-	--color-contour: rgba(116, 153, 218, 0.16);
-	--color-selection: rgba(120, 169, 238, 0.3);
-	--color-calendar-plan: #78a9ee;
-	--color-calendar-plan-surface: rgba(56, 96, 157, 0.3);
-	--color-calendar-plan-border: rgba(124, 174, 241, 0.53);
-	--color-calendar-grid-line: rgba(139, 168, 214, 0.13);
-	--color-calendar-grid-minor: rgba(139, 168, 214, 0.07);
-	--color-report-completed: #78a9ee;
-	--color-report-building: #78a9ee;
-	--color-report-planning: #a38bd2;
-	--color-report-grid: rgba(139, 168, 214, 0.11);
-	--shadow-popover: 0 22px 64px rgba(0, 4, 14, 0.55);
-	--shadow-subtle: 0 14px 42px rgba(0, 4, 14, 0.24);
-	--focus-ring: 0 0 0 3px rgba(120, 169, 238, 0.28);
+:root[data-ui-theme="observatory"] {
+	--color-background: #050b20;
+	--color-sidebar: #07102a;
+	--color-surface: #0a1430;
+	--color-surface-muted: #070f27;
+	--color-surface-elevated: #101d3e;
+	--color-surface-hover: rgba(105, 159, 244, 0.09);
+	--color-surface-pressed: rgba(105, 159, 244, 0.14);
+	--color-surface-active: rgba(78, 142, 239, 0.16);
+	--color-surface-overlay: rgba(10, 20, 48, 0.96);
+	--color-sidebar-card: rgba(9, 23, 58, 0.68);
+	--color-border: rgba(129, 164, 224, 0.15);
+	--color-border-muted: rgba(129, 164, 224, 0.1);
+	--color-border-strong: rgba(126, 171, 239, 0.26);
+	--color-border-hover: rgba(137, 184, 252, 0.4);
+	--color-text-primary: #edf3ff;
+	--color-text-secondary: #a9b9d8;
+	--color-text-subtle: #667aa3;
+	--color-text-disabled: #506285;
+	--color-text-inverse: #061126;
+	--color-accent: #68a8ff;
+	--color-accent-strong: #acd0ff;
+	--color-accent-soft: rgba(84, 147, 239, 0.16);
+	--color-accent-border: rgba(128, 181, 255, 0.23);
+	--color-accent-glow: rgba(61, 122, 218, 0.23);
+	--color-empty-glow: rgba(86, 124, 226, 0.15);
+	--color-contour: rgba(115, 161, 236, 0.18);
+	--color-selection: rgba(104, 168, 255, 0.3);
+	--color-calendar-plan: #68a8ff;
+	--color-calendar-plan-surface: rgba(53, 99, 174, 0.3);
+	--color-calendar-plan-border: rgba(111, 173, 255, 0.53);
+	--color-calendar-grid-line: rgba(129, 164, 224, 0.13);
+	--color-calendar-grid-minor: rgba(129, 164, 224, 0.07);
+	--color-report-completed: #68a8ff;
+	--color-report-building: #68a8ff;
+	--color-report-planning: #9c8be7;
+	--color-report-grid: rgba(129, 164, 224, 0.11);
+	--shadow-popover: 0 22px 64px rgba(0, 4, 20, 0.58);
+	--shadow-subtle: 0 14px 42px rgba(0, 4, 20, 0.25);
+	--focus-ring: 0 0 0 3px rgba(104, 168, 255, 0.28);
 	--theme-shell-background:
-		radial-gradient(circle at 86% 112%, rgba(79, 63, 157, 0.2), transparent 38%),
-		radial-gradient(circle at 78% -10%, rgba(53, 99, 171, 0.18), transparent 34%),
-		linear-gradient(155deg, #050b15 0%, #060a14 100%);
+		radial-gradient(circle at 91% 12%, rgba(206, 225, 255, 0.75) 0 1px, transparent 2px),
+		radial-gradient(circle at 82% 27%, rgba(133, 178, 255, 0.48) 0 1px, transparent 2px),
+		radial-gradient(circle at 73% 8%, rgba(226, 233, 255, 0.38) 0 1px, transparent 2px),
+		radial-gradient(circle at 88% -8%, rgba(53, 102, 205, 0.24), transparent 36%),
+		linear-gradient(155deg, #050b20 0%, #060c24 100%);
 	--theme-sidebar-background:
-		radial-gradient(circle at 20% 0%, rgba(70, 111, 181, 0.2), transparent 36%),
-		linear-gradient(180deg, #07101d, #080d19);
+		radial-gradient(circle at 20% 8%, rgba(188, 214, 255, 0.42) 0 1px, transparent 2px),
+		radial-gradient(circle at 76% 16%, rgba(115, 169, 255, 0.3) 0 1px, transparent 2px),
+		radial-gradient(circle at 30% 0%, rgba(58, 113, 217, 0.24), transparent 34%),
+		linear-gradient(180deg, #07102a, #070d23);
 	--theme-auth-background:
-		radial-gradient(circle at 25% 12%, rgba(62, 105, 176, 0.23), transparent 34%),
-		radial-gradient(circle at 88% 92%, rgba(94, 67, 164, 0.15), transparent 36%),
-		linear-gradient(145deg, #07101d, #050b15);
+		radial-gradient(circle at 12% 16%, rgba(224, 235, 255, 0.68) 0 1px, transparent 2px),
+		radial-gradient(circle at 27% 28%, rgba(129, 179, 255, 0.45) 0 1px, transparent 2px),
+		radial-gradient(circle at 74% 12%, rgba(221, 231, 255, 0.48) 0 1px, transparent 2px),
+		radial-gradient(circle at 68% 64%, rgba(73, 129, 228, 0.2), transparent 34%),
+		linear-gradient(145deg, #07102a, #050b20);
 	--theme-settings-background:
-		radial-gradient(circle at 92% 112%, rgba(89, 66, 164, 0.14), transparent 40%),
-		radial-gradient(circle at 88% -12%, rgba(55, 99, 169, 0.15), transparent 36%),
-		#050b15;
+		radial-gradient(circle at 94% 10%, rgba(199, 219, 255, 0.48) 0 1px, transparent 2px),
+		radial-gradient(circle at 84% 22%, rgba(119, 169, 255, 0.32) 0 1px, transparent 2px),
+		radial-gradient(circle at 90% -10%, rgba(54, 105, 210, 0.19), transparent 36%),
+		#050b20;
 }
 
 :root[data-ui-theme="firefly"] {
-	--color-background: #07100b;
-	--color-sidebar: #07150c;
-	--color-surface: #0c1810;
-	--color-surface-muted: #08120c;
-	--color-surface-elevated: #132119;
-	--color-surface-hover: rgba(190, 211, 102, 0.08);
-	--color-surface-pressed: rgba(190, 211, 102, 0.13);
-	--color-surface-active: rgba(173, 198, 76, 0.14);
-	--color-surface-overlay: rgba(12, 24, 16, 0.95);
-	--color-sidebar-card: rgba(10, 31, 16, 0.64);
-	--color-border: rgba(161, 187, 132, 0.14);
-	--color-border-muted: rgba(161, 187, 132, 0.1);
-	--color-border-strong: rgba(180, 208, 143, 0.24);
-	--color-border-hover: rgba(194, 222, 153, 0.37);
-	--color-text-primary: #edf2e9;
-	--color-text-secondary: #abbba4;
-	--color-text-subtle: #6d8068;
-	--color-text-disabled: #536550;
-	--color-text-inverse: #101705;
-	--color-accent: #c2d867;
-	--color-accent-strong: #e8ef97;
-	--color-accent-soft: rgba(174, 199, 74, 0.13);
-	--color-accent-border: rgba(205, 224, 123, 0.2);
-	--color-accent-glow: rgba(179, 207, 75, 0.19);
-	--color-empty-glow: rgba(185, 214, 82, 0.12);
-	--color-contour: rgba(186, 210, 104, 0.14);
-	--color-selection: rgba(194, 216, 103, 0.28);
-	--color-calendar-plan: #c2d867;
-	--color-calendar-plan-surface: rgba(113, 136, 39, 0.25);
-	--color-calendar-plan-border: rgba(190, 216, 96, 0.48);
-	--color-calendar-break: #72b89b;
-	--color-calendar-break-surface: rgba(51, 118, 88, 0.24);
-	--color-calendar-break-border: rgba(104, 185, 149, 0.42);
-	--color-calendar-grid-line: rgba(161, 187, 132, 0.12);
-	--color-calendar-grid-minor: rgba(161, 187, 132, 0.065);
-	--color-report-completed: #c2d867;
-	--color-report-building: #c2d867;
-	--color-report-recovery: #72b89b;
-	--color-report-grid: rgba(161, 187, 132, 0.1);
-	--shadow-popover: 0 22px 60px rgba(1, 12, 4, 0.5);
-	--shadow-subtle: 0 14px 38px rgba(1, 12, 4, 0.22);
-	--focus-ring: 0 0 0 3px rgba(194, 216, 103, 0.25);
+	--color-background: #04110d;
+	--color-sidebar: #061810;
+	--color-surface: #0a1b14;
+	--color-surface-muted: #07150f;
+	--color-surface-elevated: #10251b;
+	--color-surface-hover: rgba(193, 218, 83, 0.08);
+	--color-surface-pressed: rgba(193, 218, 83, 0.13);
+	--color-surface-active: rgba(170, 201, 70, 0.14);
+	--color-surface-overlay: rgba(10, 27, 20, 0.96);
+	--color-sidebar-card: rgba(7, 31, 19, 0.7);
+	--color-border: rgba(148, 184, 123, 0.15);
+	--color-border-muted: rgba(148, 184, 123, 0.1);
+	--color-border-strong: rgba(174, 208, 133, 0.25);
+	--color-border-hover: rgba(197, 226, 147, 0.38);
+	--color-text-primary: #eff5e9;
+	--color-text-secondary: #a9bca1;
+	--color-text-subtle: #687e63;
+	--color-text-disabled: #50644d;
+	--color-text-inverse: #101805;
+	--color-accent: #c5dc5a;
+	--color-accent-strong: #edf59b;
+	--color-accent-soft: rgba(184, 213, 72, 0.13);
+	--color-accent-border: rgba(208, 231, 117, 0.21);
+	--color-accent-glow: rgba(188, 221, 69, 0.21);
+	--color-empty-glow: rgba(191, 224, 74, 0.13);
+	--color-contour: rgba(184, 214, 99, 0.15);
+	--color-selection: rgba(197, 220, 90, 0.28);
+	--color-calendar-plan: #c5dc5a;
+	--color-calendar-plan-surface: rgba(107, 137, 32, 0.25);
+	--color-calendar-plan-border: rgba(194, 222, 83, 0.48);
+	--color-calendar-break: #64b99a;
+	--color-calendar-break-surface: rgba(42, 119, 87, 0.24);
+	--color-calendar-break-border: rgba(91, 188, 146, 0.42);
+	--color-calendar-grid-line: rgba(148, 184, 123, 0.12);
+	--color-calendar-grid-minor: rgba(148, 184, 123, 0.065);
+	--color-report-completed: #c5dc5a;
+	--color-report-building: #c5dc5a;
+	--color-report-recovery: #64b99a;
+	--color-report-grid: rgba(148, 184, 123, 0.1);
+	--shadow-popover: 0 22px 60px rgba(0, 10, 5, 0.54);
+	--shadow-subtle: 0 14px 38px rgba(0, 10, 5, 0.24);
+	--focus-ring: 0 0 0 3px rgba(197, 220, 90, 0.25);
 	--theme-shell-background:
-		radial-gradient(circle at 88% 18%, rgba(220, 234, 112, 0.42) 0 1px, transparent 4px),
-		radial-gradient(circle at 74% 32%, rgba(200, 222, 94, 0.25) 0 2px, transparent 5px),
-		radial-gradient(circle at 92% 70%, rgba(209, 229, 105, 0.2) 0 1px, transparent 4px),
-		linear-gradient(155deg, #07100b 0%, #07120a 100%);
+		radial-gradient(circle at 88% 18%, rgba(230, 244, 116, 0.68) 0 1px, transparent 4px),
+		radial-gradient(circle at 74% 32%, rgba(201, 228, 80, 0.42) 0 2px, transparent 6px),
+		radial-gradient(circle at 92% 70%, rgba(214, 237, 93, 0.3) 0 1px, transparent 5px),
+		radial-gradient(ellipse at 76% 110%, rgba(24, 99, 62, 0.25), transparent 48%),
+		linear-gradient(155deg, #04110d 0%, #06150f 100%);
 	--theme-sidebar-background:
-		radial-gradient(circle at 24% 10%, rgba(196, 220, 89, 0.26) 0 1px, transparent 5px),
-		radial-gradient(circle at 70% 27%, rgba(196, 220, 89, 0.18) 0 1px, transparent 4px),
-		linear-gradient(180deg, #07150c, #07110a);
+		radial-gradient(circle at 24% 10%, rgba(209, 234, 92, 0.48) 0 1px, transparent 5px),
+		radial-gradient(circle at 70% 27%, rgba(199, 226, 77, 0.31) 0 1px, transparent 4px),
+		radial-gradient(ellipse at 28% 105%, rgba(22, 87, 51, 0.34), transparent 48%),
+		linear-gradient(180deg, #061810, #05120d);
 	--theme-auth-background:
-		radial-gradient(circle at 18% 22%, rgba(214, 230, 105, 0.34) 0 2px, transparent 6px),
-		radial-gradient(circle at 72% 14%, rgba(202, 223, 94, 0.22) 0 1px, transparent 5px),
-		radial-gradient(circle at 42% 68%, rgba(202, 223, 94, 0.18) 0 1px, transparent 5px),
-		linear-gradient(145deg, #07150c, #07100b);
+		radial-gradient(circle at 18% 22%, rgba(226, 241, 105, 0.6) 0 2px, transparent 7px),
+		radial-gradient(circle at 72% 14%, rgba(207, 234, 79, 0.42) 0 1px, transparent 6px),
+		radial-gradient(circle at 42% 68%, rgba(205, 232, 79, 0.34) 0 1px, transparent 6px),
+		radial-gradient(ellipse at 65% 105%, rgba(24, 106, 62, 0.3), transparent 48%),
+		linear-gradient(145deg, #061810, #04110d);
 	--theme-settings-background:
-		radial-gradient(circle at 92% 18%, rgba(210, 228, 104, 0.28) 0 1px, transparent 5px),
-		radial-gradient(circle at 84% 68%, rgba(195, 218, 86, 0.19) 0 1px, transparent 5px),
-		#07100b;
+		radial-gradient(circle at 92% 18%, rgba(221, 239, 95, 0.47) 0 1px, transparent 6px),
+		radial-gradient(circle at 84% 68%, rgba(201, 229, 75, 0.31) 0 1px, transparent 6px),
+		radial-gradient(ellipse at 92% 112%, rgba(23, 101, 59, 0.24), transparent 42%),
+		#04110d;
+}
+
+:root[data-ui-theme="whale-fall"] {
+	--color-background: #02121b;
+	--color-sidebar: #041b25;
+	--color-surface: #07202b;
+	--color-surface-muted: #041823;
+	--color-surface-elevated: #0b2a36;
+	--color-surface-hover: rgba(87, 207, 201, 0.08);
+	--color-surface-pressed: rgba(87, 207, 201, 0.13);
+	--color-surface-active: rgba(68, 186, 183, 0.14);
+	--color-surface-overlay: rgba(7, 32, 43, 0.96);
+	--color-sidebar-card: rgba(5, 38, 50, 0.68);
+	--color-border: rgba(112, 183, 190, 0.15);
+	--color-border-muted: rgba(112, 183, 190, 0.1);
+	--color-border-strong: rgba(111, 207, 210, 0.25);
+	--color-border-hover: rgba(117, 222, 221, 0.38);
+	--color-text-primary: #e8f5f5;
+	--color-text-secondary: #9ebfc1;
+	--color-text-subtle: #5f858a;
+	--color-text-disabled: #496970;
+	--color-text-inverse: #031718;
+	--color-accent: #57d0c9;
+	--color-accent-strong: #96eee6;
+	--color-accent-soft: rgba(64, 190, 185, 0.14);
+	--color-accent-border: rgba(108, 220, 215, 0.22);
+	--color-accent-glow: rgba(54, 174, 174, 0.21);
+	--color-empty-glow: rgba(53, 183, 184, 0.14);
+	--color-contour: rgba(93, 199, 199, 0.16);
+	--color-selection: rgba(87, 208, 201, 0.28);
+	--color-calendar-plan: #57d0c9;
+	--color-calendar-plan-surface: rgba(38, 137, 139, 0.27);
+	--color-calendar-plan-border: rgba(84, 208, 203, 0.49);
+	--color-calendar-grid-line: rgba(112, 183, 190, 0.12);
+	--color-calendar-grid-minor: rgba(112, 183, 190, 0.065);
+	--color-report-completed: #57d0c9;
+	--color-report-building: #57d0c9;
+	--color-report-planning: #729fd8;
+	--color-report-recovery: #65bd92;
+	--color-report-grid: rgba(112, 183, 190, 0.1);
+	--shadow-popover: 0 22px 64px rgba(0, 7, 13, 0.58);
+	--shadow-subtle: 0 14px 42px rgba(0, 7, 13, 0.25);
+	--focus-ring: 0 0 0 3px rgba(87, 208, 201, 0.27);
+	--theme-shell-background:
+		linear-gradient(116deg, transparent 54%, rgba(100, 220, 218, 0.055) 54.5%, transparent 63%),
+		radial-gradient(circle at 88% 22%, rgba(163, 234, 229, 0.34) 0 1px, transparent 3px),
+		radial-gradient(circle at 76% 39%, rgba(104, 210, 207, 0.24) 0 1px, transparent 4px),
+		radial-gradient(ellipse at 84% 110%, rgba(21, 113, 116, 0.28), transparent 45%),
+		linear-gradient(155deg, #02121b 0%, #031721 100%);
+	--theme-sidebar-background:
+		radial-gradient(circle at 18% 10%, rgba(132, 229, 222, 0.34) 0 1px, transparent 4px),
+		linear-gradient(116deg, transparent 36%, rgba(97, 215, 211, 0.06) 36.5%, transparent 52%),
+		linear-gradient(180deg, #041b25, #03151e);
+	--theme-auth-background:
+		linear-gradient(112deg, transparent 43%, rgba(113, 223, 218, 0.07) 43.5%, transparent 57%),
+		radial-gradient(circle at 18% 18%, rgba(155, 231, 225, 0.38) 0 1px, transparent 4px),
+		radial-gradient(circle at 72% 36%, rgba(95, 207, 204, 0.29) 0 1px, transparent 5px),
+		radial-gradient(ellipse at 70% 108%, rgba(24, 117, 119, 0.3), transparent 48%),
+		linear-gradient(145deg, #041b25, #02121b);
+	--theme-settings-background:
+		linear-gradient(114deg, transparent 70%, rgba(105, 218, 214, 0.055) 70.5%, transparent 80%),
+		radial-gradient(circle at 91% 19%, rgba(139, 226, 219, 0.34) 0 1px, transparent 5px),
+		radial-gradient(ellipse at 92% 112%, rgba(22, 112, 114, 0.24), transparent 42%),
+		#02121b;
 }
 
 [data-theme-option="orange"] {
-	--theme-preview-background: linear-gradient(145deg, #24130a, #140c08);
-	--theme-preview-sidebar: #2c1609;
-	--theme-preview-surface: #321d12;
-	--theme-preview-accent: #f39a51;
-	--theme-preview-border: rgba(255, 188, 127, 0.25);
-	--theme-preview-glow: rgba(240, 130, 45, 0.45);
+	--theme-preview-background:
+		radial-gradient(circle at 86% 14%, rgba(255, 161, 70, 0.25), transparent 26%),
+		linear-gradient(145deg, #fff9ee, #f8ead5);
+	--theme-preview-sidebar: #fff2dd;
+	--theme-preview-surface: #fffaf1;
+	--theme-preview-accent: #e66b1f;
+	--theme-preview-border: rgba(181, 83, 24, 0.27);
+	--theme-preview-glow: rgba(245, 132, 42, 0.38);
 }
 
-[data-theme-option="ocean"] {
-	--theme-preview-background: linear-gradient(145deg, #0a1b24, #081117);
-	--theme-preview-sidebar: #09202a;
-	--theme-preview-surface: #122832;
-	--theme-preview-accent: #51bdc5;
-	--theme-preview-border: rgba(127, 219, 224, 0.22);
-	--theme-preview-glow: rgba(58, 149, 157, 0.4);
+[data-theme-option="observatory"] {
+	--theme-preview-background:
+		radial-gradient(circle at 82% 16%, rgba(224, 236, 255, 0.75) 0 1px, transparent 2px),
+		radial-gradient(circle at 65% 27%, rgba(118, 172, 255, 0.55) 0 1px, transparent 2px),
+		linear-gradient(145deg, #0a1640, #050b20);
+	--theme-preview-sidebar: #091538;
+	--theme-preview-surface: #14244b;
+	--theme-preview-accent: #68a8ff;
+	--theme-preview-border: rgba(139, 187, 255, 0.26);
+	--theme-preview-glow: rgba(68, 118, 221, 0.46);
 }
 
 [data-theme-option="whale-fall"] {
 	--theme-preview-background:
-		radial-gradient(circle at 92% 110%, rgba(112, 76, 185, 0.35), transparent 48%),
-		linear-gradient(145deg, #0a1830, #050b15);
-	--theme-preview-sidebar: #0a1428;
-	--theme-preview-surface: #142440;
-	--theme-preview-accent: #78a9ee;
-	--theme-preview-border: rgba(148, 188, 244, 0.24);
-	--theme-preview-glow: rgba(98, 81, 190, 0.44);
+		linear-gradient(112deg, transparent 55%, rgba(116, 231, 225, 0.1) 55.5%, transparent 68%),
+		radial-gradient(circle at 92% 110%, rgba(35, 143, 145, 0.45), transparent 48%),
+		linear-gradient(145deg, #082834, #02121b);
+	--theme-preview-sidebar: #06222d;
+	--theme-preview-surface: #0c3440;
+	--theme-preview-accent: #57d0c9;
+	--theme-preview-border: rgba(116, 224, 219, 0.25);
+	--theme-preview-glow: rgba(45, 167, 167, 0.46);
 }
 
 [data-theme-option="firefly"] {
 	--theme-preview-background:
-		radial-gradient(circle at 84% 18%, rgba(224, 236, 112, 0.62) 0 1px, transparent 4px),
-		linear-gradient(145deg, #0b1c10, #07100b);
-	--theme-preview-sidebar: #0a2310;
-	--theme-preview-surface: #17281a;
-	--theme-preview-accent: #c2d867;
+		radial-gradient(circle at 84% 18%, rgba(231, 243, 105, 0.72) 0 1px, transparent 4px),
+		radial-gradient(circle at 70% 66%, rgba(203, 230, 74, 0.38) 0 1px, transparent 4px),
+		linear-gradient(145deg, #0a2418, #04110d);
+	--theme-preview-sidebar: #082419;
+	--theme-preview-surface: #142d20;
+	--theme-preview-accent: #c5dc5a;
 	--theme-preview-border: rgba(207, 226, 129, 0.22);
 	--theme-preview-glow: rgba(191, 214, 80, 0.4);
 }
