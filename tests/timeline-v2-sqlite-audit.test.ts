@@ -295,6 +295,31 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 			includeHeldLocal: true,
 		});
 		expect(held.inputs[0]?.state).toBe("HELD_LOCAL");
+		const agentInputId = held.inputs[0]!.input.agentInputId;
+		expect(
+			await repository.releaseAgentInputs(
+				[agentInputId],
+				clock.nowMs(),
+			),
+		).toBe(1);
+		const leased = await repository.queryAgentInputs({
+			nowMs: clock.nowMs(),
+		});
+		const leaseToken = leased.inputs[0]!.leaseToken!;
+		await expect(
+			repository.commitAgentInput(
+				agentInputId,
+				leaseToken,
+				clock.nowMs(),
+			),
+		).resolves.toMatchObject({ state: "ACKED" });
+		await expect(
+			repository.commitAgentInput(
+				agentInputId,
+				"wrong_token_after_ack_0001",
+				clock.nowMs(),
+			),
+		).rejects.toThrow("does not match");
 
 		const sqliteBytes = [path, `${path}-wal`, `${path}-shm`]
 			.filter(existsSync)
@@ -332,7 +357,159 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 			state: "COMMITTED",
 			attempt: 1,
 		});
+		await expect(
+			reopened.commitAgentInput(
+				agentInputId,
+				leaseToken,
+				clock.nowMs(),
+			),
+		).resolves.toMatchObject({ state: "ACKED" });
+		await expect(
+			reopened.commitAgentInput(
+				agentInputId,
+				"wrong_token_after_ack_0002",
+				clock.nowMs(),
+			),
+		).rejects.toThrow("does not match");
 		reopened.close();
+	});
+
+	test("migrates v1 ACK leases without weakening token idempotency", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "whalehall-timeline-v1-"));
+		temporaryDirectories.push(directory);
+		const path = join(directory, "timeline-v2.sqlite3");
+		const vault = new MemoryVault();
+		const clock = new Clock();
+		const repository = new SqliteTimelineV2Repository(
+			path,
+			vault,
+			clock.nowMs.bind(clock),
+		);
+		const { windowId } = await populate(repository, clock);
+		const held = await repository.queryAgentInputs({
+			nowMs: clock.nowMs(),
+			includeHeldLocal: true,
+		});
+		const agentInputId = held.inputs[0]!.input.agentInputId;
+		await repository.releaseAgentInputs([agentInputId], clock.nowMs());
+		const leased = await repository.queryAgentInputs({
+			nowMs: clock.nowMs(),
+		});
+		const leaseToken = leased.inputs[0]!.leaseToken!;
+		repository.close();
+
+		const legacy = new Database(path);
+		legacy.exec("PRAGMA foreign_keys = ON;");
+		const leasedPayload = (
+			legacy
+				.query(
+					"SELECT sealed_payload FROM agent_input_outbox WHERE agent_input_id = ?",
+				)
+				.get(agentInputId) as { sealed_payload: string }
+		).sealed_payload;
+		legacy
+			.query("UPDATE timeline_schema SET version = 1 WHERE singleton = 1")
+			.run();
+		legacy.exec(
+			"ALTER TABLE agent_input_outbox DROP COLUMN acked_lease_token_hash",
+		);
+		legacy
+			.query(
+				`INSERT INTO timeline_windows (
+				  window_id, collector_id, device_id, session_id, input_hash,
+				  trigger_reason, started_at_ms, ended_at_ms, event_count,
+				  first_cursor, last_cursor, sealed_payload
+				 )
+				 SELECT ?, collector_id, device_id, session_id, ?,
+				        trigger_reason, started_at_ms, ended_at_ms, event_count,
+				        ?, ?, ?
+				   FROM timeline_windows WHERE window_id = ?`,
+			)
+			.run(
+				"legacy-window-acked",
+				"legacy-input-hash",
+				"legacy-first-cursor",
+				"legacy-last-cursor",
+				"legacy-window-sealed",
+				windowId,
+			);
+		legacy
+			.query(
+				`INSERT INTO agent_input_outbox (
+				  agent_input_id, window_id, state, created_at_ms, payload_hash,
+				  lease_token, lease_expires_at_ms, attempt, acked_at_ms,
+				  sealed_payload
+				 ) VALUES (?, ?, 'ACKED', ?, ?, NULL, NULL, 1, ?, ?)`,
+			)
+			.run(
+				"legacy_agent_input_acked_0001",
+				"legacy-window-acked",
+				clock.nowMs(),
+				"legacy-payload-hash",
+				clock.nowMs(),
+				"legacy-agent-input-sealed",
+			);
+		legacy.close();
+
+		const migrated = new SqliteTimelineV2Repository(
+			path,
+			vault,
+			clock.nowMs.bind(clock),
+		);
+		await expect(
+			migrated.commitAgentInput(
+				agentInputId,
+				leaseToken,
+				clock.nowMs(),
+			),
+		).resolves.toMatchObject({ state: "ACKED" });
+		await expect(
+			migrated.commitAgentInput(
+				"legacy_agent_input_acked_0001",
+				"unknown_legacy_ack_token_0001",
+				clock.nowMs(),
+			),
+		).rejects.toThrow("does not match");
+		migrated.close();
+
+		const verified = new Database(path, { readonly: true });
+		expect(
+			(
+				verified
+					.query(
+						"SELECT version FROM timeline_schema WHERE singleton = 1",
+					)
+					.get() as { version: number }
+			).version,
+		).toBe(2);
+		expect(
+			(
+				verified
+					.query("PRAGMA table_info(agent_input_outbox)")
+					.all() as Array<{ name: string }>
+			).some((column) => column.name === "acked_lease_token_hash"),
+		).toBeTrue();
+		expect(
+			(
+				verified
+					.query(
+						"SELECT sealed_payload FROM agent_input_outbox WHERE agent_input_id = ?",
+					)
+					.get(agentInputId) as { sealed_payload: string }
+			).sealed_payload,
+		).toBe(leasedPayload);
+		expect(
+			(
+				verified
+					.query(
+						"SELECT acked_lease_token_hash FROM agent_input_outbox WHERE agent_input_id = ?",
+					)
+					.get("legacy_agent_input_acked_0001") as {
+					acked_lease_token_hash: string | null;
+				}
+			).acked_lease_token_hash,
+		).toBeNull();
+		verified.close();
 	});
 
 	test("exports exactly five minutes with full lineage and redacts by default", async () => {

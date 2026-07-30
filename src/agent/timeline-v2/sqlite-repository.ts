@@ -36,7 +36,7 @@ import {
 	type TimelineVaultPurpose,
 } from "./vault";
 
-const SQLITE_SCHEMA_VERSION = 1;
+const SQLITE_SCHEMA_VERSION = 2;
 const RAW_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DERIVED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -104,6 +104,7 @@ type OutboxRow = {
 	created_at_ms: number;
 	payload_hash: string;
 	lease_token: string | null;
+	acked_lease_token_hash: string | null;
 	lease_expires_at_ms: number | null;
 	attempt: number;
 	acked_at_ms: number | null;
@@ -837,10 +838,16 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 		leaseToken: string,
 		nowMs: number,
 	): Promise<AgentInputEnvelopeV1> {
+		const leaseTokenHash = await opaqueLeaseTokenHash(leaseToken);
 		const transaction = this.database.transaction(() => {
 			const row = this.outboxRow(agentInputId);
 			if (!row) throw new Error(`Unknown AgentInput: ${agentInputId}.`);
-			if (row.state === "ACKED") return row;
+			if (row.state === "ACKED") {
+				if (row.acked_lease_token_hash !== leaseTokenHash) {
+					throw new Error("AgentInput ACK lease token does not match.");
+				}
+				return row;
+			}
 			if (
 				row.state !== "LEASED" ||
 				row.lease_token !== leaseToken ||
@@ -853,11 +860,12 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 				.query(
 					`UPDATE agent_input_outbox
 					 SET state = 'ACKED', lease_token = NULL,
+					     acked_lease_token_hash = ?,
 					     lease_expires_at_ms = NULL, acked_at_ms = ?
 					 WHERE agent_input_id = ? AND state = 'LEASED'
 					   AND lease_token = ?`,
 				)
-				.run(nowMs, agentInputId, leaseToken);
+				.run(leaseTokenHash, nowMs, agentInputId, leaseToken);
 			if (updated.changes !== 1) {
 				throw new Error(`AgentInput commit raced for ${agentInputId}.`);
 			}
@@ -865,6 +873,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 				...row,
 				state: "ACKED" as const,
 				lease_token: null,
+				acked_lease_token_hash: leaseTokenHash,
 				lease_expires_at_ms: null,
 				acked_at_ms: nowMs,
 			};
@@ -1066,6 +1075,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 				 created_at_ms INTEGER NOT NULL,
 				 payload_hash TEXT NOT NULL,
 				 lease_token TEXT,
+				 acked_lease_token_hash TEXT,
 				 lease_expires_at_ms INTEGER,
 				 attempt INTEGER NOT NULL,
 				 acked_at_ms INTEGER,
@@ -1078,16 +1088,39 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 			const row = this.database
 				.query("SELECT version FROM timeline_schema WHERE singleton = 1")
 				.get() as { version: number } | null;
+			if (
+				row !== null &&
+				row.version !== 1 &&
+				row.version !== SQLITE_SCHEMA_VERSION
+			) {
+				throw new Error(
+					`Unsupported timeline SQLite schema ${row.version}; expected 1 or ${SQLITE_SCHEMA_VERSION}.`,
+				);
+			}
+			const outboxColumns = this.database
+				.query("PRAGMA table_info(agent_input_outbox)")
+				.all() as Array<{ name: string }>;
+			if (
+				!outboxColumns.some(
+					(column) => column.name === "acked_lease_token_hash",
+				)
+			) {
+				this.database.exec(
+					"ALTER TABLE agent_input_outbox ADD COLUMN acked_lease_token_hash TEXT",
+				);
+			}
 			if (!row) {
 				this.database
 					.query(
 						"INSERT INTO timeline_schema(singleton, version) VALUES (1, ?)",
 					)
 					.run(SQLITE_SCHEMA_VERSION);
-			} else if (row.version !== SQLITE_SCHEMA_VERSION) {
-				throw new Error(
-					`Unsupported timeline SQLite schema ${row.version}; expected ${SQLITE_SCHEMA_VERSION}.`,
-				);
+			} else if (row.version === 1) {
+				this.database
+					.query(
+						"UPDATE timeline_schema SET version = ? WHERE singleton = 1",
+					)
+					.run(SQLITE_SCHEMA_VERSION);
 			}
 		});
 		migration.immediate();
@@ -1453,4 +1486,14 @@ function hardenPath(path: string, mode: number): void {
 	} catch {
 		// POSIX mode hardening is unavailable on some test and Windows filesystems.
 	}
+}
+
+async function opaqueLeaseTokenHash(value: string): Promise<string> {
+	const digest = await crypto.subtle.digest(
+		"SHA-256",
+		new TextEncoder().encode(value),
+	);
+	return [...new Uint8Array(digest)]
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
 }

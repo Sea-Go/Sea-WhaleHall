@@ -1,5 +1,8 @@
 import type { TimelineV2Service } from "./service";
-import type { AgentInputEnvelopeV1 } from "./types";
+import {
+	AGENT_INPUT_SCHEMA_VERSION,
+	type AgentInputEnvelopeV1,
+} from "./types";
 
 export const AGENT_INPUT_QUERY_REQUEST_VERSION =
 	"agent-input.query.v1" as const;
@@ -8,7 +11,7 @@ export const AGENT_INPUT_QUERY_RESPONSE_VERSION =
 export const AGENT_INPUT_COMMIT_REQUEST_VERSION =
 	"agent-input.commit.v1" as const;
 export const AGENT_INPUT_COMMIT_RESPONSE_VERSION =
-	"agent-input.commit-result.v1" as const;
+	"agent-input.commit-result.v2" as const;
 export const AGENT_INPUT_REPLAY_REQUEST_VERSION =
 	"agent-input.replay.v1" as const;
 export const AGENT_INPUT_REPLAY_RESPONSE_VERSION =
@@ -47,7 +50,9 @@ export type AgentInputCommitRequestV1 = {
 
 export type AgentInputCommitResponseV1 = {
 	schemaVersion: typeof AGENT_INPUT_COMMIT_RESPONSE_VERSION;
-	input: AgentInputEnvelopeV1;
+	agentInputId: string;
+	state: "ACKED";
+	ackedAtMs: number;
 };
 
 export type AgentInputReplayRequestV1 = {
@@ -147,22 +152,29 @@ export class TimelineAgentInputAdapterV1 {
 	async commit(request: unknown): Promise<AgentInputCommitResponseV1> {
 		const parsed = parseCommitRequest(request);
 		try {
-			const input = await this.service.commitAgentInput(
+			const envelope = await this.service.commitAgentInput(
 				parsed.agentInputId,
 				parsed.leaseToken,
 			);
 			if (
-				input.state !== "ACKED" ||
-				input.input.agentInputId !== parsed.agentInputId ||
-				!isOpaqueValue(input.input.idempotencyKey) ||
-				input.leaseToken !== null ||
-				input.leaseExpiresAtMs !== null
+				envelope.state !== "ACKED" ||
+				envelope.input.agentInputId !== parsed.agentInputId ||
+				!isOpaqueValue(envelope.input.idempotencyKey) ||
+				envelope.leaseToken !== null ||
+				envelope.leaseExpiresAtMs !== null ||
+				!isBoundedInteger(
+					envelope.ackedAtMs,
+					0,
+					Number.MAX_SAFE_INTEGER,
+				)
 			) {
 				throw new AgentInputAdapterError("COMMIT_REJECTED");
 			}
 			return {
 				schemaVersion: AGENT_INPUT_COMMIT_RESPONSE_VERSION,
-				input,
+				agentInputId: parsed.agentInputId,
+				state: "ACKED",
+				ackedAtMs: envelope.ackedAtMs,
 			};
 		} catch {
 			throw new AgentInputAdapterError("COMMIT_REJECTED");
@@ -271,6 +283,7 @@ function validLeasedResult(
 	return inputs.every(
 		(envelope) =>
 			envelope.state === "LEASED" &&
+			isDeliverableAgentInput(envelope.input) &&
 			isOpaqueValue(envelope.input.agentInputId) &&
 			isOpaqueValue(envelope.input.idempotencyKey) &&
 			isOpaqueValue(envelope.leaseToken) &&
@@ -279,6 +292,112 @@ function validLeasedResult(
 			Number.isSafeInteger(envelope.attempt) &&
 			envelope.attempt >= 1,
 	);
+}
+
+const ACTIVITY_LABELS = new Set([
+	"development",
+	"writing",
+	"research",
+	"communication",
+	"planning",
+	"data_work",
+	"media",
+	"gaming",
+	"system_file_ops",
+	"commerce",
+	"idle_transition",
+	"other_unknown",
+]);
+const GOAL_RELEVANCE_LABELS = new Set([
+	"direct",
+	"supporting",
+	"unrelated",
+	"uncertain",
+]);
+const UNCERTAIN_HYPOTHESIS =
+	"可能在进行当前可见操作（活动类型暂不确定）";
+
+/**
+ * Fail closed at the future Agent delivery boundary. Pre-uncertainty local
+ * records remain decryptable for audit, but cannot leave the outbox without
+ * the calibrated snapshot added to every segment.
+ */
+function isDeliverableAgentInput(value: unknown): boolean {
+	if (
+		!isRecord(value) ||
+		value.schemaVersion !== AGENT_INPUT_SCHEMA_VERSION ||
+		!("goal" in value) ||
+		(value.goal !== null && !isRecord(value.goal)) ||
+		!Array.isArray(value.segments) ||
+		value.segments.length < 1
+	) {
+		return false;
+	}
+	const hasGoal = value.goal !== null;
+	return value.segments.every((segment) => {
+		if (
+			!isRecord(segment) ||
+			!ACTIVITY_LABELS.has(String(segment.activity)) ||
+			!isRecord(segment.classification) ||
+			!hasExactKeys(
+				segment.classification,
+				[
+					"activity",
+					"goalRelevance",
+					"confidence",
+					"entropy",
+					"oodScore",
+					"abstain",
+					"modelVersion",
+				],
+				[],
+			)
+		) {
+			return false;
+		}
+		const classification = segment.classification;
+		if (
+			!ACTIVITY_LABELS.has(String(classification.activity)) ||
+			!isUnitInterval(classification.confidence) ||
+			!isUnitInterval(classification.entropy) ||
+			!isUnitInterval(classification.oodScore) ||
+			typeof classification.abstain !== "boolean" ||
+			!isBoundedText(classification.modelVersion, 1, 256)
+		) {
+			return false;
+		}
+		if (!hasGoal) {
+			if (
+				classification.goalRelevance !== null ||
+				segment.goalRelevance !== null
+			) {
+				return false;
+			}
+		} else if (
+			!GOAL_RELEVANCE_LABELS.has(
+				String(classification.goalRelevance),
+			) ||
+			!GOAL_RELEVANCE_LABELS.has(String(segment.goalRelevance))
+		) {
+			return false;
+		}
+		if (classification.abstain) {
+			return (
+				segment.activity === "other_unknown" &&
+				segment.goalRelevance ===
+					(hasGoal ? "uncertain" : null) &&
+				isRecord(segment.hypothesis) &&
+				segment.hypothesis.generator ===
+					"deterministic-template.v2" &&
+				segment.hypothesis.text === UNCERTAIN_HYPOTHESIS
+			);
+		}
+		return (
+			segment.activity === classification.activity &&
+			segment.goalRelevance ===
+				classification.goalRelevance
+		);
+	});
 }
 
 function hasExactKeys(
@@ -320,6 +439,28 @@ function isBoundedInteger(
 		Number.isSafeInteger(value) &&
 		(value as number) >= minimum &&
 		(value as number) <= maximum
+	);
+}
+
+function isUnitInterval(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isFinite(value) &&
+		value >= 0 &&
+		value <= 1
+	);
+}
+
+function isBoundedText(
+	value: unknown,
+	minimum: number,
+	maximum: number,
+): value is string {
+	return (
+		typeof value === "string" &&
+		value.length >= minimum &&
+		value.length <= maximum &&
+		!/[\u0000-\u001f\u007f]/u.test(value)
 	);
 }
 

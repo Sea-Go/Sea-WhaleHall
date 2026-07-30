@@ -20,6 +20,7 @@ class FakeAgentInputService {
 	nowMs = 10_000;
 	private leaseSequence = 0;
 	readonly outbox = new Map<string, AgentInputEnvelopeV1>();
+	readonly ackedLeaseTokens = new Map<string, string>();
 	readonly queries: Array<{
 		limit?: number;
 		leaseDurationMs?: number;
@@ -80,7 +81,12 @@ class FakeAgentInputService {
 	): Promise<AgentInputEnvelopeV1> {
 		const current = this.outbox.get(agentInputId);
 		if (!current) throw new Error(`secret unknown id ${agentInputId}`);
-		if (current.state === "ACKED") return structuredClone(current);
+		if (current.state === "ACKED") {
+			if (this.ackedLeaseTokens.get(agentInputId) !== leaseToken) {
+				throw new Error(`secret bad ACK token ${leaseToken}`);
+			}
+			return structuredClone(current);
+		}
 		if (
 			current.state !== "LEASED" ||
 			current.leaseToken !== leaseToken ||
@@ -96,6 +102,7 @@ class FakeAgentInputService {
 			ackedAtMs: this.nowMs,
 		};
 		this.outbox.set(agentInputId, acked);
+		this.ackedLeaseTokens.set(agentInputId, leaseToken);
 		return structuredClone(acked);
 	}
 
@@ -249,9 +256,21 @@ describe("TimelineAgentInputAdapterV1", () => {
 		expect(committed.schemaVersion).toBe(
 			AGENT_INPUT_COMMIT_RESPONSE_VERSION,
 		);
-		expect(committed.input.state).toBe("ACKED");
-		expect(committed.input.input.idempotencyKey).toBe(idempotencyKey);
+		expect(committed).toEqual({
+			schemaVersion: AGENT_INPUT_COMMIT_RESPONSE_VERSION,
+			agentInputId: id,
+			state: "ACKED",
+			ackedAtMs: service.nowMs,
+		});
+		expect(committed).not.toHaveProperty("input");
+		expect(JSON.stringify(committed)).not.toContain(idempotencyKey);
 		expect(duplicate).toEqual(committed);
+		await expect(
+			adapter.commit({
+				...request,
+				leaseToken: "wrong_token_after_ack_0001",
+			}),
+		).rejects.toMatchObject({ code: "COMMIT_REJECTED" });
 		expect(
 			(
 				await adapter.query({
@@ -291,14 +310,12 @@ describe("TimelineAgentInputAdapterV1", () => {
 		expect(error.message).not.toContain(wrongToken);
 
 		expect(
-			(
-				await adapter.commit({
-					schemaVersion: AGENT_INPUT_COMMIT_REQUEST_VERSION,
-					agentInputId: id,
-					leaseToken: leased.leaseToken!,
-				})
-			).input.state,
-		).toBe("ACKED");
+			await adapter.commit({
+				schemaVersion: AGENT_INPUT_COMMIT_REQUEST_VERSION,
+				agentInputId: id,
+				leaseToken: leased.leaseToken!,
+			}),
+		).toMatchObject({ state: "ACKED" });
 	});
 
 	test("strictly rejects unknown fields, invalid versions, and unsafe bounds", async () => {
@@ -444,6 +461,57 @@ describe("TimelineAgentInputAdapterV1", () => {
 		expect(error.message).toBe("AgentInput query failed.");
 		expect(error.message).not.toContain("sensitive");
 	});
+
+	test("fails closed before delivering legacy or unsafe uncertainty snapshots", async () => {
+		const mutations: Array<(input: AgentInputV1) => void> = [
+			(input) => {
+				delete (
+					input.segments[0] as unknown as Record<string, unknown>
+				).classification;
+			},
+			(input) => {
+				input.segments = [];
+			},
+			(input) => {
+				input.segments[0]!.classification.goalRelevance =
+					"unrelated";
+				input.segments[0]!.goalRelevance = "unrelated";
+			},
+			(input) => {
+				input.segments[0]!.classification = {
+					...input.segments[0]!.classification,
+					activity: "development",
+					goalRelevance: null,
+					confidence: 0.2,
+					entropy: 0.95,
+					oodScore: 0.98,
+					abstain: true,
+				};
+			},
+		];
+
+		for (const [index, mutate] of mutations.entries()) {
+			const service = new FakeAgentInputService();
+			const id = opaqueId(`legacy-${index}`);
+			service.addHeld(id);
+			mutate(service.outbox.get(id)!.input);
+			const adapter = new TimelineAgentInputAdapterV1(service);
+			await adapter.replay({
+				schemaVersion: AGENT_INPUT_REPLAY_REQUEST_VERSION,
+				agentInputIds: [id],
+			});
+
+			const error = await captureError(() =>
+				adapter.query({
+					schemaVersion: AGENT_INPUT_QUERY_REQUEST_VERSION,
+				}),
+			);
+			expect(error.code).toBe("QUERY_FAILED");
+			expect(error.message).toBe("AgentInput query failed.");
+			expect(error.message).not.toContain(id);
+			expect(service.outbox.get(id)?.state).toBe("LEASED");
+		}
+	});
 });
 
 function inputFixture(
@@ -461,7 +529,31 @@ function inputFixture(
 		deadlineAtMs: 9_000,
 		period: { startedAtMs: 1_000, endedAtMs: 9_000 },
 		goal: null,
-		segments: [],
+		segments: [
+			{
+				episodeId: "episode_adapter_fixture",
+				episodeRevisionId: "episode_revision_adapter_fixture",
+				startedAtMs: 1_000,
+				endedAtMs: 9_000,
+				activity: "research",
+				goalRelevance: null,
+				classification: {
+					activity: "research",
+					goalRelevance: null,
+					confidence: 0.8,
+					entropy: 0.3,
+					oodScore: 0.1,
+					abstain: false,
+					modelVersion: "modernbert-adapter-fixture",
+				},
+				hypothesis: {
+					text: "可能在查阅和研究资料",
+					citedFactIds: ["fact_adapter_fixture"],
+					generator: "deterministic-template.v2",
+				},
+				evidence: [],
+			},
+		],
 		renderedText: "local-only summary",
 		coverage: ["metadata"],
 		modelVersions: ["deterministic"],

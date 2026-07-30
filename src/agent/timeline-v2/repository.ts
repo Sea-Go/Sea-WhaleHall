@@ -112,6 +112,7 @@ export class InMemoryTimelineV2Repository implements TimelineV2Repository {
 	private readonly jobs = new Map<string, TimelineJobV2>();
 	private readonly results = new Map<string, PersistTimelineResult>();
 	private readonly outbox = new Map<string, AgentInputEnvelopeV1>();
+	private readonly ackedLeaseTokenHashes = new Map<string, string>();
 
 	async loadCollector(
 		collectorId: string,
@@ -421,7 +422,15 @@ export class InMemoryTimelineV2Repository implements TimelineV2Repository {
 	): Promise<AgentInputEnvelopeV1> {
 		const current = this.outbox.get(agentInputId);
 		if (!current) throw new Error(`Unknown AgentInput: ${agentInputId}.`);
-		if (current.state === "ACKED") return clone(current);
+		const leaseTokenHash = await opaqueLeaseTokenHash(leaseToken);
+		if (current.state === "ACKED") {
+			if (
+				this.ackedLeaseTokenHashes.get(agentInputId) !== leaseTokenHash
+			) {
+				throw new Error("AgentInput ACK lease token does not match.");
+			}
+			return clone(current);
+		}
 		if (
 			current.state !== "LEASED" ||
 			current.leaseToken !== leaseToken ||
@@ -438,6 +447,7 @@ export class InMemoryTimelineV2Repository implements TimelineV2Repository {
 			ackedAtMs: nowMs,
 		};
 		this.outbox.set(agentInputId, acked);
+		this.ackedLeaseTokenHashes.set(agentInputId, leaseTokenHash);
 		return clone(acked);
 	}
 
@@ -535,4 +545,14 @@ function boundedFailureText(value: string, maximum: number): string {
 
 function clone<T>(value: T): T {
 	return structuredClone(value);
+}
+
+async function opaqueLeaseTokenHash(value: string): Promise<string> {
+	const digest = await crypto.subtle.digest(
+		"SHA-256",
+		new TextEncoder().encode(value),
+	);
+	return [...new Uint8Array(digest)]
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
 }

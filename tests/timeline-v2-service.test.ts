@@ -424,6 +424,18 @@ describe("TimelineV2Service", () => {
 			leaseToken!,
 		);
 		expect(acked.state).toBe("ACKED");
+		await expect(
+			service.commitAgentInput(
+				leased.inputs[0]!.input.agentInputId,
+				"wrong_token_after_ack_0001",
+			),
+		).rejects.toThrow("does not match");
+		await expect(
+			service.commitAgentInput(
+				leased.inputs[0]!.input.agentInputId,
+				leaseToken!,
+			),
+		).resolves.toMatchObject({ state: "ACKED" });
 		await service.stop();
 	});
 
