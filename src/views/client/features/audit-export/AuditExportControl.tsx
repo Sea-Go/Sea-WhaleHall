@@ -7,6 +7,7 @@ import {
 } from "./audit-export-service";
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
+const INPUT_BUCKET_MS = 5 * 1000;
 
 export type AuditExportControlProps = {
 	service: AuditExportService;
@@ -30,7 +31,7 @@ export function AuditExportControl({
 		setState({ status: "exporting" });
 		try {
 			const result = await service.exportFiveMinutes({
-				fromMs: Math.max(0, nowMs() - FIVE_MINUTES_MS),
+				fromMs: recentCompleteFiveMinuteStart(nowMs()),
 				includeDecryptedContent,
 			});
 			setState({
@@ -51,7 +52,10 @@ export function AuditExportControl({
 	}
 
 	return (
-		<section className="audit-export-control" aria-labelledby="audit-export-title">
+		<section
+			className="audit-export-control"
+			aria-labelledby="audit-export-title"
+		>
 			<div className="audit-export-control__heading">
 				<span aria-hidden="true">
 					<FileLock2 size={17} />
@@ -59,8 +63,8 @@ export function AuditExportControl({
 				<div>
 					<strong id="audit-export-title">最近五分钟审计包</strong>
 					<p>
-						主动选择本机文件夹后，导出 raw→event→fact→episode
-						血缘。默认隐藏可见文本与网址。
+						主动选择本机文件夹后，导出 raw→event→fact→episode slice→timeline
+						slice 血缘。范围对齐到完整 5 秒活动桶，默认隐藏可见文本与网址。
 					</p>
 				</div>
 			</div>
@@ -98,4 +102,13 @@ export function AuditExportControl({
 			) : null}
 		</section>
 	);
+}
+
+export function recentCompleteFiveMinuteStart(nowMs: number): number {
+	if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
+		throw new Error("nowMs must be a non-negative safe integer.");
+	}
+	const completedBucketEndMs =
+		Math.floor(nowMs / INPUT_BUCKET_MS) * INPUT_BUCKET_MS;
+	return Math.max(0, completedBucketEndMs - FIVE_MINUTES_MS);
 }

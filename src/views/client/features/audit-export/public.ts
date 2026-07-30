@@ -1,5 +1,6 @@
 export {
 	AuditExportControl,
+	recentCompleteFiveMinuteStart,
 	type AuditExportControlProps,
 } from "./AuditExportControl";
 export {

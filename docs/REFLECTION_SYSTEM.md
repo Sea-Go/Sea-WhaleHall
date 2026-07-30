@@ -190,21 +190,36 @@ manifest + permissions/coverage
 + rawObservations
 + semanticEvents
 + evidenceFacts
-+ episode revisions
-+ timeline summaries
-+ observation → event → fact → episode → timeline lineage
++ exact source episode revisions / source timeline summaries
++ range-recomputed episodeSlices / timelineSlices
++ observation → event → fact → episodeSlice → timelineSegmentSlice → timelineSlice lineage
 ```
 
 默认导出遮蔽正文、假设和 Fact 参数；只有调用方显式请求
 `includeDecryptedContent:true` 时，Rust 才可返回仍在保留期且已授权的文本。
 导出协议不包含截图字节或路径。Renderer 只能请求 Bun 执行文件导出，永远
 拿不到 audit bundle、Held AgentInput、明文或完整文件路径。解密导出需要
-原生二次确认和目录选择；文件以 `O_EXCL`、`0600` 新建并 `fsync`，不会覆盖
-已有文件。任一 raw/event/fact/episode/summary 跨越所选五分钟边界时，导出
-会 fail closed 地省略该层内容，在 manifest 记录各层 omission 数并把 coverage
-标为 unavailable，绝不把相邻时段的明文一并导出。默认脱敏还会在 Bun
-边界再次执行 raw allow-list 和字符串脱敏，解密模式也会剥离任何截图、像素
-缓冲或临时文件字段。
+原生二次确认和目录选择。Bun 同时强制 `fromMs` 对齐 epoch 的完整 5 秒活动桶。
+
+Audit v3 不会把改写后的内容冒充不可变 episode revision 或 timeline。完全位于
+范围内的源 episode/summary 可继续出现在 `episodes`/`timelineSummaries`；
+所有可导出的范围内 Fact 另构成带独立 `episodeSliceId`、`segmentSliceId` 和
+`timelineSliceId` 的 excerpt。每个 slice 显式保留
+`sourceEpisodeRevisionId`/`sourceTimelineId` 作为 provenance。跨界推理只使用
+范围内 Fact 由 `HeuristicTimelineEpisodeClassifier` 重新分类，并标记
+`inferenceScope=range_recomputed`；因为审计索引只有 `goalVersion` 而没有目标
+正文，`goalRelevance` 必须为 `null`，假设固定由 deterministic 模板生成并只
+引用包内 Fact，绝不沿用 Qwen 文本或伪造引用。lineage 的 slice ID 都可在包内
+对应数组或 timeline segment 中解析，source ID 则明确标为外部不可变来源。
+manifest 分别记录 source episode、episode slice、source timeline summary 和
+timeline slice 数量，所有 included count 与实际数组逐项一致。
+
+Raw observation 在 TypeScript 导出边界按 `raw-observation.v2` schema 和已知 kind
+执行严格字段 allow-list；未知 schema/kind、额外字段或错误 payload 直接省略，
+不依赖截图/路径关键词黑名单。文件先流式写入所选目录内隐藏的 `0600` 临时文件，
+每次写入都检查 `bytesWritten`，完成后 `fsync` 并关闭，再用不覆盖目标的原子
+hard-link 发布最终 `.json`，清理临时文件并 `fsync` 目录。失败时不会留下可见的
+部分 JSON，也不会覆盖已有文件。
 
 WebView 的生产 CSP 只允许自身资源和 Electrobun 固定使用的
 `ws://localhost:*` 本机 RPC。该通道使用每个 WebView 独立的 AES-GCM
