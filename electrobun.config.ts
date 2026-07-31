@@ -110,7 +110,10 @@ export default {
 		},
 	},
 	runtime: {
-		exitOnLastWindowClosed: true,
+		// On macOS the control window is presentation state. The Bun process,
+		// Timeline runtime, whalehall-local, and Observer remain resident until
+		// the user explicitly quits WhaleHall.
+		exitOnLastWindowClosed: target.os !== "macos",
 	},
 	scripts: {
 		preBuild: "scripts/pre-build.ts",

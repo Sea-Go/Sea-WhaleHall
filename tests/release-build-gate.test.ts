@@ -36,6 +36,12 @@ describe("stable macOS release build gate", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.output).not.toContain("[whalehall-release-gate]");
 	});
+
+	test("keeps the macOS runtime alive after the control window closes", async () => {
+		const result = await evaluateConfig("canary", {});
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain('"exitOnLastWindowClosed":false');
+	});
 });
 
 async function evaluateConfig(
@@ -53,7 +59,7 @@ async function evaluateConfig(
 		[
 			process.execPath,
 			"-e",
-			`await import(${JSON.stringify(configUrl)})`,
+			`console.log(JSON.stringify((await import(${JSON.stringify(configUrl)})).default.runtime))`,
 			"--",
 			`--env=${channel}`,
 		],

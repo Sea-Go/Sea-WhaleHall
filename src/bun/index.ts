@@ -6,6 +6,7 @@ import {
 	Screen,
 	Updater,
 	Utils,
+	app,
 } from "electrobun/bun";
 import { AgentRuntime } from "../agent/agent-runtime";
 import {
@@ -32,6 +33,7 @@ import {
 	parseNativeRuntimeChannel,
 } from "./native-runtime-security";
 import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
+import { BackgroundAppLifecycle } from "./app-lifecycle";
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
@@ -138,13 +140,13 @@ const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
 await auditCaptureCoordinator.initialize();
 const STARTUP_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 45_000, 120_000, 300_000];
 
-let clientWindow: BrowserWindow;
+let clientWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow;
 let petWindowController: PetWindowController;
 let petStateArbiter: PetStateArbiter;
 
 function sendLocalStatus(status = agent.getLocalStatus()): void {
-	clientRPC.send.localStatusChanged(status);
+	if (clientWindow !== null) clientRPC.send.localStatusChanged(status);
 	petStateArbiter.updateRuntime(status);
 }
 
@@ -226,7 +228,9 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 				petVisible = visible;
 				if (!visible) petStateArbiter.resetToRuntime(agent.getLocalStatus());
 				petWindowController.setVisible(visible);
-				clientRPC.send.petVisibilityChanged({ visible });
+				if (clientWindow !== null) {
+					clientRPC.send.petVisibilityChanged({ visible });
+				}
 				return { visible };
 			},
 			presentPetEvent: (event): { accepted: boolean } => {
@@ -316,22 +320,48 @@ const display = Screen.getPrimaryDisplay();
 const clientWidth = Math.min(1280, Math.max(1000, display.workArea.width - 80));
 const clientHeight = Math.min(800, Math.max(720, display.workArea.height - 80));
 
-clientWindow = new BrowserWindow({
-	title: "WhaleHall",
-	url: await viewUrl("client"),
-	rpc: clientRPC,
-	frame: {
-		x: 120,
-		y: 100,
-		width: clientWidth,
-		height: clientHeight,
+async function createClientWindow(): Promise<BrowserWindow> {
+	const window = new BrowserWindow({
+		title: "WhaleHall",
+		url: await viewUrl("client"),
+		rpc: clientRPC,
+		frame: {
+			x: 120,
+			y: 100,
+			width: clientWidth,
+			height: clientHeight,
+		},
+	});
+	window.setPosition(
+		display.workArea.x +
+			Math.max(0, Math.floor((display.workArea.width - clientWidth) / 2)),
+		display.workArea.y +
+			Math.max(0, Math.floor((display.workArea.height - clientHeight) / 2)),
+	);
+	window.webview.on("dom-ready", () => {
+		sendLocalStatus();
+		clientRPC.send.petVisibilityChanged({ visible: petVisible });
+	});
+	window.on("close", () => {
+		clientLifecycle.didClose(window);
+		if (clientWindow === window) clientWindow = null;
+	});
+	clientWindow = window;
+	return window;
+}
+
+const clientLifecycle = new BackgroundAppLifecycle<BrowserWindow>({
+	createWindow: createClientWindow,
+	shutdown,
+	exit: () => Utils.quit(),
+	onError(operation, error) {
+		console.error(
+			`[lifecycle] ${operation} failed:`,
+			error instanceof Error ? error.name : "UNKNOWN",
+		);
 	},
 });
-
-clientWindow.setPosition(
-	display.workArea.x + Math.max(0, Math.floor((display.workArea.width - clientWidth) / 2)),
-	display.workArea.y + Math.max(0, Math.floor((display.workArea.height - clientHeight) / 2)),
-);
+await clientLifecycle.open();
 
 petWindow = new BrowserWindow({
 	title: "WhaleHall Pet",
@@ -364,10 +394,6 @@ petWindowController = new PetWindowController(petWindow, Screen, {
 
 agent.onStatusChange(sendLocalStatus);
 agent.onToolEvent(sendToolEvent);
-clientWindow.webview.on("dom-ready", () => {
-	sendLocalStatus();
-	clientRPC.send.petVisibilityChanged({ visible: petVisible });
-});
 petWindow.webview.on("dom-ready", () => {
 	console.log("[pet] DOM ready");
 	sendLocalStatus();
@@ -396,14 +422,19 @@ function shutdown(): Promise<void> {
 	return shutdownPromise;
 }
 
-clientWindow.on("close", () => {
+app.on("reopen", () => {
+	void clientLifecycle.open();
+});
+app.on("before-quit", () => {
+	// Normal menu/Dock quit still starts the same idempotent persistence path.
+	// Explicit WhaleHall quit actions await this path before calling Utils.quit.
 	void shutdown();
 });
 process.once("SIGINT", () => {
-	void shutdown().finally(() => process.exit(0));
+	void clientLifecycle.quit();
 });
 process.once("SIGTERM", () => {
-	void shutdown().finally(() => process.exit(0));
+	void clientLifecycle.quit();
 });
 
 startupPromise = (async () => {
