@@ -8,6 +8,17 @@ export const MONITORING_PERMISSION_IDS = [
 export type MonitoringPermissionId =
 	(typeof MONITORING_PERMISSION_IDS)[number];
 
+/**
+ * The full local-content setup. Browser Automation is deliberately excluded:
+ * it is an optional enrichment and must never block monitoring readiness or
+ * trigger one consent dialog per browser.
+ */
+export const MONITORING_SETUP_PERMISSION_IDS = [
+	"accessibility",
+	"screenRecording",
+	"inputMonitoring",
+] as const satisfies readonly MonitoringPermissionId[];
+
 export type MonitoringPermissionState =
 	| "granted"
 	| "unknown"
@@ -20,6 +31,23 @@ export interface MonitoringPermissionStatus {
 	state: MonitoringPermissionState;
 	required: boolean;
 	detail: string | null;
+}
+
+export type ContentVaultAvailability =
+	| "available"
+	| "migration_required"
+	| "unavailable";
+
+export type ContentVaultStorageMode =
+	| "data_protection_keychain"
+	| "local_login_keychain"
+	| "legacy_development_keychain"
+	| "custom";
+
+export interface ContentVaultStatus {
+	availability: ContentVaultAvailability;
+	storageMode: ContentVaultStorageMode | null;
+	interactiveMigrationAvailable: boolean;
 }
 
 export type MonitoringPermissionCheckState =
@@ -44,8 +72,11 @@ export interface MonitoringSnapshot {
 	paused: boolean;
 	observerConnected: boolean;
 	permissions: MonitoringPermissionStatus[];
+	contentVault: ContentVaultStatus;
 	permissionCheckState: MonitoringPermissionCheckState;
 	permissionsCheckedAtMs: number | null;
+	permissionSetupAvailable: boolean;
+	permissionSetupAttempted: boolean;
 	excludedAppIds: string[];
 	lastObservationAtMs: number | null;
 	coverageGaps: string[];
@@ -55,6 +86,77 @@ export interface MonitoringConfiguration {
 	enabled: boolean;
 	captureContent: boolean;
 	excludedAppIds: string[];
+}
+
+export type MonitoringSetupPhase =
+	| "not_started"
+	| "needs_permissions"
+	| "needs_legacy_vault_migration"
+	| "ready"
+	| "unavailable";
+
+export type MonitoringSetupStatus = {
+	phase: MonitoringSetupPhase;
+	permissions: MonitoringPermissionStatus[];
+	missingPermissions: MonitoringPermissionStatus[];
+	firstMissingPermission: MonitoringPermissionStatus | null;
+	grantedPermissionCount: number;
+	requiredPermissionCount: number;
+};
+
+export function monitoringSetupStatus(
+	snapshot: MonitoringSnapshot,
+): MonitoringSetupStatus {
+	const permissionById = new Map(
+		snapshot.permissions.map((permission) => [permission.id, permission]),
+	);
+	const permissions = MONITORING_SETUP_PERMISSION_IDS.map(
+		(id): MonitoringPermissionStatus =>
+			permissionById.get(id) ?? {
+				id,
+				state: "unknown",
+				required: true,
+				detail: null,
+			},
+	);
+	const missingPermissions = permissions.filter(
+		(permission) => permission.state !== "granted",
+	);
+	const common = {
+		permissions,
+		missingPermissions,
+		firstMissingPermission: missingPermissions[0] ?? null,
+		grantedPermissionCount:
+			permissions.length - missingPermissions.length,
+		requiredPermissionCount: permissions.length,
+	};
+
+	if (snapshot.state === "unavailable") {
+		return { phase: "unavailable", ...common };
+	}
+	if (
+		snapshot.contentVault.availability === "unavailable" ||
+		(snapshot.contentVault.availability === "migration_required" &&
+			!snapshot.contentVault.interactiveMigrationAvailable)
+	) {
+		return { phase: "unavailable", ...common };
+	}
+	if (!snapshot.enabled || !snapshot.captureContent) {
+		return { phase: "not_started", ...common };
+	}
+	if (missingPermissions.length > 0) {
+		return { phase: "needs_permissions", ...common };
+	}
+	if (snapshot.contentVault.availability === "available") {
+		return { phase: "ready", ...common };
+	}
+	if (snapshot.contentVault.availability === "migration_required") {
+		return {
+			phase: "needs_legacy_vault_migration",
+			...common,
+		};
+	}
+	return { phase: "unavailable", ...common };
 }
 
 export function monitoringStatusLabel(snapshot: MonitoringSnapshot): string {
@@ -98,7 +200,12 @@ export function isMonitoringSnapshot(
 		typeof value.paused !== "boolean" ||
 		typeof value.observerConnected !== "boolean" ||
 		!Array.isArray(value.permissions) ||
+		!isContentVaultStatus(value.contentVault) ||
 		!isPermissionCheckState(value.permissionCheckState) ||
+		typeof value.permissionSetupAvailable !== "boolean" ||
+		typeof value.permissionSetupAttempted !== "boolean" ||
+		(value.permissionSetupAttempted &&
+			!value.permissionSetupAvailable) ||
 		!(
 			value.permissionsCheckedAtMs === null ||
 			(typeof value.permissionsCheckedAtMs === "number" &&
@@ -124,6 +231,21 @@ export function isMonitoringSnapshot(
 		value.permissions.every(isPermissionStatus) &&
 		value.excludedAppIds.every((item) => typeof item === "string") &&
 		value.coverageGaps.every((item) => typeof item === "string")
+	);
+}
+
+function isContentVaultStatus(value: unknown): value is ContentVaultStatus {
+	return (
+		isRecord(value) &&
+		(value.availability === "available" ||
+			value.availability === "migration_required" ||
+			value.availability === "unavailable") &&
+		(value.storageMode === null ||
+			value.storageMode === "data_protection_keychain" ||
+			value.storageMode === "local_login_keychain" ||
+			value.storageMode === "legacy_development_keychain" ||
+			value.storageMode === "custom") &&
+		typeof value.interactiveMigrationAvailable === "boolean"
 	);
 }
 

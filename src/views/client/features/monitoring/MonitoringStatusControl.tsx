@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useEffect, useSyncExternalStore } from "react";
 import {
-	missingRequiredPermissions,
+	monitoringSetupStatus,
 	monitoringStatusLabel,
 } from "./domain";
 import type { MonitoringController } from "./MonitoringController";
@@ -61,7 +61,12 @@ export function MonitoringStatusControl({
 
 	const snapshot = state.snapshot;
 	if (snapshot === null) return null;
-	const missing = missingRequiredPermissions(snapshot);
+	const setup = monitoringSetupStatus(snapshot);
+	const setupReady = setup.phase === "ready";
+	const setupActionable =
+		setup.phase === "not_started" ||
+		setup.phase === "needs_permissions" ||
+		setup.phase === "needs_legacy_vault_migration";
 	const updating = state.status === "updating";
 	const stateClass =
 		snapshot.state === "running"
@@ -82,8 +87,14 @@ export function MonitoringStatusControl({
 				<div>
 					<strong>{monitoringStatusLabel(snapshot)}</strong>
 					<span>
-						{missing.length > 0
-							? `缺少 ${missing.length} 项系统权限`
+						{setup.phase === "not_started"
+							? "尚未完成一次性监测设置"
+							: setup.phase === "needs_permissions"
+								? `还有 ${setup.missingPermissions.length} 项系统权限待完成`
+								: setup.phase === "needs_legacy_vault_migration"
+									? "旧版本本地加密需要一次迁移"
+									: setup.phase === "unavailable"
+										? "本机监测设置当前不可用"
 							: snapshot.state === "running"
 								? "前台可见内容 · 本地加密"
 								: snapshot.state === "starting"
@@ -100,36 +111,19 @@ export function MonitoringStatusControl({
 				</p>
 			) : null}
 			<div className="monitoring-control__actions">
-				{!snapshot.enabled ? (
-					<>
-						<button
-							type="button"
-							onClick={() => void controller.enable()}
-							disabled={updating || snapshot.state === "unavailable"}
-						>
-							<Play size={14} aria-hidden="true" />
-							{updating && state.operation === "enable"
-								? "正在启用…"
-								: "启用本机观察"}
-						</button>
-						<button type="button" onClick={onOpenPrivacy} disabled={updating}>
-							<ShieldCheck size={14} aria-hidden="true" />
-							数据与隐私
-						</button>
-					</>
-				) : missing.length > 0 ? (
+				{setupActionable ? (
 					<button
 						type="button"
-						onClick={() => {
-							onOpenPrivacy();
-						}}
+						onClick={onOpenPrivacy}
 						disabled={updating}
 					>
 						<ShieldCheck size={14} aria-hidden="true" />
-						查看权限详情
+						{setup.phase === "not_started"
+							? "设置本机监测"
+							: "修复监测设置"}
 					</button>
 				) : null}
-				{snapshot.enabled ? (
+				{setupReady ? (
 					<button
 						type="button"
 						onClick={() =>

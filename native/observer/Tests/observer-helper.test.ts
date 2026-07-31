@@ -11,6 +11,9 @@ type ObserverFrame = {
 	sequence?: number;
 	ok?: boolean;
 	id?: string;
+	error?: {
+		code?: string;
+	};
 	authorizationReason?: string;
 	capabilities?: Record<string, boolean>;
 	permissions?: Record<string, string>;
@@ -78,6 +81,88 @@ test("keeps browser Automation outside the required permission action", () => {
 	);
 	expect(browserSource).toContain(
 		"WhaleHall's single\n    /// monitoring permission action",
+	);
+});
+
+test("keeps display polling cached and prompt APIs explicit", () => {
+	const runtimeSource = readFileSync(
+		resolve(import.meta.dir, "../Sources/ObserverRuntime.swift"),
+		"utf8",
+	);
+	const inputSource = readFileSync(
+		resolve(import.meta.dir, "../Sources/InputActivityMonitor.swift"),
+		"utf8",
+	);
+	const ocrSource = readFileSync(
+		resolve(import.meta.dir, "../Sources/ScreenOCRMonitor.swift"),
+		"utf8",
+	);
+
+	expect(runtimeSource).not.toContain("permissionSnapshot(prompt:");
+	expect(runtimeSource).not.toContain("prompt: Bool");
+	expect(runtimeSource).toContain('errorCode: "prompt_field_forbidden"');
+	expect(runtimeSource.match(/passivePermissionSnapshot\(\)/g)?.length).toBe(4);
+	expect(runtimeSource.match(/CGRequestScreenCaptureAccess\(\)/g)?.length).toBe(1);
+	expect(runtimeSource.match(/CGRequestListenEventAccess\(\)/g)?.length).toBe(1);
+	expect(runtimeSource.match(/AXIsProcessTrustedWithOptions\(/g)?.length).toBe(1);
+
+	const startMonitoring = runtimeSource.slice(
+		runtimeSource.indexOf("private func startMonitoring()"),
+		runtimeSource.indexOf("private func stopMonitoring("),
+	);
+	const heartbeat = runtimeSource.slice(
+		runtimeSource.indexOf("private func emitHeartbeat()"),
+		runtimeSource.indexOf("private func handleForegroundApplication("),
+	);
+	const statusCommand = runtimeSource.slice(
+		runtimeSource.indexOf('case "status":'),
+		runtimeSource.indexOf('case "refreshPermissions":'),
+	);
+	for (const passivePath of [startMonitoring, heartbeat, statusCommand]) {
+		expect(passivePath).toContain("cachedPermissionSnapshot()");
+		expect(passivePath).not.toContain("CGPreflight");
+		expect(passivePath).not.toContain("CGRequest");
+		expect(passivePath).not.toContain("AXIsProcessTrusted");
+	}
+	const refreshCommand = runtimeSource.slice(
+		runtimeSource.indexOf('case "refreshPermissions":'),
+		runtimeSource.indexOf('case "setupPermissions":'),
+	);
+	expect(refreshCommand).toContain("passivePermissionSnapshot()");
+	expect(refreshCommand).not.toContain("CGRequest");
+	expect(refreshCommand).not.toContain("AXIsProcessTrustedWithOptions");
+	const setupCommand = runtimeSource.slice(
+		runtimeSource.indexOf('case "setupPermissions":'),
+		runtimeSource.indexOf('case "shutdown":'),
+	);
+	expect(setupCommand).toContain("requestPermissionSetupSnapshot()");
+
+	expect(inputSource).toContain("CGPreflightListenEventAccess");
+	expect(inputSource).not.toContain("CGRequestListenEventAccess");
+	expect(ocrSource).toContain("CGPreflightScreenCaptureAccess");
+	expect(ocrSource).not.toContain("CGRequestScreenCaptureAccess");
+	expect(inputSource).toContain('onGap("input_monitoring_unavailable")');
+	expect(ocrSource).toContain(
+		"self.onGap(Self.sanitizedCaptureError(error))",
+	);
+	expect(runtimeSource).toContain("guard updated != previous else");
+	expect(runtimeSource).toContain(
+		'emitter.emitPermissionStatus(updated, reason: "runtime_change")',
+	);
+	const foregroundHandler = runtimeSource.slice(
+		runtimeSource.indexOf("private func handleForegroundApplication("),
+		runtimeSource.indexOf("private func emitBrowserBoundary("),
+	);
+	expect(foregroundHandler).toContain(
+		"let permissionRevoked = !AXIsProcessTrusted()",
+	);
+	expect(foregroundHandler).toContain('"accessibility_target_unavailable"');
+	expect(
+		foregroundHandler.indexOf("if permissionRevoked {"),
+	).toBeLessThan(
+		foregroundHandler.indexOf(
+			"markCachedPermissionUnavailable(accessibility: true)",
+		),
 	);
 });
 
@@ -154,6 +239,21 @@ macOSTest(
 		expect(ready.capabilities?.readsKeyValues).toBe(false);
 		expect(ready.capabilities?.browserAppleEventsPrompted).toBe(false);
 		expect(ready.permissions?.automation).toBe("unavailable");
+
+		child.stdin.write(
+			`${JSON.stringify({
+				type: "command",
+				id: "forbidden-prompt",
+				command: "refreshPermissions",
+				prompt: true,
+			})}\n`,
+		);
+		child.stdin.flush();
+		const forbiddenPrompt = await frames.next();
+		expect(forbiddenPrompt.type).toBe("commandResult");
+		expect(forbiddenPrompt.id).toBe("forbidden-prompt");
+		expect(forbiddenPrompt.ok).toBe(false);
+		expect(forbiddenPrompt.error?.code).toBe("prompt_field_forbidden");
 
 		child.stdin.write(
 			`${JSON.stringify({

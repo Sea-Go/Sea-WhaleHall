@@ -11,7 +11,6 @@ import type {
 	LocalEventQuery,
 	LocalEventQueryResult,
 	LocalMonitoringConfigure,
-	LocalMonitoringRefreshPermissions,
 	LocalMonitoringStatus,
 	LocalRuntimeStatus,
 	LocalSemanticCommitResult,
@@ -24,6 +23,8 @@ import type {
 	LocalToolEvent,
 	LocalVaultOpenBatch,
 	LocalVaultOpenBatchResult,
+	LocalVaultKeyStatus,
+	LocalVaultLegacyMigrationResult,
 	LocalVaultSealBatch,
 	LocalVaultSealBatchResult,
 } from "./local-protocol";
@@ -203,11 +204,14 @@ export class AgentRuntime {
 		return this.local.resumeMonitoring();
 	}
 
-	async refreshMonitoringPermissions(
-		options: LocalMonitoringRefreshPermissions = {},
-	): Promise<LocalMonitoringStatus> {
+	async refreshMonitoringPermissions(): Promise<LocalMonitoringStatus> {
 		await this.ensureStarted();
-		return this.local.refreshMonitoringPermissions(options);
+		return this.local.refreshMonitoringPermissions();
+	}
+
+	async setupMonitoringPermissions(): Promise<LocalMonitoringStatus> {
+		await this.ensureStarted();
+		return this.local.setupMonitoringPermissions();
 	}
 
 	async querySemanticEvents(
@@ -244,6 +248,16 @@ export class AgentRuntime {
 	): Promise<LocalVaultOpenBatchResult> {
 		await this.ensureStarted();
 		return this.local.openVaultBatch(batch);
+	}
+
+	async getVaultKeyStatus(): Promise<LocalVaultKeyStatus> {
+		await this.ensureStarted();
+		return this.local.getVaultKeyStatus();
+	}
+
+	async migrateLegacyVaultKey(): Promise<LocalVaultLegacyMigrationResult> {
+		await this.ensureStarted();
+		return this.local.migrateLegacyVaultKey();
 	}
 
 	async stop(): Promise<void> {

@@ -23,7 +23,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["libc
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDate", "CFMachPort", "CFRunLoop"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
-security-framework = "3.5.1"
+security-framework = { version = "3.5.1", features = ["OSX_10_15"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"

@@ -7,8 +7,9 @@ import type {
 	LocalMonitoringConfigure,
 	LocalMonitoringPermissionCheckState,
 	LocalMonitoringPermissionState,
-	LocalMonitoringRefreshPermissions,
 	LocalMonitoringStatus,
+	LocalVaultKeyStatus,
+	LocalVaultLegacyMigrationResult,
 } from '../agent/local-protocol';
 
 export type {
@@ -16,8 +17,9 @@ export type {
 	LocalMonitoringConfigure,
 	LocalMonitoringPermissionCheckState,
 	LocalMonitoringPermissionState,
-	LocalMonitoringRefreshPermissions,
 	LocalMonitoringStatus,
+	LocalVaultKeyStatus,
+	LocalVaultLegacyMigrationResult,
 	PetPresentationEvent,
 	ActiveGoalContextV1,
 };
@@ -92,6 +94,26 @@ export type FiveMinuteAuditFileExportResult = {
 	basename: string | null;
 };
 
+export type PrivateTrainingWindowExportRequest = {
+	/** Exact immutable production Timeline windows selected by local id. */
+	windowIds: string[];
+	participantId: string;
+	/** IANA timezone used to derive stable session-day boundaries. */
+	sessionTimezone: string;
+};
+
+export type PrivateTrainingWindowExportResult = {
+	status:
+		| "exported"
+		| "cancelled"
+		| "invalid_request"
+		| "not_ready"
+		| "failed";
+	/** Directory basename only; the selected local path remains native-only. */
+	basename: string | null;
+	windowCount: number;
+};
+
 export type FiveMinuteAuditCaptureState =
 	| "collecting"
 	| "settling"
@@ -99,10 +121,17 @@ export type FiveMinuteAuditCaptureState =
 	| "failed"
 	| "cancelled";
 
+export type FiveMinuteAuditCaptureFailureCode =
+	| "authoritative_coverage_timeout"
+	| "timeline_job_terminal_failure"
+	| "timeline_result_inconsistent";
+
 /**
  * Content-free renderer projection of a local five-minute capture session.
- * Timeline completeness is deliberately qualified because production windows
- * are never force-sealed for an audit.
+ * A ready capture has proved that every effective semantic event in the exact
+ * range is covered by a COMMITTED production Timeline result, or that the
+ * exact range contains no effective events. Audit-only projections never
+ * satisfy this authority state.
  */
 export type FiveMinuteAuditCaptureStatus = {
 	captureId: string;
@@ -111,6 +140,8 @@ export type FiveMinuteAuditCaptureStatus = {
 	toMs: number;
 	updatedAtMs: number;
 	analysisCompleteness: "natural_windows_only";
+	authoritativeCoverage: "pending" | "complete" | "unavailable";
+	failureCode: FiveMinuteAuditCaptureFailureCode | null;
 };
 
 export type MonitoringPermissionSettingsTarget =
@@ -143,16 +174,37 @@ export type ClientRPC = {
 				response: LocalMonitoringStatus;
 			};
 			refreshMonitoringPermissions: {
-				params: LocalMonitoringRefreshPermissions;
+				params: Record<string, never>;
+				response: LocalMonitoringStatus;
+			};
+			setupMonitoringPermissions: {
+				params: Record<string, never>;
 				response: LocalMonitoringStatus;
 			};
 			openMonitoringPermissionSettings: {
 				params: { permission: MonitoringPermissionSettingsTarget };
 				response: { opened: boolean };
 			};
+			getContentVaultStatus: {
+				params: Record<string, never>;
+				response: LocalVaultKeyStatus;
+			};
+			migrateLegacyContentVault: {
+				params: Record<string, never>;
+				response:
+					| { status: 'cancelled'; vault: LocalVaultKeyStatus }
+					| {
+							status: 'completed';
+							result: LocalVaultLegacyMigrationResult;
+					  };
+			};
 			exportFiveMinuteAuditToFile: {
 				params: FiveMinuteAuditFileExportRequest;
 				response: FiveMinuteAuditFileExportResult;
+			};
+			exportPrivateTrainingWindows: {
+				params: PrivateTrainingWindowExportRequest;
+				response: PrivateTrainingWindowExportResult;
 			};
 			startFiveMinuteAuditCapture: {
 				params: Record<string, never>;

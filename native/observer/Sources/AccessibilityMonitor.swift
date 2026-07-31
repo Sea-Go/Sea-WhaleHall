@@ -200,12 +200,13 @@ final class AccessibilityMonitor {
         self.onSnapshot = onSnapshot
     }
 
-    func attach(to application: NSRunningApplication) {
+    @discardableResult
+    func attach(to application: NSRunningApplication) -> Bool {
         detach()
         runningApplication = application
         let processIdentifier = application.processIdentifier
         guard processIdentifier > 0 else {
-            return
+            return false
         }
 
         var createdObserver: AXObserver?
@@ -215,7 +216,7 @@ final class AccessibilityMonitor {
             &createdObserver
         )
         guard error == .success, let createdObserver else {
-            return
+            return false
         }
 
         let appElement = AXUIElementCreateApplication(processIdentifier)
@@ -252,6 +253,7 @@ final class AccessibilityMonitor {
                 self?.scheduleSnapshot(kind: "ax.visibleContentChanged", delay: 0)
             }
         }
+        return true
     }
 
     func detach() {

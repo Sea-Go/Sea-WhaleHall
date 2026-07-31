@@ -17,6 +17,8 @@ function snapshot(
 		observerConnected: true,
 		permissionCheckState: "current",
 		permissionsCheckedAtMs: 1_800_000_000_000,
+		permissionSetupAvailable: true,
+		permissionSetupAttempted: true,
 		permissions: [
 			{
 				id: "accessibility",
@@ -43,6 +45,11 @@ function snapshot(
 				detail: null,
 			},
 		],
+		contentVault: {
+			availability: "available",
+			storageMode: "data_protection_keychain",
+			interactiveMigrationAvailable: false,
+		},
 		excludedAppIds: [],
 		lastObservationAtMs: 1_800_000_000_000,
 		coverageGaps: [],
@@ -74,7 +81,13 @@ describe("MonitoringController", () => {
 				current = snapshot();
 				return current;
 			},
+			async requestRequiredPermissions() {
+				return current;
+			},
 			async refreshPermissions() {
+				return current;
+			},
+			async migrateContentVault() {
 				return current;
 			},
 			async openPermissionSettings() {},
@@ -113,8 +126,14 @@ describe("MonitoringController", () => {
 			async resume() {
 				return snapshot();
 			},
+			async requestRequiredPermissions() {
+				return snapshot();
+			},
 			async refreshPermissions() {
 				throw new Error("system settings unavailable");
+			},
+			async migrateContentVault() {
+				return snapshot();
 			},
 			async openPermissionSettings() {},
 		};
@@ -146,7 +165,13 @@ describe("MonitoringController", () => {
 			async resume() {
 				return snapshot();
 			},
+			async requestRequiredPermissions() {
+				return snapshot();
+			},
 			async refreshPermissions() {
+				return snapshot();
+			},
+			async migrateContentVault() {
 				return snapshot();
 			},
 			async openPermissionSettings() {},
@@ -185,8 +210,14 @@ describe("MonitoringController", () => {
 			async resume() {
 				throw new Error("disabled observer cannot resume");
 			},
+			async requestRequiredPermissions() {
+				return snapshot();
+			},
 			async refreshPermissions() {
 				throw new Error("disabled observer cannot refresh");
+			},
+			async migrateContentVault() {
+				throw new Error("disabled observer cannot migrate");
 			},
 			async openPermissionSettings() {},
 		};
@@ -199,5 +230,141 @@ describe("MonitoringController", () => {
 			status: "ready",
 			snapshot: { state: "running", enabled: true },
 		});
+	});
+
+	test("runs full-capture configuration before the sole permission request", async () => {
+		const calls: string[] = [];
+		let current = snapshot({
+			state: "disabled",
+			enabled: false,
+			captureContent: false,
+			excludedAppIds: ["com.example.private"],
+		});
+		const service: MonitoringService = {
+			async status() {
+				return current;
+			},
+			async configure(configuration) {
+				calls.push("configure");
+				expect(configuration).toEqual({
+					enabled: true,
+					captureContent: true,
+					excludedAppIds: ["com.example.private"],
+				});
+				current = snapshot({
+					enabled: true,
+					captureContent: true,
+					excludedAppIds: configuration.excludedAppIds,
+				});
+				return current;
+			},
+			async pause() {
+				return current;
+			},
+			async resume() {
+				return current;
+			},
+			async requestRequiredPermissions() {
+				calls.push("requestRequiredPermissions");
+				return current;
+			},
+			async refreshPermissions() {
+				throw new Error("setup must not use the silent refresh path");
+			},
+			async migrateContentVault() {
+				throw new Error("setup must never migrate the vault automatically");
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		await controller.beginSetup();
+		expect(calls).toEqual(["configure", "requestRequiredPermissions"]);
+		expect(controller.getSnapshot()).toMatchObject({
+			status: "ready",
+			snapshot: { enabled: true, captureContent: true },
+		});
+	});
+
+	test("skips redundant configuration and deduplicates a double setup click", async () => {
+		let configureCalls = 0;
+		let requestCalls = 0;
+		let resolveRequest: (value: MonitoringSnapshot) => void = () => {};
+		const service: MonitoringService = {
+			async status() {
+				return snapshot();
+			},
+			async configure() {
+				configureCalls += 1;
+				return snapshot();
+			},
+			async pause() {
+				return snapshot();
+			},
+			async resume() {
+				return snapshot();
+			},
+			requestRequiredPermissions() {
+				requestCalls += 1;
+				return new Promise((resolve) => {
+					resolveRequest = resolve;
+				});
+			},
+			async refreshPermissions() {
+				return snapshot();
+			},
+			async migrateContentVault() {
+				return snapshot();
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		const first = controller.beginSetup();
+		const second = controller.beginSetup();
+		expect(first).toBe(second);
+		expect(configureCalls).toBe(0);
+		expect(requestCalls).toBe(1);
+		resolveRequest(snapshot());
+		await first;
+	});
+
+	test("never requests consent during load or background polling", async () => {
+		let statusCalls = 0;
+		let requestCalls = 0;
+		const service: MonitoringService = {
+			async status() {
+				statusCalls += 1;
+				return snapshot();
+			},
+			async configure() {
+				return snapshot();
+			},
+			async pause() {
+				return snapshot();
+			},
+			async resume() {
+				return snapshot();
+			},
+			async requestRequiredPermissions() {
+				requestCalls += 1;
+				return snapshot();
+			},
+			async refreshPermissions() {
+				return snapshot();
+			},
+			async migrateContentVault() {
+				return snapshot();
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service, 5);
+		await controller.load();
+		await controller.load({ background: true });
+		controller.start();
+		await new Promise((resolve) => setTimeout(resolve, 18));
+		controller.stop();
+		expect(statusCalls).toBeGreaterThanOrEqual(3);
+		expect(requestCalls).toBe(0);
 	});
 });

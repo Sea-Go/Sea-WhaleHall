@@ -73,6 +73,11 @@ final class ObserverRuntime: @unchecked Sendable {
             Task { @MainActor in
                 self?.handleInputActivity()
             }
+        },
+        onGap: { [weak self] code in
+            Task { @MainActor in
+                self?.handleInputGap(code)
+            }
         }
     )
     private lazy var screenOCRMonitor = ScreenOCRMonitor(
@@ -108,6 +113,11 @@ final class ObserverRuntime: @unchecked Sendable {
         "thermal_critical",
         "foreground_window_unavailable",
         "screen_capture_failed",
+        "screen_recording_unavailable",
+        "accessibility_unavailable",
+        "accessibility_target_unavailable",
+        "input_event_tap_disabled",
+        "input_monitoring_unavailable",
     ]
 
     func run() {
@@ -115,7 +125,9 @@ final class ObserverRuntime: @unchecked Sendable {
             emitter.emitError(code: "unsupported_macos_version", recoverable: false)
             exit(EXIT_FAILURE)
         }
-        let permissions = permissionSnapshot(prompt: false)
+        // This is the observer process's only automatic TCC preflight.
+        // All later background work consumes this cached snapshot.
+        let permissions = passivePermissionSnapshot()
         lastPermissionSnapshot = permissions
         emitter.emitReady(permissionSnapshot: permissions)
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) {
@@ -152,6 +164,15 @@ final class ObserverRuntime: @unchecked Sendable {
             protocolFailure(code: "invalid_command")
             return
         }
+        guard dictionary["prompt"] == nil else {
+            emitter.emitCommandResult(
+                id: id,
+                ok: false,
+                state: state,
+                errorCode: "prompt_field_forbidden"
+            )
+            return
+        }
 
         switch command {
         case "start":
@@ -167,24 +188,16 @@ final class ObserverRuntime: @unchecked Sendable {
             startMonitoring()
             emitter.emitCommandResult(id: id, ok: true, state: state)
         case "status":
-            let permissions = permissionSnapshot(prompt: false)
-            lastPermissionSnapshot = permissions
+            let permissions = cachedPermissionSnapshot()
             emitter.emitPermissionStatus(permissions, reason: "status_request")
             emitter.emitCommandResult(id: id, ok: true, state: state)
         case "refreshPermissions":
-            let prompt = dictionary["prompt"] as? Bool ?? false
-            if prompt {
-                requestRequiredPermissions(id: id)
-                return
-            }
-            let permissions = permissionSnapshot(prompt: prompt)
-            let changed = permissions != lastPermissionSnapshot
-            lastPermissionSnapshot = permissions
-            emitter.emitPermissionStatus(permissions, reason: "manual_refresh")
-            if changed, state == "running" {
-                stopMonitoring(nextState: "idle")
-                startMonitoring()
-            }
+            let permissions = passivePermissionSnapshot()
+            applyRefreshedPermissions(permissions)
+            emitter.emitCommandResult(id: id, ok: true, state: state)
+        case "setupPermissions":
+            let permissions = requestPermissionSetupSnapshot()
+            applyRefreshedPermissions(permissions)
             emitter.emitCommandResult(id: id, ok: true, state: state)
         case "shutdown":
             emitter.emitCommandResult(id: id, ok: true, state: "stopping")
@@ -196,6 +209,16 @@ final class ObserverRuntime: @unchecked Sendable {
                 state: state,
                 errorCode: "unsupported_command"
             )
+        }
+    }
+
+    private func applyRefreshedPermissions(_ permissions: PermissionSnapshot) {
+        let changed = permissions != lastPermissionSnapshot
+        lastPermissionSnapshot = permissions
+        emitter.emitPermissionStatus(permissions, reason: "manual_refresh")
+        if changed, state == "running" {
+            stopMonitoring(nextState: "idle")
+            startMonitoring()
         }
     }
 
@@ -214,8 +237,7 @@ final class ObserverRuntime: @unchecked Sendable {
         state = "running"
         workspaceMonitor.start()
         screenOCRMonitor.start()
-        let permissions = permissionSnapshot(prompt: false)
-        lastPermissionSnapshot = permissions
+        let permissions = cachedPermissionSnapshot()
         if permissions.inputMonitoring {
             _ = inputMonitor.start()
         }
@@ -240,29 +262,8 @@ final class ObserverRuntime: @unchecked Sendable {
     }
 
     private func emitHeartbeat() {
-        let permissions = permissionSnapshot(prompt: false)
-        if permissions != lastPermissionSnapshot {
-            lastPermissionSnapshot = permissions
-            emitter.emitPermissionStatus(permissions, reason: "runtime_change")
-            if state == "running" {
-                stopMonitoring(nextState: "idle")
-                startMonitoring()
-            }
-        }
+        let permissions = cachedPermissionSnapshot()
         emitter.emitHeartbeat(state: state, permissionSnapshot: permissions)
-    }
-
-    private func requestRequiredPermissions(id: String) {
-        _ = permissionSnapshot(prompt: true)
-        let permissions = permissionSnapshot(prompt: false)
-        let changed = permissions != lastPermissionSnapshot
-        lastPermissionSnapshot = permissions
-        emitter.emitPermissionStatus(permissions, reason: "manual_refresh")
-        if changed, state == "running" {
-            stopMonitoring(nextState: "idle")
-            startMonitoring()
-        }
-        emitter.emitCommandResult(id: id, ok: true, state: state)
     }
 
     private func handleForegroundApplication(_ application: NSRunningApplication) {
@@ -365,8 +366,30 @@ final class ObserverRuntime: @unchecked Sendable {
                 reliability: "low"
             )
         }
-        if AXIsProcessTrusted(), decision.allowed {
-            accessibilityMonitor.attach(to: application)
+        if cachedPermissionSnapshot().accessibility, decision.allowed {
+            if !accessibilityMonitor.attach(to: application) {
+                // AXObserverCreate can fail for one short-lived, terminating, or
+                // otherwise non-AX application even while WhaleHall's global
+                // Accessibility grant is still valid. Only a passive system
+                // preflight may downgrade the cached global permission.
+                let permissionRevoked = !AXIsProcessTrusted()
+                if permissionRevoked {
+                    markCachedPermissionUnavailable(accessibility: true)
+                }
+                emitAnonymousCoverageGap(
+                    sensor: "ax",
+                    redaction: permissionRevoked
+                        ? "accessibility_unavailable"
+                        : "accessibility_target_unavailable"
+                )
+                screenOCRMonitor.updateTarget(
+                    blockedTarget(
+                        application: application,
+                        fallbackIdentifier: appIdentifier,
+                        fallbackName: appName
+                    )
+                )
+            }
         } else {
             accessibilityMonitor.detach()
             screenOCRMonitor.updateTarget(
@@ -573,7 +596,7 @@ final class ObserverRuntime: @unchecked Sendable {
                 opaqueWindowIdentifier: snapshot.opaqueWindowIdentifier,
                 captureAllowed: contentAllowed
                     && !snapshot.protectedInput
-                    && CGPreflightScreenCaptureAccess(),
+                    && cachedPermissionSnapshot().screenRecording,
                 accessibilityContentSufficient: axSufficient
             )
         )
@@ -729,7 +752,24 @@ final class ObserverRuntime: @unchecked Sendable {
         guard state == "running" else {
             return
         }
+        if reason == "screen_recording_unavailable" {
+            markCachedPermissionUnavailable(screenRecording: true)
+            screenOCRMonitor.stop()
+        }
         emitAnonymousCoverageGap(sensor: "ocr", redaction: reason)
+    }
+
+    private func handleInputGap(_ reason: String) {
+        guard state == "running" else {
+            return
+        }
+        if reason == "input_monitoring_unavailable"
+            || reason == "input_event_tap_disabled"
+        {
+            markCachedPermissionUnavailable(inputMonitoring: true)
+            inputMonitor.stop()
+        }
+        emitAnonymousCoverageGap(sensor: "cg_activity", redaction: reason)
     }
 
     private func handleInputBucket(_ bucket: InputActivityBucket) {
@@ -895,7 +935,15 @@ final class ObserverRuntime: @unchecked Sendable {
                   Self.redactedCoverageGapReasons.contains(redaction)
         {
             coverage = "redacted"
+        } else if sensor == "ax",
+                  Self.unavailableCoverageGapReasons.contains(redaction)
+        {
+            coverage = "unavailable"
         } else if sensor == "ocr",
+                  Self.unavailableCoverageGapReasons.contains(redaction)
+        {
+            coverage = "unavailable"
+        } else if sensor == "cg_activity",
                   Self.unavailableCoverageGapReasons.contains(redaction)
         {
             coverage = "unavailable"
@@ -923,30 +971,52 @@ final class ObserverRuntime: @unchecked Sendable {
         )
     }
 
-    private func permissionSnapshot(prompt: Bool) -> PermissionSnapshot {
-        let accessibility: Bool
-        let screenRecording: Bool
-        let inputMonitoring: Bool
-        if prompt {
-            accessibility = AXIsProcessTrustedWithOptions(
-                ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-            )
-            screenRecording = CGRequestScreenCaptureAccess()
-            inputMonitoring = CGRequestListenEventAccess()
-        } else {
-            accessibility = AXIsProcessTrusted()
-            screenRecording = CGPreflightScreenCaptureAccess()
-            inputMonitoring = CGPreflightListenEventAccess()
-        }
-        return PermissionSnapshot(
-            accessibility: accessibility,
-            screenRecording: screenRecording,
-            inputMonitoring: inputMonitoring,
-            // Automation is not part of the required monitoring grant.
-            // Apple Events remain an opportunistic enrichment path and are
-            // never prompted by the observer.
+    private func cachedPermissionSnapshot() -> PermissionSnapshot {
+        lastPermissionSnapshot ?? PermissionSnapshot(
+            accessibility: false,
+            screenRecording: false,
+            inputMonitoring: false,
             automation: "unavailable"
         )
+    }
+
+    private func markCachedPermissionUnavailable(
+        accessibility: Bool = false,
+        screenRecording: Bool = false,
+        inputMonitoring: Bool = false
+    ) {
+        let previous = cachedPermissionSnapshot()
+        let updated = PermissionSnapshot(
+            accessibility: accessibility ? false : previous.accessibility,
+            screenRecording: screenRecording ? false : previous.screenRecording,
+            inputMonitoring: inputMonitoring ? false : previous.inputMonitoring,
+            automation: previous.automation
+        )
+        guard updated != previous else {
+            return
+        }
+        lastPermissionSnapshot = updated
+        emitter.emitPermissionStatus(updated, reason: "runtime_change")
+    }
+
+    private func passivePermissionSnapshot() -> PermissionSnapshot {
+        PermissionSnapshot(
+            accessibility: AXIsProcessTrusted(),
+            screenRecording: CGPreflightScreenCaptureAccess(),
+            inputMonitoring: CGPreflightListenEventAccess(),
+            automation: "unavailable"
+        )
+    }
+
+    /// Called only by the parent's dedicated, identity-gated one-time setup
+    /// command. Refresh and status commands cannot reach these request APIs.
+    private func requestPermissionSetupSnapshot() -> PermissionSnapshot {
+        _ = AXIsProcessTrustedWithOptions(
+            ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        )
+        _ = CGRequestScreenCaptureAccess()
+        _ = CGRequestListenEventAccess()
+        return passivePermissionSnapshot()
     }
 
     private func unsignedInteger(_ value: Any?) -> UInt64? {

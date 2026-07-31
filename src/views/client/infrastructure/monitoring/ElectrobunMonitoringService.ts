@@ -2,6 +2,8 @@ import type {
 	LocalMonitoringConfigure,
 	LocalMonitoringPermissionState,
 	LocalMonitoringStatus,
+	LocalVaultKeyStatus,
+	LocalVaultLegacyMigrationResult,
 } from "../../../../shared/contracts";
 import type {
 	MonitoringConfiguration,
@@ -18,7 +20,13 @@ export interface MonitoringTransport {
 	): Promise<LocalMonitoringStatus>;
 	pause(): Promise<LocalMonitoringStatus>;
 	resume(): Promise<LocalMonitoringStatus>;
-	refreshPermissions(prompt: boolean): Promise<LocalMonitoringStatus>;
+	refreshPermissions(): Promise<LocalMonitoringStatus>;
+	setupPermissions(): Promise<LocalMonitoringStatus>;
+	vaultStatus(): Promise<LocalVaultKeyStatus>;
+	migrateLegacyVault(): Promise<
+		| { status: "cancelled"; vault: LocalVaultKeyStatus }
+		| { status: "completed"; result: LocalVaultLegacyMigrationResult }
+	>;
 	openPermissionSettings(
 		permission: MonitoringPermissionId,
 	): Promise<{ opened: boolean }>;
@@ -41,7 +49,10 @@ export class ElectrobunMonitoringService implements MonitoringService {
 	async status(): Promise<MonitoringSnapshot> {
 		if (!this.runtimeAvailable()) return unavailableSnapshot();
 		const transport = await this.loadTransport();
-		return toMonitoringSnapshot(await transport.status());
+		return monitoringSnapshot(
+			await transport.status(),
+			await transport.vaultStatus(),
+		);
 	}
 
 	async configure(
@@ -49,25 +60,43 @@ export class ElectrobunMonitoringService implements MonitoringService {
 	): Promise<MonitoringSnapshot> {
 		if (!this.runtimeAvailable()) return unavailableSnapshot();
 		const transport = await this.loadTransport();
-		return toMonitoringSnapshot(
+		return monitoringSnapshot(
 			await transport.configure({
 				enabled: configuration.enabled,
 				captureContent: configuration.captureContent,
 				excludedBundleIds: configuration.excludedAppIds,
 			}),
+			await transport.vaultStatus(),
 		);
 	}
 
 	async pause(): Promise<MonitoringSnapshot> {
 		if (!this.runtimeAvailable()) return unavailableSnapshot();
 		const transport = await this.loadTransport();
-		return toMonitoringSnapshot(await transport.pause());
+		return monitoringSnapshot(
+			await transport.pause(),
+			await transport.vaultStatus(),
+		);
 	}
 
 	async resume(): Promise<MonitoringSnapshot> {
 		if (!this.runtimeAvailable()) return unavailableSnapshot();
 		const transport = await this.loadTransport();
-		return toMonitoringSnapshot(await transport.resume());
+		return monitoringSnapshot(
+			await transport.resume(),
+			await transport.vaultStatus(),
+		);
+	}
+
+	async requestRequiredPermissions(): Promise<MonitoringSnapshot> {
+		if (!this.runtimeAvailable()) return unavailableSnapshot();
+		const transport = await this.loadTransport();
+		// This is the sole prompt-capable path and is invoked only from the
+		// user's explicit one-time setup action.
+		return monitoringSnapshot(
+			await transport.setupPermissions(),
+			await transport.vaultStatus(),
+		);
 	}
 
 	async refreshPermissions(): Promise<MonitoringSnapshot> {
@@ -76,7 +105,20 @@ export class ElectrobunMonitoringService implements MonitoringService {
 		// Status refreshes are deliberately read-only. Permission prompts belong to
 		// the user's one-time setup in macOS System Settings, never to polling or
 		// the "重新检查" action.
-		return toMonitoringSnapshot(await transport.refreshPermissions(false));
+		return monitoringSnapshot(
+			await transport.refreshPermissions(),
+			await transport.vaultStatus(),
+		);
+	}
+
+	async migrateContentVault(): Promise<MonitoringSnapshot> {
+		if (!this.runtimeAvailable()) return unavailableSnapshot();
+		const transport = await this.loadTransport();
+		await transport.migrateLegacyVault();
+		return monitoringSnapshot(
+			await transport.status(),
+			await transport.vaultStatus(),
+		);
 	}
 
 	async openPermissionSettings(
@@ -95,6 +137,7 @@ export class ElectrobunMonitoringService implements MonitoringService {
 
 export function toMonitoringSnapshot(
 	status: LocalMonitoringStatus,
+	vault: LocalVaultKeyStatus = unavailableVaultStatus(),
 ): MonitoringSnapshot {
 	const state =
 		status.state === "stopped"
@@ -122,6 +165,8 @@ export function toMonitoringSnapshot(
 		observerConnected,
 		permissionCheckState: status.permissionCheckState,
 		permissionsCheckedAtMs: status.permissionsCheckedAtMs,
+		permissionSetupAvailable: status.permissionSetupAvailable,
+		permissionSetupAttempted: status.permissionSetupAttempted,
 		permissions: [
 			permission(
 				"accessibility",
@@ -144,6 +189,11 @@ export function toMonitoringSnapshot(
 				false,
 			),
 		],
+		contentVault: {
+			availability: vault.availability,
+			storageMode: vault.storageMode,
+			interactiveMigrationAvailable: vault.interactiveMigrationAvailable,
+		},
 		excludedAppIds: [...status.excludedBundleIds],
 		// The native status currently reports its heartbeat, not the time of the
 		// last accepted observation. Keep this honest until that field exists.
@@ -160,8 +210,12 @@ async function loadClientTransport(): Promise<MonitoringTransport> {
 			clientApi.configureMonitoring(configuration),
 		pause: () => clientApi.pauseMonitoring(),
 		resume: () => clientApi.resumeMonitoring(),
-		refreshPermissions: (prompt) =>
-			clientApi.refreshMonitoringPermissions(prompt),
+		refreshPermissions: () =>
+			clientApi.refreshMonitoringPermissions(),
+		setupPermissions: () =>
+			clientApi.setupMonitoringPermissions(),
+		vaultStatus: () => clientApi.getContentVaultStatus(),
+		migrateLegacyVault: () => clientApi.migrateLegacyContentVault(),
 		openPermissionSettings: (permission) =>
 			clientApi.openMonitoringPermissionSettings(permission),
 	};
@@ -177,15 +231,38 @@ function unavailableSnapshot(): MonitoringSnapshot {
 		observerConnected: false,
 		permissionCheckState: "unchecked",
 		permissionsCheckedAtMs: null,
+		permissionSetupAvailable: false,
+		permissionSetupAttempted: false,
 		permissions: [
 			permission("accessibility", "unsupported", true),
 			permission("screenRecording", "unsupported", true),
 			permission("inputMonitoring", "unsupported", true),
 			permission("browserAutomation", "unsupported", false),
 		],
+		contentVault: {
+			availability: "unavailable",
+			storageMode: null,
+			interactiveMigrationAvailable: false,
+		},
 		excludedAppIds: [],
 		lastObservationAtMs: null,
 		coverageGaps: ["runtime_unavailable"],
+	};
+}
+
+function monitoringSnapshot(
+	status: LocalMonitoringStatus,
+	vault: LocalVaultKeyStatus,
+): MonitoringSnapshot {
+	return toMonitoringSnapshot(status, vault);
+}
+
+function unavailableVaultStatus(): LocalVaultKeyStatus {
+	return {
+		availability: "unavailable",
+		storageMode: null,
+		keyVersion: null,
+		interactiveMigrationAvailable: false,
 	};
 }
 

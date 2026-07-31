@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
 	MonitoringController,
+	MonitoringPermissionsControl,
 	parseExcludedAppIds,
 	MonitoringStatusControl,
+	monitoringSetupStatus,
 	type MonitoringService,
 	type MonitoringSnapshot,
 } from "../src/views/client/features/monitoring/public";
@@ -18,6 +20,8 @@ function monitoringSnapshot(): MonitoringSnapshot {
 		observerConnected: true,
 		permissionCheckState: "current",
 		permissionsCheckedAtMs: 1_800_000_000_000,
+		permissionSetupAvailable: true,
+		permissionSetupAttempted: true,
 		permissions: [
 			{
 				id: "accessibility",
@@ -44,6 +48,11 @@ function monitoringSnapshot(): MonitoringSnapshot {
 				detail: null,
 			},
 		],
+		contentVault: {
+			availability: "available",
+			storageMode: "data_protection_keychain",
+			interactiveMigrationAvailable: false,
+		},
 		excludedAppIds: [],
 		lastObservationAtMs: null,
 		coverageGaps: ["screen_recording_denied"],
@@ -79,7 +88,13 @@ describe("monitoring status UI", () => {
 			async resume() {
 				return monitoringSnapshot();
 			},
+			async requestRequiredPermissions() {
+				return monitoringSnapshot();
+			},
 			async refreshPermissions() {
+				return monitoringSnapshot();
+			},
+			async migrateContentVault() {
 				return monitoringSnapshot();
 			},
 			async openPermissionSettings() {},
@@ -90,9 +105,9 @@ describe("monitoring status UI", () => {
 			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
 		);
 		expect(markup).toContain("权限不完整");
-		expect(markup).toContain("缺少 1 项系统权限");
-		expect(markup).toContain("查看权限详情");
-		expect(markup).toContain("暂停观察");
+		expect(markup).toContain("还有 1 项系统权限待完成");
+		expect(markup).toContain("修复监测设置");
+		expect(markup).not.toContain("暂停观察");
 		expect(markup).not.toContain("screen_recording_denied");
 	});
 
@@ -115,8 +130,14 @@ describe("monitoring status UI", () => {
 			async resume() {
 				throw new Error("must not resume while disabled");
 			},
+			async requestRequiredPermissions() {
+				return monitoringSnapshot();
+			},
 			async refreshPermissions() {
 				throw new Error("must not refresh while disabled");
+			},
+			async migrateContentVault() {
+				throw new Error("must not migrate while disabled");
 			},
 			async openPermissionSettings() {},
 		};
@@ -126,8 +147,7 @@ describe("monitoring status UI", () => {
 			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
 		);
 		expect(markup).toContain("未启用");
-		expect(markup).toContain("启用本机观察");
-		expect(markup).toContain("数据与隐私");
+		expect(markup).toContain("设置本机监测");
 		expect(markup).not.toContain("暂停观察");
 		expect(markup).not.toContain("恢复观察");
 	});
@@ -155,7 +175,13 @@ describe("monitoring status UI", () => {
 			async resume() {
 				return unchecked;
 			},
+			async requestRequiredPermissions() {
+				return unchecked;
+			},
 			async refreshPermissions() {
+				return unchecked;
+			},
+			async migrateContentVault() {
 				return unchecked;
 			},
 			async openPermissionSettings() {},
@@ -166,5 +192,196 @@ describe("monitoring status UI", () => {
 			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
 		);
 		expect(markup).not.toContain("缺少 4 项系统权限");
+	});
+
+	test("after the one-time request, directs missing permissions to System Settings", async () => {
+		const service: MonitoringService = {
+			async status() {
+				return monitoringSnapshot();
+			},
+			async configure() {
+				return monitoringSnapshot();
+			},
+			async pause() {
+				return monitoringSnapshot();
+			},
+			async resume() {
+				return monitoringSnapshot();
+			},
+			async requestRequiredPermissions() {
+				return monitoringSnapshot();
+			},
+			async refreshPermissions() {
+				return monitoringSnapshot();
+			},
+			async migrateContentVault() {
+				return monitoringSnapshot();
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		const markup = renderToStaticMarkup(
+			<MonitoringPermissionsControl controller={controller} />,
+		);
+		expect(markup).toContain("一次性监测设置");
+		expect(markup).toContain("辅助功能");
+		expect(markup).toContain("屏幕录制");
+		expect(markup).toContain("输入监控");
+		expect(markup).toContain("已经请求过一次");
+		expect(markup).toContain("打开屏幕录制设置");
+		expect((markup.match(/<button/g) ?? []).length).toBe(1);
+		expect(markup).toContain("<details");
+		expect(markup).not.toContain("<details open");
+		expect(markup).toContain("fail-closed");
+		expect(markup).not.toContain("重新检查");
+		expect(markup).not.toContain("在系统设置中查看");
+	});
+
+	test("offers the dedicated setup action only before the identity marker exists", async () => {
+		const firstRun = {
+			...monitoringSnapshot(),
+			permissionSetupAvailable: true,
+			permissionSetupAttempted: false,
+		};
+		const service: MonitoringService = {
+			async status() {
+				return firstRun;
+			},
+			async configure() {
+				return firstRun;
+			},
+			async pause() {
+				return firstRun;
+			},
+			async resume() {
+				return firstRun;
+			},
+			async requestRequiredPermissions() {
+				return {
+					...firstRun,
+					permissionSetupAttempted: true,
+				};
+			},
+			async refreshPermissions() {
+				return firstRun;
+			},
+			async migrateContentVault() {
+				return firstRun;
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		const markup = renderToStaticMarkup(
+			<MonitoringPermissionsControl controller={controller} />,
+		);
+		expect(markup).toContain("开始一次性设置");
+		expect(markup).not.toContain("已经请求过一次");
+	});
+
+	test("collapses completed setup to a button-free ready state", async () => {
+		const ready = {
+			...monitoringSnapshot(),
+			state: "running" as const,
+			permissions: monitoringSnapshot().permissions.map((permission) => ({
+				...permission,
+				state:
+					permission.id === "browserAutomation"
+						? ("denied" as const)
+						: ("granted" as const),
+			})),
+			coverageGaps: [],
+		};
+		const service: MonitoringService = {
+			async status() {
+				return ready;
+			},
+			async configure() {
+				return ready;
+			},
+			async pause() {
+				return ready;
+			},
+			async resume() {
+				return ready;
+			},
+			async requestRequiredPermissions() {
+				return ready;
+			},
+			async refreshPermissions() {
+				return ready;
+			},
+			async migrateContentVault() {
+				return ready;
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		const markup = renderToStaticMarkup(
+			<MonitoringPermissionsControl controller={controller} />,
+		);
+		expect(monitoringSetupStatus(ready).phase).toBe("ready");
+		expect(markup).toContain("本机监测已设置");
+		expect(markup).toContain("3/3 项完成");
+		expect(markup).not.toContain("<ol");
+		expect(markup).not.toContain("本地内容加密</strong>");
+		expect(markup).not.toContain("<button");
+		expect(markup).toContain("浏览器精确 URL（可选）");
+	});
+
+	test("does not offer setup when an ad-hoc build cannot safely open the vault", async () => {
+		const adHoc = {
+			...monitoringSnapshot(),
+			state: "disabled" as const,
+			enabled: false,
+			captureContent: false,
+			permissionSetupAvailable: false,
+			permissionSetupAttempted: false,
+			contentVault: {
+				availability: "migration_required" as const,
+				storageMode: "legacy_development_keychain" as const,
+				interactiveMigrationAvailable: false,
+			},
+		};
+		const service: MonitoringService = {
+			async status() {
+				return adHoc;
+			},
+			async configure() {
+				throw new Error("must not configure an unsafe build");
+			},
+			async pause() {
+				return adHoc;
+			},
+			async resume() {
+				return adHoc;
+			},
+			async requestRequiredPermissions() {
+				throw new Error("must not request TCC consent for an unsafe build");
+			},
+			async refreshPermissions() {
+				return adHoc;
+			},
+			async migrateContentVault() {
+				return adHoc;
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		expect(monitoringSetupStatus(adHoc).phase).toBe("unavailable");
+		const settingsMarkup = renderToStaticMarkup(
+			<MonitoringPermissionsControl controller={controller} />,
+		);
+		const sidebarMarkup = renderToStaticMarkup(
+			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
+		);
+		expect(settingsMarkup).toContain("当前应用没有稳定签名");
+		expect(settingsMarkup).not.toContain("<button");
+		expect(sidebarMarkup).not.toContain("设置本机监测");
+		expect(sidebarMarkup).not.toContain("修复监测设置");
+		expect(sidebarMarkup).not.toContain("<button");
 	});
 });

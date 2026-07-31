@@ -13,7 +13,9 @@ export type MonitoringOperation =
 	| "enable"
 	| "pause"
 	| "resume"
+	| "beginSetup"
 	| "refreshPermissions"
+	| "migrateContentVault"
 	| "openPermissionSettings";
 
 export type MonitoringState =
@@ -105,10 +107,32 @@ export class MonitoringController {
 		return this.perform("resume", () => this.service.resume());
 	}
 
+	beginSetup(): Promise<MonitoringSnapshot | null> {
+		const snapshot = snapshotFromState(this.state);
+		if (snapshot === null) return this.load();
+		return this.perform("beginSetup", async () => {
+			if (!snapshot.enabled || !snapshot.captureContent) {
+				await this.service.configure({
+					enabled: true,
+					captureContent: true,
+					excludedAppIds: snapshot.excludedAppIds,
+				});
+			}
+			return this.service.requestRequiredPermissions();
+		});
+	}
+
 	refreshPermissions(): Promise<MonitoringSnapshot | null> {
 		return this.perform(
 			"refreshPermissions",
 			() => this.service.refreshPermissions(),
+		);
+	}
+
+	migrateContentVault(): Promise<MonitoringSnapshot | null> {
+		return this.perform(
+			"migrateContentVault",
+			() => this.service.migrateContentVault(),
 		);
 	}
 

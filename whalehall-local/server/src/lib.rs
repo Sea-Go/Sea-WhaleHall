@@ -11,7 +11,10 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use whalehall_local_core::ToolHost;
 use whalehall_local_core::events::{EventAppendResult, EventJournal, EventJournalError};
-use whalehall_local_core::observations::{ObservationJournal, ObservationJournalError};
+use whalehall_local_core::observations::{
+    ObservationJournal, ObservationJournalError, ObservationKeyAvailability, ObservationKeyStatus,
+    ObservationKeyStorageMode,
+};
 use whalehall_local_core::sensors::accessibility_tree::{
     AccessibilityConfig, AccessibilityService, SystemAccessibilityProvider,
 };
@@ -36,11 +39,12 @@ use whalehall_local_core::sensors::vscode_edit_bridge::{
 use whalehall_local_protocol::{
     AuditQueryFiveMinutesParams, AuditQueryFiveMinutesResult, DesktopEventFrame,
     DesktopEventFrameKind, EventCommitParams, EventGoalChangeParams, EventGoalChangeResult,
-    EventQueryParams, MAX_JSONL_LINE_BYTES, MonitoringConfigureParams,
-    MonitoringRefreshPermissionsParams, OutboundMessage, Request, Response, RuntimeHealth,
-    SemanticCommitParams, SemanticEventFrame, SemanticEventFrameKind, SemanticQueryParams,
-    ToolCallParams, ToolCallResult, ToolCancelParams, ToolCancelResult, ToolListResult,
-    VaultOpenBatchParams, VaultSealBatchParams, error_codes,
+    EventQueryParams, MAX_JSONL_LINE_BYTES, MonitoringConfigureParams, OutboundMessage, Request,
+    Response, RuntimeHealth, SemanticCommitParams, SemanticEventFrame, SemanticEventFrameKind,
+    SemanticQueryParams, ToolCallParams, ToolCallResult, ToolCancelParams, ToolCancelResult,
+    ToolListResult, VaultKeyAvailability, VaultKeyStatusResult, VaultKeyStorageMode,
+    VaultMigrateLegacyKeyParams, VaultMigrateLegacyKeyResult, VaultOpenBatchParams,
+    VaultSealBatchParams, error_codes,
 };
 
 use observer::{ObserverSupervisor, ObserverSupervisorConfig};
@@ -980,20 +984,35 @@ fn dispatch_request(
             });
         }
         "monitoring.refreshPermissions" => {
-            let params: MonitoringRefreshPermissionsParams =
-                match serde_json::from_value(request.params) {
-                    Ok(params) => params,
+            if !is_empty_object(&request.params) {
+                let _ = output.send(OutboundMessage::Response(Response::failure(
+                    Some(request.id),
+                    error_codes::INVALID_ARGUMENTS,
+                    "monitoring.refreshPermissions accepts an empty params object",
+                )));
+                return;
+            }
+            calls.spawn(async move {
+                let response = match observer.refresh_permissions().await {
+                    Ok(result) => Response::success(request.id, result),
                     Err(error) => {
-                        let _ = output.send(OutboundMessage::Response(Response::failure(
-                            Some(request.id),
-                            error_codes::INVALID_ARGUMENTS,
-                            format!("Invalid monitoring.refreshPermissions parameters: {error}"),
-                        )));
-                        return;
+                        Response::failure(Some(request.id), error_codes::INVALID_ARGUMENTS, error)
                     }
                 };
+                let _ = output.send(OutboundMessage::Response(response));
+            });
+        }
+        "monitoring.setupPermissions" => {
+            if !is_empty_object(&request.params) {
+                let _ = output.send(OutboundMessage::Response(Response::failure(
+                    Some(request.id),
+                    error_codes::INVALID_ARGUMENTS,
+                    "monitoring.setupPermissions accepts an empty params object",
+                )));
+                return;
+            }
             calls.spawn(async move {
-                let response = match observer.refresh_permissions(params).await {
+                let response = match observer.setup_permissions().await {
                     Ok(result) => Response::success(request.id, result),
                     Err(error) => {
                         Response::failure(Some(request.id), error_codes::INVALID_ARGUMENTS, error)
@@ -1065,6 +1084,67 @@ fn dispatch_request(
                 Err(error) => observation_error_response(request.id, error),
             };
             let _ = output.send(OutboundMessage::Response(response));
+        }
+        "vault.status" => {
+            if !is_empty_object(&request.params) {
+                let _ = output.send(OutboundMessage::Response(Response::failure(
+                    Some(request.id),
+                    error_codes::INVALID_ARGUMENTS,
+                    "vault.status accepts an empty params object",
+                )));
+                return;
+            }
+            let result = vault_key_status_result(observation_journal.key_status());
+            let _ = output.send(OutboundMessage::Response(Response::success(
+                request.id, result,
+            )));
+        }
+        "vault.migrateLegacyKey" => {
+            let params: VaultMigrateLegacyKeyParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid vault.migrateLegacyKey parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            if !params.confirm {
+                let _ = output.send(OutboundMessage::Response(Response::failure(
+                    Some(request.id),
+                    error_codes::INVALID_ARGUMENTS,
+                    "vault.migrateLegacyKey requires explicit confirmation",
+                )));
+                return;
+            }
+            calls.spawn(async move {
+                let migration_journal = observation_journal.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    migration_journal.migrate_legacy_key_interactive()
+                })
+                .await;
+                let response = match result {
+                    Ok(Ok(migration)) => {
+                        let status = vault_key_status_result(observation_journal.key_status());
+                        Response::success(
+                            request.id,
+                            VaultMigrateLegacyKeyResult {
+                                migrated: migration.migrated,
+                                status,
+                            },
+                        )
+                    }
+                    Ok(Err(error)) => observation_error_response(request.id, error),
+                    Err(_) => Response::failure(
+                        Some(request.id),
+                        error_codes::INTERNAL_ERROR,
+                        "Vault migration worker failed",
+                    ),
+                };
+                let _ = output.send(OutboundMessage::Response(response));
+            });
         }
         "vault.sealBatch" => {
             let params: VaultSealBatchParams = match serde_json::from_value(request.params) {
@@ -1195,6 +1275,32 @@ fn event_error_response(id: String, error: EventJournalError) -> Response {
     Response::failure(Some(id), code, error.to_string())
 }
 
+fn vault_key_status_result(status: ObservationKeyStatus) -> VaultKeyStatusResult {
+    VaultKeyStatusResult {
+        availability: match status.availability {
+            ObservationKeyAvailability::Available => VaultKeyAvailability::Available,
+            ObservationKeyAvailability::MigrationRequired => {
+                VaultKeyAvailability::MigrationRequired
+            }
+            ObservationKeyAvailability::Unavailable => VaultKeyAvailability::Unavailable,
+        },
+        storage_mode: status.storage_mode.map(|mode| match mode {
+            ObservationKeyStorageMode::DataProtectionKeychain => {
+                VaultKeyStorageMode::DataProtectionKeychain
+            }
+            ObservationKeyStorageMode::LocalLoginKeychain => {
+                VaultKeyStorageMode::LocalLoginKeychain
+            }
+            ObservationKeyStorageMode::LegacyDevelopmentKeychain => {
+                VaultKeyStorageMode::LegacyDevelopmentKeychain
+            }
+            ObservationKeyStorageMode::Custom => VaultKeyStorageMode::Custom,
+        }),
+        key_version: status.key_version,
+        interactive_migration_available: status.interactive_migration_available,
+    }
+}
+
 fn observation_error_response(id: String, error: ObservationJournalError) -> Response {
     let code = match error {
         ObservationJournalError::InvalidCursor(_) => error_codes::INVALID_CURSOR,
@@ -1203,6 +1309,7 @@ fn observation_error_response(id: String, error: ObservationJournalError) -> Res
         | ObservationJournalError::IdempotencyConflict
         | ObservationJournalError::VaultConflict => error_codes::INVALID_ARGUMENTS,
         ObservationJournalError::KeyUnavailable
+        | ObservationJournalError::KeyMigration(_)
         | ObservationJournalError::VaultRecordUnavailable => error_codes::PERMISSION_DENIED,
         ObservationJournalError::Io(_)
         | ObservationJournalError::Sqlite(_)
@@ -1521,6 +1628,28 @@ mod tests {
             )
             .await
             .expect("write invalid audit query");
+        input
+            .write_all(b"{\"id\":\"vault-status\",\"method\":\"vault.status\",\"params\":{}}\n")
+            .await
+            .expect("write vault status");
+        input
+            .write_all(
+                b"{\"id\":\"invalid-migration\",\"method\":\"vault.migrateLegacyKey\",\"params\":{\"confirm\":false}}\n",
+            )
+            .await
+            .expect("write invalid migration");
+        input
+            .write_all(
+                b"{\"id\":\"forbidden-refresh-prompt\",\"method\":\"monitoring.refreshPermissions\",\"params\":{\"prompt\":true}}\n",
+            )
+            .await
+            .expect("write forbidden refresh prompt");
+        input
+            .write_all(
+                b"{\"id\":\"forbidden-setup-params\",\"method\":\"monitoring.setupPermissions\",\"params\":{\"prompt\":true}}\n",
+            )
+            .await
+            .expect("write forbidden setup params");
         input.shutdown().await.expect("close input");
 
         let mut output = BufReader::new(output);
@@ -1541,6 +1670,8 @@ mod tests {
         };
         assert_eq!(by_id("monitor")["ok"], true);
         assert!(by_id("monitor")["result"]["permissions"].is_object());
+        assert!(by_id("monitor")["result"]["permissionSetupAvailable"].is_boolean());
+        assert!(by_id("monitor")["result"]["permissionSetupAttempted"].is_boolean());
         assert_eq!(by_id("semantic")["result"]["events"], serde_json::json!([]));
         assert_eq!(by_id("audit")["result"]["fromMs"], 0);
         assert_eq!(by_id("audit")["result"]["toMs"], 300_000);
@@ -1549,6 +1680,14 @@ mod tests {
             serde_json::json!([])
         );
         assert_eq!(by_id("invalid-audit")["ok"], false);
+        assert!(matches!(
+            by_id("vault-status")["result"]["availability"].as_str(),
+            Some("available" | "migration_required" | "unavailable")
+        ));
+        assert!(by_id("vault-status")["result"]["interactiveMigrationAvailable"].is_boolean());
+        assert_eq!(by_id("invalid-migration")["ok"], false);
+        assert_eq!(by_id("forbidden-refresh-prompt")["ok"], false);
+        assert_eq!(by_id("forbidden-setup-params")["ok"], false);
     }
 
     #[tokio::test]

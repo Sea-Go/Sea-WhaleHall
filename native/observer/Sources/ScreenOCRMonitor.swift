@@ -119,9 +119,12 @@ final class ScreenOCRMonitor {
     private func beginCapture() {
         guard let target,
               target.captureAllowed,
-              !target.accessibilityContentSufficient,
-              CGPreflightScreenCaptureAccess()
+              !target.accessibilityContentSufficient
         else {
+            return
+        }
+        guard CGPreflightScreenCaptureAccess() else {
+            onGap("screen_recording_unavailable")
             return
         }
         if captureInFlight {
@@ -275,6 +278,9 @@ final class ScreenOCRMonitor {
     nonisolated private static func sanitizedCaptureError(_ error: Error) -> String {
         if let captureError = error as? ObserverCaptureError {
             return captureError.rawValue
+        }
+        if !CGPreflightScreenCaptureAccess() {
+            return "screen_recording_unavailable"
         }
         return "screen_capture_failed"
     }

@@ -70,12 +70,19 @@ async function createMonitoringController(): Promise<MonitoringController> {
 		observerConnected: true,
 		permissionCheckState: "current",
 		permissionsCheckedAtMs: 1_800_000_000_000,
+		permissionSetupAvailable: true,
+		permissionSetupAttempted: true,
 		permissions: [
 			{ id: "accessibility", state: "granted", required: true, detail: null },
 			{ id: "screenRecording", state: "granted", required: true, detail: null },
 			{ id: "inputMonitoring", state: "granted", required: true, detail: null },
 			{ id: "browserAutomation", state: "granted", required: false, detail: null },
 		],
+		contentVault: {
+			availability: "available",
+			storageMode: "data_protection_keychain",
+			interactiveMigrationAvailable: false,
+		},
 		excludedAppIds: ["com.example.private"],
 		lastObservationAtMs: null,
 		coverageGaps: [],
@@ -99,7 +106,13 @@ async function createMonitoringController(): Promise<MonitoringController> {
 		async resume() {
 			return current;
 		},
+		async requestRequiredPermissions() {
+			return current;
+		},
 		async refreshPermissions() {
+			return current;
+		},
+		async migrateContentVault() {
 			return current;
 		},
 		async openPermissionSettings() {},
@@ -154,15 +167,12 @@ describe("settings UI", () => {
 				"开始采满五分钟",
 				"导出过去五分钟",
 				"包含可解密的文本内容",
-				"macOS 系统权限",
-				"辅助功能",
-				"屏幕录制",
-				"输入监控",
-				"自动化",
-				"可选增强",
-				"每项权限只需在首次安装时到系统设置中同意一次",
-				"只会静默读取当前状态",
-				"在系统设置中查看",
+				"一次性监测设置",
+				"本机监测已设置",
+				"3/3 项完成",
+				"不会再次弹出授权",
+				"浏览器精确 URL（可选）",
+				"fail-closed",
 				"按应用排除",
 				"当前排除 1 个应用",
 				"com.example.private",

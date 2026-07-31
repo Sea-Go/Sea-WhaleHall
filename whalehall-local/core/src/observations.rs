@@ -46,14 +46,12 @@ const MAX_VAULT_RECORD_BYTES: usize = 512 * 1024;
 const MAX_VAULT_BATCH_BYTES: usize = 768 * 1024;
 const MAX_VAULT_BATCH_RECORDS: usize = 64;
 const KEY_VERSION: &str = "keychain-v1";
+const LEGACY_DEV_KEY_VERSION: &str = "keychain-dev-legacy-v1";
 const FIVE_MINUTES_MS: i64 = 300_000;
 const DEVICE_ID_ENV: &str = "WHALEHALL_DEVICE_ID";
 const SESSION_ID_ENV: &str = "WHALEHALL_SESSION_ID";
 const AUTHORIZATION_SNAPSHOT_META_KEY: &str = "authorization_snapshot_v1";
 const AUTHORIZATION_SNAPSHOT_SCHEMA_VERSION: &str = "authorization-snapshot.v1";
-#[cfg(target_os = "macos")]
-const LEGACY_DEV_KEYCHAIN_ENV: &str = "WHALEHALL_ALLOW_LEGACY_DEV_KEYCHAIN";
-
 static INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -90,13 +88,23 @@ impl ObservationJournalConfig {
 pub struct ObservationKey {
     bytes: Zeroizing<[u8; 32]>,
     version: String,
+    storage_mode: ObservationKeyStorageMode,
 }
 
 impl ObservationKey {
     pub fn from_bytes(bytes: [u8; 32], version: impl Into<String>) -> Self {
+        Self::from_stored_bytes(bytes, version, ObservationKeyStorageMode::Custom)
+    }
+
+    fn from_stored_bytes(
+        bytes: [u8; 32],
+        version: impl Into<String>,
+        storage_mode: ObservationKeyStorageMode,
+    ) -> Self {
         Self {
             bytes: Zeroizing::new(bytes),
             version: version.into(),
+            storage_mode,
         }
     }
 
@@ -107,12 +115,24 @@ impl ObservationKey {
     fn version(&self) -> &str {
         &self.version
     }
+
+    fn storage_mode(&self) -> ObservationKeyStorageMode {
+        self.storage_mode
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ObservationKeyError {
     #[error("observation encryption key is unavailable")]
     Unavailable,
+    #[error("legacy observation encryption key migration is required")]
+    MigrationRequired { interactive_available: bool },
+    #[error("interactive observation encryption key migration is unsupported")]
+    MigrationUnsupported,
+    #[error("the observation encryption key migration target contains a different key")]
+    MigrationConflict,
+    #[error("the migrated observation encryption key failed read-back verification")]
+    MigrationVerificationFailed,
     #[error("observation encryption key has an invalid size")]
     InvalidSize,
     #[error("observation encryption key storage failed")]
@@ -122,12 +142,44 @@ pub enum ObservationKeyError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservationKeyStorageMode {
     DataProtectionKeychain,
+    LocalLoginKeychain,
     LegacyDevelopmentKeychain,
     Custom,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservationKeyAvailability {
+    Available,
+    MigrationRequired,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservationKeyStatus {
+    pub availability: ObservationKeyAvailability,
+    pub storage_mode: Option<ObservationKeyStorageMode>,
+    pub key_version: Option<String>,
+    pub interactive_migration_available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservationKeyMigrationResult {
+    pub migrated: bool,
+    pub storage_mode: ObservationKeyStorageMode,
+    pub key_version: String,
+}
+
 pub trait ObservationKeyProvider: Send + Sync {
+    /// Loads or creates the production key without ever allowing Keychain UI.
     fn load_or_create(&self) -> Result<ObservationKey, ObservationKeyError>;
+
+    /// Performs the one operation that may display Keychain UI. Callers must
+    /// expose this only behind an explicit user action.
+    fn migrate_legacy_key_interactive(
+        &self,
+    ) -> Result<(ObservationKey, bool), ObservationKeyError> {
+        Err(ObservationKeyError::MigrationUnsupported)
+    }
 }
 
 /// Deterministic provider for unit tests and explicitly constructed embedders.
@@ -167,88 +219,95 @@ pub struct MacKeychainObservationKeyProvider;
 #[cfg(target_os = "macos")]
 impl ObservationKeyProvider for MacKeychainObservationKeyProvider {
     fn load_or_create(&self) -> Result<ObservationKey, ObservationKeyError> {
-        use security_framework::access_control::{ProtectionMode, SecAccessControl};
-        use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
-        use security_framework::passwords::{
-            PasswordOptions, generic_password, set_generic_password_options,
-        };
+        use security_framework::os::macos::keychain::SecKeychain;
 
-        const SERVICE: &str = "com.seago.whalehall.observation-v2";
-        const ACCOUNT: &str = "local-aes-256-gcm-key-v1";
-        const LEGACY_DEV_SERVICE: &str = "com.seago.whalehall.observation-v2.dev-legacy";
-        const LEGACY_DEV_KEY_VERSION: &str = "keychain-dev-legacy-v1";
-        const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
-        const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34_018;
+        let _operation_guard = mac_keychain_operation_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _interaction_guard =
+            SecKeychain::disable_user_interaction().map_err(|_| ObservationKeyError::Storage)?;
+        load_or_create_mac_key(current_mac_signing_identity())
+    }
 
-        let query = || {
-            let mut options = PasswordOptions::new_generic_password(SERVICE, ACCOUNT);
-            options.set_access_synchronized(Some(false));
-            options
-        };
-        match generic_password(query()) {
-            Ok(bytes) => key_from_slice(&bytes, KEY_VERSION),
-            Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
-                let mut bytes = Zeroizing::new([0_u8; 32]);
-                getrandom::fill(bytes.as_mut()).map_err(|_| ObservationKeyError::Storage)?;
-                let access = SecAccessControl::create_with_protection(
-                    Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly),
-                    0,
-                )
-                .map_err(|_| ObservationKeyError::Storage)?;
-                let mut options = query();
-                options.set_access_control(access);
-                if let Err(error) = set_generic_password_options(bytes.as_ref(), options) {
-                    if error.code() == ERR_SEC_MISSING_ENTITLEMENT
-                        && legacy_dev_keychain_is_allowed()
-                    {
-                        // The local JSONL child must never block on an
-                        // unexpected Keychain ACL dialog after an ad-hoc
-                        // rebuild. A stale development item fails closed and
-                        // can be recreated explicitly by the developer.
-                        let _interaction_lock = SecKeychain::disable_user_interaction()
-                            .map_err(|_| ObservationKeyError::Storage)?;
-                        let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
-                            .map_err(|_| ObservationKeyError::Storage)?;
-                        let persisted =
-                            match keychain.find_generic_password(LEGACY_DEV_SERVICE, ACCOUNT) {
-                                Ok((persisted, _)) => persisted,
-                                Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
-                                    keychain
-                                        .set_generic_password(
-                                            LEGACY_DEV_SERVICE,
-                                            ACCOUNT,
-                                            bytes.as_ref(),
-                                        )
-                                        .map_err(|_| ObservationKeyError::Storage)?;
-                                    keychain
-                                        .find_generic_password(LEGACY_DEV_SERVICE, ACCOUNT)
-                                        .map_err(|_| ObservationKeyError::Storage)?
-                                        .0
-                                }
-                                Err(_) => return Err(ObservationKeyError::Storage),
-                            };
-                        return key_from_slice(&persisted, LEGACY_DEV_KEY_VERSION);
-                    }
-                    return Err(ObservationKeyError::Storage);
-                }
-                // Read the durable item again so a concurrent creator and the
-                // current process always converge on the same key.
-                let persisted =
-                    generic_password(query()).map_err(|_| ObservationKeyError::Storage)?;
-                key_from_slice(&persisted, KEY_VERSION)
-            }
-            Err(_) => Err(ObservationKeyError::Unavailable),
+    fn migrate_legacy_key_interactive(
+        &self,
+    ) -> Result<(ObservationKey, bool), ObservationKeyError> {
+        use security_framework::os::macos::keychain::SecKeychain;
+
+        let _operation_guard = mac_keychain_operation_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !SecKeychain::user_interaction_allowed().map_err(|_| ObservationKeyError::Storage)? {
+            return Err(ObservationKeyError::MigrationUnsupported);
+        }
+        migrate_mac_legacy_key(current_mac_signing_identity())
+    }
+}
+
+#[cfg(target_os = "macos")]
+const MAC_KEYCHAIN_SERVICE: &str = "com.seago.whalehall.observation-v2";
+#[cfg(target_os = "macos")]
+const MAC_LOCAL_KEYCHAIN_SERVICE: &str = "com.seago.whalehall.observation-v2.local-signed";
+#[cfg(target_os = "macos")]
+const MAC_LEGACY_DEV_KEYCHAIN_SERVICE: &str = "com.seago.whalehall.observation-v2.dev-legacy";
+#[cfg(target_os = "macos")]
+const MAC_KEYCHAIN_ACCOUNT: &str = "local-aes-256-gcm-key-v1";
+#[cfg(target_os = "macos")]
+const MAC_MIGRATED_LEGACY_ACCOUNT: &str = "local-aes-256-gcm-key-from-dev-legacy-v1";
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacSigningIdentity {
+    TeamSigned,
+    StableLocal,
+    AdHoc,
+    Unsupported,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacKeychainTarget {
+    DataProtection,
+    LocalLogin,
+}
+
+#[cfg(target_os = "macos")]
+impl MacKeychainTarget {
+    fn for_signing_identity(identity: MacSigningIdentity) -> Option<Self> {
+        match identity {
+            MacSigningIdentity::TeamSigned => Some(Self::DataProtection),
+            MacSigningIdentity::StableLocal => Some(Self::LocalLogin),
+            MacSigningIdentity::AdHoc | MacSigningIdentity::Unsupported => None,
+        }
+    }
+
+    fn storage_mode(self) -> ObservationKeyStorageMode {
+        match self {
+            Self::DataProtection => ObservationKeyStorageMode::DataProtectionKeychain,
+            Self::LocalLogin => ObservationKeyStorageMode::LocalLoginKeychain,
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn legacy_dev_keychain_is_allowed() -> bool {
-    if std::env::var_os(LEGACY_DEV_KEYCHAIN_ENV).as_deref() != Some(std::ffi::OsStr::new("true")) {
-        return false;
-    }
+enum LegacyMacKey {
+    Found(Zeroizing<Vec<u8>>),
+    Missing,
+    Inaccessible,
+}
+
+#[cfg(target_os = "macos")]
+fn mac_keychain_operation_lock() -> &'static Mutex<()> {
+    static OPERATION_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    OPERATION_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(target_os = "macos")]
+fn current_mac_signing_identity() -> MacSigningIdentity {
     let Ok(executable) = std::env::current_exe() else {
-        return false;
+        return MacSigningIdentity::Unsupported;
     };
     let Ok(output) = std::process::Command::new("/usr/bin/codesign")
         .arg("-dv")
@@ -256,34 +315,221 @@ fn legacy_dev_keychain_is_allowed() -> bool {
         .arg(executable)
         .output()
     else {
-        return false;
+        return MacSigningIdentity::Unsupported;
     };
-    output.status.success()
-        && is_adhoc_signature_without_team_identifier(&String::from_utf8_lossy(&output.stderr))
+    if !output.status.success() {
+        return MacSigningIdentity::Unsupported;
+    }
+    classify_mac_signing_details(&String::from_utf8_lossy(&output.stderr))
 }
 
 #[cfg(target_os = "macos")]
-fn is_adhoc_signature_without_team_identifier(details: &str) -> bool {
+fn classify_mac_signing_details(details: &str) -> MacSigningIdentity {
     let mut is_adhoc = false;
-    let mut lacks_team_identifier = false;
+    let mut team_identifier = None;
+    let mut has_authority = false;
     for line in details.lines().map(str::trim) {
         if line == "Signature=adhoc" {
             is_adhoc = true;
-        } else if line == "TeamIdentifier=not set" {
-            lacks_team_identifier = true;
+        } else if let Some(value) = line.strip_prefix("TeamIdentifier=") {
+            team_identifier = Some(value);
+        } else if line.starts_with("Authority=") {
+            has_authority = true;
         }
     }
-    is_adhoc && lacks_team_identifier
+    if is_adhoc {
+        MacSigningIdentity::AdHoc
+    } else if team_identifier.is_some_and(|value| !value.is_empty() && value != "not set") {
+        MacSigningIdentity::TeamSigned
+    } else if has_authority {
+        MacSigningIdentity::StableLocal
+    } else {
+        MacSigningIdentity::Unsupported
+    }
 }
 
-fn key_from_slice(
+#[cfg(target_os = "macos")]
+fn load_or_create_mac_key(
+    signing_identity: MacSigningIdentity,
+) -> Result<ObservationKey, ObservationKeyError> {
+    let Some(target) = MacKeychainTarget::for_signing_identity(signing_identity) else {
+        return match read_legacy_mac_key() {
+            LegacyMacKey::Found(_) | LegacyMacKey::Inaccessible => {
+                Err(ObservationKeyError::MigrationRequired {
+                    interactive_available: false,
+                })
+            }
+            LegacyMacKey::Missing => Err(ObservationKeyError::Unavailable),
+        };
+    };
+
+    if let Some(bytes) = read_mac_target_key(target, MAC_MIGRATED_LEGACY_ACCOUNT)? {
+        return key_from_stored_slice(&bytes, LEGACY_DEV_KEY_VERSION, target.storage_mode());
+    }
+    if let Some(bytes) = read_mac_target_key(target, MAC_KEYCHAIN_ACCOUNT)? {
+        return key_from_stored_slice(&bytes, KEY_VERSION, target.storage_mode());
+    }
+
+    match read_legacy_mac_key() {
+        LegacyMacKey::Found(_) | LegacyMacKey::Inaccessible => {
+            return Err(ObservationKeyError::MigrationRequired {
+                interactive_available: true,
+            });
+        }
+        LegacyMacKey::Missing => {}
+    }
+
+    let mut generated = Zeroizing::new([0_u8; 32]);
+    getrandom::fill(generated.as_mut()).map_err(|_| ObservationKeyError::Storage)?;
+    write_mac_target_key(target, MAC_KEYCHAIN_ACCOUNT, generated.as_ref())?;
+    let persisted =
+        read_mac_target_key(target, MAC_KEYCHAIN_ACCOUNT)?.ok_or(ObservationKeyError::Storage)?;
+    key_from_stored_slice(&persisted, KEY_VERSION, target.storage_mode())
+}
+
+#[cfg(target_os = "macos")]
+fn migrate_mac_legacy_key(
+    signing_identity: MacSigningIdentity,
+) -> Result<(ObservationKey, bool), ObservationKeyError> {
+    let target = MacKeychainTarget::for_signing_identity(signing_identity)
+        .ok_or(ObservationKeyError::MigrationUnsupported)?;
+    let source = match read_legacy_mac_key() {
+        LegacyMacKey::Found(bytes) => bytes,
+        LegacyMacKey::Missing | LegacyMacKey::Inaccessible => {
+            return Err(ObservationKeyError::Unavailable);
+        }
+    };
+    if source.len() != 32 {
+        return Err(ObservationKeyError::InvalidSize);
+    }
+
+    if read_mac_target_key(target, MAC_KEYCHAIN_ACCOUNT)?.is_some() {
+        return Err(ObservationKeyError::MigrationConflict);
+    }
+
+    let migrated = match read_mac_target_key(target, MAC_MIGRATED_LEGACY_ACCOUNT)? {
+        Some(existing) if existing.as_slice() == source.as_slice() => false,
+        Some(_) => return Err(ObservationKeyError::MigrationConflict),
+        None => {
+            write_mac_target_key(target, MAC_MIGRATED_LEGACY_ACCOUNT, source.as_slice())?;
+            true
+        }
+    };
+    let persisted = read_mac_target_key(target, MAC_MIGRATED_LEGACY_ACCOUNT)?
+        .ok_or(ObservationKeyError::MigrationVerificationFailed)?;
+    let key = verified_migrated_key(
+        source.as_slice(),
+        persisted.as_slice(),
+        target.storage_mode(),
+    )?;
+    Ok((key, migrated))
+}
+
+#[cfg(target_os = "macos")]
+fn read_legacy_mac_key() -> LegacyMacKey {
+    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
+
+    let Ok(keychain) = SecKeychain::default_for_domain(SecPreferencesDomain::User) else {
+        return LegacyMacKey::Inaccessible;
+    };
+    match keychain.find_generic_password(MAC_LEGACY_DEV_KEYCHAIN_SERVICE, MAC_KEYCHAIN_ACCOUNT) {
+        Ok((bytes, _)) => LegacyMacKey::Found(Zeroizing::new(bytes.as_ref().to_vec())),
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => LegacyMacKey::Missing,
+        Err(_) => LegacyMacKey::Inaccessible,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_mac_target_key(
+    target: MacKeychainTarget,
+    account: &str,
+) -> Result<Option<Zeroizing<Vec<u8>>>, ObservationKeyError> {
+    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
+    use security_framework::passwords::{PasswordOptions, generic_password};
+
+    match target {
+        MacKeychainTarget::DataProtection => {
+            let mut options = PasswordOptions::new_generic_password(MAC_KEYCHAIN_SERVICE, account);
+            options.set_access_synchronized(Some(false));
+            options.use_protected_keychain();
+            match generic_password(options) {
+                Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
+                Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+                Err(_) => Err(ObservationKeyError::Unavailable),
+            }
+        }
+        MacKeychainTarget::LocalLogin => {
+            let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
+                .map_err(|_| ObservationKeyError::Unavailable)?;
+            match keychain.find_generic_password(MAC_LOCAL_KEYCHAIN_SERVICE, account) {
+                Ok((bytes, _)) => Ok(Some(Zeroizing::new(bytes.as_ref().to_vec()))),
+                Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+                Err(_) => Err(ObservationKeyError::Unavailable),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn write_mac_target_key(
+    target: MacKeychainTarget,
+    account: &str,
+    bytes: &[u8],
+) -> Result<(), ObservationKeyError> {
+    use security_framework::access_control::{ProtectionMode, SecAccessControl};
+    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
+    use security_framework::passwords::{PasswordOptions, set_generic_password_options};
+
+    match target {
+        MacKeychainTarget::DataProtection => {
+            let access = SecAccessControl::create_with_protection(
+                Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly),
+                0,
+            )
+            .map_err(|_| ObservationKeyError::Storage)?;
+            let mut options = PasswordOptions::new_generic_password(MAC_KEYCHAIN_SERVICE, account);
+            options.set_access_synchronized(Some(false));
+            options.use_protected_keychain();
+            options.set_access_control(access);
+            set_generic_password_options(bytes, options).map_err(|_| ObservationKeyError::Storage)
+        }
+        MacKeychainTarget::LocalLogin => {
+            let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
+                .map_err(|_| ObservationKeyError::Storage)?;
+            keychain
+                .add_generic_password(MAC_LOCAL_KEYCHAIN_SERVICE, account, bytes)
+                .map_err(|_| ObservationKeyError::Storage)
+        }
+    }
+}
+
+fn key_from_stored_slice(
     bytes: &[u8],
     version: impl Into<String>,
+    storage_mode: ObservationKeyStorageMode,
 ) -> Result<ObservationKey, ObservationKeyError> {
     let bytes: [u8; 32] = bytes
         .try_into()
         .map_err(|_| ObservationKeyError::InvalidSize)?;
-    Ok(ObservationKey::from_bytes(bytes, version))
+    Ok(ObservationKey::from_stored_bytes(
+        bytes,
+        version,
+        storage_mode,
+    ))
+}
+
+fn verified_migrated_key(
+    source: &[u8],
+    persisted: &[u8],
+    storage_mode: ObservationKeyStorageMode,
+) -> Result<ObservationKey, ObservationKeyError> {
+    if source.len() != 32 {
+        return Err(ObservationKeyError::InvalidSize);
+    }
+    if persisted != source {
+        return Err(ObservationKeyError::MigrationVerificationFailed);
+    }
+    key_from_stored_slice(persisted, LEGACY_DEV_KEY_VERSION, storage_mode)
 }
 
 pub fn production_observation_key_provider() -> Arc<dyn ObservationKeyProvider> {
@@ -309,6 +555,8 @@ pub enum ObservationJournalError {
     Json(#[from] serde_json::Error),
     #[error("Observation content encryption is unavailable")]
     KeyUnavailable,
+    #[error("Observation encryption key migration failed: {0}")]
+    KeyMigration(ObservationKeyError),
     #[error("Observation content encryption failed")]
     Encryption,
     #[error("Observation content authentication failed")]
@@ -509,12 +757,39 @@ impl ObservationJournal {
     }
 
     pub fn key_storage_mode(&self) -> Option<ObservationKeyStorageMode> {
-        let key = self.inner.cached_key()?;
-        Some(match key.version() {
-            KEY_VERSION => ObservationKeyStorageMode::DataProtectionKeychain,
-            "keychain-dev-legacy-v1" => ObservationKeyStorageMode::LegacyDevelopmentKeychain,
-            _ => ObservationKeyStorageMode::Custom,
-        })
+        self.inner.cached_key().map(|key| key.storage_mode())
+    }
+
+    /// Returns the in-memory encryption status without invoking the provider,
+    /// Keychain, `codesign`, or any other I/O.
+    pub fn key_status(&self) -> ObservationKeyStatus {
+        self.inner.key_status()
+    }
+
+    /// Explicitly copies the legacy development key into the stable target for
+    /// the current signing identity. This is the only journal API allowed to
+    /// invoke an interactive provider operation. The legacy item is retained,
+    /// and no key bytes are returned to the caller.
+    pub fn migrate_legacy_key_interactive(
+        &self,
+    ) -> Result<ObservationKeyMigrationResult, ObservationJournalError> {
+        let (key, migrated) = self
+            .inner
+            .key_provider
+            .migrate_legacy_key_interactive()
+            .map_err(ObservationJournalError::KeyMigration)?;
+        let result = ObservationKeyMigrationResult {
+            migrated,
+            storage_mode: key.storage_mode(),
+            key_version: key.version().to_owned(),
+        };
+        let mut state = self
+            .inner
+            .key_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *state = ObservationKeyState::Ready(key);
+        Ok(result)
     }
 
     /// Mirrors a validated `event.goal.change` into the v2 observation and
@@ -1608,6 +1883,38 @@ impl ObservationJournal {
 }
 
 impl ObservationJournalInner {
+    fn key_status(&self) -> ObservationKeyStatus {
+        let state = self
+            .key_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &*state {
+            ObservationKeyState::Ready(key) => ObservationKeyStatus {
+                availability: ObservationKeyAvailability::Available,
+                storage_mode: Some(key.storage_mode()),
+                key_version: Some(key.version().to_owned()),
+                interactive_migration_available: false,
+            },
+            ObservationKeyState::RetryAfter { error, .. } => {
+                let (availability, interactive_migration_available) = match error {
+                    ObservationKeyError::MigrationRequired {
+                        interactive_available,
+                    } => (
+                        ObservationKeyAvailability::MigrationRequired,
+                        *interactive_available,
+                    ),
+                    _ => (ObservationKeyAvailability::Unavailable, false),
+                };
+                ObservationKeyStatus {
+                    availability,
+                    storage_mode: None,
+                    key_version: None,
+                    interactive_migration_available,
+                }
+            }
+        }
+    }
+
     fn cached_key(&self) -> Option<ObservationKey> {
         let state = self
             .key_state
@@ -2588,7 +2895,7 @@ fn decrypt_value(
     key: &ObservationKey,
     encrypted: &StoredEncryptedValue,
 ) -> Result<Value, ObservationJournalError> {
-    if encrypted.key_version != key.version() || encrypted.nonce.len() != 12 {
+    if encrypted.nonce.len() != 12 {
         return Err(ObservationJournalError::Authentication);
     }
     let aad = serde_json::to_vec(&EncryptionAad {
@@ -4216,28 +4523,52 @@ fn harden_sqlite_permissions(_path: &Path) -> Result<(), ObservationJournalError
 
 #[cfg(all(test, target_os = "macos"))]
 mod macos_keychain_policy_tests {
-    use super::is_adhoc_signature_without_team_identifier;
+    use super::{MacKeychainTarget, MacSigningIdentity, classify_mac_signing_details};
 
     #[test]
-    fn accepts_only_adhoc_signature_without_team_identifier() {
-        assert!(is_adhoc_signature_without_team_identifier(
-            "Signature=adhoc\nTeamIdentifier=not set\n"
-        ));
-        assert!(!is_adhoc_signature_without_team_identifier(
-            "Signature=Developer ID Application: Example\nTeamIdentifier=ABCDE12345\n"
-        ));
-        assert!(!is_adhoc_signature_without_team_identifier(
-            "Signature=adhoc\nTeamIdentifier=ABCDE12345\n"
-        ));
-        assert!(!is_adhoc_signature_without_team_identifier(
-            "TeamIdentifier=not set\n"
-        ));
+    fn signing_identity_selects_only_stable_keychain_targets() {
+        assert_eq!(
+            classify_mac_signing_details("Signature=adhoc\nTeamIdentifier=not set\n"),
+            MacSigningIdentity::AdHoc
+        );
+        assert_eq!(
+            classify_mac_signing_details(
+                "Authority=Developer ID Application: Example\nTeamIdentifier=ABCDE12345\n"
+            ),
+            MacSigningIdentity::TeamSigned
+        );
+        assert_eq!(
+            classify_mac_signing_details(
+                "Authority=WhaleHall Local Development\nTeamIdentifier=not set\n"
+            ),
+            MacSigningIdentity::StableLocal
+        );
+        assert_eq!(
+            classify_mac_signing_details("TeamIdentifier=not set\n"),
+            MacSigningIdentity::Unsupported
+        );
+        assert_eq!(
+            MacKeychainTarget::for_signing_identity(MacSigningIdentity::TeamSigned),
+            Some(MacKeychainTarget::DataProtection)
+        );
+        assert_eq!(
+            MacKeychainTarget::for_signing_identity(MacSigningIdentity::StableLocal),
+            Some(MacKeychainTarget::LocalLogin)
+        );
+        assert_eq!(
+            MacKeychainTarget::for_signing_identity(MacSigningIdentity::AdHoc),
+            None
+        );
+        assert_eq!(
+            MacKeychainTarget::for_signing_identity(MacSigningIdentity::Unsupported),
+            None
+        );
     }
 }
 
 #[cfg(test)]
 mod key_cache_policy_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
 
@@ -4260,6 +4591,51 @@ mod key_cache_policy_tests {
             } else {
                 Ok(ObservationKey::from_bytes([0x2a; 32], "recovering-test-v1"))
             }
+        }
+    }
+
+    struct MigratingKeyProvider {
+        load_calls: AtomicUsize,
+        migration_calls: AtomicUsize,
+        migrated: AtomicBool,
+    }
+
+    impl MigratingKeyProvider {
+        fn new() -> Self {
+            Self {
+                load_calls: AtomicUsize::new(0),
+                migration_calls: AtomicUsize::new(0),
+                migrated: AtomicBool::new(false),
+            }
+        }
+
+        fn migrated_key() -> ObservationKey {
+            ObservationKey::from_stored_bytes(
+                [0x3c; 32],
+                LEGACY_DEV_KEY_VERSION,
+                ObservationKeyStorageMode::LocalLoginKeychain,
+            )
+        }
+    }
+
+    impl ObservationKeyProvider for MigratingKeyProvider {
+        fn load_or_create(&self) -> Result<ObservationKey, ObservationKeyError> {
+            self.load_calls.fetch_add(1, Ordering::SeqCst);
+            if self.migrated.load(Ordering::SeqCst) {
+                Ok(Self::migrated_key())
+            } else {
+                Err(ObservationKeyError::MigrationRequired {
+                    interactive_available: true,
+                })
+            }
+        }
+
+        fn migrate_legacy_key_interactive(
+            &self,
+        ) -> Result<(ObservationKey, bool), ObservationKeyError> {
+            self.migration_calls.fetch_add(1, Ordering::SeqCst);
+            let migrated = !self.migrated.swap(true, Ordering::SeqCst);
+            Ok((Self::migrated_key(), migrated))
         }
     }
 
@@ -4313,6 +4689,134 @@ mod key_cache_policy_tests {
             2,
             "a successful retry must remain cached"
         );
+    }
+
+    #[test]
+    fn status_is_pure_memory_and_explicit_migration_caches_the_verified_key() {
+        let directory = tempfile::tempdir().expect("create key migration directory");
+        let provider = Arc::new(MigratingKeyProvider::new());
+        let journal = ObservationJournal::open_with_config(ObservationJournalConfig::new(
+            directory.path().join("key-migration.sqlite3"),
+            provider.clone(),
+        ))
+        .expect("open migration-required journal");
+
+        for _ in 0..100 {
+            assert_eq!(
+                journal.key_status(),
+                ObservationKeyStatus {
+                    availability: ObservationKeyAvailability::MigrationRequired,
+                    storage_mode: None,
+                    key_version: None,
+                    interactive_migration_available: true,
+                }
+            );
+        }
+        assert_eq!(provider.load_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.migration_calls.load(Ordering::SeqCst), 0);
+
+        let result = journal
+            .migrate_legacy_key_interactive()
+            .expect("perform explicit migration");
+        assert!(result.migrated);
+        assert_eq!(
+            result.storage_mode,
+            ObservationKeyStorageMode::LocalLoginKeychain
+        );
+        assert_eq!(result.key_version, LEGACY_DEV_KEY_VERSION);
+        assert_eq!(provider.load_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.migration_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            journal.key_status(),
+            ObservationKeyStatus {
+                availability: ObservationKeyAvailability::Available,
+                storage_mode: Some(ObservationKeyStorageMode::LocalLoginKeychain),
+                key_version: Some(LEGACY_DEV_KEY_VERSION.to_owned()),
+                interactive_migration_available: false,
+            }
+        );
+    }
+
+    #[test]
+    fn migrated_key_readback_must_match_and_never_exposes_bytes() {
+        let source = [0x4d; 32];
+        let verified = verified_migrated_key(
+            &source,
+            &source,
+            ObservationKeyStorageMode::DataProtectionKeychain,
+        )
+        .expect("equal readback");
+        assert_eq!(verified.bytes(), &source);
+        assert_eq!(verified.version(), LEGACY_DEV_KEY_VERSION);
+        assert_eq!(
+            verified.storage_mode(),
+            ObservationKeyStorageMode::DataProtectionKeychain
+        );
+        assert!(matches!(
+            verified_migrated_key(
+                &source,
+                &[0x5e; 32],
+                ObservationKeyStorageMode::DataProtectionKeychain,
+            ),
+            Err(ObservationKeyError::MigrationVerificationFailed)
+        ));
+        assert!(matches!(
+            verified_migrated_key(
+                &[0x4d; 31],
+                &[0x4d; 31],
+                ObservationKeyStorageMode::DataProtectionKeychain,
+            ),
+            Err(ObservationKeyError::InvalidSize)
+        ));
+    }
+
+    #[test]
+    fn ciphertext_key_version_is_authenticated_but_not_a_storage_location() {
+        let legacy_key = ObservationKey::from_stored_bytes(
+            [0x6f; 32],
+            LEGACY_DEV_KEY_VERSION,
+            ObservationKeyStorageMode::LegacyDevelopmentKeychain,
+        );
+        let encrypted = encrypt_value(
+            &legacy_key,
+            "raw",
+            "observation-1",
+            "raw-observation.v2",
+            1_000,
+            1_000,
+            &json!({"visibleText": "legacy ciphertext"}),
+        )
+        .expect("encrypt with legacy key version");
+        let stored = StoredEncryptedValue {
+            owner_kind: "raw".to_owned(),
+            owner_id: "observation-1".to_owned(),
+            schema_version: "raw-observation.v2".to_owned(),
+            started_at_ms: 1_000,
+            ended_at_ms: 1_000,
+            key_version: encrypted.key_version,
+            nonce: encrypted.nonce.to_vec(),
+            ciphertext: encrypted.ciphertext,
+            content_hash: encrypted.content_hash,
+        };
+        let migrated_key = ObservationKey::from_stored_bytes(
+            [0x6f; 32],
+            KEY_VERSION,
+            ObservationKeyStorageMode::LocalLoginKeychain,
+        );
+        assert_eq!(
+            decrypt_value(&migrated_key, &stored)
+                .expect("decrypt legacy ciphertext after migration"),
+            json!({"visibleText": "legacy ciphertext"})
+        );
+        let wrong_key = ObservationKey::from_stored_bytes(
+            [0x70; 32],
+            KEY_VERSION,
+            ObservationKeyStorageMode::LocalLoginKeychain,
+        );
+        assert!(matches!(
+            decrypt_value(&wrong_key, &stored),
+            Err(ObservationJournalError::Authentication)
+        ));
     }
 }
 

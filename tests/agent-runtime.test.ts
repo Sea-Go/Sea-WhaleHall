@@ -13,7 +13,6 @@ import type {
 	LocalEventQuery,
 	LocalEventQueryResult,
 	LocalMonitoringConfigure,
-	LocalMonitoringRefreshPermissions,
 	LocalMonitoringStatus,
 	LocalRuntimeHealth,
 	LocalSemanticCommitResult,
@@ -26,6 +25,8 @@ import type {
 	LocalToolEvent,
 	LocalVaultOpenBatch,
 	LocalVaultOpenBatchResult,
+	LocalVaultKeyStatus,
+	LocalVaultLegacyMigrationResult,
 	LocalVaultSealBatch,
 	LocalVaultSealBatchResult,
 } from "../src/agent/local-protocol";
@@ -159,9 +160,11 @@ class FakeLocalProcess implements LocalToolProcess {
 		return monitoringStatus();
 	}
 
-	async refreshMonitoringPermissions(
-		_options?: LocalMonitoringRefreshPermissions,
-	): Promise<LocalMonitoringStatus> {
+	async refreshMonitoringPermissions(): Promise<LocalMonitoringStatus> {
+		return monitoringStatus();
+	}
+
+	async setupMonitoringPermissions(): Promise<LocalMonitoringStatus> {
 		return monitoringStatus();
 	}
 
@@ -201,6 +204,22 @@ class FakeLocalProcess implements LocalToolProcess {
 		_batch: LocalVaultOpenBatch,
 	): Promise<LocalVaultOpenBatchResult> {
 		return { records: [] };
+	}
+
+	async getVaultKeyStatus(): Promise<LocalVaultKeyStatus> {
+		return {
+			availability: "available",
+			storageMode: "data_protection_keychain",
+			keyVersion: "keychain-v1",
+			interactiveMigrationAvailable: false,
+		};
+	}
+
+	async migrateLegacyVaultKey(): Promise<LocalVaultLegacyMigrationResult> {
+		return {
+			migrated: false,
+			status: await this.getVaultKeyStatus(),
+		};
 	}
 
 	async stop(): Promise<void> {
@@ -265,6 +284,8 @@ function monitoringStatus(
 		},
 		permissionCheckState: "current",
 		permissionsCheckedAtMs: 1_800_000_000_000,
+		permissionSetupAvailable: true,
+		permissionSetupAttempted: true,
 		coverage: ["content", "metadata"],
 		lastError: null,
 		...overrides,

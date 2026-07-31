@@ -13,6 +13,7 @@ import type {
 export const MAX_JSONL_LINE_BYTES = 1024 * 1024;
 export const LOCAL_CONTROL_TIMEOUT_MS = 5000;
 export const LOCAL_PERMISSION_REFRESH_TIMEOUT_MS = 32_000;
+export const LOCAL_KEY_MIGRATION_TIMEOUT_MS = 120_000;
 export const LOCAL_TOOL_TIMEOUT_MS = 30_000;
 
 export type LocalMethod =
@@ -28,11 +29,14 @@ export type LocalMethod =
 	| "monitoring.pause"
 	| "monitoring.resume"
 	| "monitoring.refreshPermissions"
+	| "monitoring.setupPermissions"
 	| "semantic.query"
 	| "semantic.commit"
 	| "audit.queryFiveMinutes"
 	| "vault.sealBatch"
-	| "vault.openBatch";
+	| "vault.openBatch"
+	| "vault.status"
+	| "vault.migrateLegacyKey";
 
 export type LocalRequest = {
 	id: string;
@@ -193,6 +197,8 @@ export type LocalMonitoringStatus = {
 	permissions: LocalMonitoringPermissions;
 	permissionCheckState: LocalMonitoringPermissionCheckState;
 	permissionsCheckedAtMs: number | null;
+	permissionSetupAvailable: boolean;
+	permissionSetupAttempted: boolean;
 	coverage: CoverageLevel[];
 	lastError: string | null;
 };
@@ -201,10 +207,6 @@ export type LocalMonitoringConfigure = {
 	enabled: boolean;
 	captureContent: boolean;
 	excludedBundleIds: string[];
-};
-
-export type LocalMonitoringRefreshPermissions = {
-	prompt?: boolean;
 };
 
 export type LocalSemanticQuery = {
@@ -282,6 +284,29 @@ export type LocalVaultOpenResultRecord = {
 
 export type LocalVaultOpenBatchResult = {
 	records: LocalVaultOpenResultRecord[];
+};
+
+export type LocalVaultKeyAvailability =
+	| "available"
+	| "migration_required"
+	| "unavailable";
+
+export type LocalVaultKeyStorageMode =
+	| "data_protection_keychain"
+	| "local_login_keychain"
+	| "legacy_development_keychain"
+	| "custom";
+
+export type LocalVaultKeyStatus = {
+	availability: LocalVaultKeyAvailability;
+	storageMode: LocalVaultKeyStorageMode | null;
+	keyVersion: string | null;
+	interactiveMigrationAvailable: boolean;
+};
+
+export type LocalVaultLegacyMigrationResult = {
+	migrated: boolean;
+	status: LocalVaultKeyStatus;
 };
 
 export type LocalEventGoalChange = {
@@ -457,6 +482,44 @@ export function isLocalVaultOpenResultRecord(
 	);
 }
 
+export function isLocalVaultKeyStatus(
+	value: unknown,
+): value is LocalVaultKeyStatus {
+	return (
+		isRecord(value) &&
+		hasExactKeys(value, [
+			"availability",
+			"storageMode",
+			"keyVersion",
+			"interactiveMigrationAvailable",
+		]) &&
+		(value.availability === "available" ||
+			value.availability === "migration_required" ||
+			value.availability === "unavailable") &&
+		(value.storageMode === null ||
+			value.storageMode === "data_protection_keychain" ||
+			value.storageMode === "local_login_keychain" ||
+			value.storageMode === "legacy_development_keychain" ||
+			value.storageMode === "custom") &&
+		(value.keyVersion === null ||
+			isProtocolIdentifier(value.keyVersion, 128)) &&
+		typeof value.interactiveMigrationAvailable === "boolean" &&
+		(value.availability !== "available" ||
+			(value.storageMode !== null && value.keyVersion !== null))
+	);
+}
+
+export function isLocalVaultLegacyMigrationResult(
+	value: unknown,
+): value is LocalVaultLegacyMigrationResult {
+	return (
+		isRecord(value) &&
+		hasExactKeys(value, ["migrated", "status"]) &&
+		typeof value.migrated === "boolean" &&
+		isLocalVaultKeyStatus(value.status)
+	);
+}
+
 export function isLocalMonitoringStatus(
 	value: unknown,
 ): value is LocalMonitoringStatus {
@@ -476,6 +539,8 @@ export function isLocalMonitoringStatus(
 			"permissions",
 			"permissionCheckState",
 			"permissionsCheckedAtMs",
+			"permissionSetupAvailable",
+			"permissionSetupAttempted",
 			"coverage",
 			"lastError",
 		]) ||
@@ -505,6 +570,10 @@ export function isLocalMonitoringStatus(
 		!isMonitoringPermissions(value.permissions) ||
 		!isMonitoringPermissionCheckState(value.permissionCheckState) ||
 		!isNullableNonNegativeSafeInteger(value.permissionsCheckedAtMs) ||
+		typeof value.permissionSetupAvailable !== "boolean" ||
+		typeof value.permissionSetupAttempted !== "boolean" ||
+		(value.permissionSetupAttempted &&
+			!value.permissionSetupAvailable) ||
 		(value.permissionCheckState === "unchecked" &&
 			value.permissionsCheckedAtMs !== null) ||
 		(value.permissionCheckState === "current" &&
@@ -540,16 +609,6 @@ export function isLocalMonitoringConfigure(
 		value.excludedBundleIds.every(isMonitoringBundleId) &&
 		new Set(value.excludedBundleIds).size ===
 			value.excludedBundleIds.length
-	);
-}
-
-export function isLocalMonitoringRefreshPermissions(
-	value: unknown,
-): value is LocalMonitoringRefreshPermissions {
-	return (
-		isRecord(value) &&
-		hasRequiredAndOptionalKeys(value, [], ["prompt"]) &&
-		(value.prompt === undefined || typeof value.prompt === "boolean")
 	);
 }
 

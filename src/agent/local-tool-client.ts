@@ -1,14 +1,16 @@
 import {
 	LOCAL_CONTROL_TIMEOUT_MS,
+	LOCAL_KEY_MIGRATION_TIMEOUT_MS,
 	LOCAL_PERMISSION_REFRESH_TIMEOUT_MS,
 	LOCAL_TOOL_TIMEOUT_MS,
 	MAX_JSONL_LINE_BYTES,
 	isDesktopEvent,
 	isLocalAuditFiveMinutesResult,
 	isLocalVaultOpenResultRecord,
+	isLocalVaultKeyStatus,
+	isLocalVaultLegacyMigrationResult,
 	isLocalVaultSealResultRecord,
 	isLocalMonitoringConfigure,
-	isLocalMonitoringRefreshPermissions,
 	isLocalMonitoringStatus,
 	isLocalToolDescriptor,
 	isRecord,
@@ -24,7 +26,6 @@ import {
 	type LocalMessage,
 	type LocalMethod,
 	type LocalMonitoringConfigure,
-	type LocalMonitoringRefreshPermissions,
 	type LocalMonitoringStatus,
 	type LocalRequest,
 	type LocalRuntimeHealth,
@@ -40,6 +41,8 @@ import {
 	type LocalToolListResult,
 	type LocalVaultOpenBatch,
 	type LocalVaultOpenBatchResult,
+	type LocalVaultKeyStatus,
+	type LocalVaultLegacyMigrationResult,
 	type LocalVaultSealBatch,
 	type LocalVaultSealBatchResult,
 } from "./local-protocol";
@@ -106,9 +109,8 @@ export interface LocalToolProcess {
 	): Promise<LocalMonitoringStatus>;
 	pauseMonitoring(): Promise<LocalMonitoringStatus>;
 	resumeMonitoring(): Promise<LocalMonitoringStatus>;
-	refreshMonitoringPermissions(
-		options?: LocalMonitoringRefreshPermissions,
-	): Promise<LocalMonitoringStatus>;
+	refreshMonitoringPermissions(): Promise<LocalMonitoringStatus>;
+	setupMonitoringPermissions(): Promise<LocalMonitoringStatus>;
 	querySemanticEvents(query: LocalSemanticQuery): Promise<LocalSemanticQueryResult>;
 	commitSemanticCursor(
 		consumerId: string,
@@ -119,6 +121,8 @@ export interface LocalToolProcess {
 	): Promise<LocalAuditFiveMinutesResult>;
 	sealVaultBatch(batch: LocalVaultSealBatch): Promise<LocalVaultSealBatchResult>;
 	openVaultBatch(batch: LocalVaultOpenBatch): Promise<LocalVaultOpenBatchResult>;
+	getVaultKeyStatus(): Promise<LocalVaultKeyStatus>;
+	migrateLegacyVaultKey(): Promise<LocalVaultLegacyMigrationResult>;
 	stop(): Promise<void>;
 	onEvent(listener: (event: LocalToolEvent) => void): () => void;
 	onDesktopEvent(listener: (event: LocalDesktopEventFrame["data"]) => void): () => void;
@@ -407,18 +411,18 @@ export class LocalToolClient implements LocalToolProcess {
 		return this.requestMonitoringStatus("monitoring.resume", {});
 	}
 
-	async refreshMonitoringPermissions(
-		options: LocalMonitoringRefreshPermissions = {},
-	): Promise<LocalMonitoringStatus> {
-		if (!isLocalMonitoringRefreshPermissions(options)) {
-			throw new LocalClientError(
-				"INVALID_ARGUMENTS",
-				"monitoring.refreshPermissions received invalid parameters.",
-			);
-		}
+	async refreshMonitoringPermissions(): Promise<LocalMonitoringStatus> {
 		return this.requestMonitoringStatus(
 			"monitoring.refreshPermissions",
-			options,
+			{},
+			LOCAL_PERMISSION_REFRESH_TIMEOUT_MS,
+		);
+	}
+
+	async setupMonitoringPermissions(): Promise<LocalMonitoringStatus> {
+		return this.requestMonitoringStatus(
+			"monitoring.setupPermissions",
+			{},
 			LOCAL_PERMISSION_REFRESH_TIMEOUT_MS,
 		);
 	}
@@ -579,6 +583,29 @@ export class LocalToolClient implements LocalToolProcess {
 		return result as LocalVaultOpenBatchResult;
 	}
 
+	async getVaultKeyStatus(): Promise<LocalVaultKeyStatus> {
+		const result = await this.request<unknown>("vault.status", {});
+		if (!isLocalVaultKeyStatus(result)) {
+			throw this.protocolFailure("vault.status returned an invalid result.");
+		}
+		return result;
+	}
+
+	async migrateLegacyVaultKey(): Promise<LocalVaultLegacyMigrationResult> {
+		const result = await this.request<unknown>(
+			"vault.migrateLegacyKey",
+			{ confirm: true },
+			crypto.randomUUID(),
+			LOCAL_KEY_MIGRATION_TIMEOUT_MS,
+		);
+		if (!isLocalVaultLegacyMigrationResult(result)) {
+			throw this.protocolFailure(
+				"vault.migrateLegacyKey returned an invalid result.",
+			);
+		}
+		return result as LocalVaultLegacyMigrationResult;
+	}
+
 	async stop(): Promise<void> {
 		this.stopping = true;
 		const child = this.child;
@@ -671,7 +698,8 @@ export class LocalToolClient implements LocalToolProcess {
 			| "monitoring.configure"
 			| "monitoring.pause"
 			| "monitoring.resume"
-			| "monitoring.refreshPermissions",
+			| "monitoring.refreshPermissions"
+			| "monitoring.setupPermissions",
 		params: Record<string, unknown>,
 		timeoutMs?: number,
 	): Promise<LocalMonitoringStatus> {

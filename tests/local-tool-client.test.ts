@@ -545,9 +545,12 @@ describe("LocalToolClient", () => {
 		await expect(client.resumeMonitoring()).resolves.toMatchObject({
 			state: "running",
 		});
-		await expect(
-			client.refreshMonitoringPermissions({ prompt: true }),
-		).resolves.toMatchObject({ state: "running" });
+		await expect(client.refreshMonitoringPermissions()).resolves.toMatchObject({
+			state: "running",
+		});
+		await expect(client.setupMonitoringPermissions()).resolves.toMatchObject({
+			state: "running",
+		});
 
 		expect(requests).toEqual([
 			{ method: "monitoring.status", params: {} },
@@ -563,7 +566,11 @@ describe("LocalToolClient", () => {
 			{ method: "monitoring.resume", params: {} },
 			{
 				method: "monitoring.refreshPermissions",
-				params: { prompt: true },
+				params: {},
+			},
+			{
+				method: "monitoring.setupPermissions",
+				params: {},
 			},
 		]);
 		await expect(
@@ -573,6 +580,56 @@ describe("LocalToolClient", () => {
 				excludedBundleIds: ["com.example.same", "com.example.same"],
 			}),
 		).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
+		await client.stop();
+	});
+
+	test("reads vault status without interaction and migrates only with explicit confirmation", async () => {
+		const requests: Array<{ method: string; params: unknown }> = [];
+		const status = {
+			availability: "migration_required",
+			storageMode: null,
+			keyVersion: null,
+			interactiveMigrationAvailable: true,
+		} as const;
+		const child = new FakeChild((line, process) => {
+			const request = JSON.parse(line) as {
+				id: string;
+				method: string;
+				params: unknown;
+			};
+			requests.push({ method: request.method, params: request.params });
+			process.respond({
+				id: request.id,
+				ok: true,
+				result:
+					request.method === "vault.status"
+						? status
+						: {
+								migrated: true,
+								status: {
+									availability: "available",
+									storageMode: "local_login_keychain",
+									keyVersion: "keychain-dev-legacy-v1",
+									interactiveMigrationAvailable: false,
+								},
+							},
+			});
+		});
+		const client = new LocalToolClient("fake", { spawn: () => child });
+		await client.start();
+
+		await expect(client.getVaultKeyStatus()).resolves.toEqual(status);
+		await expect(client.migrateLegacyVaultKey()).resolves.toMatchObject({
+			migrated: true,
+			status: {
+				availability: "available",
+				storageMode: "local_login_keychain",
+			},
+		});
+		expect(requests).toEqual([
+			{ method: "vault.status", params: {} },
+			{ method: "vault.migrateLegacyKey", params: { confirm: true } },
+		]);
 		await client.stop();
 	});
 
@@ -654,6 +711,8 @@ function monitoringStatus(
 		},
 		permissionCheckState: "current",
 		permissionsCheckedAtMs: 1_800_000_000_000,
+		permissionSetupAvailable: true,
+		permissionSetupAttempted: true,
 		coverage: ["content", "metadata"],
 		lastError: null,
 		...overrides,

@@ -698,7 +698,7 @@ function PrivacySettings({
 		<SettingsSection
 			eyebrow="数据与隐私"
 			title="本地数据边界"
-			description="这里控制派生洞察与保留偏好；内置观察器只能从侧栏显式启用，并始终受 macOS 系统权限约束。"
+			description="通过唯一入口完成一次性监测设置；macOS 拆分的必需权限会集中显示，完成后不再重复请求。"
 		>
 			<AuditExportControl service={auditExportService} />
 			<MonitoringPermissionsControl controller={monitoringController} />

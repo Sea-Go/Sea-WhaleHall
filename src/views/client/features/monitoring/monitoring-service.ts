@@ -11,7 +11,14 @@ export interface MonitoringService {
 	): Promise<MonitoringSnapshot>;
 	pause(): Promise<MonitoringSnapshot>;
 	resume(): Promise<MonitoringSnapshot>;
+	/**
+	 * The only UI-authorized path that may ask macOS for the three required
+	 * monitoring permissions. It must never be called by status polling.
+	 */
+	requestRequiredPermissions(): Promise<MonitoringSnapshot>;
+	/** Silent preflight only; this must never display a system prompt. */
 	refreshPermissions(): Promise<MonitoringSnapshot>;
+	migrateContentVault(): Promise<MonitoringSnapshot>;
 	openPermissionSettings(permission: MonitoringPermissionId): Promise<void>;
 }
 

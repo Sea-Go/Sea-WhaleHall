@@ -65,12 +65,19 @@ const monitoringSnapshot: MonitoringSnapshot = {
 	observerConnected: true,
 	permissionCheckState: "current",
 	permissionsCheckedAtMs: 1_800_000_000_000,
+	permissionSetupAvailable: true,
+	permissionSetupAttempted: true,
 	permissions: [
 		{ id: "accessibility", state: "granted", required: true, detail: null },
 		{ id: "screenRecording", state: "granted", required: true, detail: null },
 		{ id: "inputMonitoring", state: "granted", required: true, detail: null },
 		{ id: "browserAutomation", state: "granted", required: false, detail: null },
 	],
+	contentVault: {
+		availability: "available",
+		storageMode: "data_protection_keychain",
+		interactiveMigrationAvailable: false,
+	},
 	excludedAppIds: [],
 	lastObservationAtMs: null,
 	coverageGaps: [],
@@ -88,7 +95,13 @@ const monitoringService: MonitoringService = {
 	async resume() {
 		return monitoringSnapshot;
 	},
+	async requestRequiredPermissions() {
+		return monitoringSnapshot;
+	},
 	async refreshPermissions() {
+		return monitoringSnapshot;
+	},
+	async migrateContentVault() {
 		return monitoringSnapshot;
 	},
 	async openPermissionSettings() {},

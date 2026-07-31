@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { LocalToolClient } from "../src/agent/local-tool-client";
 import {
 	isLocalMonitoringConfigure,
-	isLocalMonitoringRefreshPermissions,
 	isLocalMonitoringStatus,
 	type LocalMonitoringStatus,
 } from "../src/agent/local-protocol";
@@ -29,6 +28,8 @@ function status(
 		},
 		permissionCheckState: "current",
 		permissionsCheckedAtMs: 1_800_000_000_000,
+		permissionSetupAvailable: true,
+		permissionSetupAttempted: true,
 		coverage: ["content", "metadata"],
 		lastError: null,
 		...overrides,
@@ -78,9 +79,17 @@ describe("monitoring local protocol", () => {
 				status({ coverage: ["metadata", "metadata"] }),
 			),
 		).toBeFalse();
+		expect(
+			isLocalMonitoringStatus(
+				status({
+					permissionSetupAvailable: false,
+					permissionSetupAttempted: true,
+				}),
+			),
+		).toBeFalse();
 	});
 
-	test("mirrors Rust configure and refresh parameter constraints", () => {
+	test("mirrors Rust configure constraints", () => {
 		expect(
 			isLocalMonitoringConfigure({
 				enabled: true,
@@ -116,16 +125,6 @@ describe("monitoring local protocol", () => {
 				excludedBundleIds: ["敏感窗口标题"],
 			}),
 		).toBeFalse();
-		expect(isLocalMonitoringRefreshPermissions({})).toBeTrue();
-		expect(
-			isLocalMonitoringRefreshPermissions({ prompt: true }),
-		).toBeTrue();
-		expect(
-			isLocalMonitoringRefreshPermissions({
-				prompt: true,
-				unexpected: true,
-			}),
-		).toBeFalse();
 	});
 
 	test("fails malformed calls before writing to the native process", async () => {
@@ -136,11 +135,6 @@ describe("monitoring local protocol", () => {
 				captureContent: true,
 				excludedBundleIds: ["duplicate", "duplicate"],
 			}),
-		).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
-		await expect(
-			client.refreshMonitoringPermissions({
-				prompt: "yes",
-			} as never),
 		).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
 	});
 });

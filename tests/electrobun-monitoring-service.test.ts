@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type {
 	LocalMonitoringConfigure,
 	LocalMonitoringStatus,
+	LocalVaultKeyStatus,
 } from "../src/shared/contracts";
 import {
 	ElectrobunMonitoringService,
@@ -31,8 +32,22 @@ function nativeStatus(
 		},
 		permissionCheckState: "current",
 		permissionsCheckedAtMs: 1_800_000_000_000,
+		permissionSetupAvailable: true,
+		permissionSetupAttempted: true,
 		coverage: ["metadata", "denied"],
 		lastError: null,
+		...overrides,
+	};
+}
+
+function vaultStatus(
+	overrides: Partial<LocalVaultKeyStatus> = {},
+): LocalVaultKeyStatus {
+	return {
+		availability: "available",
+		storageMode: "data_protection_keychain",
+		keyVersion: "keychain-v1",
+		interactiveMigrationAvailable: false,
 		...overrides,
 	};
 }
@@ -87,9 +102,11 @@ describe("ElectrobunMonitoringService", () => {
 	test("forwards explicit configuration and keeps permission refresh silent", async () => {
 		const calls: {
 			configured?: LocalMonitoringConfigure;
-			refreshPrompt?: boolean;
+			refreshes: number;
+			setups: number;
 			openedPermission?: string;
-		} = {};
+			migrated?: boolean;
+		} = { refreshes: 0, setups: 0 };
 		const transport: MonitoringTransport = {
 			async status() {
 				return nativeStatus();
@@ -108,9 +125,26 @@ describe("ElectrobunMonitoringService", () => {
 			async resume() {
 				return nativeStatus();
 			},
-			async refreshPermissions(prompt) {
-				calls.refreshPrompt = prompt;
+			async refreshPermissions() {
+				calls.refreshes += 1;
 				return nativeStatus();
+			},
+			async setupPermissions() {
+				calls.setups += 1;
+				return nativeStatus();
+			},
+			async vaultStatus() {
+				return vaultStatus();
+			},
+			async migrateLegacyVault() {
+				calls.migrated = true;
+				return {
+					status: "completed",
+					result: {
+						migrated: true,
+						status: vaultStatus(),
+					},
+				};
 			},
 			async openPermissionSettings(permission) {
 				calls.openedPermission = permission;
@@ -126,14 +160,21 @@ describe("ElectrobunMonitoringService", () => {
 			captureContent: false,
 			excludedAppIds: ["com.example.private"],
 		});
+		await service.status();
+		await service.pause();
+		await service.resume();
 		await service.refreshPermissions();
+		await service.requestRequiredPermissions();
+		await service.migrateContentVault();
 		await service.openPermissionSettings("screenRecording");
 		expect(calls.configured).toEqual({
 			enabled: true,
 			captureContent: false,
 			excludedBundleIds: ["com.example.private"],
 		});
-		expect(calls.refreshPrompt).toBe(false);
+		expect(calls.refreshes).toBe(1);
+		expect(calls.setups).toBe(1);
+		expect(calls.migrated).toBe(true);
 		expect(calls.openedPermission).toBe("screenRecording");
 	});
 });

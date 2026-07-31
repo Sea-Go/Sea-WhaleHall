@@ -71,11 +71,13 @@ final class InputActivityMonitor: @unchecked Sendable {
     typealias BucketHandler = @Sendable (InputActivityBucket) -> Void
     typealias ClickHandler = @Sendable (CGPoint) -> Void
     typealias ActivityHandler = @Sendable () -> Void
+    typealias GapHandler = @Sendable (String) -> Void
 
     private let accumulator = InputAccumulator()
     private let onBucket: BucketHandler
     private let onClick: ClickHandler
     private let onActivity: ActivityHandler
+    private let onGap: GapHandler
     private let stateLock = NSLock()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -87,11 +89,13 @@ final class InputActivityMonitor: @unchecked Sendable {
     init(
         onBucket: @escaping BucketHandler,
         onClick: @escaping ClickHandler,
-        onActivity: @escaping ActivityHandler
+        onActivity: @escaping ActivityHandler,
+        onGap: @escaping GapHandler
     ) {
         self.onBucket = onBucket
         self.onClick = onClick
         self.onActivity = onActivity
+        self.onGap = onGap
     }
 
     func start() -> Bool {
@@ -101,6 +105,7 @@ final class InputActivityMonitor: @unchecked Sendable {
             return eventTap != nil
         }
         guard CGPreflightListenEventAccess() else {
+            onGap("input_monitoring_unavailable")
             return false
         }
         stopped = false
@@ -148,6 +153,9 @@ final class InputActivityMonitor: @unchecked Sendable {
             stateLock.unlock()
             if let tap, CGPreflightListenEventAccess() {
                 CGEvent.tapEnable(tap: tap, enable: true)
+            } else {
+                accumulator.setEnabled(false)
+                onGap("input_event_tap_disabled")
             }
             return
         }
@@ -183,6 +191,11 @@ final class InputActivityMonitor: @unchecked Sendable {
             callback: inputEventCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
+            stateLock.lock()
+            stopped = true
+            stateLock.unlock()
+            accumulator.setEnabled(false)
+            onGap("input_monitoring_unavailable")
             return
         }
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)

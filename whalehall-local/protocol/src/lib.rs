@@ -547,6 +547,45 @@ pub struct VaultOpenBatchResult {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultKeyAvailability {
+    Available,
+    MigrationRequired,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultKeyStorageMode {
+    DataProtectionKeychain,
+    LocalLoginKeychain,
+    LegacyDevelopmentKeychain,
+    Custom,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultKeyStatusResult {
+    pub availability: VaultKeyAvailability,
+    pub storage_mode: Option<VaultKeyStorageMode>,
+    pub key_version: Option<String>,
+    pub interactive_migration_available: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VaultMigrateLegacyKeyParams {
+    pub confirm: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultMigrateLegacyKeyResult {
+    pub migrated: bool,
+    pub status: VaultKeyStatusResult,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MonitoringState {
     Disabled,
@@ -612,6 +651,8 @@ pub struct MonitoringStatusResult {
     pub permissions: MonitoringPermissions,
     pub permission_check_state: MonitoringPermissionCheckState,
     pub permissions_checked_at_ms: Option<i64>,
+    pub permission_setup_available: bool,
+    pub permission_setup_attempted: bool,
     pub coverage: Vec<CoverageLevelV2>,
     pub last_error: Option<String>,
 }
@@ -623,13 +664,6 @@ pub struct MonitoringConfigureParams {
     pub capture_content: bool,
     #[serde(default)]
     pub excluded_bundle_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MonitoringRefreshPermissionsParams {
-    #[serde(default)]
-    pub prompt: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

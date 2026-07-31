@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
@@ -17,8 +18,8 @@ use tokio::time::{MissedTickBehavior, interval};
 use whalehall_local_core::observations::{ObservationJournal, ObservationKeyStorageMode};
 use whalehall_local_protocol::{
     CoverageLevelV2, MonitoringConfigureParams, MonitoringPermissionCheckState,
-    MonitoringPermissionState, MonitoringPermissions, MonitoringRefreshPermissionsParams,
-    MonitoringState, MonitoringStatusResult, RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2,
+    MonitoringPermissionState, MonitoringPermissions, MonitoringState, MonitoringStatusResult,
+    RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2,
 };
 
 const HELPER_PATH_ENV: &str = "WHALEHALL_OBSERVER_HELPER_PATH";
@@ -29,9 +30,14 @@ const HELPER_EXCLUDED_APPS_ENV: &str = "WHALEHALL_OBSERVER_EXCLUDED_BUNDLE_IDS";
 const MONITORING_SETTINGS_DIRECTORY: &str = "monitoring";
 const MONITORING_SETTINGS_FILE: &str = "settings.v1.json";
 const MONITORING_SETTINGS_SCHEMA_VERSION: &str = "monitoring-settings.v1";
+const MONITORING_PERMISSIONS_FILE: &str = "permissions.v2.json";
+const MONITORING_PERMISSIONS_SCHEMA_VERSION: &str = "monitoring-permissions.v2";
 const MAX_MONITORING_SETTINGS_BYTES: u64 = 128 * 1024;
 const MONITORING_SETTINGS_LOAD_WARNING: &str = "observer_settings_load_failed";
 const MONITORING_SETTINGS_PERSISTENCE_WARNING: &str = "observer_settings_persistence_failed";
+const MONITORING_PERMISSIONS_LOAD_WARNING: &str = "observer_permissions_cache_load_failed";
+const MONITORING_PERMISSIONS_PERSISTENCE_WARNING: &str =
+    "observer_permissions_cache_persistence_failed";
 const OBSERVER_BUNDLE_NAME: &str = "WhaleHall Observer.app";
 const OBSERVER_EXECUTABLE_NAME: &str = "whalehall-observer";
 const OBSERVER_BUNDLE_ID: &str = "com.seago.whalehall.observer";
@@ -41,6 +47,7 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_TICK: Duration = Duration::from_secs(5);
 const PERMISSION_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const PERMISSION_REFRESH_COMMAND_ID: &str = "refresh-permissions";
+const PERMISSION_SETUP_COMMAND_ID: &str = "setup-permissions";
 const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
 const FAILURE_LIMIT: usize = 5;
 const RESTART_DELAYS: &[Duration] = &[
@@ -85,6 +92,267 @@ struct PersistedMonitoringSettings {
 struct MonitoringSettingsStore {
     directory_path: PathBuf,
     settings_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedMonitoringPermissions {
+    schema_version: String,
+    identity_fingerprint: String,
+    setup_attempted: bool,
+    permissions: MonitoringPermissions,
+    checked_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+struct MonitoringPermissionsStore {
+    directory_path: PathBuf,
+    permissions_path: PathBuf,
+    identity_fingerprint: Option<String>,
+}
+
+fn observer_permission_identity_fingerprint(helper_path: &Path) -> Result<String, String> {
+    validate_helper_before_spawn(helper_path)?;
+    let bundle_path = helper_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| "observer_permission_setup_identity_unavailable".to_owned())?;
+    let output = StdCommand::new("/usr/bin/codesign")
+        .args(["--display", "--requirements", "-", "--verbose=4"])
+        .arg(bundle_path)
+        .output()
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+    if !output.status.success() {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    }
+    let details = String::from_utf8(output.stderr)
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+    let (identity_marker, designated_requirement) = parse_permission_identity_details(&details)?;
+    let bundle_identifier = read_bundle_identifier(bundle_path)?;
+    if bundle_identifier != OBSERVER_BUNDLE_ID
+        || !designated_requirement.contains(&format!("identifier \"{OBSERVER_BUNDLE_ID}\""))
+    {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    }
+    let material = format!(
+        "whalehall-permission-identity.v1\0{bundle_identifier}\0{identity_marker}\0{designated_requirement}"
+    );
+    Ok(format!("sha256:{:x}", Sha256::digest(material.as_bytes())))
+}
+
+fn parse_permission_identity_details(details: &str) -> Result<(String, String), String> {
+    let requirements = details.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("# designated => ")
+            .or_else(|| line.trim().strip_prefix("designated => "))
+    });
+    let requirements = requirements.collect::<Vec<_>>();
+    if requirements.len() != 1 || requirements[0].is_empty() || requirements[0].len() > 8_192 {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    }
+    let designated_requirement = requirements[0];
+    if designated_requirement
+        .to_ascii_lowercase()
+        .contains("cdhash")
+    {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    }
+
+    let teams = details
+        .lines()
+        .filter_map(|line| line.strip_prefix("TeamIdentifier="))
+        .collect::<Vec<_>>();
+    if teams.len() != 1 {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    }
+    let identity_marker = if teams[0] == "not set" {
+        let authorities = details
+            .lines()
+            .filter_map(|line| line.strip_prefix("Authority="))
+            .collect::<Vec<_>>();
+        if authorities != ["WhaleHall Local Development"] {
+            return Err("observer_permission_setup_identity_unavailable".to_owned());
+        }
+        let leaf_hash = local_certificate_leaf_hash(designated_requirement)
+            .ok_or_else(|| "observer_permission_setup_identity_unavailable".to_owned())?;
+        format!("local-certificate:whalehall-local-development:{leaf_hash}")
+    } else if teams[0].len() == 10
+        && teams[0]
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        format!("developer-team:{}", teams[0])
+    } else {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    };
+    Ok((identity_marker, designated_requirement.to_owned()))
+}
+
+fn local_certificate_leaf_hash(requirement: &str) -> Option<String> {
+    let marker = "certificate leaf = H\"";
+    let start = requirement.find(marker)? + marker.len();
+    let tail = &requirement[start..];
+    let end = tail.find('"')?;
+    let value = &tail[..end];
+    if requirement[start + end + 1..].contains(marker)
+        || value.len() != 40
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
+
+fn valid_identity_fingerprint(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+impl MonitoringPermissionsStore {
+    fn for_observation_journal(
+        journal: &ObservationJournal,
+        identity_fingerprint: Option<String>,
+    ) -> Self {
+        let data_directory = journal
+            .database_path()
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        Self::new(data_directory, identity_fingerprint)
+    }
+
+    fn new(data_directory: &Path, identity_fingerprint: Option<String>) -> Self {
+        let directory_path = data_directory.join(MONITORING_SETTINGS_DIRECTORY);
+        let permissions_path = directory_path.join(MONITORING_PERMISSIONS_FILE);
+        Self {
+            directory_path,
+            permissions_path,
+            identity_fingerprint,
+        }
+    }
+
+    fn setup_available(&self) -> bool {
+        self.identity_fingerprint.is_some()
+    }
+
+    fn load(&self) -> Result<Option<PersistedMonitoringPermissions>, String> {
+        let Some(identity_fingerprint) = self.identity_fingerprint.as_deref() else {
+            return Ok(None);
+        };
+        prepare_monitoring_directory(&self.directory_path, MONITORING_PERMISSIONS_LOAD_WARNING)?;
+        let metadata = match fs::symlink_metadata(&self.permissions_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(MONITORING_PERMISSIONS_LOAD_WARNING.to_owned()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(MONITORING_PERMISSIONS_LOAD_WARNING.to_owned());
+        }
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        let mut file = options
+            .open(&self.permissions_path)
+            .map_err(|_| MONITORING_PERMISSIONS_LOAD_WARNING.to_owned())?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| MONITORING_PERMISSIONS_LOAD_WARNING.to_owned())?;
+        if !metadata.is_file() || metadata.len() > MAX_MONITORING_SETTINGS_BYTES {
+            return Err(MONITORING_PERMISSIONS_LOAD_WARNING.to_owned());
+        }
+        harden_monitoring_settings_file(&file)
+            .map_err(|_| MONITORING_PERMISSIONS_LOAD_WARNING.to_owned())?;
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
+        (&mut file)
+            .take(MAX_MONITORING_SETTINGS_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| MONITORING_PERMISSIONS_LOAD_WARNING.to_owned())?;
+        if bytes.len() as u64 > MAX_MONITORING_SETTINGS_BYTES {
+            return Err(MONITORING_PERMISSIONS_LOAD_WARNING.to_owned());
+        }
+        let permissions: PersistedMonitoringPermissions = serde_json::from_slice(&bytes)
+            .map_err(|_| MONITORING_PERMISSIONS_LOAD_WARNING.to_owned())?;
+        if permissions.schema_version != MONITORING_PERMISSIONS_SCHEMA_VERSION
+            || !valid_identity_fingerprint(&permissions.identity_fingerprint)
+            || permissions.checked_at_ms.is_some_and(|value| value < 0)
+        {
+            return Err(MONITORING_PERMISSIONS_LOAD_WARNING.to_owned());
+        }
+        if permissions.identity_fingerprint != identity_fingerprint {
+            return Ok(None);
+        }
+        Ok(Some(permissions))
+    }
+
+    fn save(
+        &self,
+        permissions: &MonitoringPermissions,
+        checked_at_ms: Option<i64>,
+        setup_attempted: bool,
+    ) -> Result<(), String> {
+        let Some(identity_fingerprint) = self.identity_fingerprint.as_deref() else {
+            return Err("observer_permission_setup_identity_unavailable".to_owned());
+        };
+        if checked_at_ms.is_some_and(|value| value < 0) {
+            return Err(MONITORING_PERMISSIONS_PERSISTENCE_WARNING.to_owned());
+        }
+        prepare_monitoring_directory(
+            &self.directory_path,
+            MONITORING_PERMISSIONS_PERSISTENCE_WARNING,
+        )?;
+        let persisted = PersistedMonitoringPermissions {
+            schema_version: MONITORING_PERMISSIONS_SCHEMA_VERSION.to_owned(),
+            identity_fingerprint: identity_fingerprint.to_owned(),
+            setup_attempted,
+            permissions: permissions.clone(),
+            checked_at_ms,
+        };
+        let mut bytes = serde_json::to_vec(&persisted)
+            .map_err(|_| MONITORING_PERMISSIONS_PERSISTENCE_WARNING.to_owned())?;
+        bytes.push(b'\n');
+        if bytes.len() as u64 > MAX_MONITORING_SETTINGS_BYTES {
+            return Err(MONITORING_PERMISSIONS_PERSISTENCE_WARNING.to_owned());
+        }
+
+        let sequence = MONITORING_SETTINGS_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = self.directory_path.join(format!(
+            ".{MONITORING_PERMISSIONS_FILE}.tmp-{}-{sequence}",
+            std::process::id()
+        ));
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+
+                options
+                    .mode(0o600)
+                    .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+            }
+            let mut file = options.open(&temporary_path)?;
+            harden_monitoring_settings_file(&file)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary_path, &self.permissions_path)?;
+            sync_monitoring_settings_directory(&self.directory_path)?;
+            Ok::<(), io::Error>(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        result.map_err(|_| MONITORING_PERMISSIONS_PERSISTENCE_WARNING.to_owned())
+    }
 }
 
 impl MonitoringSettingsStore {
@@ -264,6 +532,16 @@ impl ObserverSupervisor {
     pub fn start(config: ObserverSupervisorConfig, journal: ObservationJournal) -> Self {
         let settings_store = MonitoringSettingsStore::for_observation_journal(&journal);
         let (settings, settings_warning) = load_runtime_settings(config, &settings_store);
+        let identity_fingerprint = settings
+            .helper_path
+            .as_deref()
+            .and_then(|path| observer_permission_identity_fingerprint(path).ok());
+        let permissions_store =
+            MonitoringPermissionsStore::for_observation_journal(&journal, identity_fingerprint);
+        let (cached_permissions, permissions_warning) = match permissions_store.load() {
+            Ok(permissions) => (permissions, None),
+            Err(error) => (None, Some(error)),
+        };
         let initial_state = if !settings.enabled {
             MonitoringState::Disabled
         } else if settings.paused {
@@ -283,16 +561,34 @@ impl ObserverSupervisor {
             last_sequence: None,
             last_acked_sequence: None,
             last_heartbeat_at_ms: None,
-            permissions: MonitoringPermissions::default(),
-            permission_check_state: MonitoringPermissionCheckState::Unchecked,
-            permissions_checked_at_ms: None,
+            permissions: cached_permissions
+                .as_ref()
+                .map(|cached| cached.permissions.clone())
+                .unwrap_or_default(),
+            permission_check_state: if cached_permissions
+                .as_ref()
+                .and_then(|cached| cached.checked_at_ms)
+                .is_some()
+            {
+                MonitoringPermissionCheckState::Current
+            } else {
+                MonitoringPermissionCheckState::Unchecked
+            },
+            permissions_checked_at_ms: cached_permissions
+                .as_ref()
+                .and_then(|cached| cached.checked_at_ms),
+            permission_setup_available: permissions_store.setup_available(),
+            permission_setup_attempted: cached_permissions
+                .as_ref()
+                .is_some_and(|cached| cached.setup_attempted),
             coverage: vec![CoverageLevelV2::Metadata],
-            last_error: settings_warning.or(key_warning),
+            last_error: settings_warning.or(permissions_warning).or(key_warning),
         }));
         let (commands, receiver) = mpsc::channel(32);
         tokio::spawn(run_supervisor(
             settings,
             settings_store,
+            permissions_store,
             journal,
             status.clone(),
             receiver,
@@ -326,15 +622,14 @@ impl ObserverSupervisor {
             .await
     }
 
-    pub async fn refresh_permissions(
-        &self,
-        params: MonitoringRefreshPermissionsParams,
-    ) -> Result<MonitoringStatusResult, String> {
-        self.request(|response| SupervisorCommand::RefreshPermissions {
-            prompt: params.prompt,
-            response,
-        })
-        .await
+    pub async fn refresh_permissions(&self) -> Result<MonitoringStatusResult, String> {
+        self.request(|response| SupervisorCommand::RefreshPermissions { response })
+            .await
+    }
+
+    pub async fn setup_permissions(&self) -> Result<MonitoringStatusResult, String> {
+        self.request(|response| SupervisorCommand::SetupPermissions { response })
+            .await
     }
 
     pub async fn shutdown(&self) {
@@ -376,7 +671,9 @@ enum SupervisorCommand {
         response: oneshot::Sender<Result<MonitoringStatusResult, String>>,
     },
     RefreshPermissions {
-        prompt: bool,
+        response: oneshot::Sender<Result<MonitoringStatusResult, String>>,
+    },
+    SetupPermissions {
         response: oneshot::Sender<Result<MonitoringStatusResult, String>>,
     },
     Shutdown {
@@ -402,6 +699,8 @@ enum SessionOutcome {
 }
 
 struct PendingPermissionRefresh {
+    command_id: &'static str,
+    completes_permission_setup: bool,
     permission_status_received: bool,
     command_result_received: bool,
     deadline: Instant,
@@ -412,6 +711,7 @@ struct HelperSessionContext<'a> {
     journal: &'a ObservationJournal,
     status: &'a Arc<Mutex<MonitoringStatusResult>>,
     settings_store: &'a MonitoringSettingsStore,
+    permissions_store: &'a MonitoringPermissionsStore,
     permission_check_before_start: MonitoringPermissionCheckState,
 }
 
@@ -516,6 +816,7 @@ fn persist_runtime_settings(
 async fn run_supervisor(
     mut settings: RuntimeSettings,
     settings_store: MonitoringSettingsStore,
+    permissions_store: MonitoringPermissionsStore,
     journal: ObservationJournal,
     status: Arc<Mutex<MonitoringStatusResult>>,
     mut commands: mpsc::Receiver<SupervisorCommand>,
@@ -535,7 +836,15 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status, &settings_store, &journal).await
+            if handle_idle_command(
+                command,
+                &mut settings,
+                &status,
+                &settings_store,
+                &permissions_store,
+                &journal,
+            )
+            .await
             {
                 break;
             }
@@ -561,7 +870,15 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status, &settings_store, &journal).await
+            if handle_idle_command(
+                command,
+                &mut settings,
+                &status,
+                &settings_store,
+                &permissions_store,
+                &journal,
+            )
+            .await
             {
                 break;
             }
@@ -581,7 +898,15 @@ async fn run_supervisor(
                 break;
             };
             let manual_retry = command_requests_manual_retry(&command);
-            if handle_idle_command(command, &mut settings, &status, &settings_store, &journal).await
+            if handle_idle_command(
+                command,
+                &mut settings,
+                &status,
+                &settings_store,
+                &permissions_store,
+                &journal,
+            )
+            .await
             {
                 break;
             }
@@ -604,6 +929,7 @@ async fn run_supervisor(
                         journal: &journal,
                         status: &status,
                         settings_store: &settings_store,
+                        permissions_store: &permissions_store,
                         permission_check_before_start,
                     },
                     &mut settings,
@@ -651,6 +977,7 @@ async fn run_supervisor(
                     &mut settings,
                     &status,
                     &settings_store,
+                    &permissions_store,
                     &journal,
                 )
                 .await
@@ -674,6 +1001,7 @@ async fn run_helper_session(
         journal,
         status,
         settings_store,
+        permissions_store,
         permission_check_before_start,
     } = context;
     let Some(stdout) = child.stdout.take() else {
@@ -697,7 +1025,7 @@ async fn run_helper_session(
         current.last_heartbeat_at_ms = None;
         current.last_error = observation_key_warning(journal).map(ToOwned::to_owned);
     }
-    if send_command(&mut stdin, "start-1", "start", settings, false)
+    if send_start_command(&mut stdin, "start-1", settings)
         .await
         .is_err()
     {
@@ -752,6 +1080,7 @@ async fn run_helper_session(
                             &line,
                             journal,
                             status,
+                            permissions_store,
                             &mut stdin,
                             &mut frame_state,
                         ).await {
@@ -759,6 +1088,7 @@ async fn run_helper_session(
                                 handle_permission_refresh_event(
                                     event,
                                     status,
+                                    permissions_store,
                                     &mut pending_permission_refresh,
                                 );
                             }
@@ -785,6 +1115,7 @@ async fn run_helper_session(
                     settings,
                     status,
                     settings_store,
+                    permissions_store,
                     &mut stdin,
                     &mut pending_permission_refresh,
                 ).await {
@@ -810,7 +1141,7 @@ async fn run_helper_session(
         &mut pending_permission_refresh,
         "observer_permission_refresh_interrupted",
     );
-    let _ = send_simple_command(&mut stdin, "shutdown-parent", "shutdown", false).await;
+    let _ = send_simple_command(&mut stdin, "shutdown-parent", "shutdown").await;
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     if child.id().is_some() {
         let _ = child.kill().await;
@@ -838,6 +1169,7 @@ async fn handle_running_command(
     settings: &mut RuntimeSettings,
     status: &Arc<Mutex<MonitoringStatusResult>>,
     settings_store: &MonitoringSettingsStore,
+    permissions_store: &MonitoringPermissionsStore,
     stdin: &mut ChildStdin,
     pending_permission_refresh: &mut Option<PendingPermissionRefresh>,
 ) -> RunningCommandOutcome {
@@ -877,7 +1209,7 @@ async fn handle_running_command(
                 return RunningCommandOutcome::Continue;
             }
             *settings = proposed;
-            let result = send_simple_command(stdin, "pause-runtime", "pause", false)
+            let result = send_simple_command(stdin, "pause-runtime", "pause")
                 .await
                 .map(|()| {
                     set_state(status, MonitoringState::Paused, None);
@@ -895,7 +1227,7 @@ async fn handle_running_command(
                 return RunningCommandOutcome::Continue;
             }
             *settings = proposed;
-            let result = send_simple_command(stdin, "resume-runtime", "resume", false)
+            let result = send_simple_command(stdin, "resume-runtime", "resume")
                 .await
                 .map(|()| {
                     set_state(status, MonitoringState::Running, None);
@@ -905,7 +1237,7 @@ async fn handle_running_command(
             let _ = response.send(result);
             RunningCommandOutcome::Continue
         }
-        SupervisorCommand::RefreshPermissions { prompt, response } => {
+        SupervisorCommand::RefreshPermissions { response } => {
             if pending_permission_refresh.is_some() {
                 let _ = response.send(Err(
                     "observer_permission_refresh_already_in_progress".to_owned()
@@ -913,20 +1245,58 @@ async fn handle_running_command(
                 return RunningCommandOutcome::Continue;
             }
             set_permission_check_state(status, MonitoringPermissionCheckState::Checking);
-            if send_simple_command(
-                stdin,
-                PERMISSION_REFRESH_COMMAND_ID,
-                "refreshPermissions",
-                prompt,
-            )
-            .await
-            .is_err()
+            if send_permission_refresh_command(stdin, PERMISSION_REFRESH_COMMAND_ID)
+                .await
+                .is_err()
             {
                 set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
                 let _ = response.send(Err("observer_permission_refresh_failed".to_owned()));
                 return RunningCommandOutcome::Continue;
             }
             *pending_permission_refresh = Some(PendingPermissionRefresh {
+                command_id: PERMISSION_REFRESH_COMMAND_ID,
+                completes_permission_setup: false,
+                permission_status_received: false,
+                command_result_received: false,
+                deadline: Instant::now() + PERMISSION_REFRESH_TIMEOUT,
+                response,
+            });
+            RunningCommandOutcome::Continue
+        }
+        SupervisorCommand::SetupPermissions { response } => {
+            if pending_permission_refresh.is_some() {
+                let _ = response.send(Err(
+                    "observer_permission_refresh_already_in_progress".to_owned()
+                ));
+                return RunningCommandOutcome::Continue;
+            }
+            let request_allowed = match prepare_permission_setup(permissions_store, status) {
+                Ok(request_allowed) => request_allowed,
+                Err(error) => {
+                    let _ = response.send(Err(error));
+                    return RunningCommandOutcome::Continue;
+                }
+            };
+            set_permission_check_state(status, MonitoringPermissionCheckState::Checking);
+            let (command_id, result) = if request_allowed {
+                (
+                    PERMISSION_SETUP_COMMAND_ID,
+                    send_permission_setup_command(stdin, PERMISSION_SETUP_COMMAND_ID).await,
+                )
+            } else {
+                (
+                    PERMISSION_REFRESH_COMMAND_ID,
+                    send_permission_refresh_command(stdin, PERMISSION_REFRESH_COMMAND_ID).await,
+                )
+            };
+            if result.is_err() {
+                set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
+                let _ = response.send(Err("observer_permission_refresh_failed".to_owned()));
+                return RunningCommandOutcome::Continue;
+            }
+            *pending_permission_refresh = Some(PendingPermissionRefresh {
+                command_id,
+                completes_permission_setup: request_allowed,
                 permission_status_received: false,
                 command_result_received: false,
                 deadline: Instant::now() + PERMISSION_REFRESH_TIMEOUT,
@@ -944,6 +1314,7 @@ async fn handle_running_command(
 fn handle_permission_refresh_event(
     event: HelperFrameEvent,
     status: &Arc<Mutex<MonitoringStatusResult>>,
+    permissions_store: &MonitoringPermissionsStore,
     pending: &mut Option<PendingPermissionRefresh>,
 ) {
     let Some(refresh) = pending.as_mut() else {
@@ -953,7 +1324,7 @@ fn handle_permission_refresh_event(
         HelperFrameEvent::PermissionStatus => {
             refresh.permission_status_received = true;
         }
-        HelperFrameEvent::CommandResult { id, ok } if id == PERMISSION_REFRESH_COMMAND_ID => {
+        HelperFrameEvent::CommandResult { id, ok } if id == refresh.command_id => {
             if !ok {
                 fail_pending_permission_refresh(
                     status,
@@ -970,6 +1341,12 @@ fn handle_permission_refresh_event(
         let Some(refresh) = pending.take() else {
             return;
         };
+        if refresh.completes_permission_setup
+            && let Err(error) = complete_permission_setup(permissions_store, status)
+        {
+            let _ = refresh.response.send(Err(error));
+            return;
+        }
         let _ = refresh.response.send(Ok(status_snapshot(status)));
     }
 }
@@ -1026,6 +1403,7 @@ async fn handle_idle_command(
     settings: &mut RuntimeSettings,
     status: &Arc<Mutex<MonitoringStatusResult>>,
     settings_store: &MonitoringSettingsStore,
+    permissions_store: &MonitoringPermissionsStore,
     journal: &ObservationJournal,
 ) -> bool {
     match command {
@@ -1081,7 +1459,7 @@ async fn handle_idle_command(
             }
             false
         }
-        SupervisorCommand::RefreshPermissions { prompt, response } => {
+        SupervisorCommand::RefreshPermissions { response } => {
             let resting_state = status_snapshot(status).state;
             if settings.helper_path.is_none() {
                 settings.helper_path = resolve_helper_path().ok().flatten();
@@ -1089,7 +1467,49 @@ async fn handle_idle_command(
             }
             let result = match settings.helper_path.as_deref() {
                 Some(helper_path) => {
-                    run_permission_probe(helper_path, status, journal, resting_state, prompt).await
+                    run_permission_probe(
+                        helper_path,
+                        status,
+                        permissions_store,
+                        journal,
+                        resting_state,
+                        PermissionProbeMode::Refresh,
+                    )
+                    .await
+                }
+                None => {
+                    set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
+                    Err("observer_helper_unavailable".to_owned())
+                }
+            };
+            let _ = response.send(result);
+            false
+        }
+        SupervisorCommand::SetupPermissions { response } => {
+            let resting_state = status_snapshot(status).state;
+            if settings.helper_path.is_none() {
+                settings.helper_path = resolve_helper_path().ok().flatten();
+                update_configuration_status(status, settings);
+            }
+            let result = match settings.helper_path.as_deref() {
+                Some(helper_path) => {
+                    let mode = match prepare_permission_setup(permissions_store, status) {
+                        Ok(true) => PermissionProbeMode::Setup,
+                        Ok(false) => PermissionProbeMode::Refresh,
+                        Err(error) => {
+                            let _ = response.send(Err(error));
+                            return false;
+                        }
+                    };
+                    run_permission_probe(
+                        helper_path,
+                        status,
+                        permissions_store,
+                        journal,
+                        resting_state,
+                        mode,
+                    )
+                    .await
                 }
                 None => {
                     set_permission_check_state(status, MonitoringPermissionCheckState::Failed);
@@ -1112,16 +1532,25 @@ fn command_requests_manual_retry(command: &SupervisorCommand) -> bool {
         SupervisorCommand::Configure { params, .. } if params.enabled
     ) || matches!(
         command,
-        SupervisorCommand::Resume { .. } | SupervisorCommand::RefreshPermissions { .. }
+        SupervisorCommand::Resume { .. }
+            | SupervisorCommand::RefreshPermissions { .. }
+            | SupervisorCommand::SetupPermissions { .. }
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionProbeMode {
+    Refresh,
+    Setup,
 }
 
 async fn run_permission_probe(
     helper_path: &Path,
     status: &Arc<Mutex<MonitoringStatusResult>>,
+    permissions_store: &MonitoringPermissionsStore,
     journal: &ObservationJournal,
     resting_state: MonitoringState,
-    prompt: bool,
+    mode: PermissionProbeMode,
 ) -> Result<MonitoringStatusResult, String> {
     let previous_error = status_snapshot(status).last_error;
     set_permission_check_state(status, MonitoringPermissionCheckState::Checking);
@@ -1151,14 +1580,20 @@ async fn run_permission_probe(
     }
 
     let probe = async {
-        send_simple_command(
-            &mut stdin,
-            PERMISSION_REFRESH_COMMAND_ID,
-            "refreshPermissions",
-            prompt,
-        )
-        .await
-        .map_err(|_| "observer_permission_refresh_failed")?;
+        let command_id = match mode {
+            PermissionProbeMode::Refresh => {
+                send_permission_refresh_command(&mut stdin, PERMISSION_REFRESH_COMMAND_ID)
+                    .await
+                    .map_err(|_| "observer_permission_refresh_failed")?;
+                PERMISSION_REFRESH_COMMAND_ID
+            }
+            PermissionProbeMode::Setup => {
+                send_permission_setup_command(&mut stdin, PERMISSION_SETUP_COMMAND_ID)
+                    .await
+                    .map_err(|_| "observer_permission_refresh_failed")?;
+                PERMISSION_SETUP_COMMAND_ID
+            }
+        };
         let mut stdout = BufReader::new(stdout);
         let mut line = Vec::new();
         let mut permission_status_received = false;
@@ -1173,13 +1608,11 @@ async fn run_permission_probe(
             if line.len() > MAX_HELPER_FRAME_BYTES {
                 return Err("observer_frame_too_large");
             }
-            match handle_permission_probe_frame(&line, status, journal)? {
+            match handle_permission_probe_frame(&line, status, permissions_store, journal)? {
                 HelperFrameEvent::PermissionStatus => {
                     permission_status_received = true;
                 }
-                HelperFrameEvent::CommandResult { id, ok }
-                    if id == PERMISSION_REFRESH_COMMAND_ID =>
-                {
+                HelperFrameEvent::CommandResult { id, ok } if id == command_id => {
                     if !ok {
                         return Err("observer_permission_refresh_rejected");
                     }
@@ -1197,7 +1630,7 @@ async fn run_permission_probe(
         Ok(result) => result.map_err(ToOwned::to_owned),
         Err(_) => Err("observer_permission_refresh_timeout".to_owned()),
     };
-    let _ = send_simple_command(&mut stdin, "shutdown-probe", "shutdown", false).await;
+    let _ = send_simple_command(&mut stdin, "shutdown-probe", "shutdown").await;
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     if child.id().is_some() {
         let _ = child.kill().await;
@@ -1214,13 +1647,25 @@ async fn run_permission_probe(
         match &result {
             Ok(()) => {
                 current.permission_check_state = MonitoringPermissionCheckState::Current;
-                current.last_error = previous_error;
+                if current.last_error.as_deref() != Some(MONITORING_PERMISSIONS_PERSISTENCE_WARNING)
+                {
+                    current.last_error = previous_error.filter(|warning| {
+                        !matches!(
+                            warning.as_str(),
+                            MONITORING_PERMISSIONS_LOAD_WARNING
+                                | MONITORING_PERMISSIONS_PERSISTENCE_WARNING
+                        )
+                    });
+                }
             }
             Err(code) => {
                 current.permission_check_state = MonitoringPermissionCheckState::Failed;
                 current.last_error = Some(code.clone());
             }
         }
+    }
+    if result.is_ok() && mode == PermissionProbeMode::Setup {
+        complete_permission_setup(permissions_store, status)?;
     }
     result.map(|()| status_snapshot(status))
 }
@@ -1269,6 +1714,7 @@ async fn handle_helper_frame(
     bytes: &[u8],
     journal: &ObservationJournal,
     status: &Arc<Mutex<MonitoringStatusResult>>,
+    permissions_store: &MonitoringPermissionsStore,
     stdin: &mut ChildStdin,
     frame_state: &mut HelperFrameState,
 ) -> Result<HelperFrameEvent, &'static str> {
@@ -1346,6 +1792,8 @@ async fn handle_helper_frame(
             };
             frame_state.last_heartbeat = Instant::now();
             let authorization = parse_authorization_frame(&value)?;
+            let permissions_cache_error =
+                persist_permission_frame(permissions_store, status, &authorization).err();
             journal
                 .append_authorization_change(
                     &authorization.boot_id,
@@ -1358,7 +1806,8 @@ async fn handle_helper_frame(
             frame_state.permission_frame_received = true;
             let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
             current.state = MonitoringState::Running;
-            current.last_error = observation_key_warning(journal).map(ToOwned::to_owned);
+            current.last_error = permissions_cache_error
+                .or_else(|| observation_key_warning(journal).map(ToOwned::to_owned));
             Ok(event)
         }
         "gap" => {
@@ -1413,6 +1862,7 @@ async fn handle_helper_frame(
 fn handle_permission_probe_frame(
     bytes: &[u8],
     status: &Arc<Mutex<MonitoringStatusResult>>,
+    permissions_store: &MonitoringPermissionsStore,
     journal: &ObservationJournal,
 ) -> Result<HelperFrameEvent, &'static str> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| "observer_invalid_json")?;
@@ -1423,6 +1873,8 @@ fn handle_permission_probe_frame(
     match frame_type {
         "ready" | "heartbeat" | "permissionStatus" => {
             let authorization = parse_authorization_frame(&value)?;
+            let permissions_cache_error =
+                persist_permission_frame(permissions_store, status, &authorization).err();
             journal
                 .append_authorization_change(
                     &authorization.boot_id,
@@ -1432,6 +1884,10 @@ fn handle_permission_probe_frame(
                 )
                 .map_err(|_| "observer_permission_persistence_failed")?;
             apply_permission_frame(status, &authorization);
+            status
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .last_error = permissions_cache_error;
             Ok(if frame_type == "permissionStatus" {
                 HelperFrameEvent::PermissionStatus
             } else {
@@ -1477,45 +1933,60 @@ async fn spawn_helper(helper_path: &Path) -> io::Result<(Child, JoinHandle<()>)>
     Ok((child, stderr_task))
 }
 
-async fn send_command(
-    stdin: &mut ChildStdin,
-    id: &str,
-    command: &str,
-    settings: &RuntimeSettings,
-    prompt: bool,
-) -> io::Result<()> {
-    write_helper_message(
-        stdin,
-        &json!({
-            "type": "command",
-            "id": id,
-            "command": command,
-            "config": {
-                "captureContent": settings.capture_content,
-                "excludedBundleIds": settings.excluded_bundle_ids,
-            },
-            "prompt": prompt,
-        }),
-    )
-    .await
+fn start_command_value(id: &str, settings: &RuntimeSettings) -> Value {
+    json!({
+        "type": "command",
+        "id": id,
+        "command": "start",
+        "config": {
+            "captureContent": settings.capture_content,
+            "excludedBundleIds": settings.excluded_bundle_ids,
+        },
+    })
 }
 
-async fn send_simple_command(
+fn simple_command_value(id: &str, command: &str) -> Value {
+    json!({
+        "type": "command",
+        "id": id,
+        "command": command,
+    })
+}
+
+fn permission_refresh_command_value(id: &str) -> Value {
+    json!({
+        "type": "command",
+        "id": id,
+        "command": "refreshPermissions",
+    })
+}
+
+fn permission_setup_command_value(id: &str) -> Value {
+    json!({
+        "type": "command",
+        "id": id,
+        "command": "setupPermissions",
+    })
+}
+
+async fn send_start_command(
     stdin: &mut ChildStdin,
     id: &str,
-    command: &str,
-    prompt: bool,
+    settings: &RuntimeSettings,
 ) -> io::Result<()> {
-    write_helper_message(
-        stdin,
-        &json!({
-            "type": "command",
-            "id": id,
-            "command": command,
-            "prompt": prompt,
-        }),
-    )
-    .await
+    write_helper_message(stdin, &start_command_value(id, settings)).await
+}
+
+async fn send_simple_command(stdin: &mut ChildStdin, id: &str, command: &str) -> io::Result<()> {
+    write_helper_message(stdin, &simple_command_value(id, command)).await
+}
+
+async fn send_permission_refresh_command(stdin: &mut ChildStdin, id: &str) -> io::Result<()> {
+    write_helper_message(stdin, &permission_refresh_command_value(id)).await
+}
+
+async fn send_permission_setup_command(stdin: &mut ChildStdin, id: &str) -> io::Result<()> {
+    write_helper_message(stdin, &permission_setup_command_value(id)).await
 }
 
 async fn send_ack(stdin: &mut ChildStdin, boot_id: &str, sequence: u64) -> io::Result<()> {
@@ -1641,6 +2112,68 @@ fn apply_permission_frame(status: &Arc<Mutex<MonitoringStatusResult>>, frame: &A
     }
 }
 
+fn persist_permission_frame(
+    store: &MonitoringPermissionsStore,
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+    frame: &AuthorizationFrame,
+) -> Result<(), String> {
+    if !store.setup_available() {
+        return Ok(());
+    }
+    let current = status_snapshot(status);
+    let must_refresh_cache = current.permissions != frame.permissions
+        || current.permissions_checked_at_ms.is_none()
+        || matches!(frame.reason.as_str(), "startup_snapshot" | "manual_refresh");
+    if !must_refresh_cache {
+        return Ok(());
+    }
+    store.save(
+        &frame.permissions,
+        Some(frame.observed_at_ms),
+        current.permission_setup_attempted,
+    )
+}
+
+fn prepare_permission_setup(
+    store: &MonitoringPermissionsStore,
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+) -> Result<bool, String> {
+    if !store.setup_available() {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    }
+    let current = status_snapshot(status);
+    if current.permission_setup_attempted {
+        return Ok(false);
+    }
+    // Prove the identity-scoped cache is writable before invoking any request
+    // API, but do not hide the setup entry yet. A helper launch/write failure,
+    // crash, or timeout must remain recoverable by the same explicit user
+    // action. TCC request APIs are never reached by a background path.
+    store.save(
+        &current.permissions,
+        current.permissions_checked_at_ms,
+        false,
+    )?;
+    Ok(true)
+}
+
+fn complete_permission_setup(
+    store: &MonitoringPermissionsStore,
+    status: &Arc<Mutex<MonitoringStatusResult>>,
+) -> Result<(), String> {
+    let current = status_snapshot(status);
+    store.save(
+        &current.permissions,
+        current.permissions_checked_at_ms,
+        true,
+    )?;
+    status
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .permission_setup_attempted = true;
+    Ok(())
+}
+
 fn permission_state(
     permissions: &Map<String, Value>,
     key: &str,
@@ -1711,6 +2244,8 @@ fn set_state(
                 DEV_LEGACY_KEYCHAIN_WARNING
                     | MONITORING_SETTINGS_LOAD_WARNING
                     | MONITORING_SETTINGS_PERSISTENCE_WARNING
+                    | MONITORING_PERMISSIONS_LOAD_WARNING
+                    | MONITORING_PERMISSIONS_PERSISTENCE_WARNING
             )
         );
     if !preserve_warning {
@@ -1737,6 +2272,20 @@ fn push_coverage(values: &mut Vec<CoverageLevelV2>, value: CoverageLevelV2) {
     if !values.contains(&value) {
         values.push(value);
     }
+}
+
+fn prepare_monitoring_directory(path: &Path, error_code: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(error_code.to_owned());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|_| error_code.to_owned())?;
+        }
+        Err(_) => return Err(error_code.to_owned()),
+    }
+    harden_monitoring_settings_directory(path).map_err(|_| error_code.to_owned())
 }
 
 #[cfg(unix)]
@@ -2049,6 +2598,14 @@ mod tests {
         }
     }
 
+    fn test_identity_fingerprint() -> String {
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()
+    }
+
+    fn test_permissions_store(directory: &Path) -> MonitoringPermissionsStore {
+        MonitoringPermissionsStore::new(directory, Some(test_identity_fingerprint()))
+    }
+
     fn test_status() -> Arc<Mutex<MonitoringStatusResult>> {
         Arc::new(Mutex::new(MonitoringStatusResult {
             state: MonitoringState::Starting,
@@ -2064,6 +2621,8 @@ mod tests {
             permissions: MonitoringPermissions::default(),
             permission_check_state: MonitoringPermissionCheckState::Unchecked,
             permissions_checked_at_ms: None,
+            permission_setup_available: true,
+            permission_setup_attempted: false,
             coverage: vec![CoverageLevelV2::Metadata],
             last_error: None,
         }))
@@ -2149,10 +2708,279 @@ mod tests {
         }
     }
 
+    #[test]
+    fn monitoring_permissions_cache_is_private_atomic_and_allowlisted() {
+        let directory = tempfile::tempdir().expect("create monitoring permissions directory");
+        let store = test_permissions_store(directory.path());
+        let permissions = MonitoringPermissions {
+            accessibility: MonitoringPermissionState::Granted,
+            screen_recording: MonitoringPermissionState::Denied,
+            input_monitoring: MonitoringPermissionState::Granted,
+            automation: MonitoringPermissionState::Unsupported,
+        };
+
+        store
+            .save(&permissions, Some(1_800_000_000_000), false)
+            .expect("persist monitoring permissions");
+        let loaded = store
+            .load()
+            .expect("load monitoring permissions")
+            .expect("permissions exist");
+        assert_eq!(loaded.permissions, permissions);
+        assert_eq!(loaded.checked_at_ms, Some(1_800_000_000_000));
+        assert!(!loaded.setup_attempted);
+        assert_eq!(loaded.identity_fingerprint, test_identity_fingerprint());
+
+        let bytes = fs::read(&store.permissions_path).expect("read permissions cache");
+        let value: Value = serde_json::from_slice(&bytes).expect("parse permissions cache");
+        let keys = value
+            .as_object()
+            .expect("permissions object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "checkedAtMs",
+                "identityFingerprint",
+                "permissions",
+                "schemaVersion",
+                "setupAttempted",
+            ])
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                fs::metadata(&store.directory_path)
+                    .expect("permissions directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&store.permissions_path)
+                    .expect("permissions file metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_monitoring_permissions_cache_is_rejected_without_guessing() {
+        let directory = tempfile::tempdir().expect("create monitoring permissions directory");
+        let store = test_permissions_store(directory.path());
+        prepare_monitoring_directory(&store.directory_path, MONITORING_PERMISSIONS_LOAD_WARNING)
+            .expect("prepare permissions directory");
+        fs::write(
+            &store.permissions_path,
+            br#"{
+                "schemaVersion":"monitoring-permissions.v2",
+                "identityFingerprint":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "setupAttempted":false,
+                "checkedAtMs":1800000000000,
+                "permissions":{
+                    "accessibility":"granted",
+                    "screenRecording":"denied",
+                    "inputMonitoring":"granted",
+                    "automation":"unsupported"
+                },
+                "unexpected":"must fail closed"
+            }"#,
+        )
+        .expect("write corrupt permissions cache");
+
+        assert_eq!(
+            store.load().unwrap_err(),
+            MONITORING_PERMISSIONS_LOAD_WARNING
+        );
+    }
+
+    #[test]
+    fn permission_identity_accepts_developer_id_and_fixed_local_certificate() {
+        let developer = r#"
+# designated => identifier "com.seago.whalehall.observer" and anchor apple generic
+Identifier=com.seago.whalehall.observer
+TeamIdentifier=A1B2C3D4E5
+"#;
+        assert_eq!(
+            parse_permission_identity_details(developer).unwrap(),
+            (
+                "developer-team:A1B2C3D4E5".to_owned(),
+                "identifier \"com.seago.whalehall.observer\" and anchor apple generic".to_owned(),
+            )
+        );
+
+        let local = r#"
+# designated => identifier "com.seago.whalehall.observer" and certificate leaf = H"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+Identifier=com.seago.whalehall.observer
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#;
+        assert_eq!(
+            parse_permission_identity_details(local).unwrap(),
+            (
+                "local-certificate:whalehall-local-development:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "identifier \"com.seago.whalehall.observer\" and certificate leaf = H\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"".to_owned(),
+            )
+        );
+    }
+
+    #[test]
+    fn permission_identity_rejects_adhoc_and_ambiguous_local_signatures() {
+        for details in [
+            r#"
+# designated => cdhash H"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+Signature=adhoc
+TeamIdentifier=not set
+"#,
+            r#"
+# designated => identifier "com.seago.whalehall.observer"
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#,
+            r#"
+# designated => identifier "com.seago.whalehall.observer" and certificate leaf = H"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+Authority=Unexpected Local Authority
+TeamIdentifier=not set
+"#,
+        ] {
+            assert_eq!(
+                parse_permission_identity_details(details).unwrap_err(),
+                "observer_permission_setup_identity_unavailable"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_send_failure_or_crash_does_not_commit_the_identity_marker() {
+        let directory = tempfile::tempdir().expect("create monitoring permissions directory");
+        let store = test_permissions_store(directory.path());
+        let status = test_status();
+
+        assert!(prepare_permission_setup(&store, &status).expect("prepare first setup"));
+        assert!(!status_snapshot(&status).permission_setup_attempted);
+        let persisted = store
+            .load()
+            .expect("load setup preparation")
+            .expect("setup preparation exists");
+        assert!(!persisted.setup_attempted);
+        assert_eq!(persisted.checked_at_ms, None);
+
+        // A new process after a launch/write failure or helper crash restores
+        // an actionable setup entry instead of permanently hiding it.
+        assert!(
+            prepare_permission_setup(&store, &test_status())
+                .expect("retry setup after interrupted attempt")
+        );
+
+        complete_permission_setup(&store, &status).expect("complete confirmed setup");
+        assert!(status_snapshot(&status).permission_setup_attempted);
+        assert!(
+            store
+                .load()
+                .expect("load completed marker")
+                .expect("completed marker exists")
+                .setup_attempted
+        );
+        assert!(!prepare_permission_setup(&store, &status).expect("repeat setup is passive"));
+
+        let other_identity = MonitoringPermissionsStore::new(
+            directory.path(),
+            Some(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            ),
+        );
+        assert!(
+            other_identity
+                .load()
+                .expect("identity mismatch is not corruption")
+                .is_none()
+        );
+
+        let unavailable = MonitoringPermissionsStore::new(directory.path(), None);
+        assert_eq!(
+            prepare_permission_setup(&unavailable, &test_status()).unwrap_err(),
+            "observer_permission_setup_identity_unavailable"
+        );
+    }
+
+    #[test]
+    fn permission_commands_never_serialize_a_prompt_field() {
+        let settings = test_runtime_settings();
+        for command in [
+            start_command_value("start", &settings),
+            simple_command_value("pause", "pause"),
+            simple_command_value("resume", "resume"),
+            simple_command_value("shutdown", "shutdown"),
+        ] {
+            assert!(command.get("prompt").is_none());
+        }
+
+        let passive_refresh = permission_refresh_command_value("refresh");
+        assert_eq!(
+            passive_refresh.get("command").and_then(Value::as_str),
+            Some("refreshPermissions")
+        );
+        assert!(passive_refresh.get("prompt").is_none());
+        let explicit_setup = permission_setup_command_value("setup");
+        assert_eq!(
+            explicit_setup.get("command").and_then(Value::as_str),
+            Some("setupPermissions")
+        );
+        assert!(explicit_setup.get("prompt").is_none());
+    }
+
+    #[test]
+    fn unchanged_heartbeat_does_not_rewrite_permission_cache() {
+        let directory = tempfile::tempdir().expect("create monitoring permissions directory");
+        let store = test_permissions_store(directory.path());
+        let status = test_status();
+        let permissions = MonitoringPermissions {
+            accessibility: MonitoringPermissionState::Granted,
+            screen_recording: MonitoringPermissionState::Granted,
+            input_monitoring: MonitoringPermissionState::Granted,
+            automation: MonitoringPermissionState::Unsupported,
+        };
+        {
+            let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+            current.permissions = permissions.clone();
+            current.permissions_checked_at_ms = Some(100);
+        }
+        store
+            .save(&permissions, Some(100), false)
+            .expect("seed permissions cache");
+        let frame = AuthorizationFrame {
+            boot_id: "boot-heartbeat".to_owned(),
+            observed_at_ms: 200,
+            permissions,
+            reason: "heartbeat_check".to_owned(),
+        };
+
+        persist_permission_frame(&store, &status, &frame).expect("unchanged heartbeat is accepted");
+        assert_eq!(
+            store
+                .load()
+                .expect("load cache")
+                .expect("cache exists")
+                .checked_at_ms,
+            Some(100)
+        );
+    }
+
     #[tokio::test]
     async fn idle_changes_persist_before_response_and_restore_after_restart() {
         let directory = tempfile::tempdir().expect("create monitoring settings directory");
         let store = MonitoringSettingsStore::new(directory.path());
+        let permissions_store = test_permissions_store(directory.path());
         let journal = test_journal(directory.path());
         let status = test_status();
         let mut settings = test_runtime_settings();
@@ -2171,6 +2999,7 @@ mod tests {
                 &mut settings,
                 &status,
                 &store,
+                &permissions_store,
                 &journal,
             )
             .await
@@ -2196,6 +3025,7 @@ mod tests {
                 &mut settings,
                 &status,
                 &store,
+                &permissions_store,
                 &journal,
             )
             .await
@@ -2305,6 +3135,7 @@ mod tests {
         )
         .expect("block monitoring settings directory");
         let store = MonitoringSettingsStore::new(directory.path());
+        let permissions_store = test_permissions_store(directory.path());
         let journal = test_journal(directory.path());
         let status = test_status();
         let mut settings = test_runtime_settings();
@@ -2324,6 +3155,7 @@ mod tests {
                 &mut settings,
                 &status,
                 &store,
+                &permissions_store,
                 &journal,
             )
             .await
@@ -2450,6 +3282,8 @@ mod tests {
 
     #[tokio::test]
     async fn permission_refresh_waits_for_matching_status_and_command_result() {
+        let directory = tempfile::tempdir().expect("create monitoring permissions directory");
+        let permissions_store = test_permissions_store(directory.path());
         let status = test_status();
         {
             let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
@@ -2458,6 +3292,8 @@ mod tests {
         }
         let (response, completed) = oneshot::channel();
         let mut pending = Some(PendingPermissionRefresh {
+            command_id: PERMISSION_REFRESH_COMMAND_ID,
+            completes_permission_setup: false,
             permission_status_received: false,
             command_result_received: false,
             deadline: Instant::now() + PERMISSION_REFRESH_TIMEOUT,
@@ -2470,9 +3306,15 @@ mod tests {
                 ok: true,
             },
             &status,
+            &permissions_store,
             &mut pending,
         );
-        handle_permission_refresh_event(HelperFrameEvent::PermissionStatus, &status, &mut pending);
+        handle_permission_refresh_event(
+            HelperFrameEvent::PermissionStatus,
+            &status,
+            &permissions_store,
+            &mut pending,
+        );
         assert!(pending.is_some());
 
         handle_permission_refresh_event(
@@ -2481,6 +3323,7 @@ mod tests {
                 ok: true,
             },
             &status,
+            &permissions_store,
             &mut pending,
         );
         assert!(pending.is_none());
@@ -2488,6 +3331,94 @@ mod tests {
         assert_eq!(
             result.permission_check_state,
             MonitoringPermissionCheckState::Current
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_timeout_keeps_the_explicit_entry_retryable() {
+        let directory = tempfile::tempdir().expect("create monitoring permissions directory");
+        let permissions_store = test_permissions_store(directory.path());
+        let status = test_status();
+        assert!(
+            prepare_permission_setup(&permissions_store, &status).expect("prepare explicit setup")
+        );
+        let (response, completed) = oneshot::channel();
+        let mut pending = Some(PendingPermissionRefresh {
+            command_id: PERMISSION_SETUP_COMMAND_ID,
+            completes_permission_setup: true,
+            permission_status_received: true,
+            command_result_received: false,
+            deadline: Instant::now(),
+            response,
+        });
+
+        fail_pending_permission_refresh(
+            &status,
+            &mut pending,
+            "observer_permission_refresh_timeout",
+        );
+        assert!(pending.is_none());
+        assert_eq!(
+            completed.await.expect("timeout response").unwrap_err(),
+            "observer_permission_refresh_timeout"
+        );
+        assert!(!status_snapshot(&status).permission_setup_attempted);
+        assert!(
+            prepare_permission_setup(&permissions_store, &status).expect("retry after timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_setup_handshake_commits_once_per_identity() {
+        let directory = tempfile::tempdir().expect("create monitoring permissions directory");
+        let permissions_store = test_permissions_store(directory.path());
+        let status = test_status();
+        assert!(
+            prepare_permission_setup(&permissions_store, &status).expect("prepare explicit setup")
+        );
+        let (response, completed) = oneshot::channel();
+        let mut pending = Some(PendingPermissionRefresh {
+            command_id: PERMISSION_SETUP_COMMAND_ID,
+            completes_permission_setup: true,
+            permission_status_received: false,
+            command_result_received: false,
+            deadline: Instant::now() + PERMISSION_REFRESH_TIMEOUT,
+            response,
+        });
+
+        handle_permission_refresh_event(
+            HelperFrameEvent::PermissionStatus,
+            &status,
+            &permissions_store,
+            &mut pending,
+        );
+        handle_permission_refresh_event(
+            HelperFrameEvent::CommandResult {
+                id: PERMISSION_SETUP_COMMAND_ID.to_owned(),
+                ok: true,
+            },
+            &status,
+            &permissions_store,
+            &mut pending,
+        );
+        assert!(pending.is_none());
+        assert!(
+            completed
+                .await
+                .expect("setup response")
+                .expect("confirmed setup")
+                .permission_setup_attempted
+        );
+        assert!(
+            permissions_store
+                .load()
+                .expect("load completed setup")
+                .expect("completed setup exists")
+                .setup_attempted
+        );
+        assert!(
+            !prepare_permission_setup(&permissions_store, &status)
+                .expect("subsequent explicit action is passive")
         );
     }
 
@@ -2570,6 +3501,7 @@ mod tests {
     fn permission_frames_expose_check_timestamp_and_probe_rejects_observations() {
         let directory = tempfile::tempdir().expect("create authorization journal directory");
         let journal = test_journal(directory.path());
+        let permissions_store = test_permissions_store(directory.path());
         let status = test_status();
         let permission_frame = br#"{
             "type":"permissionStatus",
@@ -2585,7 +3517,7 @@ mod tests {
             }
         }"#;
         assert!(matches!(
-            handle_permission_probe_frame(permission_frame, &status, &journal),
+            handle_permission_probe_frame(permission_frame, &status, &permissions_store, &journal,),
             Ok(HelperFrameEvent::PermissionStatus)
         ));
         let snapshot = status_snapshot(&status);
@@ -2611,7 +3543,7 @@ mod tests {
             }
         }"#;
         assert!(matches!(
-            handle_permission_probe_frame(legacy_frame, &status, &journal),
+            handle_permission_probe_frame(legacy_frame, &status, &permissions_store, &journal,),
             Ok(HelperFrameEvent::PermissionStatus)
         ));
         let authorization_events = journal
@@ -2631,7 +3563,13 @@ mod tests {
             "legacy_status"
         );
         assert_eq!(
-            handle_permission_probe_frame(br#"{"type":"observation"}"#, &status, &journal).err(),
+            handle_permission_probe_frame(
+                br#"{"type":"observation"}"#,
+                &status,
+                &permissions_store,
+                &journal,
+            )
+            .err(),
             Some("observer_probe_started_sensors")
         );
     }
