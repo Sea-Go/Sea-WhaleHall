@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rusqlite::Connection;
 use serde_json::json;
 use tempfile::TempDir;
 use whalehall_local_core::observations::{
-    MemoryObservationKeyProvider, ObservationJournal, ObservationJournalConfig,
-    UnavailableObservationKeyProvider,
+    MemoryObservationKeyProvider, ObservationJournal, ObservationJournalConfig, ObservationKey,
+    ObservationKeyError, ObservationKeyProvider, UnavailableObservationKeyProvider,
 };
 use whalehall_local_protocol::{
     AuditQueryFiveMinutesParams, CoverageLevelV2, EventGoalChangeParams, EvidenceReliabilityV2,
@@ -19,6 +20,24 @@ use whalehall_local_protocol::{
 };
 
 const SECRET: &str = "绝不能出现在SQLite明文里的浏览器正文";
+
+#[derive(Default)]
+struct CountingUnavailableKeyProvider {
+    calls: AtomicUsize,
+}
+
+impl CountingUnavailableKeyProvider {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl ObservationKeyProvider for CountingUnavailableKeyProvider {
+    fn load_or_create(&self) -> Result<ObservationKey, ObservationKeyError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ObservationKeyError::Unavailable)
+    }
+}
 
 fn memory_journal(directory: &TempDir, raw_retention: Duration) -> ObservationJournal {
     memory_journal_with_retentions(
@@ -447,6 +466,55 @@ fn unavailable_key_fails_closed_and_never_persists_content() {
         assert_file_does_not_contain(&path, SECRET.as_bytes());
         assert_file_does_not_contain(&path, b"example.com");
     }
+}
+
+#[test]
+fn unavailable_key_is_backed_off_and_status_queries_never_trigger_key_io() {
+    let directory = tempfile::tempdir().expect("create test directory");
+    let provider = Arc::new(CountingUnavailableKeyProvider::default());
+    let journal = ObservationJournal::open_with_config(ObservationJournalConfig {
+        database_path: directory.path().join("observation-journal.sqlite3"),
+        raw_content_retention: Duration::from_secs(7 * 24 * 60 * 60),
+        derived_retention: Duration::from_secs(30 * 24 * 60 * 60),
+        broadcast_capacity: 8,
+        key_provider: provider.clone(),
+        device_id: None,
+        session_id: None,
+    })
+    .expect("open journal with counting unavailable key");
+    assert_eq!(
+        provider.calls(),
+        1,
+        "journal open performs one key preflight"
+    );
+
+    for _ in 0..100 {
+        assert!(!journal.key_available());
+        assert_eq!(journal.key_storage_mode(), None);
+    }
+    assert_eq!(
+        provider.calls(),
+        1,
+        "pure key status queries must never perform Keychain I/O"
+    );
+
+    for index in 0..10 {
+        let appended = journal
+            .ingest(
+                &format!("key-backoff-frame-{index}"),
+                browser_observation(3_000 + index, SECRET),
+            )
+            .expect("metadata-only ingest must remain available during key backoff");
+        assert_eq!(
+            appended.semantic_event.content_state,
+            SemanticContentStateV2::Unavailable
+        );
+    }
+    assert_eq!(
+        provider.calls(),
+        1,
+        "content events inside the retry interval must reuse the cached failure"
+    );
 }
 
 #[test]

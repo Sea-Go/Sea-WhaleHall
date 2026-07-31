@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -32,6 +32,13 @@ const SEMANTIC_CURSOR_PREFIX: &str = "sec2_";
 const DEFAULT_RAW_CONTENT_RETENTION_DAYS: u64 = 7;
 const DEFAULT_DERIVED_RETENTION_DAYS: u64 = 30;
 const DEFAULT_BROADCAST_CAPACITY: usize = 256;
+const KEY_LOAD_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(45),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+];
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 const MAX_METADATA_BYTES: usize = 64 * 1024;
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
@@ -360,9 +367,18 @@ struct ObservationJournalInner {
     raw_content_retention_ms: i64,
     derived_retention_ms: i64,
     key_provider: Arc<dyn ObservationKeyProvider>,
-    cached_key: Mutex<Option<ObservationKey>>,
+    key_state: Mutex<ObservationKeyState>,
     write_guard: Mutex<()>,
     publisher: broadcast::Sender<SemanticEventV2>,
+}
+
+enum ObservationKeyState {
+    Ready(ObservationKey),
+    RetryAfter {
+        error: ObservationKeyError,
+        retry_at: Instant,
+        failure_count: usize,
+    },
 }
 
 #[derive(Serialize)]
@@ -451,6 +467,12 @@ impl ObservationJournal {
             None => generate_instance_id("session2"),
         };
         let (publisher, _) = broadcast::channel(config.broadcast_capacity);
+        // Keychain access is attempted once when the journal opens. The
+        // production provider is strictly non-interactive. Persist failures in
+        // memory so high-frequency content observations cannot turn one
+        // unavailable Keychain into an I/O attempt per event.
+        let key_state =
+            key_state_from_result(config.key_provider.load_or_create(), Instant::now(), 1);
         Ok(Self {
             inner: Arc::new(ObservationJournalInner {
                 database_path: config.database_path,
@@ -459,7 +481,7 @@ impl ObservationJournal {
                 raw_content_retention_ms,
                 derived_retention_ms,
                 key_provider: config.key_provider,
-                cached_key: Mutex::new(None),
+                key_state: Mutex::new(key_state),
                 write_guard: Mutex::new(()),
                 publisher,
             }),
@@ -483,11 +505,11 @@ impl ObservationJournal {
     }
 
     pub fn key_available(&self) -> bool {
-        self.key().is_ok()
+        self.inner.cached_key().is_some()
     }
 
     pub fn key_storage_mode(&self) -> Option<ObservationKeyStorageMode> {
-        let key = self.key().ok()?;
+        let key = self.inner.cached_key()?;
         Some(match key.version() {
             KEY_VERSION => ObservationKeyStorageMode::DataProtectionKeychain,
             "keychain-dev-legacy-v1" => ObservationKeyStorageMode::LegacyDevelopmentKeychain,
@@ -1581,18 +1603,67 @@ impl ObservationJournal {
     }
 
     fn key(&self) -> Result<ObservationKey, ObservationKeyError> {
-        let mut cached = self
-            .inner
-            .cached_key
+        self.inner.load_key()
+    }
+}
+
+impl ObservationJournalInner {
+    fn cached_key(&self) -> Option<ObservationKey> {
+        let state = self
+            .key_state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(key) = cached.as_ref() {
-            return Ok(key.clone());
+        match &*state {
+            ObservationKeyState::Ready(key) => Some(key.clone()),
+            ObservationKeyState::RetryAfter { .. } => None,
         }
-        let key = self.inner.key_provider.load_or_create()?;
-        *cached = Some(key.clone());
-        Ok(key)
     }
+
+    fn load_key(&self) -> Result<ObservationKey, ObservationKeyError> {
+        let now = Instant::now();
+        let mut state = self
+            .key_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &*state {
+            ObservationKeyState::Ready(key) => return Ok(key.clone()),
+            ObservationKeyState::RetryAfter {
+                error, retry_at, ..
+            } if now < *retry_at => return Err(error.clone()),
+            ObservationKeyState::RetryAfter { .. } => {}
+        }
+
+        let failure_count = match &*state {
+            ObservationKeyState::Ready(_) => unreachable!("ready key returned above"),
+            ObservationKeyState::RetryAfter { failure_count, .. } => {
+                failure_count.saturating_add(1)
+            }
+        };
+        let result = self.key_provider.load_or_create();
+        *state = key_state_from_result(result.clone(), Instant::now(), failure_count);
+        result
+    }
+}
+
+fn key_state_from_result(
+    result: Result<ObservationKey, ObservationKeyError>,
+    now: Instant,
+    failure_count: usize,
+) -> ObservationKeyState {
+    match result {
+        Ok(key) => ObservationKeyState::Ready(key),
+        Err(error) => ObservationKeyState::RetryAfter {
+            error,
+            retry_at: now + key_load_retry_delay(failure_count),
+            failure_count,
+        },
+    }
+}
+
+fn key_load_retry_delay(failure_count: usize) -> Duration {
+    KEY_LOAD_RETRY_DELAYS[failure_count
+        .saturating_sub(1)
+        .min(KEY_LOAD_RETRY_DELAYS.len() - 1)]
 }
 
 struct ProjectedSemantic {
@@ -2143,12 +2214,7 @@ fn insert_semantic_projection(
         ],
     );
     let key = if projected.content_payload.is_some() {
-        journal
-            .cached_key
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-            .or_else(|| journal.key_provider.load_or_create().ok())
+        journal.load_key().ok()
     } else {
         None
     };
@@ -4166,6 +4232,87 @@ mod macos_keychain_policy_tests {
         assert!(!is_adhoc_signature_without_team_identifier(
             "TeamIdentifier=not set\n"
         ));
+    }
+}
+
+#[cfg(test)]
+mod key_cache_policy_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct RecoveringKeyProvider {
+        calls: AtomicUsize,
+    }
+
+    impl RecoveringKeyProvider {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ObservationKeyProvider for RecoveringKeyProvider {
+        fn load_or_create(&self) -> Result<ObservationKey, ObservationKeyError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(ObservationKeyError::Unavailable)
+            } else {
+                Ok(ObservationKey::from_bytes([0x2a; 32], "recovering-test-v1"))
+            }
+        }
+    }
+
+    #[test]
+    fn retry_schedule_caps_at_five_minutes() {
+        assert_eq!(key_load_retry_delay(0), Duration::from_secs(5));
+        assert_eq!(key_load_retry_delay(1), Duration::from_secs(5));
+        assert_eq!(key_load_retry_delay(2), Duration::from_secs(15));
+        assert_eq!(key_load_retry_delay(3), Duration::from_secs(45));
+        assert_eq!(key_load_retry_delay(4), Duration::from_secs(2 * 60));
+        assert_eq!(key_load_retry_delay(5), Duration::from_secs(5 * 60));
+        assert_eq!(key_load_retry_delay(500), Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn an_expired_failure_retries_once_and_then_caches_success() {
+        let directory = tempfile::tempdir().expect("create key retry directory");
+        let provider = Arc::new(RecoveringKeyProvider::new());
+        let journal = ObservationJournal::open_with_config(ObservationJournalConfig::new(
+            directory.path().join("key-retry.sqlite3"),
+            provider.clone(),
+        ))
+        .expect("open key retry journal");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert!(!journal.key_available());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        {
+            let mut state = journal
+                .inner
+                .key_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match &mut *state {
+                ObservationKeyState::RetryAfter { retry_at, .. } => {
+                    *retry_at = Instant::now();
+                }
+                ObservationKeyState::Ready(_) => panic!("first key load must fail"),
+            }
+        }
+
+        assert!(journal.key().is_ok());
+        assert!(journal.key_available());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        for _ in 0..100 {
+            assert!(journal.key().is_ok());
+            assert!(journal.key_available());
+        }
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            2,
+            "a successful retry must remain cached"
+        );
     }
 }
 
