@@ -9,15 +9,21 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
+	FiveMinuteAuditCaptureFailureCode,
 	FiveMinuteAuditCaptureStatus,
 	FiveMinuteAuditCaptureState,
 } from "../shared/contracts";
+import type { TimelineCursorAuthority } from "../agent/timeline-v2/repository";
+import type { SemanticEventV2 } from "../agent/timeline-v2/types";
 
 export const AUDIT_CAPTURE_DURATION_MS = 5 * 60 * 1_000;
 export const AUDIT_CAPTURE_BUCKET_MS = 5_000;
 export const AUDIT_CAPTURE_SETTLE_DELAY_MS = 12_000;
+export const AUDIT_CAPTURE_SETTLE_POLL_MS = 5_000;
+export const AUDIT_CAPTURE_JOB_GRACE_MS = 60_000;
 
-const CAPTURE_SCHEMA_VERSION = "audit-capture-session.v1";
+const CAPTURE_SCHEMA_VERSION = "audit-capture-session.v2";
+const LEGACY_CAPTURE_SCHEMA_VERSION = "audit-capture-session.v1";
 const MAX_CAPTURE_FILE_BYTES = 64 * 1_024;
 const CAPTURE_ID_PATTERN = /^ac1_[A-Za-z0-9_-]{16,128}$/;
 const CAPTURE_KEYS = [
@@ -29,7 +35,11 @@ const CAPTURE_KEYS = [
 	"updatedAtMs",
 	"settleNotBeforeMs",
 	"settleAttemptedAtMs",
+	"failureCode",
 ] as const;
+const LEGACY_CAPTURE_KEYS = CAPTURE_KEYS.filter(
+	(key) => key !== "failureCode",
+);
 
 export type PersistedAuditCaptureState = {
 	captureId: string;
@@ -40,6 +50,7 @@ export type PersistedAuditCaptureState = {
 	updatedAtMs: number;
 	settleNotBeforeMs: number;
 	settleAttemptedAtMs: number | null;
+	failureCode: FiveMinuteAuditCaptureFailureCode | null;
 };
 
 type PersistedCaptureDocument = {
@@ -57,9 +68,22 @@ export interface AuditCaptureScheduler {
 	clearTimer(handle: unknown): void;
 }
 
+export type AuditCaptureSettlementResult =
+	| { state: "ready" }
+	| { state: "pending" }
+	| {
+			state: "failed";
+			failureCode:
+				| "timeline_job_terminal_failure"
+				| "timeline_result_inconsistent";
+		};
+
 export type FiveMinuteAuditCaptureDependencies = {
 	store: AuditCaptureStore;
-	settleRange(fromMs: number, toMs: number): Promise<void>;
+	settleRange(
+		fromMs: number,
+		toMs: number,
+	): Promise<AuditCaptureSettlementResult>;
 	nowMs?: () => number;
 	createCaptureId?: () => string;
 	scheduler?: AuditCaptureScheduler;
@@ -81,7 +105,7 @@ export class FiveMinuteAuditCaptureCoordinator {
 	private readonly settleRange: (
 		fromMs: number,
 		toMs: number,
-	) => Promise<void>;
+	) => Promise<AuditCaptureSettlementResult>;
 	private readonly nowMs: () => number;
 	private readonly createCaptureId: () => string;
 	private readonly scheduler: AuditCaptureScheduler;
@@ -131,7 +155,10 @@ export class FiveMinuteAuditCaptureCoordinator {
 			const nowMs = validNow(this.nowMs());
 			const fromMs = alignToCurrentOrNextBucket(nowMs);
 			const toMs = fromMs + AUDIT_CAPTURE_DURATION_MS;
-			if (!Number.isSafeInteger(toMs)) {
+			if (
+				!Number.isSafeInteger(toMs) ||
+				!Number.isSafeInteger(settleDeadlineMs(toMs))
+			) {
 				throw new Error("The audit capture range exceeds safe time bounds.");
 			}
 			const captureId = this.createCaptureId();
@@ -155,6 +182,7 @@ export class FiveMinuteAuditCaptureCoordinator {
 				updatedAtMs: nowMs,
 				settleNotBeforeMs: toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS,
 				settleAttemptedAtMs: null,
+				failureCode: null,
 			};
 			await this.store.save(next);
 			this.capture = next;
@@ -185,6 +213,7 @@ export class FiveMinuteAuditCaptureCoordinator {
 				...current,
 				state: "cancelled",
 				updatedAtMs: validNow(this.nowMs()),
+				failureCode: null,
 			};
 			await this.store.save(cancelled);
 			this.capture = cancelled;
@@ -217,17 +246,6 @@ export class FiveMinuteAuditCaptureCoordinator {
 			};
 			await this.store.save(settling);
 			this.capture = settling;
-		}
-
-		if (settling.settleAttemptedAtMs !== null) {
-			const failed: PersistedAuditCaptureState = {
-				...settling,
-				state: "failed",
-				updatedAtMs: nowMs,
-			};
-			await this.store.save(failed);
-			this.capture = failed;
-			return;
 		}
 
 		if (nowMs < settling.settleNotBeforeMs) {
@@ -275,6 +293,7 @@ export class FiveMinuteAuditCaptureCoordinator {
 				...current,
 				state: "settling",
 				updatedAtMs: nowMs,
+				failureCode: null,
 			};
 			await this.store.save(settling);
 			this.capture = settling;
@@ -315,8 +334,7 @@ export class FiveMinuteAuditCaptureCoordinator {
 			if (
 				!current ||
 				current.captureId !== captureId ||
-				current.state !== "settling" ||
-				current.settleAttemptedAtMs !== null
+				current.state !== "settling"
 			) {
 				return null;
 			}
@@ -337,10 +355,9 @@ export class FiveMinuteAuditCaptureCoordinator {
 		});
 		if (range === null) return;
 
-		let succeeded = false;
+		let result: AuditCaptureSettlementResult = { state: "pending" };
 		try {
-			await this.settleRange(range.fromMs, range.toMs);
-			succeeded = true;
+			result = await this.settleRange(range.fromMs, range.toMs);
 		} catch (error) {
 			this.onError(error);
 		}
@@ -358,13 +375,52 @@ export class FiveMinuteAuditCaptureCoordinator {
 			) {
 				return;
 			}
-			const completed: PersistedAuditCaptureState = {
+			const nowMs = validNow(this.nowMs());
+			if (result.state === "ready") {
+				const completed: PersistedAuditCaptureState = {
+					...current,
+					state: "ready",
+					updatedAtMs: nowMs,
+					failureCode: null,
+				};
+				await this.store.save(completed);
+				this.capture = completed;
+				return;
+			}
+			if (result.state === "failed") {
+				const failed: PersistedAuditCaptureState = {
+					...current,
+					state: "failed",
+					updatedAtMs: nowMs,
+					failureCode: result.failureCode,
+				};
+				await this.store.save(failed);
+				this.capture = failed;
+				return;
+			}
+			if (nowMs >= settleDeadlineMs(current.toMs)) {
+				const timedOut: PersistedAuditCaptureState = {
+					...current,
+					state: "failed",
+					updatedAtMs: nowMs,
+					failureCode: "authoritative_coverage_timeout",
+				};
+				await this.store.save(timedOut);
+				this.capture = timedOut;
+				return;
+			}
+			const pending: PersistedAuditCaptureState = {
 				...current,
-				state: succeeded ? "ready" : "failed",
-				updatedAtMs: validNow(this.nowMs()),
+				updatedAtMs: nowMs,
+				settleNotBeforeMs: Math.min(
+					nowMs + AUDIT_CAPTURE_SETTLE_POLL_MS,
+					settleDeadlineMs(current.toMs),
+				),
+				failureCode: null,
 			};
-			await this.store.save(completed);
-			this.capture = completed;
+			await this.store.save(pending);
+			this.capture = pending;
+			this.scheduleSettlement(pending);
 		});
 	}
 
@@ -478,6 +534,91 @@ export function alignToCurrentOrNextBucket(nowMs: number): number {
 	return aligned;
 }
 
+export function lastEffectiveAuditCursor(
+	events: readonly Pick<
+		SemanticEventV2,
+		"countClass" | "cursor" | "occurredAtMs"
+	>[],
+	fromMs: number,
+	toMs: number,
+): string | null {
+	if (
+		!Number.isSafeInteger(fromMs) ||
+		!Number.isSafeInteger(toMs) ||
+		fromMs < 0 ||
+		toMs <= fromMs
+	) {
+		throw new Error("The audit authority range is invalid.");
+	}
+	let latest: string | null = null;
+	for (const event of events) {
+		if (
+			event.countClass !== "effective" ||
+			event.occurredAtMs < fromMs ||
+			event.occurredAtMs >= toMs
+		) {
+			continue;
+		}
+		if (
+			latest === null ||
+			compareSemanticCursors(event.cursor, latest) > 0
+		) {
+			latest = event.cursor;
+		}
+	}
+	return latest;
+}
+
+/**
+ * Proves authority for every effective semantic event in the exact audit
+ * range. A later COMMITTED window cannot hide an earlier pending, failed, or
+ * inconsistent window.
+ */
+export async function settleEffectiveAuditAuthorities(
+	events: readonly Pick<
+		SemanticEventV2,
+		"countClass" | "cursor" | "occurredAtMs"
+	>[],
+	fromMs: number,
+	toMs: number,
+	readAuthority: (cursor: string) => Promise<TimelineCursorAuthority>,
+): Promise<AuditCaptureSettlementResult> {
+	// Reuse the range validation and cursor parser before doing any repository
+	// work, including for an empty range.
+	lastEffectiveAuditCursor(events, fromMs, toMs);
+	const cursors = [
+		...new Set(
+			events
+				.filter(
+					(event) =>
+						event.countClass === "effective" &&
+						event.occurredAtMs >= fromMs &&
+						event.occurredAtMs < toMs,
+				)
+				.map((event) => event.cursor),
+		),
+	].sort(compareSemanticCursors);
+	if (cursors.length === 0) return { state: "ready" };
+
+	const authorities = await Promise.all(cursors.map(readAuthority));
+	if (authorities.some((authority) => authority.state === "inconsistent")) {
+		return {
+			state: "failed",
+			failureCode: "timeline_result_inconsistent",
+		};
+	}
+	if (authorities.some((authority) => authority.state === "terminal_failed")) {
+		return {
+			state: "failed",
+			failureCode: "timeline_job_terminal_failure",
+		};
+	}
+	if (authorities.some((authority) => authority.state === "pending")) {
+		return { state: "pending" };
+	}
+	return { state: "ready" };
+}
+
 function publicStatus(
 	capture: PersistedAuditCaptureState,
 ): FiveMinuteAuditCaptureStatus {
@@ -488,6 +629,13 @@ function publicStatus(
 		toMs: capture.toMs,
 		updatedAtMs: capture.updatedAtMs,
 		analysisCompleteness: "natural_windows_only",
+		authoritativeCoverage:
+			capture.state === "ready"
+				? "complete"
+				: capture.state === "failed"
+					? "unavailable"
+					: "pending",
+		failureCode: capture.failureCode,
 	};
 }
 
@@ -509,7 +657,11 @@ function parseDocument(text: string): PersistedCaptureDocument {
 	} catch {
 		throw new Error("Audit capture state is not valid JSON.");
 	}
-	if (!isRecord(parsed) || parsed.schemaVersion !== CAPTURE_SCHEMA_VERSION) {
+	if (
+		!isRecord(parsed) ||
+		(parsed.schemaVersion !== CAPTURE_SCHEMA_VERSION &&
+			parsed.schemaVersion !== LEGACY_CAPTURE_SCHEMA_VERSION)
+	) {
 		throw new Error("Audit capture state has an unsupported schema.");
 	}
 	if (
@@ -522,6 +674,21 @@ function parseDocument(text: string): PersistedCaptureDocument {
 		return {
 			schemaVersion: CAPTURE_SCHEMA_VERSION,
 			capture: null,
+		};
+	}
+	if (parsed.schemaVersion === LEGACY_CAPTURE_SCHEMA_VERSION) {
+		validateLegacyCapture(parsed.capture);
+		const legacy = parsed.capture;
+		return {
+			schemaVersion: CAPTURE_SCHEMA_VERSION,
+			capture: {
+				...legacy,
+				state:
+					legacy.state === "ready" || legacy.state === "failed"
+						? "settling"
+						: legacy.state,
+				failureCode: null,
+			},
 		};
 	}
 	validateCapture(parsed.capture);
@@ -538,6 +705,46 @@ function validateCapture(
 		!isRecord(value) ||
 		Object.keys(value).length !== CAPTURE_KEYS.length ||
 		CAPTURE_KEYS.some((key) => !(key in value)) ||
+		typeof value.captureId !== "string" ||
+		!CAPTURE_ID_PATTERN.test(value.captureId) ||
+		!isCaptureState(value.state) ||
+		!isSafeTime(value.fromMs) ||
+		value.fromMs % AUDIT_CAPTURE_BUCKET_MS !== 0 ||
+		!isSafeTime(value.toMs) ||
+		value.toMs - value.fromMs !== AUDIT_CAPTURE_DURATION_MS ||
+		!Number.isSafeInteger(settleDeadlineMs(value.toMs)) ||
+		!isSafeTime(value.createdAtMs) ||
+		!isSafeTime(value.updatedAtMs) ||
+		value.createdAtMs > value.fromMs ||
+		value.updatedAtMs < value.createdAtMs ||
+		!isSafeTime(value.settleNotBeforeMs) ||
+		value.settleNotBeforeMs < value.toMs ||
+		value.settleNotBeforeMs > settleDeadlineMs(value.toMs) ||
+		!(
+			value.settleAttemptedAtMs === null ||
+			isSafeTime(value.settleAttemptedAtMs)
+		) ||
+		(value.settleAttemptedAtMs !== null &&
+			value.settleAttemptedAtMs > value.updatedAtMs) ||
+		!isCaptureFailureCodeOrNull(value.failureCode) ||
+		(value.state === "collecting" &&
+			value.settleAttemptedAtMs !== null) ||
+		((value.state === "ready" || value.state === "failed") &&
+			value.settleAttemptedAtMs === null) ||
+		(value.state === "failed" && value.failureCode === null) ||
+		(value.state !== "failed" && value.failureCode !== null)
+	) {
+		throw new Error("Audit capture state is invalid.");
+	}
+}
+
+function validateLegacyCapture(
+	value: unknown,
+): asserts value is Omit<PersistedAuditCaptureState, "failureCode"> {
+	if (
+		!isRecord(value) ||
+		Object.keys(value).length !== LEGACY_CAPTURE_KEYS.length ||
+		LEGACY_CAPTURE_KEYS.some((key) => !(key in value)) ||
 		typeof value.captureId !== "string" ||
 		!CAPTURE_ID_PATTERN.test(value.captureId) ||
 		!isCaptureState(value.state) ||
@@ -576,6 +783,39 @@ function isCaptureState(value: unknown): value is FiveMinuteAuditCaptureState {
 		value === "failed" ||
 		value === "cancelled"
 	);
+}
+
+function isCaptureFailureCodeOrNull(
+	value: unknown,
+): value is FiveMinuteAuditCaptureFailureCode | null {
+	return (
+		value === null ||
+		value === "authoritative_coverage_timeout" ||
+		value === "timeline_job_terminal_failure" ||
+		value === "timeline_result_inconsistent"
+	);
+}
+
+function settleDeadlineMs(toMs: number): number {
+	return toMs + AUDIT_CAPTURE_DURATION_MS + AUDIT_CAPTURE_JOB_GRACE_MS;
+}
+
+function compareSemanticCursors(left: string, right: string): number {
+	const leftSequence = semanticCursorSequence(left);
+	const rightSequence = semanticCursorSequence(right);
+	if (leftSequence !== null && rightSequence !== null) {
+		return leftSequence === rightSequence
+			? 0
+			: leftSequence > rightSequence
+				? 1
+				: -1;
+	}
+	return left.localeCompare(right);
+}
+
+function semanticCursorSequence(value: string): bigint | null {
+	const match = /^sec2_[0-9a-f]{16}$/u.exec(value);
+	return match ? BigInt(`0x${value.slice(value.lastIndexOf("_") + 1)}`) : null;
 }
 
 function isSafeTime(value: unknown): value is number {

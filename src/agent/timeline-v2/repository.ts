@@ -50,6 +50,25 @@ export type TimelineAuditRangeResult = {
 	summaries: TimelineSummaryV2[];
 };
 
+export type TimelineCursorAuthority =
+	| {
+			state: "committed";
+			windowId: string;
+		}
+	| {
+			state: "pending";
+			windowId: string | null;
+		}
+	| {
+			state: "terminal_failed";
+			windowId: string;
+			failureCode: string | null;
+		}
+	| {
+			state: "inconsistent";
+			windowId: string;
+		};
+
 export interface TimelineV2Repository {
 	loadCollector(
 		collectorId: string,
@@ -103,6 +122,7 @@ export interface TimelineV2Repository {
 		leaseToken: string,
 		nowMs: number,
 	): Promise<AgentInputEnvelopeV1>;
+	readCursorAuthority(cursor: string): Promise<TimelineCursorAuthority>;
 	readAuditRange(fromMs: number, toMs: number): Promise<TimelineAuditRangeResult>;
 }
 
@@ -449,6 +469,31 @@ export class InMemoryTimelineV2Repository implements TimelineV2Repository {
 		this.outbox.set(agentInputId, acked);
 		this.ackedLeaseTokenHashes.set(agentInputId, leaseTokenHash);
 		return clone(acked);
+	}
+
+	async readCursorAuthority(cursor: string): Promise<TimelineCursorAuthority> {
+		const window = [...this.windows.values()].find((candidate) =>
+			candidate.events.some((event) => event.cursor === cursor),
+		);
+		if (!window) return { state: "pending", windowId: null };
+		const job = this.jobs.get(window.windowId);
+		if (!job) {
+			return { state: "inconsistent", windowId: window.windowId };
+		}
+		if (job.state === "TERMINAL_FAILED") {
+			return {
+				state: "terminal_failed",
+				windowId: window.windowId,
+				failureCode: job.failureCode,
+			};
+		}
+		if (job.state !== "COMMITTED") {
+			return { state: "pending", windowId: window.windowId };
+		}
+		if (!this.results.has(window.windowId)) {
+			return { state: "inconsistent", windowId: window.windowId };
+		}
+		return { state: "committed", windowId: window.windowId };
 	}
 
 	async readAuditRange(

@@ -9,10 +9,16 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	AUDIT_CAPTURE_DURATION_MS,
+	AUDIT_CAPTURE_JOB_GRACE_MS,
 	AUDIT_CAPTURE_SETTLE_DELAY_MS,
+	AUDIT_CAPTURE_SETTLE_POLL_MS,
 	FileAuditCaptureStore,
 	FiveMinuteAuditCaptureCoordinator,
 	alignToCurrentOrNextBucket,
+	lastEffectiveAuditCursor,
+	settleEffectiveAuditAuthorities,
+	type AuditCaptureSettlementResult,
 	type AuditCaptureScheduler,
 	type AuditCaptureStore,
 	type PersistedAuditCaptureState,
@@ -73,7 +79,10 @@ class FakeClock implements AuditCaptureScheduler {
 function createHarness(options: {
 	nowMs?: number;
 	store?: MemoryStore;
-	settleRange?: (fromMs: number, toMs: number) => Promise<void>;
+	settleRange?: (
+		fromMs: number,
+		toMs: number,
+	) => Promise<AuditCaptureSettlementResult>;
 }) {
 	const clock = new FakeClock();
 	clock.now = options.nowMs ?? 0;
@@ -88,6 +97,7 @@ function createHarness(options: {
 			options.settleRange ??
 			(async (fromMs, toMs) => {
 				settled.push({ fromMs, toMs });
+				return { state: "ready" };
 			}),
 	});
 	return { clock, store, settled, coordinator };
@@ -98,6 +108,117 @@ describe("five-minute audit capture coordinator", () => {
 		expect(alignToCurrentOrNextBucket(10_000)).toBe(10_000);
 		expect(alignToCurrentOrNextBucket(10_001)).toBe(15_000);
 		expect(() => alignToCurrentOrNextBucket(-1)).toThrow();
+	});
+
+	test("treats empty and boundary-only ranges as having no effective authority cursor", () => {
+		expect(lastEffectiveAuditCursor([], 5_000, 305_000)).toBeNull();
+		expect(
+			lastEffectiveAuditCursor(
+				[
+					{
+						cursor: "sec2_0000000000000002",
+						countClass: "boundary",
+						occurredAtMs: 10_000,
+					},
+					{
+						cursor: "sec2_0000000000000003",
+						countClass: "effective",
+						occurredAtMs: 305_000,
+					},
+				],
+				5_000,
+				305_000,
+			),
+		).toBeNull();
+	});
+
+	test("selects the highest in-range effective cursor regardless of input order", () => {
+		expect(
+			lastEffectiveAuditCursor(
+				[
+					{
+						cursor: "sec2_0000000000000009",
+						countClass: "effective",
+						occurredAtMs: 20_000,
+					},
+					{
+						cursor: "sec2_000000000000000a",
+						countClass: "effective",
+						occurredAtMs: 10_000,
+					},
+					{
+						cursor: "sec2_000000000000000b",
+						countClass: "ignored",
+						occurredAtMs: 30_000,
+					},
+				],
+				5_000,
+				305_000,
+			),
+		).toBe("sec2_000000000000000a");
+	});
+
+	test("does not let a later COMMITTED window hide an earlier failed window", async () => {
+		const events = [
+			{
+				cursor: "sec2_0000000000000001",
+				countClass: "effective" as const,
+				occurredAtMs: 10_000,
+			},
+			{
+				cursor: "sec2_0000000000000002",
+				countClass: "effective" as const,
+				occurredAtMs: 20_000,
+			},
+		];
+		const result = await settleEffectiveAuditAuthorities(
+			events,
+			5_000,
+			305_000,
+			async (cursor) =>
+				cursor.endsWith("1")
+					? {
+							state: "terminal_failed",
+							windowId: "window-earlier",
+							failureCode: "inference_failed",
+						}
+					: { state: "committed", windowId: "window-later" },
+		);
+		expect(result).toEqual({
+			state: "failed",
+			failureCode: "timeline_job_terminal_failure",
+		});
+	});
+
+	test("waits when any earlier window is pending even if the latest is COMMITTED", async () => {
+		const visited: string[] = [];
+		const result = await settleEffectiveAuditAuthorities(
+			[
+				{
+					cursor: "sec2_0000000000000001",
+					countClass: "effective",
+					occurredAtMs: 10_000,
+				},
+				{
+					cursor: "sec2_0000000000000002",
+					countClass: "effective",
+					occurredAtMs: 20_000,
+				},
+			],
+			5_000,
+			305_000,
+			async (cursor) => {
+				visited.push(cursor);
+				return cursor.endsWith("1")
+					? { state: "pending", windowId: "window-earlier" }
+					: { state: "committed", windowId: "window-later" };
+			},
+		);
+		expect(result).toEqual({ state: "pending" });
+		expect(visited).toEqual([
+			"sec2_0000000000000001",
+			"sec2_0000000000000002",
+		]);
 	});
 
 	test("start is bounded and idempotent while one capture is active", async () => {
@@ -112,9 +233,13 @@ describe("five-minute audit capture coordinator", () => {
 		expect(first.toMs).toBe(315_000);
 		expect(first.state).toBe("collecting");
 		expect(first.analysisCompleteness).toBe("natural_windows_only");
+		expect(first.authoritativeCoverage).toBe("pending");
+		expect(first.failureCode).toBeNull();
 		expect(Object.keys(first).sort()).toEqual([
 			"analysisCompleteness",
+			"authoritativeCoverage",
 			"captureId",
+			"failureCode",
 			"fromMs",
 			"state",
 			"toMs",
@@ -144,6 +269,9 @@ describe("five-minute audit capture coordinator", () => {
 			{ fromMs: capture.fromMs, toMs: capture.toMs },
 		]);
 		expect((await harness.coordinator.status())?.state).toBe("ready");
+		expect(
+			(await harness.coordinator.status())?.authoritativeCoverage,
+		).toBe("complete");
 
 		await harness.clock.advanceTo(capture.toMs + 60_000);
 		expect(harness.settled).toHaveLength(1);
@@ -176,6 +304,7 @@ describe("five-minute audit capture coordinator", () => {
 			updatedAtMs: 1,
 			settleNotBeforeMs: 317_000,
 			settleAttemptedAtMs: null,
+			failureCode: null,
 		};
 		const harness = createHarness({ nowMs: 400_000, store });
 
@@ -189,7 +318,7 @@ describe("five-minute audit capture coordinator", () => {
 		).toHaveLength(2);
 	});
 
-	test("does not replay an in-flight settlement after a restart", async () => {
+	test("replays an in-flight idempotent settlement after a restart", async () => {
 		const store = new MemoryStore();
 		store.value = {
 			captureId: "ac1_0123456789abcdef",
@@ -200,16 +329,18 @@ describe("five-minute audit capture coordinator", () => {
 			updatedAtMs: 317_000,
 			settleNotBeforeMs: 317_000,
 			settleAttemptedAtMs: 317_000,
+			failureCode: null,
 		};
 		const harness = createHarness({ nowMs: 400_000, store });
 
 		await harness.coordinator.initialize();
+		await drainMicrotasks();
 
-		expect(harness.settled).toHaveLength(0);
-		expect((await harness.coordinator.status())?.state).toBe("failed");
+		expect(harness.settled).toEqual([{ fromMs: 5_000, toMs: 305_000 }]);
+		expect((await harness.coordinator.status())?.state).toBe("ready");
 	});
 
-	test("marks the capture failed without leaking settlement errors", async () => {
+	test("persists an explicit authority failure code without leaking details", async () => {
 		const errors: unknown[] = [];
 		const clock = new FakeClock();
 		const coordinator = new FiveMinuteAuditCaptureCoordinator({
@@ -218,7 +349,10 @@ describe("five-minute audit capture coordinator", () => {
 			nowMs: () => clock.now,
 			createCaptureId: () => "ac1_0123456789abcdef",
 			async settleRange() {
-				throw new Error("sensitive internal failure");
+				return {
+					state: "failed",
+					failureCode: "timeline_job_terminal_failure",
+				};
 			},
 			onError: (error) => errors.push(error),
 		});
@@ -231,8 +365,67 @@ describe("five-minute audit capture coordinator", () => {
 
 		const status = await coordinator.status();
 		expect(status?.state).toBe("failed");
+		expect(status?.authoritativeCoverage).toBe("unavailable");
+		expect(status?.failureCode).toBe("timeline_job_terminal_failure");
 		expect(JSON.stringify(status)).not.toContain("sensitive");
-		expect(errors).toHaveLength(1);
+		expect(errors).toHaveLength(0);
+	});
+
+	test("polls until authoritative coverage is ready instead of treating the first projection as ready", async () => {
+		let attempts = 0;
+		const harness = createHarness({
+			async settleRange() {
+				attempts += 1;
+				return attempts < 3 ? { state: "pending" } : { state: "ready" };
+			},
+		});
+		await harness.coordinator.initialize();
+		const capture = await harness.coordinator.start();
+
+		await harness.clock.advanceTo(
+			capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS,
+		);
+		expect((await harness.coordinator.status())?.state).toBe("settling");
+		expect(attempts).toBe(1);
+
+		await harness.clock.advanceTo(
+			capture.toMs +
+				AUDIT_CAPTURE_SETTLE_DELAY_MS +
+				AUDIT_CAPTURE_SETTLE_POLL_MS,
+		);
+		expect((await harness.coordinator.status())?.state).toBe("settling");
+		expect(attempts).toBe(2);
+
+		await harness.clock.advanceTo(
+			capture.toMs +
+				AUDIT_CAPTURE_SETTLE_DELAY_MS +
+				2 * AUDIT_CAPTURE_SETTLE_POLL_MS,
+		);
+		expect((await harness.coordinator.status())?.state).toBe("ready");
+		expect(attempts).toBe(3);
+	});
+
+	test("fails with a bounded authority timeout after natural-window and job grace", async () => {
+		const harness = createHarness({
+			async settleRange() {
+				return { state: "pending" };
+			},
+		});
+		await harness.coordinator.initialize();
+		const capture = await harness.coordinator.start();
+		const deadline =
+			capture.toMs +
+			AUDIT_CAPTURE_DURATION_MS +
+			AUDIT_CAPTURE_JOB_GRACE_MS;
+
+		await harness.clock.advanceTo(deadline - 1);
+		expect((await harness.coordinator.status())?.state).toBe("settling");
+		await harness.clock.advanceTo(deadline);
+		expect(await harness.coordinator.status()).toMatchObject({
+			state: "failed",
+			authoritativeCoverage: "unavailable",
+			failureCode: "authoritative_coverage_timeout",
+		});
 	});
 
 	test("settlement runs outside bounded status and cancel operations", async () => {
@@ -243,6 +436,7 @@ describe("five-minute audit capture coordinator", () => {
 		const harness = createHarness({
 			async settleRange() {
 				await settlement;
+				return { state: "ready" };
 			},
 		});
 		await harness.coordinator.initialize();
@@ -277,6 +471,7 @@ describe("file audit capture store", () => {
 				updatedAtMs: 1,
 				settleNotBeforeMs: 317_000,
 				settleAttemptedAtMs: null,
+				failureCode: null,
 			};
 			await store.save(capture);
 
@@ -297,10 +492,10 @@ describe("file audit capture store", () => {
 		const path = join(directory, "audit-capture-session.v1.json");
 		try {
 			writeFileSync(path, '{"schemaVersion":"audit-capture-session.v1"}');
-			const coordinator = new FiveMinuteAuditCaptureCoordinator({
-				store: new FileAuditCaptureStore(path),
-				settleRange: async () => {},
-			});
+				const coordinator = new FiveMinuteAuditCaptureCoordinator({
+					store: new FileAuditCaptureStore(path),
+					settleRange: async () => ({ state: "ready" }),
+				});
 			await coordinator.initialize();
 			await expect(coordinator.start()).rejects.toThrow("unavailable");
 		} finally {
@@ -332,6 +527,35 @@ describe("file audit capture store", () => {
 			await expect(new FileAuditCaptureStore(path).load()).rejects.toThrow(
 				"invalid",
 			);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("migrates a legacy completed capture back through authoritative settlement", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "whalehall-audit-capture-"));
+		const path = join(directory, "audit-capture-session.v1.json");
+		try {
+			writeFileSync(
+				path,
+				JSON.stringify({
+					schemaVersion: "audit-capture-session.v1",
+					capture: {
+						captureId: "ac1_0123456789abcdef",
+						state: "ready",
+						fromMs: 5_000,
+						toMs: 305_000,
+						createdAtMs: 1,
+						updatedAtMs: 317_000,
+						settleNotBeforeMs: 317_000,
+						settleAttemptedAtMs: 317_000,
+					},
+				}),
+			);
+			expect(await new FileAuditCaptureStore(path).load()).toMatchObject({
+				state: "settling",
+				failureCode: null,
+			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}

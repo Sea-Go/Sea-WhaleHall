@@ -12,6 +12,8 @@ const capture: FiveMinuteAuditCaptureStatus = {
 	toMs: 305_000,
 	updatedAtMs: 1,
 	analysisCompleteness: "natural_windows_only",
+	authoritativeCoverage: "complete",
+	failureCode: null,
 };
 
 describe("Electrobun audit capture service", () => {

@@ -188,6 +188,12 @@ async function populate(
 	];
 	await collector.ingest(events[0]!);
 	const window = await collector.ingest(events[1]!);
+	expect(
+		await repository.readCursorAuthority(events[1]!.cursor),
+	).toMatchObject({
+		state: "pending",
+		windowId: window!.windowId,
+	});
 	const evidence = new DeterministicEvidenceRenderer(hasher);
 	const episodes = new DeterministicEpisodeAssembler({
 		hasher,
@@ -208,6 +214,12 @@ async function populate(
 		jitter: () => 0,
 	});
 	expect(await runner.runNext()).toBe("completed");
+	expect(
+		await repository.readCursorAuthority(events[1]!.cursor),
+	).toEqual({
+		state: "committed",
+		windowId: window!.windowId,
+	});
 	return { windowId: window!.windowId, events };
 }
 

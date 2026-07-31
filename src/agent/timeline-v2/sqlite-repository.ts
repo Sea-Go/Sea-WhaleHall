@@ -7,6 +7,7 @@ import {
 	type AgentInputQueryResult,
 	type PersistTimelineResult,
 	type TimelineAuditRangeResult,
+	type TimelineCursorAuthority,
 	type TimelineSealResult,
 	type TimelineV2Repository,
 } from "./repository";
@@ -56,6 +57,8 @@ type WindowRow = {
 	started_at_ms: number;
 	ended_at_ms: number;
 	event_count: number;
+	first_cursor: string;
+	last_cursor: string;
 	sealed_payload: string;
 };
 
@@ -879,6 +882,51 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 			};
 		});
 		return this.openOutboxEnvelope(transaction.immediate());
+	}
+
+	async readCursorAuthority(cursor: string): Promise<TimelineCursorAuthority> {
+		if (!/^sec2_[0-9a-f]{16}$/u.test(cursor)) {
+			throw new Error("Timeline cursor is invalid.");
+		}
+		const candidates = this.database
+			.query(
+				`SELECT * FROM timeline_windows
+				 WHERE first_cursor <= ? AND last_cursor >= ?
+				 ORDER BY started_at_ms, window_id`,
+			)
+			.all(cursor, cursor) as WindowRow[];
+		let matched: WindowRow | null = null;
+		for (const candidate of candidates) {
+			const window = await this.openWindowRow(candidate);
+			if (window.events.some((event) => event.cursor === cursor)) {
+				matched = candidate;
+				break;
+			}
+		}
+		if (!matched) return { state: "pending", windowId: null };
+		const job = this.jobRow(matched.window_id);
+		if (!job) {
+			return { state: "inconsistent", windowId: matched.window_id };
+		}
+		if (job.state === "TERMINAL_FAILED") {
+			return {
+				state: "terminal_failed",
+				windowId: matched.window_id,
+				failureCode: job.failure_code,
+			};
+		}
+		if (job.state !== "COMMITTED") {
+			return { state: "pending", windowId: matched.window_id };
+		}
+		const summaryRow = this.summaryRowByWindow(matched.window_id);
+		if (summaryRow === null) {
+			return { state: "inconsistent", windowId: matched.window_id };
+		}
+		const summary = await this.openSummaryRow(summaryRow);
+		if (summary.windowId !== matched.window_id) {
+			return { state: "inconsistent", windowId: matched.window_id };
+		}
+		return { state: "committed", windowId: matched.window_id };
 	}
 
 	async readAuditRange(

@@ -387,7 +387,17 @@ describe("TimelineV2Service", () => {
 			"sec2_0000000000000001",
 			"sec2_0000000000000002",
 		]);
+		expect(
+			await repository.readCursorAuthority(
+				"sec2_0000000000000002",
+			),
+		).toMatchObject({ state: "pending" });
 		expect(await service.runJobsNow()).toBe(1);
+		expect(
+			await repository.readCursorAuthority(
+				"sec2_0000000000000002",
+			),
+		).toMatchObject({ state: "committed" });
 
 		const held = await service.queryAgentInputs({
 			includeHeldLocal: true,
