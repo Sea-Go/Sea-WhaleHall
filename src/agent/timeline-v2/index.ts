@@ -13,5 +13,6 @@ export * from "./runtime-vault";
 export * from "./service";
 export * from "./sqlite-repository";
 export * from "./training-sink";
+export * from "./training-window-export";
 export * from "./types";
 export * from "./vault";

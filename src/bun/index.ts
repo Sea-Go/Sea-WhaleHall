@@ -37,9 +37,11 @@ import { BackgroundAppLifecycle } from "./app-lifecycle";
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
+import { exportPrivateTrainingWindowsLocally } from "./private-training-window-export";
 import {
 	FileAuditCaptureStore,
 	FiveMinuteAuditCaptureCoordinator,
+	settleEffectiveAuditAuthorities,
 } from "./five-minute-audit-capture";
 import { monitoringPermissionSettingsUrl } from "./monitoring-permission-settings";
 import type {
@@ -106,29 +108,31 @@ const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
 			throw new Error("The audit capture range is invalid.");
 		}
 		const runtime = timelineRuntime;
+		const raw = await rawAuditSource.queryAuditRange({
+			fromMs,
+			toMs,
+			includeDecryptedContent: false,
+		});
+		const hasEffectiveEvents = raw.semanticEvents.some(
+			(event) =>
+				event.countClass === "effective" &&
+				event.occurredAtMs >= fromMs &&
+				event.occurredAtMs < toMs,
+		);
+		if (!hasEffectiveEvents) return { state: "ready" };
+		if (runtime === null) {
+			return { state: "pending" };
+		}
 		// Pull and process only naturally sealed production windows. An audit
 		// capture must never force-seal or otherwise perturb collector state.
-		if (runtime !== null) {
-			try {
-				await runtime.service.pullNow();
-				await runtime.service.runJobsNow();
-			} catch (error) {
-				// A redacted audit can still be complete at the raw/semantic
-				// boundary when the production-derived vault is temporarily
-				// unavailable (for example after an ad-hoc development re-sign).
-				// The exporter records that gap and creates audit-only projections.
-				console.warn(
-					"[audit-capture] production timeline settle deferred:",
-					error instanceof Error ? error.name : "UNKNOWN",
-				);
-			}
-		}
-		// Build once without decrypted content before declaring READY. This
-		// verifies that the exact raw range is queryable while keeping text
-		// behind the later explicit export confirmation.
-		await (
-			runtime?.audit ?? rawOnlyAuditExporter
-		).exportFiveMinutes(fromMs);
+		await runtime.service.pullNow();
+		await runtime.service.runJobsNow();
+		return settleEffectiveAuditAuthorities(
+			raw.semanticEvents,
+			fromMs,
+			toMs,
+			(cursor) => runtime.repository.readCursorAuthority(cursor),
+		);
 	},
 	onError(error) {
 		console.error(
@@ -155,7 +159,10 @@ function sendToolEvent(event: LocalToolEvent): void {
 }
 
 const clientRPC = BrowserView.defineRPC<ClientRPC>({
-	maxRequestTime: 35_000,
+	// A user-initiated legacy Keychain migration may wait on one native
+	// authorization sheet. Normal monitoring/status requests keep their much
+	// shorter LocalToolClient deadlines.
+	maxRequestTime: 130_000,
 	handlers: {
 		requests: {
 			getLocalStatus: () => agent.getLocalStatus(),
@@ -174,8 +181,10 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 				agent.configureMonitoring(configuration),
 			pauseMonitoring: () => agent.pauseMonitoring(),
 			resumeMonitoring: () => agent.resumeMonitoring(),
-			refreshMonitoringPermissions: (options) =>
-				agent.refreshMonitoringPermissions(options),
+			refreshMonitoringPermissions: () =>
+				agent.refreshMonitoringPermissions(),
+			setupMonitoringPermissions: () =>
+				agent.setupMonitoringPermissions(),
 			openMonitoringPermissionSettings: ({ permission }) => {
 				const url = monitoringPermissionSettingsUrl(permission);
 				return {
@@ -185,7 +194,35 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						Utils.openExternal(url),
 				};
 			},
-				exportFiveMinuteAuditToFile: (request) =>
+			getContentVaultStatus: () => agent.getVaultKeyStatus(),
+			migrateLegacyContentVault: async () => {
+				const vault = await agent.getVaultKeyStatus();
+				if (
+					vault.availability !== "migration_required" ||
+					!vault.interactiveMigrationAvailable
+				) {
+					return { status: "cancelled", vault };
+				}
+				const { response } = await Utils.showMessageBox({
+					type: "warning",
+					title: "迁移本地加密密钥？",
+					message:
+						"WhaleHall 将请求一次访问旧的本地密钥，并将同一密钥迁移到稳定签名的安全存储。",
+					detail:
+						"只有这次明确操作可能出现 macOS 密钥链确认。不会读取或展示密钥，也不会删除旧密钥；普通启动和后台观察不会弹出此提示。",
+					buttons: ["继续一次性迁移", "取消"],
+					defaultId: 1,
+					cancelId: 1,
+				});
+				if (response !== 0) {
+					return { status: "cancelled", vault };
+				}
+				return {
+					status: "completed",
+					result: await agent.migrateLegacyVaultKey(),
+				};
+			},
+			exportFiveMinuteAuditToFile: (request) =>
 				exportFiveMinuteAuditToFile(request, {
 					getExporter: () =>
 						timelineRuntime?.audit ?? rawOnlyAuditExporter,
@@ -197,6 +234,37 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 								message: "此文件会包含最近五分钟内可解密的可见文本和网址。",
 								detail:
 									"文件只会写入你下一步选择的本机文件夹，权限为仅当前用户可读写。请仅在可信位置保存。",
+								buttons: ["继续选择文件夹", "取消"],
+								defaultId: 1,
+								cancelId: 1,
+							});
+							return response === 0;
+						},
+						async chooseDirectory() {
+							const selected = await Utils.openFileDialog({
+								startingFolder: Utils.paths.downloads,
+								allowedFileTypes: "*",
+								canChooseFiles: false,
+								canChooseDirectory: true,
+								allowsMultipleSelection: false,
+							});
+							const directory = selected[0]?.trim();
+							return directory ? directory : null;
+						},
+					},
+				}),
+			exportPrivateTrainingWindows: (request) =>
+				exportPrivateTrainingWindowsLocally(request, {
+					getExporter: () =>
+						timelineRuntime?.privateTrainingExport ?? null,
+					dialogs: {
+						async confirmDecryptedTrainingExport(windowCount) {
+							const { response } = await Utils.showMessageBox({
+								type: "warning",
+								title: "导出本地训练数据？",
+								message: `将导出 ${windowCount} 个已完成分析窗口，其中包含可解密的可见文本和网址。`,
+								detail:
+									"导出只写入你下一步选择的本机文件夹，不会上传。生成目录和文件仅当前用户可访问。",
 								buttons: ["继续选择文件夹", "取消"],
 								defaultId: 1,
 								cancelId: 1,

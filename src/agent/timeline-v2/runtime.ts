@@ -36,6 +36,7 @@ import {
 import { RuntimeTimelineVault } from "./runtime-vault";
 import { TimelineV2Service } from "./service";
 import { SqliteTimelineV2Repository } from "./sqlite-repository";
+import { PrivateTrainingWindowExporter } from "./training-window-export";
 import type {
 	EpisodeClassificationV2,
 	EvidenceFactV2,
@@ -68,6 +69,11 @@ export type TimelineV2Runtime = {
 	service: TimelineV2Service;
 	repository: SqliteTimelineV2Repository;
 	audit: TimelineFiveMinuteAuditExporter | null;
+	/**
+	 * Explicit local-only full-window export boundary. It never runs
+	 * automatically and accepts only persisted COMMITTED window identifiers.
+	 */
+	privateTrainingExport: PrivateTrainingWindowExporter | null;
 	/** Local-only durable outbox boundary; no renderer or network transport. */
 	agentInput: TimelineAgentInputAdapterV1;
 	episodeClassifier: TimelineEpisodeClassifierRuntimeStatus;
@@ -348,11 +354,18 @@ export async function createTimelineV2Runtime(
 					repository,
 				)
 			: null;
+		const privateTrainingExport = options.rawAuditSource
+			? new PrivateTrainingWindowExporter(
+					options.rawAuditSource,
+					repository,
+				)
+			: null;
 		const agentInput = new TimelineAgentInputAdapterV1(service);
 		return {
 			service,
 			repository,
 			audit,
+			privateTrainingExport,
 			agentInput,
 			get episodeClassifier() {
 				return structuredClone(episodeClassifier);

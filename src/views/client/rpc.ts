@@ -6,6 +6,7 @@ import type {
 	LocalRuntimeStatus,
 	MonitoringPermissionSettingsTarget,
 	PetPresentationEvent,
+	PrivateTrainingWindowExportRequest,
 } from "../../shared/contracts";
 
 type StatusListener = (status: LocalRuntimeStatus) => void;
@@ -38,15 +39,22 @@ export const clientApi = {
 		rpc.request.configureMonitoring(configuration),
 	pauseMonitoring: () => rpc.request.pauseMonitoring({}),
 	resumeMonitoring: () => rpc.request.resumeMonitoring({}),
-	refreshMonitoringPermissions: (prompt = false) =>
-		rpc.request.refreshMonitoringPermissions({ prompt }),
+	refreshMonitoringPermissions: () =>
+		rpc.request.refreshMonitoringPermissions({}),
+	setupMonitoringPermissions: () =>
+		rpc.request.setupMonitoringPermissions({}),
 	openMonitoringPermissionSettings: (
 		permission: MonitoringPermissionSettingsTarget,
 	) => rpc.request.openMonitoringPermissionSettings({ permission }),
+	getContentVaultStatus: () => rpc.request.getContentVaultStatus({}),
+	migrateLegacyContentVault: () => rpc.request.migrateLegacyContentVault({}),
 	exportFiveMinuteAuditToFile: (options: {
 		fromMs: number;
 		includeDecryptedContent: boolean;
 	}) => rpc.request.exportFiveMinuteAuditToFile(options),
+	exportPrivateTrainingWindows: (
+		request: PrivateTrainingWindowExportRequest,
+	) => rpc.request.exportPrivateTrainingWindows(request),
 	startFiveMinuteAuditCapture: () =>
 		rpc.request.startFiveMinuteAuditCapture({}),
 	getFiveMinuteAuditCaptureStatus: () =>
