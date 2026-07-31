@@ -34,6 +34,35 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		mkdirSync(executableDirectory, { recursive: true });
 		copyFileSync("/usr/bin/true", join(executableDirectory, "launcher"));
 		chmodSync(join(executableDirectory, "launcher"), 0o755);
+		const nativeDirectory = join(contents, "Resources", "app", "native");
+		mkdirSync(nativeDirectory, { recursive: true });
+		const localServerPath = join(nativeDirectory, "whalehall-local");
+		copyFileSync("/usr/bin/true", localServerPath);
+		chmodSync(localServerPath, 0o755);
+		signAdHoc(localServerPath, "com.seago.whalehall.local");
+
+		const observerPath = join(nativeDirectory, "WhaleHall Observer.app");
+		const observerContents = join(observerPath, "Contents");
+		const observerExecutableDirectory = join(observerContents, "MacOS");
+		mkdirSync(observerExecutableDirectory, { recursive: true });
+		copyFileSync(
+			"/usr/bin/true",
+			join(observerExecutableDirectory, "whalehall-observer"),
+		);
+		chmodSync(
+			join(observerExecutableDirectory, "whalehall-observer"),
+			0o755,
+		);
+		writeFileSync(
+			join(observerContents, "Info.plist"),
+			`<?xml version="1.0" encoding="UTF-8"?>\n`
+				+ `<plist version="1.0"><dict>\n`
+				+ `<key>CFBundleExecutable</key><string>whalehall-observer</string>\n`
+				+ `<key>CFBundleIdentifier</key><string>com.seago.whalehall.observer</string>\n`
+				+ `<key>CFBundlePackageType</key><string>APPL</string>\n`
+				+ `</dict></plist>\n`,
+		);
+		signAdHoc(observerPath, "com.seago.whalehall.observer");
 		writeFileSync(
 			join(contents, "Info.plist"),
 			`<?xml version="1.0" encoding="UTF-8"?>\n`
@@ -80,3 +109,22 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		).toThrow("inside its build directory");
 	});
 });
+
+function signAdHoc(path: string, identifier: string): void {
+	const result = Bun.spawnSync(
+		[
+			"/usr/bin/codesign",
+			"--force",
+			"--sign",
+			"-",
+			"--identifier",
+			identifier,
+			"--timestamp=none",
+			path,
+		],
+		{ stdout: "pipe", stderr: "pipe" },
+	);
+	if (result.exitCode !== 0) {
+		throw new Error(result.stderr.toString());
+	}
+}

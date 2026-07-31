@@ -1,10 +1,14 @@
 import {
 	existsSync,
+	mkdtempSync,
 	mkdirSync,
+	readdirSync,
 	realpathSync,
+	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 export const MACOS_OUTER_ENTITLEMENTS = {
 	"com.apple.security.cs.allow-jit": true,
@@ -23,6 +27,9 @@ export const MACOS_USAGE_DESCRIPTIONS = {
 	NSScreenCaptureUsageDescription:
 		"WhaleHall 仅在内存中识别当前前台窗口的可见文本，识别完成后立即销毁截图。",
 } as const;
+
+const MACOS_LOCAL_SERVER_IDENTIFIER = "com.seago.whalehall.local";
+const MACOS_OBSERVER_IDENTIFIER = "com.seago.whalehall.observer";
 
 interface PrepareMacWrapperOptions {
 	bundlePath: string;
@@ -134,6 +141,8 @@ export function verifyMacWrapper({
 	) {
 		throw new Error("Signed release wrapper is missing a valid TeamIdentifier.");
 	}
+	const outerTeamIdentifier =
+		details.match(/TeamIdentifier=([A-Z0-9]{10})(?:\n|$)/)?.[1] ?? null;
 	for (const [key, expected] of Object.entries(MACOS_USAGE_DESCRIPTIONS)) {
 		if (readPlistString(infoPlist, key) !== expected) {
 			throw new Error(`Signed wrapper is missing ${key}.`);
@@ -156,6 +165,49 @@ export function verifyMacWrapper({
 			"Signed wrapper is missing the Apple Events automation entitlement.",
 		);
 	}
+
+	withPackagedNativeDirectory(
+		bundlePath,
+		requireTeamIdentifier,
+		(nativeDirectory) => {
+		const localServerPath = join(nativeDirectory, "whalehall-local");
+		const observerPath = join(nativeDirectory, "WhaleHall Observer.app");
+		if (!existsSync(localServerPath) || !existsSync(observerPath)) {
+			throw new Error(
+				"Signed wrapper is missing a native monitoring component.",
+			);
+		}
+		verifySignedComponent(
+			localServerPath,
+			MACOS_LOCAL_SERVER_IDENTIFIER,
+			outerTeamIdentifier,
+		);
+		if (requireTeamIdentifier && outerTeamIdentifier !== null) {
+			const localEntitlements = capture([
+				"/usr/bin/codesign",
+				"--display",
+				"--entitlements",
+				":-",
+				localServerPath,
+			]);
+			for (const requiredValue of [
+				`${outerTeamIdentifier}.${MACOS_LOCAL_SERVER_IDENTIFIER}`,
+				"keychain-access-groups",
+			]) {
+				if (!localEntitlements.includes(requiredValue)) {
+					throw new Error(
+						`Signed local server is missing ${requiredValue}.`,
+					);
+				}
+			}
+		}
+		verifySignedComponent(
+			observerPath,
+			MACOS_OBSERVER_IDENTIFIER,
+			outerTeamIdentifier,
+		);
+		},
+	);
 }
 
 export function prepareMacWrapperFromEnvironment(
@@ -236,6 +288,88 @@ function writeOuterEntitlements(buildDirectory: string): string {
 		{ mode: 0o600 },
 	);
 	return path;
+}
+
+function verifySignedComponent(
+	path: string,
+	expectedIdentifier: string,
+	expectedTeamIdentifier: string | null,
+): string {
+	run(["/usr/bin/codesign", "--verify", "--strict", path]);
+	const details = capture([
+		"/usr/bin/codesign",
+		"--display",
+		"--verbose=4",
+		path,
+	]);
+	if (!details.includes(`Identifier=${expectedIdentifier}`)) {
+		throw new Error(
+			`Signed component does not use the canonical identifier ${expectedIdentifier}.`,
+		);
+	}
+	if (
+		expectedTeamIdentifier !== null &&
+		!details.includes(`TeamIdentifier=${expectedTeamIdentifier}`)
+	) {
+		throw new Error(
+			`Signed component ${expectedIdentifier} does not share the wrapper TeamIdentifier.`,
+		);
+	}
+	return details;
+}
+
+function withPackagedNativeDirectory(
+	bundlePath: string,
+	required: boolean,
+	verify: (nativeDirectory: string) => void,
+): void {
+	const resourcesDirectory = join(bundlePath, "Contents", "Resources");
+	const expandedDirectory = join(resourcesDirectory, "app", "native");
+	if (existsSync(expandedDirectory)) {
+		verify(expandedDirectory);
+		return;
+	}
+
+	if (!existsSync(resourcesDirectory)) {
+		if (required) {
+			throw new Error("Signed release wrapper is missing application resources.");
+		}
+		return;
+	}
+	const archives = readdirSync(resourcesDirectory)
+		.filter((name) => name.endsWith(".tar.zst"))
+		.map((name) => join(resourcesDirectory, name));
+	if (archives.length === 0 && !required) return;
+	if (archives.length !== 1) {
+		throw new Error(
+			"Signed wrapper must contain exactly one Electrobun application archive.",
+		);
+	}
+	const extractionDirectory = mkdtempSync(
+		join(tmpdir(), "whalehall-native-verify-"),
+	);
+	try {
+		run([
+			"/usr/bin/tar",
+			"--use-compress-program=unzstd",
+			"-xf",
+			archives[0],
+			"-C",
+			extractionDirectory,
+		]);
+		verify(
+			join(
+				extractionDirectory,
+				basename(bundlePath),
+				"Contents",
+				"Resources",
+				"app",
+				"native",
+			),
+		);
+	} finally {
+		rmSync(extractionDirectory, { force: true, recursive: true });
+	}
 }
 
 function assertSafeBundlePath(

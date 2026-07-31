@@ -17,6 +17,8 @@ const manifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
 const observerRoot = resolve(projectRoot, "native/observer");
 const observerBundleName = "WhaleHall Observer.app";
 const observerExecutableName = "whalehall-observer";
+const observerIdentifier = "com.seago.whalehall.observer";
+const localServerIdentifier = "com.seago.whalehall.local";
 
 function localSigningIdentity(): string | undefined {
 	return process.env.WHALEHALL_LOCAL_SIGNING_IDENTITY?.trim() || undefined;
@@ -128,6 +130,8 @@ export function buildObserverApp(arch: TargetArch): string {
 		"--force",
 		"--sign",
 		identity || "-",
+		"--identifier",
+		observerIdentifier,
 		"--entitlements",
 		resolve(observerRoot, "Resources/WhaleHallObserver.entitlements"),
 	];
@@ -153,7 +157,14 @@ function signNativeChild(executable: string, arch: TargetArch): void {
 			"ELECTROBUN_DEVELOPER_ID is required to sign whalehall-local.",
 		);
 	}
-	const command = ["codesign", "--force", "--sign", identity || "-"];
+	const command = [
+		"codesign",
+		"--force",
+		"--sign",
+		identity || "-",
+		"--identifier",
+		localServerIdentifier,
+	];
 	if (identity && !isLocalSigningIdentity(identity)) {
 		const teamIdentifier = process.env.WHALEHALL_APPLE_TEAM_ID?.trim();
 		if (!teamIdentifier || !/^[A-Z0-9]{10}$/.test(teamIdentifier)) {
