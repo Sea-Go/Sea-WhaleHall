@@ -25,6 +25,7 @@ import {
 	resolveMacSigningPlan,
 	selectUniqueLocalSigningIdentity,
 } from "../scripts/macos-signing-identity";
+import { localSigningAccessVerificationTargets } from "../scripts/setup-macos-signing";
 
 const temporaryDirectories: string[] = [];
 
@@ -41,8 +42,28 @@ describe("macOS signing identity selection", () => {
 		`  1) ${localFingerprint} "${MACOS_LOCAL_SIGNING_COMMON_NAME}"\n`
 			+ `  2) ${developerFingerprint} `
 			+ '"Developer ID Application: WhaleHall (ABCDE12345)"\n'
-			+ "     2 valid identities found\n",
+		+ "     2 valid identities found\n",
 	);
+
+	test("requires two independent signatures to prove persistent Keychain access", () => {
+		expect(
+			localSigningAccessVerificationTargets(localFingerprint),
+		).toEqual([
+			{
+				identifier:
+					"com.seago.whalehall.local-signing-check.primary",
+				fileName: "signing-check-primary",
+			},
+			{
+				identifier:
+					"com.seago.whalehall.local-signing-check.persistence",
+				fileName: "signing-check-persistence",
+			},
+		]);
+		expect(() =>
+			localSigningAccessVerificationTargets("not-a-fingerprint"),
+		).toThrow("requires a SHA-1 fingerprint");
+	});
 
 	test("selects the one exact fixed local identity for a development build", () => {
 		expect(selectUniqueLocalSigningIdentity(identities)).toEqual({

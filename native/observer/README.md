@@ -81,7 +81,8 @@ explicit setup command:
 # Read-only report.
 bun run setup:macos-signing
 
-# The only command allowed to create the current-user identity.
+# The only command allowed to create or explicitly verify the current-user
+# identity. Choose "Always Allow" if macOS asks about private-key access.
 bun run setup:macos-signing -- --create
 ```
 
@@ -94,6 +95,11 @@ app to:
 ```text
 Resources/app/native/WhaleHall Observer.app
 ```
+
+For an already valid identity, the mutating setup command performs two
+temporary signatures without replacing the certificate. This proves that the
+first Keychain choice was persistent; choosing only "Allow" instead of "Always
+Allow" would otherwise make later builds prompt again.
 
 Release builds must set `ELECTROBUN_DEVELOPER_ID` to a valid Developer ID
 Application identity and `WHALEHALL_APPLE_TEAM_ID` to its exact 10-character

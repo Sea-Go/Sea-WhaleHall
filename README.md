@@ -123,7 +123,8 @@ granting monitoring permissions to a local build:
 # Read-only status; never opens or changes Keychain.
 bun run setup:macos-signing
 
-# Explicit one-time setup. macOS may ask for one certificate-trust approval.
+# Explicit one-time setup. If macOS asks about private-key access, choose
+# "Always Allow"; the command verifies the choice with a second signature.
 bun run setup:macos-signing -- --create
 ```
 
@@ -135,6 +136,11 @@ stable designated requirement, so one macOS monitoring authorization can be
 reused across rebuilds. If the identity is absent, development builds remain
 available but are explicitly metadata-only; sensitive observation content and
 the content vault stay unavailable.
+
+Running the mutating setup command again for an existing valid identity does not
+replace it. It only performs two temporary signatures to verify that
+`/usr/bin/codesign` has persistent access; normal builds never modify Keychain
+ACLs or display this setup prompt.
 
 The local identity is never accepted for a stable or explicitly signed release.
 Those builds require a valid `Developer ID Application` identity, a matching

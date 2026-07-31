@@ -103,7 +103,6 @@ function createLocalSigningIdentity(keychain: string): void {
 	const privateKeyPath = join(temporaryDirectory, "identity.key");
 	const certificatePath = join(temporaryDirectory, "identity.pem");
 	const archivePath = join(temporaryDirectory, "identity.p12");
-	const verificationExecutable = join(temporaryDirectory, "signing-check");
 	const passphrase = randomBytes(32).toString("base64url");
 	let generatedFingerprint: string | undefined;
 	let importAttempted = false;
@@ -196,56 +195,13 @@ function createLocalSigningIdentity(keychain: string): void {
 		]);
 
 		const inspection = inspectLocalSigningIdentity();
-		if (inspection.state !== "ready" || !inspection.validFingerprint) {
-			throw new Error(
-				"The imported certificate was not exposed as one unique valid "
-					+ "code-signing identity. Existing Keychain items were retained.",
-			);
-		}
-		copyFileSync("/usr/bin/true", verificationExecutable);
-		chmodSync(verificationExecutable, 0o700);
-		run([
-			"/usr/bin/codesign",
-			"--force",
-			"--sign",
-			inspection.validFingerprint,
-			"--identifier",
-			"com.seago.whalehall.local-signing-check",
-			"--requirements",
-			`=designated => identifier "com.seago.whalehall.local-signing-check" `
-				+ `and certificate leaf = H"${inspection.validFingerprint}"`,
-			"--options",
-			"runtime",
-			"--timestamp=none",
-			verificationExecutable,
-		]);
-		run([
-			"/usr/bin/codesign",
-			"--verify",
-			"--strict",
-			verificationExecutable,
-		]);
-		const requirement = capture([
-			"/usr/bin/codesign",
-			"--display",
-			"--requirements",
-			"-",
-			verificationExecutable,
-		]);
-		if (
-			requirement.includes("cdhash") ||
-			!requirement.includes(
-				'identifier "com.seago.whalehall.local-signing-check"',
-			) ||
-			!new RegExp(
-				`certificate\\s+leaf\\s*=\\s*H"${inspection.validFingerprint}"`,
-				"iu",
-			).test(requirement)
-		) {
-			throw new Error(
-				"The local identity produced an unstable designated requirement.",
-			);
-		}
+			if (inspection.state !== "ready" || !inspection.validFingerprint) {
+				throw new Error(
+					"The imported certificate was not exposed as one unique valid "
+						+ "code-signing identity. Existing Keychain items were retained.",
+				);
+			}
+			verifyPersistentSigningAccess(inspection.validFingerprint);
 	} catch (error) {
 		if (importAttempted && generatedFingerprint) {
 			const rollbackError = rollbackCreatedIdentity(
@@ -266,6 +222,77 @@ function createLocalSigningIdentity(keychain: string): void {
 		process.umask(previousUmask);
 		rmSync(temporaryDirectory, { force: true, recursive: true });
 	}
+}
+
+/**
+ * Runs two independent real codesign operations. The first use may make macOS
+ * offer "Always Allow" for the `apple:` Keychain partition; the second proves
+ * that the choice persisted instead of granting only one transient signature.
+ * This is called only from the explicit mutating setup command.
+ */
+function verifyPersistentSigningAccess(fingerprint: string): void {
+	const temporaryDirectory = mkdtempSync(
+		join(tmpdir(), "whalehall-local-signing-check-"),
+	);
+	chmodSync(temporaryDirectory, 0o700);
+	const previousUmask = process.umask(0o077);
+	try {
+		for (const target of localSigningAccessVerificationTargets(fingerprint)) {
+			const executable = join(temporaryDirectory, target.fileName);
+			copyFileSync("/usr/bin/true", executable);
+			chmodSync(executable, 0o700);
+			run([
+				"/usr/bin/codesign",
+				"--force",
+				"--sign",
+				fingerprint,
+				"--identifier",
+				target.identifier,
+				"--requirements",
+				`=designated => identifier "${target.identifier}" `
+					+ `and certificate leaf = H"${fingerprint}"`,
+				"--options",
+				"runtime",
+				"--timestamp=none",
+				executable,
+			]);
+			run(["/usr/bin/codesign", "--verify", "--strict", executable]);
+			const requirement = capture([
+				"/usr/bin/codesign",
+				"--display",
+				"--requirements",
+				"-",
+				executable,
+			]);
+			if (
+				requirement.includes("cdhash") ||
+				!requirement.includes(`identifier "${target.identifier}"`) ||
+				!new RegExp(
+					`certificate\\s+leaf\\s*=\\s*H"${fingerprint}"`,
+					"iu",
+				).test(requirement)
+			) {
+				throw new Error(
+					"The local identity produced an unstable designated requirement.",
+				);
+			}
+		}
+	} finally {
+		process.umask(previousUmask);
+		rmSync(temporaryDirectory, { force: true, recursive: true });
+	}
+}
+
+export function localSigningAccessVerificationTargets(
+	fingerprint: string,
+): ReadonlyArray<{ identifier: string; fileName: string }> {
+	if (!/^[A-F0-9]{40}$/u.test(fingerprint)) {
+		throw new Error("Local signing verification requires a SHA-1 fingerprint.");
+	}
+	return ["primary", "persistence"].map((suffix) => ({
+		identifier: `com.seago.whalehall.local-signing-check.${suffix}`,
+		fileName: `signing-check-${suffix}`,
+	}));
 }
 
 function verifyGeneratedCertificate(path: string): string {
@@ -425,7 +452,19 @@ function main(): void {
 	const create = arguments_.includes("--create");
 	const before = inspectLocalSigningIdentity();
 	report(before);
-	if (!create || before.state === "ready") return;
+	if (!create) return;
+	if (before.state === "ready") {
+		if (!before.validFingerprint) {
+			throw new Error("The ready local identity has no fingerprint.");
+		}
+		console.log(
+			"[macos-signing] Verifying persistent private-key access. If macOS "
+				+ 'asks, choose "Always Allow"; choosing only "Allow" is transient.',
+		);
+		verifyPersistentSigningAccess(before.validFingerprint);
+		console.log("[macos-signing] Persistent codesign access verified.");
+		return;
+	}
 	if (before.state === "conflict") {
 		throw new Error(
 			"Resolve the conflicting Keychain items manually before creating "
@@ -434,7 +473,8 @@ function main(): void {
 	}
 	console.log(
 		"[macos-signing] Creating one current-user identity. macOS may request "
-			+ "one trust confirmation; no existing item will be replaced or deleted.",
+			+ 'private-key access; choose "Always Allow" so later builds stay silent. '
+			+ "No existing item will be replaced or deleted.",
 	);
 	createLocalSigningIdentity(before.keychain);
 	const after = inspectLocalSigningIdentity();
