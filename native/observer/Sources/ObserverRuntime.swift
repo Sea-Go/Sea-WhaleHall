@@ -174,7 +174,7 @@ final class ObserverRuntime: @unchecked Sendable {
         case "refreshPermissions":
             let prompt = dictionary["prompt"] as? Bool ?? false
             if prompt {
-                requestPermissions(id: id)
+                requestRequiredPermissions(id: id)
                 return
             }
             let permissions = permissionSnapshot(prompt: prompt)
@@ -252,33 +252,17 @@ final class ObserverRuntime: @unchecked Sendable {
         emitter.emitHeartbeat(state: state, permissionSnapshot: permissions)
     }
 
-    private func requestPermissions(id: String) {
+    private func requestRequiredPermissions(id: String) {
         _ = permissionSnapshot(prompt: true)
-        let browserBundleIdentifiers = NSWorkspace.shared.runningApplications
-            .compactMap(\.bundleIdentifier)
-            .filter { browserMetadataReader.supports(bundleIdentifier: $0) }
-        Task.detached {
-            for bundleIdentifier in browserBundleIdentifiers {
-                _ = BrowserMetadataReader.automationAuthorization(
-                    bundleIdentifier: bundleIdentifier,
-                    prompt: true
-                )
-            }
-            await MainActor.run { [weak self] in
-                guard let self else {
-                    return
-                }
-                let permissions = self.permissionSnapshot(prompt: false)
-                let changed = permissions != self.lastPermissionSnapshot
-                self.lastPermissionSnapshot = permissions
-                self.emitter.emitPermissionStatus(permissions, reason: "manual_refresh")
-                if changed, self.state == "running" {
-                    self.stopMonitoring(nextState: "idle")
-                    self.startMonitoring()
-                }
-                self.emitter.emitCommandResult(id: id, ok: true, state: self.state)
-            }
+        let permissions = permissionSnapshot(prompt: false)
+        let changed = permissions != lastPermissionSnapshot
+        lastPermissionSnapshot = permissions
+        emitter.emitPermissionStatus(permissions, reason: "manual_refresh")
+        if changed, state == "running" {
+            stopMonitoring(nextState: "idle")
+            startMonitoring()
         }
+        emitter.emitCommandResult(id: id, ok: true, state: state)
     }
 
     private func handleForegroundApplication(_ application: NSRunningApplication) {
@@ -335,6 +319,9 @@ final class ObserverRuntime: @unchecked Sendable {
         if browserPage?.privateWindow == true {
             decision = CaptureDecision(allowed: false, redactions: ["private_window"])
         } else if browserLike, browserPage == nil {
+            // AX/OCR cannot independently prove that an arbitrary browser
+            // window is not private. Keep deep capture fail-closed when the
+            // optional, per-browser Apple Events check is unavailable.
             decision = CaptureDecision(
                 allowed: false,
                 redactions: ["browser_privacy_state_unavailable"]
@@ -955,30 +942,11 @@ final class ObserverRuntime: @unchecked Sendable {
             accessibility: accessibility,
             screenRecording: screenRecording,
             inputMonitoring: inputMonitoring,
-            automation: automationPermissionSummary()
+            // Automation is not part of the required monitoring grant.
+            // Apple Events remain an opportunistic enrichment path and are
+            // never prompted by the observer.
+            automation: "unavailable"
         )
-    }
-
-    private func automationPermissionSummary() -> String {
-        let statuses = NSWorkspace.shared.runningApplications
-            .compactMap(\.bundleIdentifier)
-            .filter { browserMetadataReader.supports(bundleIdentifier: $0) }
-            .map {
-                BrowserMetadataReader.automationAuthorization(
-                    bundleIdentifier: $0,
-                    prompt: false
-                )
-            }
-        if statuses.contains("denied") {
-            return "denied"
-        }
-        if statuses.contains("not_determined") {
-            return "not_determined"
-        }
-        if !statuses.isEmpty, statuses.allSatisfy({ $0 == "authorized" }) {
-            return "authorized"
-        }
-        return "unavailable"
     }
 
     private func unsignedInteger(_ value: Any?) -> UInt64? {

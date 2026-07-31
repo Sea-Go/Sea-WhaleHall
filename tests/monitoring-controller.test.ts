@@ -39,7 +39,7 @@ function snapshot(
 			{
 				id: "browserAutomation",
 				state: "granted",
-				required: true,
+				required: false,
 				detail: null,
 			},
 		],

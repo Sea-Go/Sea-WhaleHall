@@ -40,7 +40,7 @@ function monitoringSnapshot(): MonitoringSnapshot {
 			{
 				id: "browserAutomation",
 				state: "notDetermined",
-				required: true,
+				required: false,
 				detail: null,
 			},
 		],
@@ -90,7 +90,7 @@ describe("monitoring status UI", () => {
 			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
 		);
 		expect(markup).toContain("权限不完整");
-		expect(markup).toContain("缺少 2 项系统权限");
+		expect(markup).toContain("缺少 1 项系统权限");
 		expect(markup).toContain("查看权限详情");
 		expect(markup).toContain("暂停观察");
 		expect(markup).not.toContain("screen_recording_denied");

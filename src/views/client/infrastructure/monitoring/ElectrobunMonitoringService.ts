@@ -73,7 +73,10 @@ export class ElectrobunMonitoringService implements MonitoringService {
 	async refreshPermissions(): Promise<MonitoringSnapshot> {
 		if (!this.runtimeAvailable()) return unavailableSnapshot();
 		const transport = await this.loadTransport();
-		return toMonitoringSnapshot(await transport.refreshPermissions(true));
+		// Status refreshes are deliberately read-only. Permission prompts belong to
+		// the user's one-time setup in macOS System Settings, never to polling or
+		// the "重新检查" action.
+		return toMonitoringSnapshot(await transport.refreshPermissions(false));
 	}
 
 	async openPermissionSettings(
@@ -138,7 +141,7 @@ export function toMonitoringSnapshot(
 			permission(
 				"browserAutomation",
 				status.permissions.automation,
-				status.captureContent,
+				false,
 			),
 		],
 		excludedAppIds: [...status.excludedBundleIds],
@@ -178,7 +181,7 @@ function unavailableSnapshot(): MonitoringSnapshot {
 			permission("accessibility", "unsupported", true),
 			permission("screenRecording", "unsupported", true),
 			permission("inputMonitoring", "unsupported", true),
-			permission("browserAutomation", "unsupported", true),
+			permission("browserAutomation", "unsupported", false),
 		],
 		excludedAppIds: [],
 		lastObservationAtMs: null,

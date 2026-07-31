@@ -56,6 +56,10 @@ describe("ElectrobunMonitoringService", () => {
 			{ id: "inputMonitoring", state: "notDetermined" },
 			{ id: "browserAutomation", state: "unknown" },
 		]);
+		expect(
+			snapshot.permissions.find(({ id }) => id === "browserAutomation")
+				?.required,
+		).toBe(false);
 		expect(snapshot.coverageGaps).toEqual(["denied", "observer_error"]);
 		expect(JSON.stringify(snapshot)).not.toContain("private window title");
 	});
@@ -80,7 +84,7 @@ describe("ElectrobunMonitoringService", () => {
 		expect(typeof appModule.App).toBe("function");
 	});
 
-	test("forwards explicit configuration and prompts permission refresh", async () => {
+	test("forwards explicit configuration and keeps permission refresh silent", async () => {
 		const calls: {
 			configured?: LocalMonitoringConfigure;
 			refreshPrompt?: boolean;
@@ -129,7 +133,7 @@ describe("ElectrobunMonitoringService", () => {
 			captureContent: false,
 			excludedBundleIds: ["com.example.private"],
 		});
-		expect(calls.refreshPrompt).toBe(true);
+		expect(calls.refreshPrompt).toBe(false);
 		expect(calls.openedPermission).toBe("screenRecording");
 	});
 });

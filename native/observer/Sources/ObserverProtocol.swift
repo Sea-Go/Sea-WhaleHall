@@ -142,6 +142,7 @@ final class FrameEmitter: @unchecked Sendable {
                     "accessibility": true,
                     "screenOCR": true,
                     "browserAppleEvents": true,
+                    "browserAppleEventsPrompted": false,
                     "inputActivity": true,
                     "storesScreenshots": false,
                     "readsKeyValues": false,

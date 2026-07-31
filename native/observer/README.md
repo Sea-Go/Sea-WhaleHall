@@ -13,21 +13,33 @@ storage.
 - ScreenCaptureKit captures only the foreground application's on-screen
   window. Vision OCR runs against an in-memory `CGImage`; pixels and screenshots
   are never written to a file or sent through the protocol.
-- Apple Events reads only a foreground Chromium-family tab title and URL after
-  proving the window is not incognito. URL credentials, fragments, and
-  sensitive query parameters are removed before emission. Safari is
-  metadata-only in v2 because its public scripting API cannot prove that the
-  front window is not private; the helper fails closed instead of guessing.
+- Apple Events is an optional, per-browser privacy check and metadata
+  enrichment. If it was granted independently, Accessibility and OCR provide
+  the visible browser content while Apple Events proves the foreground
+  Chromium-family window is not incognito and supplies its title and URL.
+  WhaleHall never requests Automation itself and never loops over running
+  browsers to display separate consent dialogs. If this privacy check is
+  unavailable, deep browser capture fails closed. URL credentials, fragments,
+  and sensitive query parameters are removed before emission.
 - The listen-only `CGEventTap` counts key-downs, clicks, scrolling, and relative
   movement. It never reads key codes, characters, clipboard contents, or
   persistent pointer coordinates.
 - Password managers, secure fields, authentication/payment windows, and
   private/incognito browser windows are rejected before content emission.
 
-The helper needs user-granted Accessibility, Screen Recording, Input
-Monitoring, and browser Automation permissions. A `refreshPermissions`
-command with `"prompt":true` may request them; normal startup only checks
-existing authorization.
+The helper uses one explicit monitoring-permission action to request the three
+macOS capabilities needed by the built-in observer: Accessibility, Screen
+Recording, and Input Monitoring. macOS owns those separate TCC decisions, but
+WhaleHall asks for them only from that explicit action and never during
+startup, status checks, heartbeat checks, or normal refreshes. Once granted to
+a stably signed WhaleHall build, they persist across launches.
+
+Browser Automation is optional and is not requested by that action. Without a
+per-browser grant, WhaleHall still observes foreground application metadata but
+marks deep browser content unavailable because it cannot reliably exclude a
+private/incognito window. A `refreshPermissions` command with `"prompt":false`
+is read-only. `"prompt":true` requests only the three required monitoring
+capabilities and must be sent only after a direct user action.
 
 ## JSONL protocol
 

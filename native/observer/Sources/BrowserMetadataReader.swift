@@ -60,9 +60,8 @@ final class BrowserMetadataReader {
         else {
             return nil
         }
-        guard Self.automationAuthorization(
-            bundleIdentifier: bundleIdentifier,
-            prompt: false
+        guard Self.preflightAutomationAuthorization(
+            bundleIdentifier: bundleIdentifier
         ) == "authorized" else {
             return nil
         }
@@ -122,9 +121,15 @@ final class BrowserMetadataReader {
         )
     }
 
-    nonisolated static func automationAuthorization(
-        bundleIdentifier: String,
-        prompt: Bool
+    /// Checks whether a browser Automation grant already exists.
+    ///
+    /// This API deliberately has no prompt argument. WhaleHall's single
+    /// monitoring permission action only requests Accessibility, Screen
+    /// Recording, and Input Monitoring. Browser Apple Events are an optional
+    /// enrichment when the user has granted them independently; the observer
+    /// must never produce one consent dialog per running browser.
+    nonisolated static func preflightAutomationAuthorization(
+        bundleIdentifier: String
     ) -> String {
         guard let data = bundleIdentifier.data(using: .utf8), !data.isEmpty else {
             return "unavailable"
@@ -147,7 +152,7 @@ final class BrowserMetadataReader {
             &address,
             AEEventClass(typeWildCard),
             AEEventID(typeWildCard),
-            prompt
+            false
         )
         switch status {
         case noErr:

@@ -21,7 +21,7 @@ import "./MonitoringPermissionsControl.css";
 
 const permissionCopy: Record<
 	MonitoringPermissionId,
-	{ label: string; description: string }
+	{ label: string; description: string; optional?: boolean }
 > = {
 	accessibility: {
 		label: "辅助功能",
@@ -37,7 +37,9 @@ const permissionCopy: Record<
 	},
 	browserAutomation: {
 		label: "自动化",
-		description: "向受支持的前台浏览器读取经过隐私过滤的标签页元数据。",
+		description:
+			"可选增强：用于读取受支持浏览器当前页的精确 URL，并可靠排除无痕窗口；不授权不影响其他应用，但浏览器深度内容会保持不可用。",
+		optional: true,
 	},
 };
 
@@ -84,7 +86,8 @@ export function MonitoringPermissionsControl({
 				<div>
 					<strong id="monitoring-permissions-title">macOS 系统权限</strong>
 					<p>
-						系统授权与 WhaleHall 的采集开关相互独立；点击下方按钮会打开对应的系统设置页面。
+						每项权限只需在首次安装时到系统设置中同意一次。之后 WhaleHall
+						只会静默读取当前状态，不会再次弹出授权请求；只有权限被撤销时才需要重新设置。
 					</p>
 				</div>
 				<div className="monitoring-permissions__check">
@@ -93,6 +96,7 @@ export function MonitoringPermissionsControl({
 						type="button"
 						disabled={snapshot === null || updating}
 						onClick={() => void controller.refreshPermissions()}
+						title="仅静默读取当前状态，不会请求系统授权"
 					>
 						<RefreshCw
 							size={14}
@@ -119,7 +123,11 @@ export function MonitoringPermissionsControl({
 							<div className="monitoring-permission-card__title">
 								<div>
 									<strong>{copy.label}</strong>
-									{permission.required ? <span>当前配置需要</span> : null}
+									{permission.required ? (
+										<span>当前配置需要</span>
+									) : copy.optional ? (
+										<span>可选增强</span>
+									) : null}
 								</div>
 								<span className="monitoring-permission-card__state">
 									<StatusIcon size={14} aria-hidden="true" />

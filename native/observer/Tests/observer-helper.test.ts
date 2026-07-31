@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { buildObserverApp } from "../../../scripts/build-native";
@@ -13,6 +13,7 @@ type ObserverFrame = {
 	id?: string;
 	authorizationReason?: string;
 	capabilities?: Record<string, boolean>;
+	permissions?: Record<string, string>;
 	observation?: {
 		schemaVersion: string;
 		kind: string;
@@ -58,6 +59,27 @@ afterEach(() => {
 });
 
 const macOSTest = process.platform === "darwin" ? test : test.skip;
+
+test("keeps browser Automation outside the required permission action", () => {
+	const runtimeSource = readFileSync(
+		resolve(import.meta.dir, "../Sources/ObserverRuntime.swift"),
+		"utf8",
+	);
+	const browserSource = readFileSync(
+		resolve(import.meta.dir, "../Sources/BrowserMetadataReader.swift"),
+		"utf8",
+	);
+
+	expect(runtimeSource).not.toContain("automationAuthorization(");
+	expect(runtimeSource).not.toContain("preflightAutomationAuthorization(");
+	expect(browserSource).not.toContain("prompt: Bool");
+	expect(browserSource).toContain(
+		"static func preflightAutomationAuthorization(",
+	);
+	expect(browserSource).toContain(
+		"WhaleHall's single\n    /// monitoring permission action",
+	);
+});
 
 macOSTest(
 	"keeps AX flush, privacy, and visible-editable policies deterministic",
@@ -130,6 +152,8 @@ macOSTest(
 		expect(ready.authorizationReason).toBe("startup_snapshot");
 		expect(ready.capabilities?.storesScreenshots).toBe(false);
 		expect(ready.capabilities?.readsKeyValues).toBe(false);
+		expect(ready.capabilities?.browserAppleEventsPrompted).toBe(false);
+		expect(ready.permissions?.automation).toBe("unavailable");
 
 		child.stdin.write(
 			`${JSON.stringify({

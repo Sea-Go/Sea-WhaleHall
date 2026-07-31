@@ -69,7 +69,7 @@ const monitoringSnapshot: MonitoringSnapshot = {
 		{ id: "accessibility", state: "granted", required: true, detail: null },
 		{ id: "screenRecording", state: "granted", required: true, detail: null },
 		{ id: "inputMonitoring", state: "granted", required: true, detail: null },
-		{ id: "browserAutomation", state: "granted", required: true, detail: null },
+		{ id: "browserAutomation", state: "granted", required: false, detail: null },
 	],
 	excludedAppIds: [],
 	lastObservationAtMs: null,
