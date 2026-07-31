@@ -18,11 +18,20 @@ const observerRoot = resolve(projectRoot, "native/observer");
 const observerBundleName = "WhaleHall Observer.app";
 const observerExecutableName = "whalehall-observer";
 
+function localSigningIdentity(): string | undefined {
+	return process.env.WHALEHALL_LOCAL_SIGNING_IDENTITY?.trim() || undefined;
+}
+
 function signingIdentity(): string | undefined {
 	return (
 		process.env.WHALEHALL_OBSERVER_SIGNING_IDENTITY ??
-		process.env.ELECTROBUN_DEVELOPER_ID
+		process.env.ELECTROBUN_DEVELOPER_ID ??
+		process.env.WHALEHALL_LOCAL_SIGNING_IDENTITY
 	)?.trim() || undefined;
+}
+
+function isLocalSigningIdentity(identity: string | undefined): boolean {
+	return identity !== undefined && identity === localSigningIdentity();
 }
 
 function releaseSigningRequired(): boolean {
@@ -122,8 +131,10 @@ export function buildObserverApp(arch: TargetArch): string {
 		"--entitlements",
 		resolve(observerRoot, "Resources/WhaleHallObserver.entitlements"),
 	];
-	if (identity) {
+	if (identity && !isLocalSigningIdentity(identity)) {
 		signingCommand.push("--options", "runtime", "--timestamp");
+	} else if (identity) {
+		signingCommand.push("--options", "runtime", "--timestamp=none");
 	} else {
 		signingCommand.push("--timestamp=none");
 	}
@@ -143,7 +154,7 @@ function signNativeChild(executable: string, arch: TargetArch): void {
 		);
 	}
 	const command = ["codesign", "--force", "--sign", identity || "-"];
-	if (identity) {
+	if (identity && !isLocalSigningIdentity(identity)) {
 		const teamIdentifier = process.env.WHALEHALL_APPLE_TEAM_ID?.trim();
 		if (!teamIdentifier || !/^[A-Z0-9]{10}$/.test(teamIdentifier)) {
 			throw new Error(
@@ -175,6 +186,8 @@ function signNativeChild(executable: string, arch: TargetArch): void {
 			"runtime",
 			"--timestamp",
 		);
+	} else if (identity) {
+		command.push("--options", "runtime", "--timestamp=none");
 	} else {
 		command.push("--timestamp=none");
 	}

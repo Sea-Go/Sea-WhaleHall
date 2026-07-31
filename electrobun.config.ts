@@ -1,4 +1,5 @@
 import type { ElectrobunConfig } from "electrobun";
+import { MACOS_OUTER_ENTITLEMENTS } from "./scripts/macos-build-security";
 
 /**
  * Electrobun currently falls back to its default config when this module
@@ -96,6 +97,7 @@ export default {
 		mac: {
 			bundleCEF: false,
 			codesign: macCodeSigningEnabled,
+			entitlements: MACOS_OUTER_ENTITLEMENTS,
 			notarize:
 				macCodeSigningEnabled &&
 				process.env.WHALEHALL_MACOS_NOTARIZE === "true",
@@ -117,5 +119,7 @@ export default {
 	},
 	scripts: {
 		preBuild: "scripts/pre-build.ts",
+		postWrap: "scripts/post-wrap.ts",
+		postPackage: "scripts/post-package.ts",
 	},
 } satisfies ElectrobunConfig;
