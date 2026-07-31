@@ -345,6 +345,10 @@ function withPackagedNativeDirectory(
 			"Signed wrapper must contain exactly one Electrobun application archive.",
 		);
 	}
+	const archive = archives[0];
+	if (archive === undefined) {
+		throw new Error("Signed wrapper application archive could not be resolved.");
+	}
 	const extractionDirectory = mkdtempSync(
 		join(tmpdir(), "whalehall-native-verify-"),
 	);
@@ -353,7 +357,7 @@ function withPackagedNativeDirectory(
 			"/usr/bin/tar",
 			"--use-compress-program=unzstd",
 			"-xf",
-			archives[0],
+			archive,
 			"-C",
 			extractionDirectory,
 		]);
