@@ -37,9 +37,10 @@ a stably signed WhaleHall build, they persist across launches.
 Browser Automation is optional and is not requested by that action. Without a
 per-browser grant, WhaleHall still observes foreground application metadata but
 marks deep browser content unavailable because it cannot reliably exclude a
-private/incognito window. A `refreshPermissions` command with `"prompt":false`
-is read-only. `"prompt":true` requests only the three required monitoring
-capabilities and must be sent only after a direct user action.
+private/incognito window. `refreshPermissions` is always a read-only preflight.
+The separate `setupPermissions` command is the only prompt-capable command and
+the parent may send it only once per stable installation identity after a direct
+user action. A `prompt` field on any command is rejected by the helper.
 
 ## JSONL protocol
 
@@ -50,9 +51,9 @@ Start capture:
 {"type":"command","id":"start-1","command":"start","config":{"captureContent":true,"excludedBundleIds":[]}}
 ```
 
-Other commands are `pause`, `resume`, `status`, `refreshPermissions`, and
-`shutdown`. The parent cumulatively acknowledges observations only after
-durable persistence:
+Other commands are `pause`, `resume`, `status`, `refreshPermissions`,
+`setupPermissions`, and `shutdown`. The parent cumulatively acknowledges
+observations only after durable persistence:
 
 ```json
 {"type":"ack","bootId":"<ready.bootId>","sequence":42}
@@ -71,18 +72,37 @@ inside ten minutes should enter a visible degraded state.
 ## Build and signing
 
 `bun run build:native` compiles the helper with Swift 6 and a macOS 14
-deployment target, creates the `.app` bundle under `.native`, and applies an
-ad-hoc signature for local development. Electrobun copies the nested app to:
+deployment target and creates the `.app` bundle under `.native`. Development
+and canary builds automatically use the one valid login-Keychain identity
+named exactly `WhaleHall Local Development`. Install it once, only through the
+explicit setup command:
+
+```bash
+# Read-only report.
+bun run setup:macos-signing
+
+# The only command allowed to create the current-user identity.
+bun run setup:macos-signing -- --create
+```
+
+Ordinary builds never write Keychain state. The fixed certificate keeps the
+helper's designated requirement stable across rebuilds, so macOS monitoring
+authorization can be granted once. Without it, local builds use an ad-hoc
+signature and intentionally remain metadata-only. Electrobun copies the nested
+app to:
 
 ```text
 Resources/app/native/WhaleHall Observer.app
 ```
 
-Set `ELECTROBUN_DEVELOPER_ID` (or the helper-specific
-`WHALEHALL_OBSERVER_SIGNING_IDENTITY`) to a Developer ID Application identity
-to apply a hardened-runtime signature. Release automation must also set
+Release builds must set `ELECTROBUN_DEVELOPER_ID` to a valid Developer ID
+Application identity and `WHALEHALL_APPLE_TEAM_ID` to its exact 10-character
+Team ID. A helper-specific override, when present, must be the same identity.
+Release automation must also set
 `WHALEHALL_RELEASE_SIGNING_REQUIRED=true`; this makes both the helper and outer
-build fail instead of falling back to ad-hoc signing. Set
+build fail instead of falling back to the local or ad-hoc identity. Set
 `WHALEHALL_MACOS_NOTARIZE=true` only in the notarization job with Electrobun's
 required Apple credentials. The containing WhaleHall app is signed after the
-nested helper.
+nested helper. Post-package verification compares the staged and packaged
+designated requirements and rejects cdhash-only signatures, identifier
+rewrites, and any leaf-certificate change.

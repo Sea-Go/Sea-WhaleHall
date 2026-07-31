@@ -10,6 +10,7 @@
 		"build:views": "vite build && bun run scripts/stage-view-assets.ts",
 		"build:native": "bun run scripts/build-native.ts",
 		"build:canary": "electrobun build --env=canary",
+		"setup:macos-signing": "bun run scripts/setup-macos-signing.ts",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"test:sensors:ci": "bun test tests/native-integration.test.ts",

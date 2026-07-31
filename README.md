@@ -116,6 +116,30 @@ Start Electrobun with bundled views and its rebuild watcher:
 bun run dev
 ```
 
+On macOS, install one fixed current-user development signing identity before
+granting monitoring permissions to a local build:
+
+```bash
+# Read-only status; never opens or changes Keychain.
+bun run setup:macos-signing
+
+# Explicit one-time setup. macOS may ask for one certificate-trust approval.
+bun run setup:macos-signing -- --create
+```
+
+Normal development and canary builds only read the login Keychain and
+automatically use the one valid identity named exactly
+`WhaleHall Local Development`. They never create, replace, or delete a
+Keychain item. The fixed certificate gives the native monitoring components a
+stable designated requirement, so one macOS monitoring authorization can be
+reused across rebuilds. If the identity is absent, development builds remain
+available but are explicitly metadata-only; sensitive observation content and
+the content vault stay unavailable.
+
+The local identity is never accepted for a stable or explicitly signed release.
+Those builds require a valid `Developer ID Application` identity, a matching
+`WHALEHALL_APPLE_TEAM_ID`, hardened runtime, and notarization.
+
 The pre-build hook compiles `whalehall-local-server` in release mode and stages `whalehall-local(.exe)` under `.native/` for the current native platform.
 
 ## Desktop pet / 桌宠

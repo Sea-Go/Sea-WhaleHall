@@ -8,6 +8,12 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	type MacSigningPlan,
+	localDesignatedRequirement,
+	readMacCodeSigningIdentities,
+	resolveMacSigningPlan,
+} from "./macos-signing-identity";
 
 type TargetOS = "macos" | "linux" | "win";
 type TargetArch = "arm64" | "x64";
@@ -20,27 +26,15 @@ const observerExecutableName = "whalehall-observer";
 const observerIdentifier = "com.seago.whalehall.observer";
 const localServerIdentifier = "com.seago.whalehall.local";
 
-function localSigningIdentity(): string | undefined {
-	return process.env.WHALEHALL_LOCAL_SIGNING_IDENTITY?.trim() || undefined;
-}
+let cachedMacSigningPlan: MacSigningPlan | undefined;
 
-function signingIdentity(): string | undefined {
-	return (
-		process.env.WHALEHALL_OBSERVER_SIGNING_IDENTITY ??
-		process.env.ELECTROBUN_DEVELOPER_ID ??
-		process.env.WHALEHALL_LOCAL_SIGNING_IDENTITY
-	)?.trim() || undefined;
-}
-
-function isLocalSigningIdentity(identity: string | undefined): boolean {
-	return identity !== undefined && identity === localSigningIdentity();
-}
-
-function releaseSigningRequired(): boolean {
-	return (
-		process.env.ELECTROBUN_BUILD_ENV === "stable" ||
-		process.env.WHALEHALL_RELEASE_SIGNING_REQUIRED === "true"
-	);
+function macSigningPlan(): MacSigningPlan {
+	cachedMacSigningPlan ??= resolveMacSigningPlan({
+		environment: process.env,
+		buildEnvironment: process.env.ELECTROBUN_BUILD_ENV ?? "dev",
+		identities: readMacCodeSigningIdentities(),
+	});
+	return cachedMacSigningPlan;
 }
 
 function hostOS(): TargetOS {
@@ -119,60 +113,59 @@ export function buildObserverApp(arch: TargetArch): string {
 		resolve(contents, "Info.plist"),
 	);
 
-	const identity = signingIdentity();
-	if (releaseSigningRequired() && !identity) {
-		throw new Error(
-			"WHALEHALL_OBSERVER_SIGNING_IDENTITY is required for a signed release build.",
-		);
-	}
+	const signing = macSigningPlan();
 	const signingCommand = [
 		"codesign",
 		"--force",
 		"--sign",
-		identity || "-",
+		signing.identity || "-",
 		"--identifier",
 		observerIdentifier,
 		"--entitlements",
 		resolve(observerRoot, "Resources/WhaleHallObserver.entitlements"),
 	];
-	if (identity && !isLocalSigningIdentity(identity)) {
+	if (signing.kind === "developer-id") {
 		signingCommand.push("--options", "runtime", "--timestamp");
-	} else if (identity) {
-		signingCommand.push("--options", "runtime", "--timestamp=none");
+	} else if (signing.kind === "local") {
+		if (!signing.identity) throw new Error("Local signing identity is unavailable.");
+		signingCommand.push(
+			"--requirements",
+			localDesignatedRequirement(observerIdentifier, signing.identity),
+			"--options",
+			"runtime",
+			"--timestamp=none",
+		);
 	} else {
 		signingCommand.push("--timestamp=none");
 	}
 	signingCommand.push(bundle);
 	run(signingCommand);
 	run(["codesign", "--verify", "--strict", bundle]);
+	if (signing.kind === "ad-hoc") {
+		console.warn(
+			"[native] WhaleHall Observer is ad-hoc signed. This metadata-only "
+				+ "build cannot reuse real monitoring or content-vault authorization. "
+				+ "Run `bun run setup:macos-signing -- --create` explicitly.",
+		);
+	}
 
 	console.log(`[native] ${sourceDirectory} -> ${bundle}`);
 	return bundle;
 }
 
 function signNativeChild(executable: string, arch: TargetArch): void {
-	const identity = signingIdentity();
-	if (releaseSigningRequired() && !identity) {
-		throw new Error(
-			"ELECTROBUN_DEVELOPER_ID is required to sign whalehall-local.",
-		);
-	}
+	const signing = macSigningPlan();
 	const command = [
 		"codesign",
 		"--force",
 		"--sign",
-		identity || "-",
+		signing.identity || "-",
 		"--identifier",
 		localServerIdentifier,
 	];
-	if (identity && !isLocalSigningIdentity(identity)) {
-		const teamIdentifier = process.env.WHALEHALL_APPLE_TEAM_ID?.trim();
-		if (!teamIdentifier || !/^[A-Z0-9]{10}$/.test(teamIdentifier)) {
-			throw new Error(
-				"WHALEHALL_APPLE_TEAM_ID must be the 10-character Apple Team ID "
-					+ "when signing whalehall-local.",
-			);
-		}
+	if (signing.kind === "developer-id") {
+		const teamIdentifier = signing.teamIdentifier;
+		if (!teamIdentifier) throw new Error("Developer ID Team ID is unavailable.");
 		const entitlements = resolve(
 			projectRoot,
 			`.native/macos-${arch}/WhaleHallLocal.entitlements`,
@@ -197,14 +190,27 @@ function signNativeChild(executable: string, arch: TargetArch): void {
 			"runtime",
 			"--timestamp",
 		);
-	} else if (identity) {
-		command.push("--options", "runtime", "--timestamp=none");
+	} else if (signing.kind === "local") {
+		if (!signing.identity) throw new Error("Local signing identity is unavailable.");
+		command.push(
+			"--requirements",
+			localDesignatedRequirement(localServerIdentifier, signing.identity),
+			"--options",
+			"runtime",
+			"--timestamp=none",
+		);
 	} else {
 		command.push("--timestamp=none");
 	}
 	command.push(executable);
 	run(command);
 	run(["codesign", "--verify", "--strict", executable]);
+	if (signing.kind === "ad-hoc") {
+		console.warn(
+			"[native] whalehall-local is ad-hoc signed. Sensitive content remains "
+				+ "metadata-only until the fixed local identity is explicitly installed.",
+		);
+	}
 }
 
 export function buildNative(): string {
