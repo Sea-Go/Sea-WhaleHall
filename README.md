@@ -128,19 +128,39 @@ bun run setup:macos-signing
 bun run setup:macos-signing -- --create
 ```
 
-Normal development and canary builds only read the login Keychain and
-automatically use the one valid identity named exactly
-`WhaleHall Local Development`. They never create, replace, or delete a
-Keychain item. The fixed certificate gives the native monitoring components a
-stable designated requirement, so one macOS monitoring authorization can be
-reused across rebuilds. If the identity is absent, development builds remain
-available but are explicitly metadata-only; sensitive observation content and
-the content vault stay unavailable.
+Normal development and canary builds automatically use the one valid identity
+named exactly `WhaleHall Local Development`. The fixed certificate gives the
+native monitoring components a stable designated requirement, so one macOS
+monitoring authorization can be reused across rebuilds. Local encrypted content
+is opened only by the signed, versioned Vault Broker that WhaleHall installs
+once in its shared owner-only application data directory; dev and canary reuse
+that same installed version. The current immutable generation is v2
+(`whalehall-vault-broker-v2`, broker identity/service/protocol v2) and includes
+a Mach-O `LC_UUID`. The invalid no-UUID v1 artifact is never executed,
+overwritten, or republished as v2: v2 uses a new bundle/install basename,
+directory, signing identifier, Keychain service, and wire magic. Ordinary
+application rebuilds neither replace that Broker nor change the Keychain
+partition bound to it. An existing
+pre-Broker local key requires one explicit migration from the monitoring UI.
+The old item is retained, the new item is verified before use, and conflicts
+fail closed. If the local identity or Broker is absent, development builds
+remain available but are explicitly metadata-only; sensitive observation
+content and the content vault stay unavailable.
 
 Running the mutating setup command again for an existing valid identity does not
 replace it. It only performs two temporary signatures to verify that
-`/usr/bin/codesign` has persistent access; normal builds never modify Keychain
-ACLs or display this setup prompt.
+`/usr/bin/codesign` has persistent access. This check does not authorize the
+content vault. Normal rebuilds do not change the Vault Broker or its Keychain
+ACL and therefore do not repeat the vault migration prompt.
+
+The classic login-Keychain fallback and owner-only install directory used by
+local dev/canary builds are convenience isolation, not a hostile same-account
+security boundary. Before WhaleHall's first v2 install/item creation, another
+process already running as the same macOS UID can squat those per-user
+namespaces; local builds fail closed on the conflicts they can identify, but
+cannot generally prove the namespace was not pre-created. Production does not
+use this fallback: a Developer ID-signed build uses the Data Protection
+Keychain with the signed application access group.
 
 The local identity is never accepted for a stable or explicitly signed release.
 Those builds require a valid `Developer ID Application` identity, a matching

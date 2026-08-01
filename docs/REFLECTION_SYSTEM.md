@@ -54,14 +54,37 @@ ScreenCaptureKit + Vision 的前台单帧 OCR，不依赖 Chrome、VSCode、飞�
 ObservationJournal 的正文使用 AES-256-GCM 字段加密，随机 96-bit nonce，
 AAD 绑定记录身份、Schema、时间、内容 hash 和 key version。正式签名制品
 只接受 `AfterFirstUnlockThisDeviceOnly` Data Protection Keychain。
-无 Developer ID 的 dev/canary 可显式启用隔离的 login-Keychain fallback，
-但只有现代写入精确返回 `-34018` 且当前 binary 为 ad-hoc、没有 Team ID 时
-才生效；状态固定显示 `dev_legacy_keychain_in_use`。它不允许文件或明文密钥
-回退，也不会在已签名制品中生效。
-Keychain 在首次解锁前不可用，或 dev/canary 因重新 ad-hoc 签名而无法打开
-既有 ACL 时，Timeline v2 与解密审计保持 fail closed，但已启动的本机
-监控/权限配置运行时继续可用；不会删除旧密钥或数据库，也不会进入整进程
-重启循环。
+无 Developer ID、但使用固定本地证书的 dev/canary 不再由每次重编译的 Rust
+进程直接读取 login Keychain，而是打包一个固定身份的
+`whalehall-vault-broker-v2`。Rust 首次把经过签名验证的 Broker 以排他方式复制
+到跨 dev/canary 共享的 owner-only 版本目录，之后同一版本永不覆盖；Keychain
+partition 因而绑定稳定的 Broker CDHash，而不是随重编译或运行 channel 变化的
+主进程 CDHash。Broker 只接受来自
+同一签名应用进程链的私有 socketpair 二进制协议，并在取 key 前后重新校验
+audit token、代码要求、PID/start time、规范路径和 NOTE_EXIT。
+
+旧 `local-signed`/`dev-legacy` key 只允许用户在 WhaleHall UI 中显式执行一次
+导入。导入按固定的兼容来源顺序只读取最新可用项，避免为历史副本逐项弹出确认；它
+不删除来源、不覆盖目标，并在常量时间比对回读结果后才返回，目标或回读冲突均
+fail closed。普通启动使用非交互 LOAD，不会弹出 Keychain 确认。ad-hoc/无
+固定身份构建不会启用 Broker，且所有模式都禁止文件或明文密钥回退。Keychain
+在首次解锁前不可用，或 Broker 缺失、被改写、身份不匹配时，
+Timeline v2 与解密审计保持 fail closed，但已启动的本机监控/权限配置运行时
+继续可用；不会删除旧密钥或数据库，也不会进入整进程重启循环。
+
+v2 是一次不可变 hard bump：bundle/install basename、安装目录、签名 identifier、
+Keychain target service、请求/响应 magic 与协议版本全部与 v1 分离，并要求 Mach-O
+保留非零 `LC_UUID`。曾经生成的 no-UUID v1 是废弃坏制品，运行时不会执行、覆盖
+或把它以 v2 名义重新发布；v2 只会排他创建自己的新路径和 target item。
+v2 一旦发布或安装，任何 Broker 源码、编译器/链接器、签名要求或协议变化都必须
+整体升级到新的不可变版本；单次构建内的双编译 hash/CDHash/DR 检查不能替代这条
+跨发布版本规则。
+
+固定本地证书、classic login Keychain ACL 与 owner-only 目录只服务于 dev/canary
+易用性，不能抵抗首次 v2 安装和 target item 创建之前已经以同一 macOS UID 运行的
+进程抢占这些用户级 namespace。可识别的冲突会 fail closed，但本地构建不把
+same-UID 恶意进程当作已隔离的安全边界。生产 Developer ID 制品不走该 fallback，
+而是使用带签名应用 access group 的 Data Protection Keychain。
 
 一次性 legacy 迁移使用 Rust CLI `whalehall-legacy-migrate`，固定为四步
 `report → migrate → verify → cleanup`。`report` 只读扫描指定
@@ -328,7 +351,8 @@ Hardened Runtime 与 notarization 开关；缺任一项在配置或内层 native
 阶段立即失败。签名顺序固定为 Rust child、Observer、外层 Electrobun app。
 由于 Electrobun 在配置模块抛异常时会尝试默认配置，release gate 使用进程级
 fail-closed 终止，并由子进程回归测试覆盖，禁止回退后继续生成未签名 stable。
-dev/canary 仍可 ad-hoc 构建，但会被明确标记且不能作为生产制品。
+dev/canary 仍可 ad-hoc 构建，但会被明确标记、禁用本地内容 vault，且不能作为
+生产制品；固定本地证书构建才可使用版本化 Vault Broker。
 运行时只接受 `dev|canary|stable` 三种 channel；每次启动固定 sibling
 Observer 前都会重新检查 bundle ID 和 `codesign --verify --strict`，stable
 还要求 Rust child 与 Observer 的非空 Team ID 完全一致。
