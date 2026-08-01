@@ -41,6 +41,8 @@ const MONITORING_PERMISSIONS_PERSISTENCE_WARNING: &str =
 const OBSERVER_BUNDLE_NAME: &str = "WhaleHall Observer.app";
 const OBSERVER_EXECUTABLE_NAME: &str = "whalehall-observer";
 const OBSERVER_BUNDLE_ID: &str = "com.seago.whalehall.observer";
+const WHALEHALL_LOCAL_EXECUTABLE_NAME: &str = "whalehall-local";
+const WHALEHALL_APP_BUNDLE_ID: &str = "com.seago.whalehall";
 const DEV_LEGACY_KEYCHAIN_WARNING: &str = "dev_legacy_keychain_in_use";
 const MAX_HELPER_FRAME_BYTES: usize = 512 * 1024;
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -113,32 +115,148 @@ struct MonitoringPermissionsStore {
 
 fn observer_permission_identity_fingerprint(helper_path: &Path) -> Result<String, String> {
     validate_helper_before_spawn(helper_path)?;
-    let bundle_path = helper_path
+    let observer_bundle_path = helper_path
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
         .ok_or_else(|| "observer_permission_setup_identity_unavailable".to_owned())?;
+    let local_executable = std::env::current_exe()
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+    let app_bundle_path = containing_whalehall_app_bundle(&local_executable)?;
+
+    verify_code_signature(&app_bundle_path)
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+    verify_code_signature(observer_bundle_path)
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+
+    let app_details = read_permission_identity_details(&app_bundle_path)?;
+    let observer_details = read_permission_identity_details(observer_bundle_path)?;
+    let app_bundle_identifier = read_bundle_identifier(&app_bundle_path)
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+    let observer_bundle_identifier = read_bundle_identifier(observer_bundle_path)
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+    let material = permission_identity_material(
+        &app_bundle_identifier,
+        &app_details,
+        &observer_bundle_identifier,
+        &observer_details,
+    )?;
+    Ok(format!("sha256:{:x}", Sha256::digest(material.as_bytes())))
+}
+
+fn read_permission_identity_details(path: &Path) -> Result<String, String> {
     let output = StdCommand::new("/usr/bin/codesign")
         .args(["--display", "--requirements", "-", "--verbose=4"])
-        .arg(bundle_path)
+        .arg(path)
         .output()
         .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
     if !output.status.success() {
         return Err("observer_permission_setup_identity_unavailable".to_owned());
     }
-    let details = String::from_utf8(output.stderr)
-        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
-    let (identity_marker, designated_requirement) = parse_permission_identity_details(&details)?;
-    let bundle_identifier = read_bundle_identifier(bundle_path)?;
-    if bundle_identifier != OBSERVER_BUNDLE_ID
-        || !designated_requirement.contains(&format!("identifier \"{OBSERVER_BUNDLE_ID}\""))
+    decode_codesign_identity_output(&output.stdout, &output.stderr)
+}
+
+fn containing_whalehall_app_bundle(executable: &Path) -> Result<PathBuf, String> {
+    let unavailable = || "observer_permission_setup_identity_unavailable".to_owned();
+    if !executable.is_absolute()
+        || executable.file_name().and_then(|value| value.to_str())
+            != Some(WHALEHALL_LOCAL_EXECUTABLE_NAME)
+    {
+        return Err(unavailable());
+    }
+    let metadata = fs::symlink_metadata(executable).map_err(|_| unavailable())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(unavailable());
+    }
+    let canonical_executable = fs::canonicalize(executable).map_err(|_| unavailable())?;
+    if canonical_executable != executable {
+        return Err(unavailable());
+    }
+    let app_bundles = canonical_executable
+        .ancestors()
+        .filter(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.ends_with(".app"))
+        })
+        .collect::<Vec<_>>();
+    if app_bundles.len() != 1 {
+        return Err(unavailable());
+    }
+    let app_bundle = app_bundles[0];
+    let relative_executable = canonical_executable
+        .strip_prefix(app_bundle)
+        .map_err(|_| unavailable())?;
+    if !relative_executable.starts_with("Contents") {
+        return Err(unavailable());
+    }
+    let info_plist = app_bundle.join("Contents").join("Info.plist");
+    let info_metadata = fs::symlink_metadata(info_plist).map_err(|_| unavailable())?;
+    if !info_metadata.is_file() || info_metadata.file_type().is_symlink() {
+        return Err(unavailable());
+    }
+    Ok(app_bundle.to_path_buf())
+}
+
+fn permission_identity_material(
+    app_bundle_identifier: &str,
+    app_details: &str,
+    observer_bundle_identifier: &str,
+    observer_details: &str,
+) -> Result<String, String> {
+    if app_bundle_identifier != WHALEHALL_APP_BUNDLE_ID
+        || observer_bundle_identifier != OBSERVER_BUNDLE_ID
     {
         return Err("observer_permission_setup_identity_unavailable".to_owned());
     }
-    let material = format!(
-        "whalehall-permission-identity.v1\0{bundle_identifier}\0{identity_marker}\0{designated_requirement}"
-    );
-    Ok(format!("sha256:{:x}", Sha256::digest(material.as_bytes())))
+    let (app_identity_marker, app_designated_requirement) =
+        parse_exact_permission_identity_details(app_details, WHALEHALL_APP_BUNDLE_ID)?;
+    let (observer_identity_marker, observer_designated_requirement) =
+        parse_exact_permission_identity_details(observer_details, OBSERVER_BUNDLE_ID)?;
+    if app_identity_marker != observer_identity_marker {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    }
+    Ok(format!(
+        "whalehall-permission-identity.v2\0{app_bundle_identifier}\0{app_designated_requirement}\0{observer_bundle_identifier}\0{observer_designated_requirement}\0{app_identity_marker}"
+    ))
+}
+
+fn parse_exact_permission_identity_details(
+    details: &str,
+    expected_bundle_identifier: &str,
+) -> Result<(String, String), String> {
+    let (identity_marker, designated_requirement) = parse_permission_identity_details(details)?;
+    let identifiers = details
+        .lines()
+        .filter_map(|line| line.strip_prefix("Identifier="))
+        .collect::<Vec<_>>();
+    if identifiers != [expected_bundle_identifier]
+        || designated_requirement_identifier(&designated_requirement)
+            != Some(expected_bundle_identifier)
+    {
+        return Err("observer_permission_setup_identity_unavailable".to_owned());
+    }
+    Ok((identity_marker, designated_requirement))
+}
+
+fn designated_requirement_identifier(requirement: &str) -> Option<&str> {
+    let tail = requirement.strip_prefix("identifier \"")?;
+    let end = tail.find('"')?;
+    let identifier = &tail[..end];
+    let suffix = &tail[end + 1..];
+    if identifier.is_empty() || (!suffix.is_empty() && !suffix.starts_with(" and ")) {
+        return None;
+    }
+    Some(identifier)
+}
+
+fn decode_codesign_identity_output(stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    let stdout = std::str::from_utf8(stdout)
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+    let stderr = std::str::from_utf8(stderr)
+        .map_err(|_| "observer_permission_setup_identity_unavailable".to_owned())?;
+    Ok(format!("{stdout}\n{stderr}"))
 }
 
 fn parse_permission_identity_details(details: &str) -> Result<(String, String), String> {
@@ -2831,6 +2949,128 @@ TeamIdentifier=not set
                 "identifier \"com.seago.whalehall.observer\" and certificate leaf = H\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"".to_owned(),
             )
         );
+    }
+
+    #[test]
+    fn permission_identity_combines_codesign_stdout_and_stderr() {
+        let details = decode_codesign_identity_output(
+            br#"designated => identifier "com.seago.whalehall.observer" and certificate leaf = H"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+"#,
+            br#"Executable=/Applications/WhaleHall Observer.app/Contents/MacOS/whalehall-observer
+Identifier=com.seago.whalehall.observer
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#,
+        )
+        .expect("decode split codesign output");
+        assert_eq!(
+            parse_permission_identity_details(&details).unwrap(),
+            (
+                "local-certificate:whalehall-local-development:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "identifier \"com.seago.whalehall.observer\" and certificate leaf = H\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"".to_owned(),
+            )
+        );
+        assert!(decode_codesign_identity_output(&[0xff], b"valid").is_err());
+        assert!(decode_codesign_identity_output(b"valid", &[0xff]).is_err());
+    }
+
+    #[test]
+    fn permission_identity_binds_app_and_observer_to_the_same_certificate() {
+        let app = r#"
+designated => identifier "com.seago.whalehall" and certificate leaf = H"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+Identifier=com.seago.whalehall
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#;
+        let observer = r#"
+designated => identifier "com.seago.whalehall.observer" and certificate leaf = H"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+Identifier=com.seago.whalehall.observer
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#;
+
+        let material = permission_identity_material(
+            WHALEHALL_APP_BUNDLE_ID,
+            app,
+            OBSERVER_BUNDLE_ID,
+            observer,
+        )
+        .expect("bind matching app and observer identities");
+        assert!(material.starts_with("whalehall-permission-identity.v2\0"));
+        assert!(material.contains("\0com.seago.whalehall\0"));
+        assert!(material.contains("\0com.seago.whalehall.observer\0"));
+        assert!(material.ends_with(
+            "\0local-certificate:whalehall-local-development:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+    }
+
+    #[test]
+    fn permission_identity_rejects_mismatched_app_and_observer_identities() {
+        let app = r#"
+designated => identifier "com.seago.whalehall" and certificate leaf = H"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+Identifier=com.seago.whalehall
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#;
+        let observer = r#"
+designated => identifier "com.seago.whalehall.observer" and certificate leaf = H"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+Identifier=com.seago.whalehall.observer
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#;
+
+        assert_eq!(
+            permission_identity_material(
+                WHALEHALL_APP_BUNDLE_ID,
+                app,
+                OBSERVER_BUNDLE_ID,
+                observer,
+            )
+            .unwrap_err(),
+            "observer_permission_setup_identity_unavailable"
+        );
+    }
+
+    #[test]
+    fn permission_identity_rejects_bundle_or_requirement_identifier_mismatches() {
+        let app = r#"
+designated => identifier "com.seago.whalehall" and certificate leaf = H"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+Identifier=com.seago.whalehall
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#;
+        let wrong_observer_requirement = r#"
+designated => identifier "com.seago.whalehall.observer.preview" and certificate leaf = H"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+Identifier=com.seago.whalehall.observer
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#;
+        let observer = r#"
+designated => identifier "com.seago.whalehall.observer" and certificate leaf = H"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+Identifier=com.seago.whalehall.observer
+Authority=WhaleHall Local Development
+TeamIdentifier=not set
+"#;
+
+        for result in [
+            permission_identity_material(
+                WHALEHALL_APP_BUNDLE_ID,
+                app,
+                OBSERVER_BUNDLE_ID,
+                wrong_observer_requirement,
+            ),
+            permission_identity_material(
+                "com.seago.whalehall.preview",
+                app,
+                OBSERVER_BUNDLE_ID,
+                observer,
+            ),
+        ] {
+            assert_eq!(
+                result.unwrap_err(),
+                "observer_permission_setup_identity_unavailable"
+            );
+        }
     }
 
     #[test]
