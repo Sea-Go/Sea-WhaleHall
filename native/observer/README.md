@@ -23,16 +23,20 @@ storage.
   and sensitive query parameters are removed before emission.
 - The listen-only `CGEventTap` counts key-downs, clicks, scrolling, and relative
   movement. It never reads key codes, characters, clipboard contents, or
-  persistent pointer coordinates.
+  persistent pointer coordinates. On macOS 14+ this listen-only tap reuses the
+  Accessibility grant; WhaleHall does not request a separate Input Monitoring
+  TCC decision.
 - Password managers, secure fields, authentication/payment windows, and
   private/incognito browser windows are rejected before content emission.
 
-The helper uses one explicit monitoring-permission action to request the three
-macOS capabilities needed by the built-in observer: Accessibility, Screen
-Recording, and Input Monitoring. macOS owns those separate TCC decisions, but
-WhaleHall asks for them only from that explicit action and never during
-startup, status checks, heartbeat checks, or normal refreshes. Once granted to
-a stably signed WhaleHall build, they persist across launches.
+The helper uses one explicit monitoring-permission action to request the two
+macOS capabilities required by the built-in observer: Accessibility and Screen
+Recording. macOS owns those separate TCC decisions, but WhaleHall asks for
+them only from that explicit action and never during startup, status checks,
+heartbeat checks, or normal refreshes. Once granted to a stably signed
+WhaleHall build, they persist across launches. The JSONL protocol retains the
+`inputMonitoring` permission status for compatibility with existing parents
+and journals, but the helper never prompts for it separately.
 
 Browser Automation is optional and is not requested by that action. Without a
 per-browser grant, WhaleHall still observes foreground application metadata but
@@ -112,3 +116,11 @@ required Apple credentials. The containing WhaleHall app is signed after the
 nested helper. Post-package verification compares the staged and packaged
 designated requirements and rejects cdhash-only signatures, identifier
 rewrites, and any leaf-certificate change.
+
+The Observer intentionally runs outside App Sandbox because foreground
+cross-application AX observation is incompatible with the sandbox boundary. It
+is a directly distributed nested app: development/canary builds are signed,
+and production builds additionally require Developer ID signing, Hardened
+Runtime, and notarization. This does not broaden its transport surface: the
+Observer code exposes no network client/server interface or socket and
+communicates only with its supervising Rust process over stdin/stdout JSONL.

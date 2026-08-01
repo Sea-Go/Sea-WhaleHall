@@ -84,6 +84,20 @@ test("keeps browser Automation outside the required permission action", () => {
 	);
 });
 
+test("keeps the Accessibility observer outside App Sandbox", () => {
+	const entitlements = readFileSync(
+		resolve(import.meta.dir, "../Resources/WhaleHallObserver.entitlements"),
+		"utf8",
+	);
+	expect(entitlements).not.toContain("com.apple.security.app-sandbox");
+	expect(entitlements).not.toContain(
+		"com.apple.security.temporary-exception.apple-events",
+	);
+	expect(entitlements).toContain(
+		"com.apple.security.automation.apple-events",
+	);
+});
+
 test("keeps display polling cached and prompt APIs explicit", () => {
 	const runtimeSource = readFileSync(
 		resolve(import.meta.dir, "../Sources/ObserverRuntime.swift"),
@@ -103,7 +117,7 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 	expect(runtimeSource).toContain('errorCode: "prompt_field_forbidden"');
 	expect(runtimeSource.match(/passivePermissionSnapshot\(\)/g)?.length).toBe(4);
 	expect(runtimeSource.match(/CGRequestScreenCaptureAccess\(\)/g)?.length).toBe(1);
-	expect(runtimeSource.match(/CGRequestListenEventAccess\(\)/g)?.length).toBe(1);
+	expect(runtimeSource).not.toContain("CGRequestListenEventAccess()");
 	expect(runtimeSource.match(/AXIsProcessTrustedWithOptions\(/g)?.length).toBe(1);
 
 	const startMonitoring = runtimeSource.slice(
@@ -137,7 +151,9 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 	);
 	expect(setupCommand).toContain("requestPermissionSetupSnapshot()");
 
-	expect(inputSource).toContain("CGPreflightListenEventAccess");
+	expect(inputSource).toContain(
+		"AXIsProcessTrusted() || CGPreflightListenEventAccess()",
+	);
 	expect(inputSource).not.toContain("CGRequestListenEventAccess");
 	expect(ocrSource).toContain("CGPreflightScreenCaptureAccess");
 	expect(ocrSource).not.toContain("CGRequestScreenCaptureAccess");

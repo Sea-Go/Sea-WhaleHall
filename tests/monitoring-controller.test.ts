@@ -35,7 +35,7 @@ function snapshot(
 			{
 				id: "inputMonitoring",
 				state: "granted",
-				required: true,
+				required: false,
 				detail: null,
 			},
 			{

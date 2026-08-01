@@ -75,7 +75,7 @@ async function createMonitoringController(): Promise<MonitoringController> {
 		permissions: [
 			{ id: "accessibility", state: "granted", required: true, detail: null },
 			{ id: "screenRecording", state: "granted", required: true, detail: null },
-			{ id: "inputMonitoring", state: "granted", required: true, detail: null },
+			{ id: "inputMonitoring", state: "granted", required: false, detail: null },
 			{ id: "browserAutomation", state: "granted", required: false, detail: null },
 		],
 		contentVault: {
@@ -169,7 +169,8 @@ describe("settings UI", () => {
 				"包含可解密的文本内容",
 				"一次性监测设置",
 				"本机监测已设置",
-				"3/3 项完成",
+				"2/2 项完成",
+				"键鼠活动量由辅助功能授权覆盖",
 				"不会再次弹出授权",
 				"浏览器精确 URL（可选）",
 				"fail-closed",

@@ -30,8 +30,10 @@ NSWorkspace、AXObserver/AXUIElement、CGEventTap，以及
 ScreenCaptureKit + Vision 的前台单帧 OCR，不依赖 Chrome、VSCode、飞书或
 其他第三方扩展。
 
-- 观察默认关闭，必须由用户在侧栏显式启用，并分别授予辅助功能、屏幕录制、
-  输入监控和受支持浏览器自动化权限；
+- 观察默认关闭，必须由用户在侧栏显式启用；一次性必需授权只有辅助功能和
+  屏幕录制。listen-only `CGEventTap` 复用辅助功能授权，不单独请求输入监控；
+  协议为兼容既有父进程与 Journal 仍保留 `inputMonitoring` 状态。受支持浏览器
+  的 Automation 始终是可选增强，不包含在一次性必需授权中；
 - 只统计按键/点击/滚动/移动量，不读取 keyCode，不保存鼠标坐标；文字只能
   来自应用最终显示的 AX/OCR 状态；
 - AX 文本只接受未隐藏、具有有效几何范围且与当前焦点窗口相交的节点，并优先
@@ -41,8 +43,11 @@ ScreenCaptureKit + Vision 的前台单帧 OCR，不依赖 Chrome、VSCode、飞�
   状态无法验证的浏览器会 fail closed；只写匿名 `coverage.gap`，不写真实
   app identity、PID 或内容；
 - OCR 图像只在内存中存在；AX 足够时不 OCR，任务串行且只保留最新结果；
-- Observer 启用 App Sandbox，但不授予 network client/server entitlement；
-  Apple Events 仅 allow-list 当前支持并能验证隐私状态的 Chromium 浏览器；
+- 跨应用 AXObserver 必须运行在非 App Sandbox 的 Observer 中；该 helper 采用
+  直接分发，开发/Canary 保持稳定签名，生产制品要求 Developer ID、Hardened
+  Runtime 与 notarization。代码不暴露网络 client/server 接口或 socket，只经
+  stdin/stdout JSONL 与 Rust 父进程通信；Apple Events 仅作为可选能力
+  allow-list 当前支持并能验证隐私状态的 Chromium 浏览器；
 - stdout 写入位于独立串行队列。未 ACK 上限为 256 帧/16 MiB；压力下合并
   input bucket、只保留最新 OCR，并把 gap 持久化进审计 coverage。
 
@@ -106,8 +111,10 @@ coverage、content state、taxonomy/projector version 和由 Rust allow-list
 - process batch 与匿名 coverage gap 永远为 `ignored`。
 
 Observer 的 `ready`、权限刷新和运行期权限变化先投影成严格的
-metadata-only `authorization.changed`：只允许四项权限状态、实际变化的权限名、
-变化类型和固定原因码，不允许标题、URL、正文或窗口 ID。Rust 在同一 ingest
+metadata-only `authorization.changed`：只允许四项协议权限状态、实际变化的
+权限名、变化类型和固定原因码，不允许标题、URL、正文或窗口 ID。其中
+`inputMonitoring` 仅为协议兼容状态，不触发独立系统授权；必需的系统授权只有
+Accessibility 与 Screen Recording，浏览器 Automation 保持可选。Rust 在同一 ingest
 事务中更新独立的 durable 权限基线；相同 heartbeat/status 不重复写边界，基线
 也不受三十天审计清理影响。
 
@@ -432,7 +439,11 @@ receipt；发生在窗口内但迟到的边界仍优先于 count，并以观测�
 WHALEHALL_INPUT_MONITORING_ENABLED=true bun run dev
 ```
 
-macOS 仍需单独授予 Input Monitoring 权限。显式产品开关与系统权限是两个条件；任一条件缺失时传感器保持 disabled/degraded，而不是暗中采样或使应用崩溃。
+该环境变量保留的是输入活动采集的显式产品开关和旧配置名称，不代表第三项
+系统授权。macOS 14+ 内置 Observer 的 listen-only `CGEventTap` 复用
+Accessibility；一次性必需系统授权只有 Accessibility 与 Screen Recording，
+不会单独请求 Input Monitoring。产品开关或所需系统权限任一缺失时，传感器
+保持 disabled/degraded，而不是暗中采样或使应用崩溃。
 运行期撤权会写入不计数的 `authorization.revoked`；若权限在 WhaleHall
 停止期间被撤销，启用态重启也会立即补写一次 revoke（已持久化则不重复）。
 授权状态以 EventJournal 为准跨进程持久化，因此即使 WhaleHall 在撤权和恢复

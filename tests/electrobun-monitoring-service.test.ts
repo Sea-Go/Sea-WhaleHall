@@ -75,6 +75,9 @@ describe("ElectrobunMonitoringService", () => {
 			snapshot.permissions.find(({ id }) => id === "browserAutomation")
 				?.required,
 		).toBe(false);
+		expect(
+			snapshot.permissions.find(({ id }) => id === "inputMonitoring")?.required,
+		).toBe(false);
 		expect(snapshot.coverageGaps).toEqual(["denied", "observer_error"]);
 		expect(JSON.stringify(snapshot)).not.toContain("private window title");
 	});

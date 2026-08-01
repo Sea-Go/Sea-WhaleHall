@@ -37,8 +37,8 @@ function monitoringSnapshot(): MonitoringSnapshot {
 			},
 			{
 				id: "inputMonitoring",
-				state: "granted",
-				required: true,
+				state: "denied",
+				required: false,
 				detail: null,
 			},
 			{
@@ -227,7 +227,10 @@ describe("monitoring status UI", () => {
 		expect(markup).toContain("一次性监测设置");
 		expect(markup).toContain("辅助功能");
 		expect(markup).toContain("屏幕录制");
-		expect(markup).toContain("输入监控");
+		expect(markup).toContain(
+			"键鼠活动量由辅助功能授权覆盖，不再单独请求输入监控权限",
+		);
+		expect(markup).not.toContain("<strong>输入监控</strong>");
 		expect(markup).toContain("已经请求过一次");
 		expect(markup).toContain("打开屏幕录制设置");
 		expect((markup.match(/<button/g) ?? []).length).toBe(1);
@@ -287,6 +290,7 @@ describe("monitoring status UI", () => {
 			permissions: monitoringSnapshot().permissions.map((permission) => ({
 				...permission,
 				state:
+					permission.id === "inputMonitoring" ||
 					permission.id === "browserAutomation"
 						? ("denied" as const)
 						: ("granted" as const),
@@ -323,8 +327,12 @@ describe("monitoring status UI", () => {
 			<MonitoringPermissionsControl controller={controller} />,
 		);
 		expect(monitoringSetupStatus(ready).phase).toBe("ready");
+		expect(monitoringSetupStatus(ready).permissions.map(({ id }) => id)).toEqual([
+			"accessibility",
+			"screenRecording",
+		]);
 		expect(markup).toContain("本机监测已设置");
-		expect(markup).toContain("3/3 项完成");
+		expect(markup).toContain("2/2 项完成");
 		expect(markup).not.toContain("<ol");
 		expect(markup).not.toContain("本地内容加密</strong>");
 		expect(markup).not.toContain("<button");

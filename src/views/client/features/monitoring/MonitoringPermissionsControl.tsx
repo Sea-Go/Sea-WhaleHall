@@ -32,7 +32,7 @@ const permissionCopy: Record<
 	},
 	inputMonitoring: {
 		label: "输入监控",
-		description: "只统计键鼠活动量，不读取键值、拼音或候选词。",
+		description: "兼容字段，不属于必需设置，也不会单独请求授权。",
 	},
 };
 
@@ -121,12 +121,16 @@ export function MonitoringPermissionsControl({
 					</strong>
 					<p>
 						{ready
-							? "三项必需权限和本地加密均已就绪。日常运行只会静默读取状态，不会再次弹出授权。"
+							? "两项必需权限和本地加密均已就绪。日常运行只会静默读取状态，不会再次弹出授权。"
 							: snapshot.permissionSetupAttempted
 								? "这台安装已执行过一次系统授权请求，WhaleHall 不会再次弹出。未完成的项目请直接在系统设置中开启。"
 								: snapshot.permissionSetupAvailable
 									? "WhaleHall 只有这一个显式设置入口。完成首次请求后，后续只会静默检查状态。"
 									: "当前安装身份不能安全执行系统授权请求。请直接在系统设置中开启权限；WhaleHall 不会后台弹窗。"}
+					</p>
+					<p>
+						键鼠活动量由辅助功能授权覆盖，不再单独请求输入监控权限；WhaleHall
+						仍不会读取键值、拼音或候选词。
 					</p>
 				</div>
 				<div

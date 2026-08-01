@@ -26,7 +26,7 @@ function snapshot(
 		permissions: [
 			{ id: "accessibility", state: "granted", required: true, detail: null },
 			{ id: "screenRecording", state: "granted", required: true, detail: null },
-			{ id: "inputMonitoring", state: "granted", required: true, detail: null },
+			{ id: "inputMonitoring", state: "granted", required: false, detail: null },
 			{
 				id: "browserAutomation",
 				state: "unavailable",
@@ -112,7 +112,7 @@ describe("one-time content-vault setup UI", () => {
 	test("shows a compact button-free state once encrypted storage is ready", async () => {
 		const markup = await renderVault(false, "available");
 		expect(markup).toContain("本机监测已设置");
-		expect(markup).toContain("3/3 项完成");
+		expect(markup).toContain("2/2 项完成");
 		expect(markup).not.toContain("<ol");
 		expect(markup).not.toContain("<button");
 	});

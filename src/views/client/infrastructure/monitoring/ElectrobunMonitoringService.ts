@@ -181,7 +181,7 @@ export function toMonitoringSnapshot(
 			permission(
 				"inputMonitoring",
 				status.permissions.inputMonitoring,
-				true,
+				false,
 			),
 			permission(
 				"browserAutomation",
@@ -236,7 +236,7 @@ function unavailableSnapshot(): MonitoringSnapshot {
 		permissions: [
 			permission("accessibility", "unsupported", true),
 			permission("screenRecording", "unsupported", true),
-			permission("inputMonitoring", "unsupported", true),
+			permission("inputMonitoring", "unsupported", false),
 			permission("browserAutomation", "unsupported", false),
 		],
 		contentVault: {

@@ -26,8 +26,6 @@
 	<string>WhaleHall 需要读取当前前台应用中明确授权的可见控件和文本，以在本机整理活动事件。</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>WhaleHall 需要读取当前前台浏览器标签页的标题和网址；不会读取后台标签页、Cookie 或历史记录。</string>
-	<key>NSInputMonitoringUsageDescription</key>
-	<string>WhaleHall 只统计键盘和鼠标活动量，用于确定反思时机；不会读取按键内容或保存鼠标坐标。</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>WhaleHall 仅在内存中识别当前前台窗口的可见文本，识别完成后立即销毁截图。</string>
 </dict>

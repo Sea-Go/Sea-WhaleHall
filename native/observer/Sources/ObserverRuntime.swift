@@ -1000,10 +1000,11 @@ final class ObserverRuntime: @unchecked Sendable {
     }
 
     private func passivePermissionSnapshot() -> PermissionSnapshot {
-        PermissionSnapshot(
-            accessibility: AXIsProcessTrusted(),
+        let accessibility = AXIsProcessTrusted()
+        return PermissionSnapshot(
+            accessibility: accessibility,
             screenRecording: CGPreflightScreenCaptureAccess(),
-            inputMonitoring: CGPreflightListenEventAccess(),
+            inputMonitoring: accessibility || CGPreflightListenEventAccess(),
             automation: "unavailable"
         )
     }
@@ -1015,7 +1016,6 @@ final class ObserverRuntime: @unchecked Sendable {
             ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         )
         _ = CGRequestScreenCaptureAccess()
-        _ = CGRequestListenEventAccess()
         return passivePermissionSnapshot()
     }
 

@@ -9,14 +9,14 @@ export type MonitoringPermissionId =
 	(typeof MONITORING_PERMISSION_IDS)[number];
 
 /**
- * The full local-content setup. Browser Automation is deliberately excluded:
- * it is an optional enrichment and must never block monitoring readiness or
- * trigger one consent dialog per browser.
+ * The full local-content setup. Input Monitoring remains in the status
+ * protocol for compatibility, but keyboard and pointer activity is covered by
+ * Accessibility and must not trigger a separate consent request. Browser
+ * Automation is optional enrichment and must not block readiness either.
  */
 export const MONITORING_SETUP_PERMISSION_IDS = [
 	"accessibility",
 	"screenRecording",
-	"inputMonitoring",
 ] as const satisfies readonly MonitoringPermissionId[];
 
 export type MonitoringPermissionState =

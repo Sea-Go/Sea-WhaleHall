@@ -2,6 +2,10 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+func hasInputActivityAccess() -> Bool {
+    AXIsProcessTrusted() || CGPreflightListenEventAccess()
+}
+
 struct InputActivityBucket {
     let startedAtMs: Int64
     let endedAtMs: Int64
@@ -104,7 +108,7 @@ final class InputActivityMonitor: @unchecked Sendable {
         guard stopped else {
             return eventTap != nil
         }
-        guard CGPreflightListenEventAccess() else {
+        guard hasInputActivityAccess() else {
             onGap("input_monitoring_unavailable")
             return false
         }
@@ -151,7 +155,7 @@ final class InputActivityMonitor: @unchecked Sendable {
             stateLock.lock()
             let tap = eventTap
             stateLock.unlock()
-            if let tap, CGPreflightListenEventAccess() {
+            if let tap, hasInputActivityAccess() {
                 CGEvent.tapEnable(tap: tap, enable: true)
             } else {
                 accumulator.setEnabled(false)
