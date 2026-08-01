@@ -124,8 +124,8 @@ final class BrowserMetadataReader {
     /// Checks whether a browser Automation grant already exists.
     ///
     /// This API deliberately has no prompt argument. WhaleHall's single
-    /// monitoring permission action only requests Accessibility, Screen
-    /// Recording, and Input Monitoring. Browser Apple Events are an optional
+    /// monitoring permission action only requests Accessibility and Screen
+    /// Recording. Browser Apple Events are an optional
     /// enrichment when the user has granted them independently; the observer
     /// must never produce one consent dialog per running browser.
     nonisolated static func preflightAutomationAuthorization(
