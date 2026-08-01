@@ -14,6 +14,7 @@ import {
 	readMacCodeSigningIdentities,
 	resolveMacSigningPlan,
 } from "./macos-signing-identity";
+import { validateObserverEntitlements } from "./macos-build-security";
 
 type TargetOS = "macos" | "linux" | "win";
 type TargetArch = "arm64" | "x64";
@@ -56,6 +57,20 @@ function run(command: string[]): void {
 	if (result.exitCode !== 0) {
 		throw new Error(`Command failed (${result.exitCode}): ${command.join(" ")}`);
 	}
+}
+
+function capture(command: string[]): string {
+	const result = Bun.spawnSync(command, {
+		cwd: projectRoot,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (result.exitCode !== 0) {
+		throw new Error(`Command failed (${result.exitCode}): ${command.join(" ")}`);
+	}
+	return `${new TextDecoder().decode(result.stdout)}${new TextDecoder().decode(
+		result.stderr,
+	)}`;
 }
 
 export function buildObserverApp(arch: TargetArch): string {
@@ -141,6 +156,14 @@ export function buildObserverApp(arch: TargetArch): string {
 	signingCommand.push(bundle);
 	run(signingCommand);
 	run(["codesign", "--verify", "--strict", bundle]);
+	const signedEntitlements = capture([
+		"codesign",
+		"--display",
+		"--entitlements",
+		":-",
+		bundle,
+	]);
+	validateObserverEntitlements(signedEntitlements);
 	if (signing.kind === "ad-hoc") {
 		console.warn(
 			"[native] WhaleHall Observer is ad-hoc signed. This metadata-only "

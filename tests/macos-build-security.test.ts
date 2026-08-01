@@ -14,7 +14,9 @@ import {
 	MACOS_USAGE_DESCRIPTIONS,
 	normalizeDesignatedRequirement,
 	prepareMacWrapper,
+	validateLocalWrapperArchiveEntries,
 	validateLocalDesignatedRequirementContinuity,
+	validateObserverEntitlements,
 	verifyMacWrapper,
 } from "../scripts/macos-build-security";
 import {
@@ -165,6 +167,32 @@ describe("local designated requirement continuity", () => {
 		).toBe(normalizeDesignatedRequirement(requirement));
 	});
 
+	test("ignores codesign diagnostics regardless of stdout/stderr order", () => {
+		expect(
+			validateLocalDesignatedRequirementContinuity({
+				stagedOutput:
+					`${requirement}\nExecutable=/tmp/staged/whalehall-local\n`,
+				packagedOutput:
+					`Executable=/tmp/package/whalehall-local\n${requirement}\n`,
+				expectedIdentifier: "com.seago.whalehall.local",
+			}),
+		).toBe(normalizeDesignatedRequirement(requirement));
+	});
+
+	test("rejects diagnostic text that only embeds a requirement marker", () => {
+		expect(() =>
+			normalizeDesignatedRequirement(
+				`Executable=/tmp/${requirement}/whalehall-local\n`,
+			),
+		).toThrow("did not return a designated requirement");
+	});
+
+	test("rejects ambiguous multiple designated requirements", () => {
+		expect(() =>
+			normalizeDesignatedRequirement(`${requirement}\n${requirement}\n`),
+		).toThrow("did not return a designated requirement");
+	});
+
 	test("rejects ad-hoc cdhash requirements", () => {
 		expect(() =>
 			validateLocalDesignatedRequirementContinuity({
@@ -200,6 +228,117 @@ describe("local designated requirement continuity", () => {
 				expectedIdentifier: "com.seago.whalehall.local",
 			}),
 		).toThrow("differs from the staged");
+	});
+});
+
+describe("local wrapper archive entry validation", () => {
+	const bundleName = "WhaleHall-canary.app";
+	const infoPlist = `${bundleName}/Contents/Info.plist`;
+
+	test("accepts a safe application bundle listing", () => {
+		const entries = [
+			`${bundleName}/`,
+			`${bundleName}/Contents/`,
+			infoPlist,
+			`${bundleName}/Contents/MacOS/launcher`,
+		];
+
+		expect(
+			validateLocalWrapperArchiveEntries(
+				`\n${entries.join("\r\n")}\n`,
+				bundleName,
+			),
+		).toEqual(entries);
+	});
+
+	test("rejects absolute archive paths", () => {
+		expect(() =>
+			validateLocalWrapperArchiveEntries(
+				`/${infoPlist}\n${infoPlist}`,
+				bundleName,
+			),
+		).toThrow("unsafe path");
+	});
+
+	test("rejects parent-directory traversal", () => {
+		expect(() =>
+			validateLocalWrapperArchiveEntries(
+				`${bundleName}/Contents/../outside\n${infoPlist}`,
+				bundleName,
+			),
+		).toThrow("unsafe path");
+	});
+
+	test("does not normalize whitespace in archive paths", () => {
+		expect(() =>
+			validateLocalWrapperArchiveEntries(
+				` ${infoPlist}\n${infoPlist}`,
+				bundleName,
+			),
+		).toThrow("unsafe path");
+	});
+
+	test("rejects entries under a different root bundle", () => {
+		expect(() =>
+			validateLocalWrapperArchiveEntries(
+				`Other.app/Contents/Info.plist\n${infoPlist}`,
+				bundleName,
+			),
+		).toThrow("unsafe path");
+	});
+
+	test("rejects an archive without the application Info.plist", () => {
+		expect(() =>
+			validateLocalWrapperArchiveEntries(
+				`${bundleName}/Contents/MacOS/launcher`,
+				bundleName,
+			),
+		).toThrow("missing its Info.plist");
+	});
+
+	test.each([
+		"WhaleHall-canary",
+		"../WhaleHall-canary.app",
+		"nested/WhaleHall-canary.app",
+		"WhaleHall\\canary.app",
+		" WhaleHall-canary.app",
+		"WhaleHall-canary.app ",
+		"WhaleHall\0-canary.app",
+	])("rejects unsafe expected bundle name %s", (unsafeBundleName) => {
+		expect(() =>
+			validateLocalWrapperArchiveEntries(infoPlist, unsafeBundleName),
+		).toThrow("safe local Canary bundle name");
+	});
+
+	test("rejects an empty archive listing", () => {
+		expect(() =>
+			validateLocalWrapperArchiveEntries("\n\r\n", bundleName),
+		).toThrow("archive is empty");
+	});
+});
+
+describe("Observer entitlement validation", () => {
+	const automation =
+		"<key>com.apple.security.automation.apple-events</key><true/>";
+
+	test("accepts the non-sandboxed automation entitlement", () => {
+		expect(validateObserverEntitlements(`<dict>${automation}</dict>`)).toBeUndefined();
+	});
+
+	test("rejects App Sandbox and missing automation access", () => {
+		expect(() =>
+			validateObserverEntitlements(
+				`<dict>${automation}<key>com.apple.security.app-sandbox</key><true/></dict>`,
+			),
+		).toThrow("cannot use App Sandbox");
+		for (const invalid of [
+			"<dict></dict>",
+			"<dict><key>com.apple.security.automation.apple-events</key><false/></dict>",
+		]) {
+			expect(() => validateObserverEntitlements(invalid)).toThrow(
+				"missing its Apple Events automation entitlement",
+			);
+		}
 	});
 });
 
@@ -241,7 +380,22 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 				+ `<key>CFBundlePackageType</key><string>APPL</string>\n`
 				+ `</dict></plist>\n`,
 		);
-		signAdHoc(observerPath, "com.seago.whalehall.observer");
+		const observerEntitlements = join(
+			buildDirectory,
+			"observer.entitlements.plist",
+		);
+		writeFileSync(
+			observerEntitlements,
+			`<?xml version="1.0" encoding="UTF-8"?>\n`
+				+ `<plist version="1.0"><dict>\n`
+				+ `<key>com.apple.security.automation.apple-events</key><true/>\n`
+				+ `</dict></plist>\n`,
+		);
+		signAdHoc(
+			observerPath,
+			"com.seago.whalehall.observer",
+			observerEntitlements,
+		);
 		writeFileSync(
 			join(contents, "Info.plist"),
 			`<?xml version="1.0" encoding="UTF-8"?>\n`
@@ -327,18 +481,24 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 	});
 });
 
-function signAdHoc(path: string, identifier: string): void {
+function signAdHoc(
+	path: string,
+	identifier: string,
+	entitlements?: string,
+): void {
+	const command = [
+		"/usr/bin/codesign",
+		"--force",
+		"--sign",
+		"-",
+		"--identifier",
+		identifier,
+		"--timestamp=none",
+	];
+	if (entitlements) command.push("--entitlements", entitlements);
+	command.push(path);
 	const result = Bun.spawnSync(
-		[
-			"/usr/bin/codesign",
-			"--force",
-			"--sign",
-			"-",
-			"--identifier",
-			identifier,
-			"--timestamp=none",
-			path,
-		],
+		command,
 		{ stdout: "pipe", stderr: "pipe" },
 	);
 	if (result.exitCode !== 0) {

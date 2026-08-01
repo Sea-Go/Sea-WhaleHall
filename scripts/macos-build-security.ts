@@ -1,9 +1,12 @@
 import {
+	copyFileSync,
 	existsSync,
+	lstatSync,
 	mkdtempSync,
 	mkdirSync,
 	readdirSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -30,8 +33,6 @@ export const MACOS_USAGE_DESCRIPTIONS = {
 		"WhaleHall 需要读取当前前台应用中明确授权的可见控件和文本，以在本机整理活动事件。",
 	NSAppleEventsUsageDescription:
 		"WhaleHall 需要读取当前前台浏览器标签页的标题和网址；不会读取后台标签页、Cookie 或历史记录。",
-	NSInputMonitoringUsageDescription:
-		"WhaleHall 只统计键盘和鼠标活动量，用于确定反思时机；不会读取按键内容或保存鼠标坐标。",
 	NSScreenCaptureUsageDescription:
 		"WhaleHall 仅在内存中识别当前前台窗口的可见文本，识别完成后立即销毁截图。",
 } as const;
@@ -223,6 +224,14 @@ export function verifyMacWrapper({
 				MACOS_OBSERVER_IDENTIFIER,
 				outerTeamIdentifier,
 			);
+			const observerEntitlements = capture([
+				"/usr/bin/codesign",
+				"--display",
+				"--entitlements",
+				":-",
+				observerPath,
+			]);
+			validateObserverEntitlements(observerEntitlements);
 			if (localSigningStagedNativeDirectory) {
 				verifyLocalSigningContinuity({
 					stagedPath: join(
@@ -270,6 +279,25 @@ export function prepareMacWrapperFromEnvironment(
 		buildEnvironment,
 		identities: readMacCodeSigningIdentities(),
 	});
+	if (signing.kind === "local") {
+		if (!signing.identity) {
+			throw new Error("The local signing identity is unavailable.");
+		}
+		const architecture =
+			optionalEnvironment(environment, "ELECTROBUN_ARCH") ??
+			(process.arch === "arm64" ? "arm64" : "x64");
+		if (architecture !== "arm64" && architecture !== "x64") {
+			throw new Error(`Unsupported macOS architecture: ${architecture}.`);
+		}
+		materializeLocalSignedWrapper({
+			bundlePath,
+			buildDirectory,
+			appIdentifier,
+			localIdentity: signing.identity,
+			architecture,
+		});
+		return;
+	}
 	prepareMacWrapper({
 		bundlePath,
 		buildDirectory,
@@ -278,8 +306,255 @@ export function prepareMacWrapperFromEnvironment(
 			buildEnvironment !== "dev" && signing.kind === "developer-id",
 		developerIdentity:
 			signing.kind === "developer-id" ? signing.identity : undefined,
-		localIdentity: signing.kind === "local" ? signing.identity : undefined,
 	});
+}
+
+/**
+ * Electrobun signs its archived inner app only when a Developer ID is
+ * configured. A local certificate therefore cannot safely ship the default
+ * self-extracting wrapper: first launch replaces that signed wrapper with an
+ * unsigned inner app and changes the TCC identity. For local Canary builds we
+ * expand the locally-produced archive during postWrap, sign that immutable
+ * flat app, and atomically install it in place of the extractor.
+ */
+function materializeLocalSignedWrapper({
+	bundlePath,
+	buildDirectory,
+	appIdentifier,
+	localIdentity,
+	architecture,
+}: {
+	bundlePath: string;
+	buildDirectory: string;
+	appIdentifier: string;
+	localIdentity: string;
+	architecture: "arm64" | "x64";
+}): void {
+	assertSafeBundlePath(bundlePath, buildDirectory);
+	const resourcesDirectory = join(bundlePath, "Contents", "Resources");
+	const archives = readdirSync(resourcesDirectory)
+		.filter((name) => name.endsWith(".tar.zst"))
+		.map((name) => join(resourcesDirectory, name));
+	if (archives.length !== 1 || archives[0] === undefined) {
+		throw new Error(
+			"The local Canary wrapper must contain exactly one application archive.",
+		);
+	}
+	const archive = archives[0];
+	const archiveStats = lstatSync(archive);
+	if (!archiveStats.isFile() || archiveStats.isSymbolicLink()) {
+		throw new Error("The local Canary application archive is not a regular file.");
+	}
+
+	const zigZstd = join(
+		projectRoot,
+		"node_modules",
+		"electrobun",
+		`dist-macos-${architecture}`,
+		"zig-zstd",
+	);
+	if (!existsSync(zigZstd)) {
+		throw new Error(`Missing Electrobun zstd helper: ${zigZstd}`);
+	}
+
+	const stagingDirectory = mkdtempSync(
+		join(buildDirectory, ".whalehall-local-wrapper-"),
+	);
+	const tarPath = join(stagingDirectory, "payload.tar");
+	const payloadBundle = join(stagingDirectory, basename(bundlePath));
+	const backupBundle = join(stagingDirectory, "self-extractor-backup.app");
+	const signedTarPath = join(stagingDirectory, "signed-payload.tar");
+	const signedArchivePath = join(stagingDirectory, "signed-payload.tar.zst");
+	const updateArchives = readdirSync(buildDirectory)
+		.filter((name) => name.endsWith(".app.tar.zst"))
+		.map((name) => join(buildDirectory, name));
+	if (updateArchives.length !== 1 || updateArchives[0] === undefined) {
+		rmSync(stagingDirectory, { force: true, recursive: true });
+		throw new Error(
+			"The local Canary build must contain exactly one full update archive.",
+		);
+	}
+	if (readdirSync(buildDirectory).some((name) => name.endsWith(".patch"))) {
+		rmSync(stagingDirectory, { force: true, recursive: true });
+		throw new Error(
+			"Local-certificate Canary builds cannot publish delta patches; use the signed full archive.",
+		);
+	}
+	const updateArchive = updateArchives[0];
+	const updateArchiveReplacement = join(
+		buildDirectory,
+		`.${basename(updateArchive)}.whalehall-signed.tmp`,
+	);
+	let backupInstalled = false;
+	let payloadInstalled = false;
+	try {
+		run([zigZstd, "decompress", "-i", archive, "-o", tarPath]);
+		validateLocalWrapperArchiveEntries(
+			capture(["/usr/bin/tar", "-tf", tarPath]),
+			basename(bundlePath),
+		);
+		run([
+			"/usr/bin/tar",
+			"-xf",
+			tarPath,
+			"-C",
+			stagingDirectory,
+		]);
+		assertSafeBundlePath(payloadBundle, stagingDirectory);
+		assertArchiveTreeContainsNoLinks(payloadBundle);
+		for (const requiredPath of [
+			join(
+				payloadBundle,
+				"Contents",
+				"Resources",
+				"app",
+				"native",
+				"whalehall-local",
+			),
+			join(
+				payloadBundle,
+				"Contents",
+				"Resources",
+				"app",
+				"native",
+				"WhaleHall Observer.app",
+			),
+		]) {
+			if (!existsSync(requiredPath)) {
+				throw new Error(
+					"The archived local Canary is missing a native monitoring component.",
+				);
+			}
+		}
+		prepareMacWrapper({
+			bundlePath: payloadBundle,
+			buildDirectory: stagingDirectory,
+			appIdentifier,
+			electrobunWillSign: false,
+			localIdentity,
+		});
+		verifyMacWrapper({
+			bundlePath: payloadBundle,
+			appIdentifier,
+			requireTeamIdentifier: false,
+			localSigningStagedNativeDirectory: join(
+				projectRoot,
+				`.native/macos-${architecture}`,
+			),
+		});
+		run([
+			"/usr/bin/env",
+			"COPYFILE_DISABLE=1",
+			"/usr/bin/tar",
+			"-cf",
+			signedTarPath,
+			"-C",
+			stagingDirectory,
+			basename(payloadBundle),
+		]);
+		run([
+			zigZstd,
+			"compress",
+			"-i",
+			signedTarPath,
+			"-o",
+			signedArchivePath,
+			"--threads",
+			"max",
+		]);
+		copyFileSync(signedArchivePath, updateArchiveReplacement);
+		renameSync(updateArchiveReplacement, updateArchive);
+
+		renameSync(bundlePath, backupBundle);
+		backupInstalled = true;
+		renameSync(payloadBundle, bundlePath);
+		payloadInstalled = true;
+		run(["/usr/bin/codesign", "--verify", "--deep", "--strict", bundlePath]);
+	} catch (error) {
+		if (backupInstalled) {
+			if (payloadInstalled && existsSync(bundlePath)) {
+				rmSync(bundlePath, { force: true, recursive: true });
+			}
+			if (existsSync(backupBundle)) renameSync(backupBundle, bundlePath);
+		}
+		throw error;
+	} finally {
+		if (existsSync(updateArchiveReplacement)) {
+			rmSync(updateArchiveReplacement, { force: true });
+		}
+		rmSync(stagingDirectory, { force: true, recursive: true });
+	}
+}
+
+export function validateLocalWrapperArchiveEntries(
+	listing: string,
+	expectedBundleName: string,
+): string[] {
+	if (
+		!expectedBundleName.endsWith(".app") ||
+		expectedBundleName.trim() !== expectedBundleName ||
+		expectedBundleName.includes("/") ||
+		expectedBundleName.includes("\\") ||
+		expectedBundleName.includes("\0")
+	) {
+		throw new Error("A safe local Canary bundle name is required.");
+	}
+	const entries = listing
+		.split(/\r?\n/u)
+		.filter((entry) => entry.length > 0);
+	if (entries.length === 0) {
+		throw new Error("The local Canary application archive is empty.");
+	}
+	for (const entry of entries) {
+		const withoutTrailingSlash = entry.replace(/\/+$/u, "");
+		const components = withoutTrailingSlash.split("/");
+		if (
+			entry.includes("\0") ||
+			entry.startsWith("/") ||
+			components[0] !== expectedBundleName ||
+			components.some(
+				(component) => component === "" || component === "." || component === "..",
+			)
+		) {
+			throw new Error(
+				"The local Canary application archive contains an unsafe path.",
+			);
+		}
+	}
+	if (
+		!entries.some(
+			(entry) =>
+				entry === `${expectedBundleName}/Contents/Info.plist`,
+		)
+	) {
+		throw new Error(
+			"The local Canary application archive is missing its Info.plist.",
+		);
+	}
+	return entries;
+}
+
+function assertArchiveTreeContainsNoLinks(root: string): void {
+	const resolvedRoot = realpathSync(root);
+	for (const entry of readdirSync(root, { recursive: true })) {
+		const path = join(root, entry.toString());
+		const stats = lstatSync(path);
+		if (
+			stats.isSymbolicLink() ||
+			(!stats.isDirectory() && !stats.isFile()) ||
+			(stats.isFile() && stats.nlink !== 1)
+		) {
+			throw new Error(
+				"The local Canary application archive contains a link entry.",
+			);
+		}
+		const resolved = realpathSync(path);
+		if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}/`)) {
+			throw new Error(
+				"The local Canary application archive resolves outside its bundle.",
+			);
+		}
+	}
 }
 
 export function verifyMacWrapperFromEnvironment(
@@ -307,6 +582,9 @@ export function verifyMacWrapperFromEnvironment(
 	const architecture =
 		optionalEnvironment(environment, "ELECTROBUN_ARCH") ??
 		(process.arch === "arm64" ? "arm64" : "x64");
+	if (architecture !== "arm64" && architecture !== "x64") {
+		throw new Error(`Unsupported macOS architecture: ${architecture}.`);
+	}
 	verifyMacWrapper({
 		bundlePath: join(buildDirectory, `${appName}.app`),
 		appIdentifier,
@@ -318,6 +596,87 @@ export function verifyMacWrapperFromEnvironment(
 				? join(projectRoot, `.native/macos-${architecture}`)
 				: undefined,
 	});
+	if (signing.kind === "local") {
+		verifyLocalUpdateArchive({
+			artifactDirectory: requiredEnvironment(
+				environment,
+				"ELECTROBUN_ARTIFACT_DIR",
+			),
+			appName,
+			appIdentifier,
+			architecture,
+		});
+	}
+}
+
+function verifyLocalUpdateArchive({
+	artifactDirectory,
+	appName,
+	appIdentifier,
+	architecture,
+}: {
+	artifactDirectory: string;
+	appName: string;
+	appIdentifier: string;
+	architecture: "arm64" | "x64";
+}): void {
+	const artifactEntries = readdirSync(artifactDirectory);
+	const archives = artifactEntries
+		.filter((name) => name.endsWith(".app.tar.zst"))
+		.map((name) => join(artifactDirectory, name));
+	if (archives.length !== 1 || archives[0] === undefined) {
+		throw new Error(
+			"The local Canary artifacts must contain exactly one full update archive.",
+		);
+	}
+	if (artifactEntries.some((name) => name.endsWith(".patch"))) {
+		throw new Error(
+			"Local-certificate Canary artifacts cannot contain delta patches.",
+		);
+	}
+	const archive = archives[0];
+	const archiveStats = lstatSync(archive);
+	if (!archiveStats.isFile() || archiveStats.isSymbolicLink()) {
+		throw new Error("The local Canary update archive is not a regular file.");
+	}
+
+	const zigZstd = join(
+		projectRoot,
+		"node_modules",
+		"electrobun",
+		`dist-macos-${architecture}`,
+		"zig-zstd",
+	);
+	if (!existsSync(zigZstd)) {
+		throw new Error(`Missing Electrobun zstd helper: ${zigZstd}`);
+	}
+	const stagingDirectory = mkdtempSync(
+		join(artifactDirectory, ".whalehall-update-verify-"),
+	);
+	const tarPath = join(stagingDirectory, "payload.tar");
+	const expectedBundleName = `${appName}.app`;
+	const payloadBundle = join(stagingDirectory, expectedBundleName);
+	try {
+		run([zigZstd, "decompress", "-i", archive, "-o", tarPath]);
+		validateLocalWrapperArchiveEntries(
+			capture(["/usr/bin/tar", "-tf", tarPath]),
+			expectedBundleName,
+		);
+		run(["/usr/bin/tar", "-xf", tarPath, "-C", stagingDirectory]);
+		assertSafeBundlePath(payloadBundle, stagingDirectory);
+		assertArchiveTreeContainsNoLinks(payloadBundle);
+		verifyMacWrapper({
+			bundlePath: payloadBundle,
+			appIdentifier,
+			requireTeamIdentifier: false,
+			localSigningStagedNativeDirectory: join(
+				projectRoot,
+				`.native/macos-${architecture}`,
+			),
+		});
+	} finally {
+		rmSync(stagingDirectory, { force: true, recursive: true });
+	}
 }
 
 export function validateLocalDesignatedRequirementContinuity({
@@ -368,14 +727,38 @@ export function validateLocalDesignatedRequirementContinuity({
 	return packaged;
 }
 
+export function validateObserverEntitlements(entitlements: string): void {
+	if (entitlements.includes("com.apple.security.app-sandbox")) {
+		throw new Error(
+			"Signed Observer cannot use App Sandbox because it requires macOS Accessibility APIs.",
+		);
+	}
+	if (
+		!/<key>com\.apple\.security\.automation\.apple-events<\/key>\s*<true\s*\/>/u.test(
+			entitlements,
+		)
+	) {
+		throw new Error(
+			"Signed Observer is missing its Apple Events automation entitlement.",
+		);
+	}
+}
+
 export function normalizeDesignatedRequirement(output: string): string {
 	const marker = "designated =>";
-	const markerIndex = output.indexOf(marker);
-	if (markerIndex < 0) {
+	const requirementLines = output
+		.split(/\r?\n/u)
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith(marker));
+	if (requirementLines.length !== 1) {
 		throw new Error("codesign did not return a designated requirement.");
 	}
-	const requirement = output
-		.slice(markerIndex + marker.length)
+	const requirementLine = requirementLines[0];
+	if (requirementLine === undefined) {
+		throw new Error("codesign did not return a designated requirement.");
+	}
+	const requirement = requirementLine
+		.slice(marker.length)
 		.trim()
 		.replace(/\s+/gu, " ");
 	if (!requirement) {
@@ -541,10 +924,18 @@ function assertSafeBundlePath(
 	}
 	const existingBuild = realpathSync(resolvedBuild);
 	const existingBundleParent = realpathSync(dirname(resolvedBundle));
+	const bundleStats = lstatSync(resolvedBundle);
 	if (
 		existingBundleParent !== existingBuild &&
 		!existingBundleParent.startsWith(`${existingBuild}/`)
 	) {
+		throw new Error("Electrobun wrapper resolves outside its build directory.");
+	}
+	if (!bundleStats.isDirectory() || bundleStats.isSymbolicLink()) {
+		throw new Error("Electrobun wrapper must be a regular app directory.");
+	}
+	const existingBundle = realpathSync(resolvedBundle);
+	if (!existingBundle.startsWith(`${existingBuild}/`)) {
 		throw new Error("Electrobun wrapper resolves outside its build directory.");
 	}
 }
