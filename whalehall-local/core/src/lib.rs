@@ -4,6 +4,8 @@ pub mod legacy_migration;
 pub mod observations;
 pub mod sensors;
 mod tools;
+#[cfg(target_os = "macos")]
+mod vault_broker;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -45,8 +45,8 @@ const MAX_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_VAULT_RECORD_BYTES: usize = 512 * 1024;
 const MAX_VAULT_BATCH_BYTES: usize = 768 * 1024;
 const MAX_VAULT_BATCH_RECORDS: usize = 64;
-const KEY_VERSION: &str = "keychain-v1";
-const LEGACY_DEV_KEY_VERSION: &str = "keychain-dev-legacy-v1";
+pub(crate) const KEY_VERSION: &str = "keychain-v1";
+pub(crate) const LEGACY_DEV_KEY_VERSION: &str = "keychain-dev-legacy-v1";
 const FIVE_MINUTES_MS: i64 = 300_000;
 const DEVICE_ID_ENV: &str = "WHALEHALL_DEVICE_ID";
 const SESSION_ID_ENV: &str = "WHALEHALL_SESSION_ID";
@@ -96,13 +96,21 @@ impl ObservationKey {
         Self::from_stored_bytes(bytes, version, ObservationKeyStorageMode::Custom)
     }
 
-    fn from_stored_bytes(
+    pub(crate) fn from_stored_bytes(
         bytes: [u8; 32],
         version: impl Into<String>,
         storage_mode: ObservationKeyStorageMode,
     ) -> Self {
+        Self::from_zeroizing_bytes(Zeroizing::new(bytes), version, storage_mode)
+    }
+
+    pub(crate) fn from_zeroizing_bytes(
+        bytes: Zeroizing<[u8; 32]>,
+        version: impl Into<String>,
+        storage_mode: ObservationKeyStorageMode,
+    ) -> Self {
         Self {
-            bytes: Zeroizing::new(bytes),
+            bytes,
             version: version.into(),
             storage_mode,
         }
@@ -112,11 +120,11 @@ impl ObservationKey {
         &self.bytes
     }
 
-    fn version(&self) -> &str {
+    pub(crate) fn version(&self) -> &str {
         &self.version
     }
 
-    fn storage_mode(&self) -> ObservationKeyStorageMode {
+    pub(crate) fn storage_mode(&self) -> ObservationKeyStorageMode {
         self.storage_mode
     }
 }
@@ -213,8 +221,10 @@ impl ObservationKeyProvider for UnavailableObservationKeyProvider {
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Clone, Default)]
-pub struct MacKeychainObservationKeyProvider;
+#[derive(Clone)]
+struct MacKeychainObservationKeyProvider {
+    signing_identity: MacSigningIdentity,
+}
 
 #[cfg(target_os = "macos")]
 impl ObservationKeyProvider for MacKeychainObservationKeyProvider {
@@ -226,7 +236,7 @@ impl ObservationKeyProvider for MacKeychainObservationKeyProvider {
             .unwrap_or_else(|error| error.into_inner());
         let _interaction_guard =
             SecKeychain::disable_user_interaction().map_err(|_| ObservationKeyError::Storage)?;
-        load_or_create_mac_key(current_mac_signing_identity())
+        load_or_create_mac_key(self.signing_identity)
     }
 
     fn migrate_legacy_key_interactive(
@@ -240,14 +250,12 @@ impl ObservationKeyProvider for MacKeychainObservationKeyProvider {
         if !SecKeychain::user_interaction_allowed().map_err(|_| ObservationKeyError::Storage)? {
             return Err(ObservationKeyError::MigrationUnsupported);
         }
-        migrate_mac_legacy_key(current_mac_signing_identity())
+        migrate_mac_legacy_key(self.signing_identity)
     }
 }
 
 #[cfg(target_os = "macos")]
 const MAC_KEYCHAIN_SERVICE: &str = "com.seago.whalehall.observation-v2";
-#[cfg(target_os = "macos")]
-const MAC_LOCAL_KEYCHAIN_SERVICE: &str = "com.seago.whalehall.observation-v2.local-signed";
 #[cfg(target_os = "macos")]
 const MAC_LEGACY_DEV_KEYCHAIN_SERVICE: &str = "com.seago.whalehall.observation-v2.dev-legacy";
 #[cfg(target_os = "macos")]
@@ -270,7 +278,6 @@ enum MacSigningIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MacKeychainTarget {
     DataProtection,
-    LocalLogin,
 }
 
 #[cfg(target_os = "macos")]
@@ -278,15 +285,15 @@ impl MacKeychainTarget {
     fn for_signing_identity(identity: MacSigningIdentity) -> Option<Self> {
         match identity {
             MacSigningIdentity::TeamSigned => Some(Self::DataProtection),
-            MacSigningIdentity::StableLocal => Some(Self::LocalLogin),
-            MacSigningIdentity::AdHoc | MacSigningIdentity::Unsupported => None,
+            MacSigningIdentity::StableLocal
+            | MacSigningIdentity::AdHoc
+            | MacSigningIdentity::Unsupported => None,
         }
     }
 
     fn storage_mode(self) -> ObservationKeyStorageMode {
         match self {
             Self::DataProtection => ObservationKeyStorageMode::DataProtectionKeychain,
-            Self::LocalLogin => ObservationKeyStorageMode::LocalLoginKeychain,
         }
     }
 }
@@ -353,14 +360,7 @@ fn load_or_create_mac_key(
     signing_identity: MacSigningIdentity,
 ) -> Result<ObservationKey, ObservationKeyError> {
     let Some(target) = MacKeychainTarget::for_signing_identity(signing_identity) else {
-        return match read_legacy_mac_key() {
-            LegacyMacKey::Found(_) | LegacyMacKey::Inaccessible => {
-                Err(ObservationKeyError::MigrationRequired {
-                    interactive_available: false,
-                })
-            }
-            LegacyMacKey::Missing => Err(ObservationKeyError::Unavailable),
-        };
+        return Err(ObservationKeyError::Unavailable);
     };
 
     if let Some(bytes) = read_mac_target_key(target, MAC_MIGRATED_LEGACY_ACCOUNT)? {
@@ -444,7 +444,6 @@ fn read_mac_target_key(
     target: MacKeychainTarget,
     account: &str,
 ) -> Result<Option<Zeroizing<Vec<u8>>>, ObservationKeyError> {
-    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
     use security_framework::passwords::{PasswordOptions, generic_password};
 
     match target {
@@ -454,15 +453,6 @@ fn read_mac_target_key(
             options.use_protected_keychain();
             match generic_password(options) {
                 Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
-                Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
-                Err(_) => Err(ObservationKeyError::Unavailable),
-            }
-        }
-        MacKeychainTarget::LocalLogin => {
-            let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
-                .map_err(|_| ObservationKeyError::Unavailable)?;
-            match keychain.find_generic_password(MAC_LOCAL_KEYCHAIN_SERVICE, account) {
-                Ok((bytes, _)) => Ok(Some(Zeroizing::new(bytes.as_ref().to_vec()))),
                 Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
                 Err(_) => Err(ObservationKeyError::Unavailable),
             }
@@ -477,7 +467,6 @@ fn write_mac_target_key(
     bytes: &[u8],
 ) -> Result<(), ObservationKeyError> {
     use security_framework::access_control::{ProtectionMode, SecAccessControl};
-    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
     use security_framework::passwords::{PasswordOptions, set_generic_password_options};
 
     match target {
@@ -492,13 +481,6 @@ fn write_mac_target_key(
             options.use_protected_keychain();
             options.set_access_control(access);
             set_generic_password_options(bytes, options).map_err(|_| ObservationKeyError::Storage)
-        }
-        MacKeychainTarget::LocalLogin => {
-            let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
-                .map_err(|_| ObservationKeyError::Storage)?;
-            keychain
-                .add_generic_password(MAC_LOCAL_KEYCHAIN_SERVICE, account, bytes)
-                .map_err(|_| ObservationKeyError::Storage)
         }
     }
 }
@@ -532,13 +514,29 @@ fn verified_migrated_key(
     key_from_stored_slice(persisted, LEGACY_DEV_KEY_VERSION, storage_mode)
 }
 
-pub fn production_observation_key_provider() -> Arc<dyn ObservationKeyProvider> {
+fn production_observation_key_provider(database_path: &Path) -> Arc<dyn ObservationKeyProvider> {
     #[cfg(target_os = "macos")]
     {
-        Arc::new(MacKeychainObservationKeyProvider)
+        match current_mac_signing_identity() {
+            MacSigningIdentity::TeamSigned => Arc::new(MacKeychainObservationKeyProvider {
+                signing_identity: MacSigningIdentity::TeamSigned,
+            }),
+            MacSigningIdentity::StableLocal => {
+                match crate::vault_broker::VaultBrokerObservationKeyProvider::install_for_database(
+                    database_path,
+                ) {
+                    Ok(provider) => Arc::new(provider),
+                    Err(_) => Arc::new(UnavailableObservationKeyProvider),
+                }
+            }
+            MacSigningIdentity::AdHoc | MacSigningIdentity::Unsupported => {
+                Arc::new(UnavailableObservationKeyProvider)
+            }
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = database_path;
         Arc::new(UnavailableObservationKeyProvider)
     }
 }
@@ -664,8 +662,11 @@ struct StoredEncryptedValue {
 
 impl ObservationJournal {
     pub fn open(database_path: impl Into<PathBuf>) -> Result<Self, ObservationJournalError> {
-        let mut config =
-            ObservationJournalConfig::new(database_path, production_observation_key_provider());
+        let database_path = database_path.into();
+        let mut config = ObservationJournalConfig::new(
+            database_path.clone(),
+            production_observation_key_provider(&database_path),
+        );
         config.device_id = identity_from_environment(DEVICE_ID_ENV)?;
         config.session_id = identity_from_environment(SESSION_ID_ENV)?;
         Self::open_with_config(config)
@@ -4539,7 +4540,7 @@ mod macos_keychain_policy_tests {
     use super::{MacKeychainTarget, MacSigningIdentity, classify_mac_signing_details};
 
     #[test]
-    fn signing_identity_selects_only_stable_keychain_targets() {
+    fn only_team_signed_builds_select_a_direct_keychain_target() {
         assert_eq!(
             classify_mac_signing_details("Signature=adhoc\nTeamIdentifier=not set\n"),
             MacSigningIdentity::AdHoc
@@ -4566,7 +4567,7 @@ mod macos_keychain_policy_tests {
         );
         assert_eq!(
             MacKeychainTarget::for_signing_identity(MacSigningIdentity::StableLocal),
-            Some(MacKeychainTarget::LocalLogin)
+            None
         );
         assert_eq!(
             MacKeychainTarget::for_signing_identity(MacSigningIdentity::AdHoc),

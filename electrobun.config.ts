@@ -65,6 +65,8 @@ const nativeCopies: Record<string, string> = {
 if (target.os === "macos") {
 	nativeCopies[`.native/macos-${target.arch}/WhaleHall Observer.app`] =
 		"native/WhaleHall Observer.app";
+	nativeCopies[`.native/macos-${target.arch}/whalehall-vault-broker-v2`] =
+		"native/whalehall-vault-broker-v2";
 }
 
 export default {
@@ -91,6 +93,7 @@ export default {
 			"whalehall-local/core/src",
 			"whalehall-local/server/src",
 			"native/observer",
+			"native/vault-broker",
 			"scripts",
 		],
 		watchIgnore: ["dist/**", ".native/**", "whalehall-local/target/**"],

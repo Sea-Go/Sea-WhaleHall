@@ -4,12 +4,14 @@ import {
 	lstatSync,
 	mkdtempSync,
 	mkdirSync,
+	readFileSync,
 	readdirSync,
 	realpathSync,
 	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -39,6 +41,9 @@ export const MACOS_USAGE_DESCRIPTIONS = {
 
 const MACOS_LOCAL_SERVER_IDENTIFIER = "com.seago.whalehall.local";
 const MACOS_OBSERVER_IDENTIFIER = "com.seago.whalehall.observer";
+export const MACOS_VAULT_BROKER_IDENTIFIER =
+	"com.seago.whalehall.vault-broker.v2";
+export const MACOS_VAULT_BROKER_EXECUTABLE = "whalehall-vault-broker-v2";
 
 interface PrepareMacWrapperOptions {
 	bundlePath: string;
@@ -54,6 +59,7 @@ interface VerifyMacWrapperOptions {
 	appIdentifier: string;
 	requireTeamIdentifier: boolean;
 	localSigningStagedNativeDirectory?: string;
+	stagedVaultBrokerDirectory?: string;
 }
 
 export function prepareMacWrapper({
@@ -132,6 +138,7 @@ export function verifyMacWrapper({
 	appIdentifier,
 	requireTeamIdentifier,
 	localSigningStagedNativeDirectory,
+	stagedVaultBrokerDirectory,
 }: VerifyMacWrapperOptions): void {
 	const infoPlist = join(bundlePath, "Contents", "Info.plist");
 	run([
@@ -186,11 +193,21 @@ export function verifyMacWrapper({
 
 	withPackagedNativeDirectory(
 		bundlePath,
-		requireTeamIdentifier || localSigningStagedNativeDirectory !== undefined,
+		requireTeamIdentifier ||
+			localSigningStagedNativeDirectory !== undefined ||
+			stagedVaultBrokerDirectory !== undefined,
 		(nativeDirectory) => {
 			const localServerPath = join(nativeDirectory, "whalehall-local");
 			const observerPath = join(nativeDirectory, "WhaleHall Observer.app");
-			if (!existsSync(localServerPath) || !existsSync(observerPath)) {
+			const vaultBrokerPath = join(
+				nativeDirectory,
+				MACOS_VAULT_BROKER_EXECUTABLE,
+			);
+			if (
+				!existsSync(localServerPath) ||
+				!existsSync(observerPath) ||
+				!existsSync(vaultBrokerPath)
+			) {
 				throw new Error(
 					"Signed wrapper is missing a native monitoring component.",
 				);
@@ -232,6 +249,20 @@ export function verifyMacWrapper({
 				observerPath,
 			]);
 			validateObserverEntitlements(observerEntitlements);
+			verifySignedComponent(
+				vaultBrokerPath,
+				MACOS_VAULT_BROKER_IDENTIFIER,
+				outerTeamIdentifier,
+			);
+			if (stagedVaultBrokerDirectory) {
+				verifyVaultBrokerContinuity({
+					stagedPath: join(
+						stagedVaultBrokerDirectory,
+						MACOS_VAULT_BROKER_EXECUTABLE,
+					),
+					packagedPath: vaultBrokerPath,
+				});
+			}
 			if (localSigningStagedNativeDirectory) {
 				verifyLocalSigningContinuity({
 					stagedPath: join(
@@ -248,6 +279,14 @@ export function verifyMacWrapper({
 					),
 					packagedPath: observerPath,
 					expectedIdentifier: MACOS_OBSERVER_IDENTIFIER,
+				});
+				verifyLocalSigningContinuity({
+					stagedPath: join(
+						localSigningStagedNativeDirectory,
+						MACOS_VAULT_BROKER_EXECUTABLE,
+					),
+					packagedPath: vaultBrokerPath,
+					expectedIdentifier: MACOS_VAULT_BROKER_IDENTIFIER,
 				});
 			}
 		},
@@ -423,6 +462,14 @@ function materializeLocalSignedWrapper({
 				"native",
 				"WhaleHall Observer.app",
 			),
+			join(
+				payloadBundle,
+				"Contents",
+				"Resources",
+				"app",
+				"native",
+				MACOS_VAULT_BROKER_EXECUTABLE,
+			),
 		]) {
 			if (!existsSync(requiredPath)) {
 				throw new Error(
@@ -442,6 +489,10 @@ function materializeLocalSignedWrapper({
 			appIdentifier,
 			requireTeamIdentifier: false,
 			localSigningStagedNativeDirectory: join(
+				projectRoot,
+				`.native/macos-${architecture}`,
+			),
+			stagedVaultBrokerDirectory: join(
 				projectRoot,
 				`.native/macos-${architecture}`,
 			),
@@ -624,30 +675,44 @@ export function verifyMacWrapperFromEnvironment(
 			signing.kind === "local"
 				? join(projectRoot, `.native/macos-${architecture}`)
 				: undefined,
+		stagedVaultBrokerDirectory: join(
+			projectRoot,
+			`.native/macos-${architecture}`,
+		),
 	});
-	if (signing.kind === "local") {
-		verifyLocalUpdateArchive({
-			artifactDirectory: requiredEnvironment(
-				environment,
-				"ELECTROBUN_ARTIFACT_DIR",
-			),
-			appName,
-			appIdentifier,
-			architecture,
-		});
-	}
+	verifyUpdateArchive({
+		artifactDirectory: requiredEnvironment(
+			environment,
+			"ELECTROBUN_ARTIFACT_DIR",
+		),
+		appName,
+		appIdentifier,
+		architecture,
+		requireTeamIdentifier: signing.kind === "developer-id",
+		localSigningStagedNativeDirectory:
+			signing.kind === "local"
+				? join(projectRoot, `.native/macos-${architecture}`)
+				: undefined,
+		rejectDeltaPatches: signing.kind === "local",
+	});
 }
 
-function verifyLocalUpdateArchive({
+function verifyUpdateArchive({
 	artifactDirectory,
 	appName,
 	appIdentifier,
 	architecture,
+	requireTeamIdentifier,
+	localSigningStagedNativeDirectory,
+	rejectDeltaPatches,
 }: {
 	artifactDirectory: string;
 	appName: string;
 	appIdentifier: string;
 	architecture: "arm64" | "x64";
+	requireTeamIdentifier: boolean;
+	localSigningStagedNativeDirectory?: string;
+	rejectDeltaPatches: boolean;
 }): void {
 	const artifactEntries = readdirSync(artifactDirectory);
 	const archives = artifactEntries
@@ -655,10 +720,13 @@ function verifyLocalUpdateArchive({
 		.map((name) => join(artifactDirectory, name));
 	if (archives.length !== 1 || archives[0] === undefined) {
 		throw new Error(
-			"The local Canary artifacts must contain exactly one full update archive.",
+			"The macOS artifacts must contain exactly one full update archive.",
 		);
 	}
-	if (artifactEntries.some((name) => name.endsWith(".patch"))) {
+	if (
+		rejectDeltaPatches &&
+		artifactEntries.some((name) => name.endsWith(".patch"))
+	) {
 		throw new Error(
 			"Local-certificate Canary artifacts cannot contain delta patches.",
 		);
@@ -701,8 +769,9 @@ function verifyLocalUpdateArchive({
 		verifyMacWrapper({
 			bundlePath: payloadBundle,
 			appIdentifier,
-			requireTeamIdentifier: false,
-			localSigningStagedNativeDirectory: join(
+			requireTeamIdentifier,
+			localSigningStagedNativeDirectory,
+			stagedVaultBrokerDirectory: join(
 				projectRoot,
 				`.native/macos-${architecture}`,
 			),
@@ -758,6 +827,72 @@ export function validateLocalDesignatedRequirementContinuity({
 		);
 	}
 	return packaged;
+}
+
+export function parseMacCodeDirectoryHash(output: string): string {
+	const hashes = output
+		.split(/\r?\n/u)
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith("CDHash="))
+		.map((line) => line.slice("CDHash=".length).toUpperCase());
+	if (hashes.length !== 1 || !/^[A-F0-9]{40,64}$/u.test(hashes[0] ?? "")) {
+		throw new Error("codesign did not return one valid Vault Broker CDHash.");
+	}
+	return hashes[0] as string;
+}
+
+export function validateVaultBrokerContinuity({
+	stagedDigest,
+	packagedDigest,
+	stagedDetails,
+	packagedDetails,
+	stagedRequirement,
+	packagedRequirement,
+}: {
+	stagedDigest: string;
+	packagedDigest: string;
+	stagedDetails: string;
+	packagedDetails: string;
+	stagedRequirement: string;
+	packagedRequirement: string;
+}): void {
+	if (
+		!/^[A-Fa-f0-9]{64}$/u.test(stagedDigest) ||
+		!/^[A-Fa-f0-9]{64}$/u.test(packagedDigest) ||
+		stagedDigest.toLowerCase() !== packagedDigest.toLowerCase()
+	) {
+		throw new Error(
+			"Packaged Vault Broker bytes differ from the staged executable.",
+		);
+	}
+	if (
+		parseMacCodeDirectoryHash(stagedDetails) !==
+		parseMacCodeDirectoryHash(packagedDetails)
+	) {
+		throw new Error(
+			"Packaged Vault Broker CDHash differs from the staged executable.",
+		);
+	}
+	const staged = normalizeDesignatedRequirement(stagedRequirement);
+	const packaged = normalizeDesignatedRequirement(packagedRequirement);
+	for (const [location, requirement] of [
+		["staged", staged],
+		["packaged", packaged],
+	] as const) {
+		if (
+			requirement.match(/\bidentifier\s+"([^"]+)"/u)?.[1] !==
+			MACOS_VAULT_BROKER_IDENTIFIER
+		) {
+			throw new Error(
+				`The ${location} Vault Broker has an unexpected identifier.`,
+			);
+		}
+	}
+	if (staged !== packaged) {
+		throw new Error(
+			"Packaged Vault Broker designated requirement differs from the staged executable.",
+		);
+	}
 }
 
 export function validateObserverEntitlements(entitlements: string): void {
@@ -830,6 +965,50 @@ function verifyLocalSigningContinuity({
 			packagedPath,
 		]),
 		expectedIdentifier,
+	});
+}
+
+function verifyVaultBrokerContinuity({
+	stagedPath,
+	packagedPath,
+}: {
+	stagedPath: string;
+	packagedPath: string;
+}): void {
+	if (!existsSync(stagedPath)) {
+		throw new Error("Missing staged Vault Broker for package verification.");
+	}
+	const digest = (path: string) =>
+		createHash("sha256").update(readFileSync(path)).digest("hex");
+	validateVaultBrokerContinuity({
+		stagedDigest: digest(stagedPath),
+		packagedDigest: digest(packagedPath),
+		stagedDetails: capture([
+			"/usr/bin/codesign",
+			"--display",
+			"--verbose=4",
+			stagedPath,
+		]),
+		packagedDetails: capture([
+			"/usr/bin/codesign",
+			"--display",
+			"--verbose=4",
+			packagedPath,
+		]),
+		stagedRequirement: capture([
+			"/usr/bin/codesign",
+			"--display",
+			"--requirements",
+			"-",
+			stagedPath,
+		]),
+		packagedRequirement: capture([
+			"/usr/bin/codesign",
+			"--display",
+			"--requirements",
+			"-",
+			packagedPath,
+		]),
 	});
 }
 

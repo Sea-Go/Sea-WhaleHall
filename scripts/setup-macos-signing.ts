@@ -227,7 +227,9 @@ function createLocalSigningIdentity(keychain: string): void {
 /**
  * Runs two independent real codesign operations. The first use may make macOS
  * offer "Always Allow" for the `apple:` Keychain partition; the second proves
- * that the choice persisted instead of granting only one transient signature.
+ * only that codesign can reuse this certificate's private key. It does not
+ * authorize the observation vault. Local vault continuity is provided by the
+ * separately signed, versioned Vault Broker installed with the application.
  * This is called only from the explicit mutating setup command.
  */
 function verifyPersistentSigningAccess(fingerprint: string): void {
@@ -363,7 +365,9 @@ function report(inspection: LocalSigningInspection): void {
 	if (inspection.state === "ready") {
 		console.log(
 			`[macos-signing] Ready: "${MACOS_LOCAL_SIGNING_COMMON_NAME}" `
-				+ `(${inspection.validFingerprint}) in ${inspection.keychain}.`,
+				+ `(${inspection.validFingerprint}) in ${inspection.keychain}. `
+				+ "This identity stabilizes local TCC/code signing; the installed "
+				+ "versioned Vault Broker owns local vault continuity.",
 		);
 		return;
 	}
@@ -458,11 +462,15 @@ function main(): void {
 			throw new Error("The ready local identity has no fingerprint.");
 		}
 		console.log(
-			"[macos-signing] Verifying persistent private-key access. If macOS "
+			"[macos-signing] Verifying persistent codesign private-key access. If macOS "
 				+ 'asks, choose "Always Allow"; choosing only "Allow" is transient.',
 		);
 		verifyPersistentSigningAccess(before.validFingerprint);
-		console.log("[macos-signing] Persistent codesign access verified.");
+		console.log(
+			"[macos-signing] Persistent codesign access verified. This does not "
+				+ "authorize the vault; local vault continuity uses the installed "
+				+ "versioned Vault Broker.",
+		);
 		return;
 	}
 	if (before.state === "conflict") {
@@ -472,7 +480,8 @@ function main(): void {
 		);
 	}
 	console.log(
-		"[macos-signing] Creating one current-user identity. macOS may request "
+		"[macos-signing] Creating one current-user identity for stable local "
+			+ "TCC/code signing. macOS may request "
 			+ 'private-key access; choose "Always Allow" so later builds stay silent. '
 			+ "No existing item will be replaced or deleted.",
 	);
