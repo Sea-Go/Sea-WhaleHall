@@ -34,6 +34,10 @@ import {
 } from "./native-runtime-security";
 import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import { BackgroundAppLifecycle } from "./app-lifecycle";
+import {
+	TimelineRuntimeLifecycle,
+	resumeTimelineRuntimeForAvailableVault,
+} from "./timeline-runtime-lifecycle";
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
@@ -47,6 +51,7 @@ import { monitoringPermissionSettingsUrl } from "./monitoring-permission-setting
 import type {
 	LocalRuntimeStatus,
 	LocalToolEvent,
+	LocalVaultLegacyMigrationResult,
 } from "../agent/local-protocol";
 import type { ClientRPC, PetRPC } from "../shared/contracts";
 
@@ -94,7 +99,38 @@ let shutdownPromise: Promise<void> | null = null;
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
-let timelineRuntime: TimelineV2Runtime | null = null;
+const STARTUP_RETRY_DELAYS_MS = [
+	1_000,
+	5_000,
+	15_000,
+	45_000,
+	120_000,
+	300_000,
+];
+const timelineLifecycle = new TimelineRuntimeLifecycle<TimelineV2Runtime>({
+	async createRuntime() {
+		const reflection = reflectionRuntime;
+		if (reflection === null || shutdownPromise !== null) {
+			throw new Error(
+				"Timeline runtime cannot start without an active reflection runtime.",
+			);
+		}
+		return createTimelineV2Runtime({
+			agent,
+			dataDirectory: localDataPath,
+			initialGoal: reflection.service.getActiveGoalContext(),
+			rawAuditSource,
+			modernBert: timelineModernBertConfiguration.modernBert,
+		});
+	},
+	retryDelaysMs: STARTUP_RETRY_DELAYS_MS,
+	onError(error) {
+		console.error(
+			"WhaleHall Timeline v2 start attempt failed:",
+			error instanceof Error ? error.name : "UNKNOWN",
+		);
+	},
+});
 const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
 	store: new FileAuditCaptureStore(
 		join(localDataPath, "audit-capture-session.v1.json"),
@@ -107,7 +143,7 @@ const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
 		) {
 			throw new Error("The audit capture range is invalid.");
 		}
-		const runtime = timelineRuntime;
+		const runtime = timelineLifecycle.current;
 		const raw = await rawAuditSource.queryAuditRange({
 			fromMs,
 			toMs,
@@ -142,7 +178,6 @@ const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
 	},
 });
 await auditCaptureCoordinator.initialize();
-const STARTUP_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 45_000, 120_000, 300_000];
 
 let clientWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow;
@@ -194,9 +229,36 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						Utils.openExternal(url),
 				};
 			},
-			getContentVaultStatus: () => agent.getVaultKeyStatus(),
+			getContentVaultStatus: async () => {
+				const vault = await agent.getVaultKeyStatus();
+				if (
+					vault.availability === "available" &&
+					reflectionRuntime !== null &&
+					shutdownPromise === null &&
+					timelineLifecycle.current === null &&
+					!timelineLifecycle.recoveryPending
+				) {
+					void resumeTimelineRuntimeForAvailableVault(
+						vault,
+						timelineLifecycle,
+					);
+				}
+				return vault;
+			},
 			migrateLegacyContentVault: async () => {
 				const vault = await agent.getVaultKeyStatus();
+				if (vault.availability === "available") {
+					if (
+						timelineLifecycle.current === null &&
+						!timelineLifecycle.recoveryPending
+					) {
+						void resumeTimelineRuntimeForAvailableVault(
+							vault,
+							timelineLifecycle,
+						);
+					}
+					return { status: "cancelled", vault };
+				}
 				if (
 					vault.availability !== "migration_required" ||
 					!vault.interactiveMigrationAvailable
@@ -217,15 +279,46 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 				if (response !== 0) {
 					return { status: "cancelled", vault };
 				}
+				let result: LocalVaultLegacyMigrationResult;
+				try {
+					result = await agent.migrateLegacyVaultKey();
+				} catch (error) {
+					// The native migration may have committed just before its response
+					// was interrupted. A content-free status recheck restores Timeline
+					// without asking the user to repeat the Keychain operation.
+					const recoveredVault = await agent
+						.getVaultKeyStatus()
+						.catch(() => null);
+					if (recoveredVault?.availability === "available") {
+						void resumeTimelineRuntimeForAvailableVault(
+							recoveredVault,
+							timelineLifecycle,
+						);
+						return {
+							status: "completed",
+							result: {
+								// The durable target is usable, but the interrupted
+								// response cannot prove which process performed the copy.
+								migrated: false,
+								status: recoveredVault,
+							},
+						};
+					}
+					throw error;
+				}
+				void resumeTimelineRuntimeForAvailableVault(
+					result.status,
+					timelineLifecycle,
+				);
 				return {
 					status: "completed",
-					result: await agent.migrateLegacyVaultKey(),
+					result,
 				};
 			},
 			exportFiveMinuteAuditToFile: (request) =>
 				exportFiveMinuteAuditToFile(request, {
 					getExporter: () =>
-						timelineRuntime?.audit ?? rawOnlyAuditExporter,
+						timelineLifecycle.current?.audit ?? rawOnlyAuditExporter,
 					dialogs: {
 						async confirmDecryptedContent() {
 							const { response } = await Utils.showMessageBox({
@@ -256,7 +349,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 			exportPrivateTrainingWindows: (request) =>
 				exportPrivateTrainingWindowsLocally(request, {
 					getExporter: () =>
-						timelineRuntime?.privateTrainingExport ?? null,
+						timelineLifecycle.current?.privateTrainingExport ?? null,
 					dialogs: {
 						async confirmDecryptedTrainingExport(windowCount) {
 							const { response } = await Utils.showMessageBox({
@@ -319,7 +412,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 							}
 						: null,
 				);
-				await timelineRuntime?.service.pullNow();
+				await timelineLifecycle.current?.service.pullNow();
 				return {
 					goal: normalized
 						? {
@@ -476,8 +569,7 @@ function shutdown(): Promise<void> {
 		// start. Waiting here prevents a late candidate from restarting the
 		// native sensor process after shutdown has already stopped it.
 		await startupPromise;
-		await timelineRuntime?.close();
-		timelineRuntime = null;
+		await timelineLifecycle.close();
 		await reflectionRuntime?.close();
 		reflectionRuntime = null;
 		await agent.stop();
@@ -509,7 +601,6 @@ startupPromise = (async () => {
 	let attempt = 0;
 	while (!shutdownPromise) {
 		let candidate: WhaleHallReflectionRuntime | null = null;
-		let timelineCandidate: TimelineV2Runtime | null = null;
 		try {
 			candidate = await createWhaleHallReflectionRuntime({
 				agent,
@@ -531,55 +622,37 @@ startupPromise = (async () => {
 				await candidate.close();
 				return;
 			}
+			reflectionRuntime = candidate;
+			candidate = null;
+			let timeline: TimelineV2Runtime;
 			try {
-				timelineCandidate = await createTimelineV2Runtime({
-					agent,
-					dataDirectory: localDataPath,
-					initialGoal: candidate.service.getActiveGoalContext(),
-					rawAuditSource,
-					modernBert:
-						timelineModernBertConfiguration.modernBert,
-				});
-				await timelineCandidate.start();
+				timeline = await timelineLifecycle.ensureStarted();
 			} catch (error) {
 				if (!isObservationEncryptionUnavailable(error)) throw error;
-				await timelineCandidate?.close().catch(() => {});
-				timelineCandidate = null;
 				// Keychain can be unavailable before first unlock or after an
 				// ad-hoc development re-sign. Keep the healthy native process
 				// available for monitoring/configuration, while Timeline v2
 				// and decrypted export remain fail closed.
-				reflectionRuntime = candidate;
-				candidate = null;
 				console.warn(
 					"WhaleHall Timeline v2 is unavailable because the local encryption key cannot be opened; monitoring remains available.",
 				);
 				return;
 			}
 			if (shutdownPromise) {
-				await timelineCandidate.close();
-				await candidate.close();
+				await timelineLifecycle.close();
+				await reflectionRuntime?.close();
+				reflectionRuntime = null;
 				return;
 			}
-			reflectionRuntime = candidate;
-			timelineRuntime = timelineCandidate;
 			console.log(
 				`WhaleHall Timeline v2 ready; Qwen hypothesis lock: ${
-					timelineCandidate.teacherVerified
+					timeline.teacherVerified
 						? "verified"
 						: "deterministic fallback"
 				}`,
 			);
 			return;
 		} catch (error) {
-			if (timelineCandidate) {
-				await timelineCandidate.close().catch((closeError) => {
-					console.error(
-						"WhaleHall Timeline v2 candidate cleanup failed:",
-						closeError,
-					);
-				});
-			}
 			if (candidate) {
 				await candidate.close().catch((closeError) => {
 					console.error(
@@ -587,6 +660,15 @@ startupPromise = (async () => {
 						closeError,
 					);
 				});
+			}
+			if (reflectionRuntime) {
+				await reflectionRuntime.close().catch((closeError) => {
+					console.error(
+						"WhaleHall reflection runtime cleanup failed:",
+						closeError,
+					);
+				});
+				reflectionRuntime = null;
 			}
 			if (shutdownPromise) return;
 			// A failed health/query can leave a child allocated but unusable.
