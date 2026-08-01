@@ -22,6 +22,4 @@ pub enum ActivityError {
     Io(#[from] std::io::Error),
     #[error("Activity database operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("Activity event publication failed: {0}")]
-    EventJournal(#[from] crate::events::EventJournalError),
 }

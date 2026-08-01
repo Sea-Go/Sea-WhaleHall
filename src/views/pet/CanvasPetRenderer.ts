@@ -181,7 +181,6 @@ export class CanvasPetRenderer implements PetRenderer {
   private petting = false;
   private pettingDistance = 0;
   private clickTimes: number[] = [];
-  private lastDoubleClickAt = Number.NEGATIVE_INFINITY;
   private pendingAction: PetActionId | null = null;
   private readonly onInteract?: (event: PetInteractionEvent) => void;
   private readonly onFrame?: (snapshot: PetRenderSnapshot) => void;
@@ -211,7 +210,6 @@ export class CanvasPetRenderer implements PetRenderer {
     canvas.addEventListener('pointerleave', this.handlePointerLeave);
     canvas.addEventListener('pointerdown', this.handlePointerDown);
     canvas.addEventListener('pointerup', this.handlePointerUp);
-    canvas.addEventListener('dblclick', this.handleNativeDoubleClick);
     canvas.addEventListener('pointercancel', this.handlePointerCancel);
     canvas.addEventListener('lostpointercapture', this.handleLostPointerCapture);
     this.resize();
@@ -273,7 +271,6 @@ export class CanvasPetRenderer implements PetRenderer {
     this.canvas?.removeEventListener('pointerleave', this.handlePointerLeave);
     this.canvas?.removeEventListener('pointerdown', this.handlePointerDown);
     this.canvas?.removeEventListener('pointerup', this.handlePointerUp);
-    this.canvas?.removeEventListener('dblclick', this.handleNativeDoubleClick);
     this.canvas?.removeEventListener('pointercancel', this.handlePointerCancel);
     this.canvas?.removeEventListener('lostpointercapture', this.handleLostPointerCapture);
     if (this.canvas && this.activePointerId !== null && this.canvas.hasPointerCapture?.(this.activePointerId)) {
@@ -303,7 +300,6 @@ export class CanvasPetRenderer implements PetRenderer {
     this.petting = false;
     this.pettingDistance = 0;
     this.clickTimes = [];
-    this.lastDoubleClickAt = Number.NEGATIVE_INFINITY;
   }
 
   private readonly resize = () => {
@@ -463,7 +459,6 @@ export class CanvasPetRenderer implements PetRenderer {
     }
     if (previousClick !== undefined && now - previousClick <= DOUBLE_CLICK_WINDOW_MS) {
       this.play('doubleClick');
-      this.lastDoubleClickAt = now;
       this.emit('doubleClick', 'doubleClick', zone, pointerId);
       return;
     }
@@ -479,30 +474,6 @@ export class CanvasPetRenderer implements PetRenderer {
       this.emit('poke', action, zone, pointerId);
     }
   }
-
-  /**
-   * Browser double-click timing follows the user's operating-system setting.
-   * Keep the pointer timing above for the existing interaction behaviour, but
-   * use this event as a fallback when that fixed window is too short.
-   */
-  private readonly handleNativeDoubleClick = (event: MouseEvent) => {
-    const point = this.eventPoint(event);
-    if (!point) return;
-    const localPoint = this.toLocalPoint(point);
-    const zone = this.model.hitTest(localPoint, this.currentFrame);
-    if (!zone) return;
-
-    const now = performance.now();
-    // pointerup normally emits the same semantic event just before dblclick.
-    if (now - this.lastDoubleClickAt < 100) return;
-    event.preventDefault();
-    this.pointerCanvas = point;
-    this.pointerLocal = localPoint;
-    this.play('doubleClick');
-    this.lastDoubleClickAt = now;
-    this.clickTimes = [];
-    this.emit('doubleClick', 'doubleClick', zone);
-  };
 
   private cancelPointer(pointerId: number): void {
     if (this.dragging) {
@@ -567,7 +538,7 @@ export class CanvasPetRenderer implements PetRenderer {
     });
   }
 
-  private eventPoint(event: MouseEvent): Point | null {
+  private eventPoint(event: PointerEvent): Point | null {
     if (!this.canvas) return null;
     const rect = this.canvas.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };

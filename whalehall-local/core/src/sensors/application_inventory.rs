@@ -4,7 +4,7 @@
 //! lifecycle and latest resource usage in SQLite, and refreshes the installed
 //! application catalog on a slower cadence.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,20 +16,15 @@ use directories::ProjectDirs;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sha2::{Digest, Sha256};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use whalehall_local_protocol::desktop_event_kinds;
-
-use crate::events::{DesktopEventDraft, EventJournal, EventJournalError};
 
 pub const DEFAULT_APPLICATION_PROCESS_POLL_INTERVAL_MS: u64 = 2_000;
 pub const DEFAULT_INSTALLED_APPLICATION_REFRESH_INTERVAL_MS: u64 = 6 * 60 * 60 * 1_000;
-const APPLICATION_SCHEMA_VERSION: i64 = 2;
+const APPLICATION_SCHEMA_VERSION: i64 = 1;
 const MAX_INSTALLED_APPLICATIONS: usize = 20_000;
 const MAX_QUERY_LIMIT: usize = 1_000;
 
@@ -41,12 +36,8 @@ pub enum ApplicationInventoryError {
     Io(#[from] std::io::Error),
     #[error("application inventory SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("application inventory JSON error: {0}")]
-    Json(#[from] serde_json::Error),
     #[error("application inventory collection error: {0}")]
     Collection(String),
-    #[error("application inventory event publication failed: {0}")]
-    EventJournal(#[from] EventJournalError),
 }
 
 #[derive(Clone, Debug)]
@@ -131,34 +122,6 @@ pub struct ObservedProcess {
     pub started_at_ms: i64,
     pub cpu_usage_percent: f32,
     pub memory_bytes: u64,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ProcessEventIdentity {
-    process_id: u64,
-    app_id: String,
-    app_name: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct ProcessObservationBatch {
-    started: Vec<ProcessEventIdentity>,
-    exited: Vec<ProcessEventIdentity>,
-}
-
-impl ProcessObservationBatch {
-    fn is_empty(&self) -> bool {
-        self.started.is_empty() && self.exited.is_empty()
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ProcessEventOutboxRecord {
-    id: i64,
-    occurred_at_ms: i64,
-    deduplication_key: String,
-    payload: serde_json::Value,
 }
 
 pub trait ApplicationInventoryProvider: Send + Sync + 'static {
@@ -355,14 +318,6 @@ impl ApplicationInventoryService {
         config: ApplicationInventoryConfig,
         provider: Arc<dyn ApplicationInventoryProvider>,
     ) -> Result<Self, ApplicationInventoryError> {
-        Self::start_with_event_journal(config, provider, None)
-    }
-
-    pub fn start_with_event_journal(
-        config: ApplicationInventoryConfig,
-        provider: Arc<dyn ApplicationInventoryProvider>,
-        event_journal: Option<EventJournal>,
-    ) -> Result<Self, ApplicationInventoryError> {
         let store = ApplicationInventoryStore::open(&config.database_path)?;
         store.recover_interrupted_processes()?;
         let inner = Arc::new(ApplicationInventoryInner {
@@ -384,11 +339,7 @@ impl ApplicationInventoryService {
             cancellation: CancellationToken::new(),
             task: Mutex::new(None),
         });
-        let task = tokio::spawn(run_inventory_monitor(
-            inner.clone(),
-            provider,
-            event_journal,
-        ));
+        let task = tokio::spawn(run_inventory_monitor(inner.clone(), provider));
         *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
         Ok(Self { inner })
     }
@@ -436,25 +387,10 @@ impl ApplicationInventoryService {
 async fn run_inventory_monitor(
     inner: Arc<ApplicationInventoryInner>,
     provider: Arc<dyn ApplicationInventoryProvider>,
-    event_journal: Option<EventJournal>,
 ) {
     let mut ticker = interval(inner.config.process_poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_installed_scan_at_ms = None;
-    let mut has_process_baseline = false;
-
-    if let Some(journal) = &event_journal
-        && let Err(error) = flush_process_event_outbox(&inner.store, journal)
-    {
-        update_inventory_status(
-            &inner,
-            ApplicationInventoryState::Degraded,
-            None,
-            None,
-            Some(error.to_string()),
-            None,
-        );
-    }
 
     loop {
         tokio::select! {
@@ -474,15 +410,7 @@ async fn run_inventory_monitor(
                 let process_result = collect_running_processes(provider.clone()).await
                     .and_then(|processes| {
                         let count = processes.len();
-                        inner.store.record_process_snapshot(
-                            &processes,
-                            observed_at_ms,
-                            has_process_baseline && event_journal.is_some(),
-                        )?;
-                        has_process_baseline = true;
-                        if let Some(journal) = &event_journal {
-                            flush_process_event_outbox(&inner.store, journal)?;
-                        }
+                        inner.store.record_process_snapshot(&processes, observed_at_ms)?;
                         Ok(count)
                     });
                 let (running_count, process_error) = match process_result {
@@ -567,31 +495,6 @@ async fn collect_installed(
                 "installed-application observation task failed: {error}"
             ))
         })?
-}
-
-fn flush_process_event_outbox(
-    store: &ApplicationInventoryStore,
-    event_journal: &EventJournal,
-) -> Result<(), ApplicationInventoryError> {
-    for record in store.pending_process_events(100)? {
-        publish_process_outbox_record(event_journal, &record)?;
-        store.delete_process_event(record.id)?;
-    }
-    Ok(())
-}
-
-fn publish_process_outbox_record(
-    event_journal: &EventJournal,
-    record: &ProcessEventOutboxRecord,
-) -> Result<(), ApplicationInventoryError> {
-    event_journal.append(DesktopEventDraft::metadata(
-        desktop_event_kinds::APPLICATION_PROCESS_OBSERVED_BATCH,
-        "application.inventory.sensor",
-        record.occurred_at_ms,
-        record.payload.clone(),
-        record.deduplication_key.clone(),
-    ))?;
-    Ok(())
 }
 
 fn update_inventory_status(
@@ -696,29 +599,9 @@ impl ApplicationInventoryStore {
         &self,
         processes: &[ObservedProcess],
         observed_at_ms: i64,
-        enqueue_event: bool,
-    ) -> Result<ProcessObservationBatch, ApplicationInventoryError> {
+    ) -> Result<(), ApplicationInventoryError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut previously_open = {
-            let mut statement = transaction.prepare(
-                "SELECT process_id, started_at_ms, name, executable_path
-                 FROM process_runs
-                 WHERE exited_at_ms IS NULL",
-            )?;
-            let rows = statement.query_map([], |row| {
-                let process_id = u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default();
-                let started_at_ms = row.get::<_, i64>(1)?;
-                let name = row.get::<_, String>(2)?;
-                let executable_path = row.get::<_, String>(3)?;
-                Ok((
-                    (process_id, started_at_ms),
-                    process_event_identity(process_id, &name, &executable_path),
-                ))
-            })?;
-            rows.collect::<Result<HashMap<_, _>, _>>()?
-        };
-        let mut batch = ProcessObservationBatch::default();
         transaction.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS current_process_keys (
                 process_id INTEGER NOT NULL,
@@ -730,16 +613,6 @@ impl ApplicationInventoryStore {
         for process in processes {
             let process_id = i64::try_from(process.process_id).unwrap_or(i64::MAX);
             let memory_bytes = i64::try_from(process.memory_bytes).unwrap_or(i64::MAX);
-            if previously_open
-                .remove(&(process.process_id, process.started_at_ms))
-                .is_none()
-            {
-                batch.started.push(process_event_identity(
-                    process.process_id,
-                    &process.name,
-                    &process.executable_path,
-                ));
-            }
             transaction.execute(
                 "INSERT INTO current_process_keys (process_id, started_at_ms) VALUES (?1, ?2)",
                 params![process_id, process.started_at_ms],
@@ -779,62 +652,7 @@ impl ApplicationInventoryStore {
                )",
             [observed_at_ms],
         )?;
-        batch.exited.extend(previously_open.into_values());
-        batch.started.sort_by(process_event_identity_order);
-        batch.exited.sort_by(process_event_identity_order);
-        if enqueue_event && !batch.is_empty() {
-            let payload = json!({
-                "started": batch.started,
-                "exited": batch.exited,
-            });
-            let payload_json = serde_json::to_string(&payload)?;
-            let deduplication_key =
-                process_batch_deduplication_key(observed_at_ms, payload_json.as_bytes());
-            transaction.execute(
-                "INSERT OR IGNORE INTO process_event_outbox (
-                    occurred_at_ms, deduplication_key, payload_json
-                 ) VALUES (?1, ?2, ?3)",
-                params![observed_at_ms, deduplication_key, payload_json],
-            )?;
-        }
         transaction.commit()?;
-        Ok(batch)
-    }
-
-    fn pending_process_events(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<ProcessEventOutboxRecord>, ApplicationInventoryError> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT id, occurred_at_ms, deduplication_key, payload_json
-             FROM process_event_outbox
-             ORDER BY id
-             LIMIT ?1",
-        )?;
-        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (id, occurred_at_ms, deduplication_key, payload_json) = row?;
-            Ok(ProcessEventOutboxRecord {
-                id,
-                occurred_at_ms,
-                deduplication_key,
-                payload: serde_json::from_str(&payload_json)?,
-            })
-        })
-        .collect()
-    }
-
-    fn delete_process_event(&self, id: i64) -> Result<(), ApplicationInventoryError> {
-        let connection = self.connect()?;
-        connection.execute("DELETE FROM process_event_outbox WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -1010,19 +828,6 @@ impl ApplicationInventoryStore {
                  CREATE INDEX IF NOT EXISTS process_runs_name
                     ON process_runs(name COLLATE NOCASE, last_observed_at_ms DESC);
                  PRAGMA user_version = 1;",
-            )?;
-        }
-        if version < 2 {
-            connection.execute_batch(
-                "CREATE TABLE IF NOT EXISTS process_event_outbox (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    occurred_at_ms INTEGER NOT NULL,
-                    deduplication_key TEXT NOT NULL UNIQUE,
-                    payload_json TEXT NOT NULL
-                 );
-                 CREATE INDEX IF NOT EXISTS process_event_outbox_order
-                    ON process_event_outbox(id);
-                 PRAGMA user_version = 2;",
             )?;
         }
         Ok(())
@@ -1289,79 +1094,6 @@ fn normalize_installed_applications(
     Ok(applications)
 }
 
-fn process_event_identity(
-    process_id: u64,
-    name: &str,
-    executable_path: &str,
-) -> ProcessEventIdentity {
-    let app_name = safe_process_app_name(name, executable_path);
-    let identity_source = if executable_path.trim().is_empty() {
-        app_name.as_str()
-    } else {
-        executable_path.trim()
-    };
-    let normalized_identity = if cfg!(target_os = "windows") {
-        identity_source.to_ascii_lowercase()
-    } else {
-        identity_source.to_owned()
-    };
-    let digest = Sha256::digest(normalized_identity.as_bytes());
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(24);
-    for byte in digest.iter().take(12) {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    ProcessEventIdentity {
-        process_id,
-        app_id: format!("process-app-{encoded}"),
-        app_name,
-    }
-}
-
-fn safe_process_app_name(name: &str, executable_path: &str) -> String {
-    let leaf = |value: &str| {
-        value
-            .trim()
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_owned()
-    };
-    let name = leaf(name);
-    if !name.is_empty() {
-        return name;
-    }
-    let executable_name = leaf(executable_path);
-    if executable_name.is_empty() {
-        "unknown".to_owned()
-    } else {
-        executable_name
-    }
-}
-
-fn process_event_identity_order(
-    left: &ProcessEventIdentity,
-    right: &ProcessEventIdentity,
-) -> std::cmp::Ordering {
-    left.process_id
-        .cmp(&right.process_id)
-        .then(left.app_id.cmp(&right.app_id))
-        .then(left.app_name.cmp(&right.app_name))
-}
-
-fn process_batch_deduplication_key(observed_at_ms: i64, payload: &[u8]) -> String {
-    let digest = Sha256::digest(payload);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(24);
-    for byte in digest.iter().take(12) {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    format!("process-scan:{observed_at_ms}:{encoded}")
-}
-
 fn duration_from_environment(
     name: &str,
     default_ms: u64,
@@ -1446,7 +1178,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tempfile::TempDir;
-    use whalehall_local_protocol::EventQueryParams;
 
     use super::*;
 
@@ -1491,9 +1222,7 @@ mod tests {
 
     #[test]
     fn records_installed_applications_and_process_lifecycles() {
-        let (directory, store) = test_store();
-        let event_journal =
-            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let (_directory, store) = test_store();
         store
             .record_installed_applications(
                 &[
@@ -1529,54 +1258,20 @@ mod tests {
             cpu_usage_percent: 10.5,
             memory_bytes: 4_096,
         };
-        let baseline_batch = store
-            .record_process_snapshot(std::slice::from_ref(&process), 2_000, false)
+        store
+            .record_process_snapshot(std::slice::from_ref(&process), 2_000)
             .unwrap();
-        assert_eq!(baseline_batch.started.len(), 1);
-        assert!(store.pending_process_events(100).unwrap().is_empty());
-
-        let browser_process = ObservedProcess {
-            process_id: 43,
-            name: "Browser".to_owned(),
-            executable_path: "/apps/browser".to_owned(),
-            started_at_ms: 2_500,
-            cpu_usage_percent: 5.0,
-            memory_bytes: 2_048,
-        };
-        let started_batch = store
+        store
             .record_process_snapshot(
-                &[
-                    ObservedProcess {
-                        cpu_usage_percent: 22.0,
-                        memory_bytes: 8_192,
-                        ..process.clone()
-                    },
-                    browser_process.clone(),
-                ],
+                &[ObservedProcess {
+                    cpu_usage_percent: 22.0,
+                    memory_bytes: 8_192,
+                    ..process
+                }],
                 3_000,
-                true,
             )
             .unwrap();
-        assert_eq!(started_batch.started.len(), 1);
-        assert!(started_batch.exited.is_empty());
-        assert_eq!(started_batch.started[0].process_id, 43);
-        assert_eq!(started_batch.started[0].app_name, "Browser");
-        assert!(started_batch.started[0].app_id.starts_with("process-app-"));
-        assert!(!started_batch.started[0].app_id.contains("/apps/browser"));
-        let pending_before_replay = store.pending_process_events(100).unwrap();
-        assert_eq!(pending_before_replay.len(), 1);
-        // Simulate a crash after EventJournal append but before deleting the
-        // transactional outbox row.
-        publish_process_outbox_record(&event_journal, &pending_before_replay[0]).unwrap();
-        flush_process_event_outbox(&store, &event_journal).unwrap();
-
-        let exited_batch = store
-            .record_process_snapshot(std::slice::from_ref(&browser_process), 4_000, true)
-            .unwrap();
-        assert!(exited_batch.started.is_empty());
-        assert_eq!(exited_batch.exited.len(), 1);
-        assert_eq!(exited_batch.exited[0].process_id, 42);
-        flush_process_event_outbox(&store, &event_journal).unwrap();
+        store.record_process_snapshot(&[], 4_000).unwrap();
 
         let installed = store
             .query_installed_applications(&InstalledApplicationQuery::default())
@@ -1586,39 +1281,14 @@ mod tests {
         assert_eq!(installed[0].first_discovered_at_ms, 2_000);
         assert_eq!(installed[0].last_discovered_at_ms, 2_500);
         let processes = store.query_processes(&ProcessRunQuery::default()).unwrap();
-        assert_eq!(processes.len(), 2);
-        let editor = processes
-            .iter()
-            .find(|process| process.process_id == 42)
-            .expect("editor process");
-        assert_eq!(editor.started_at_ms, 1_000);
-        assert_eq!(editor.last_observed_at_ms, 3_000);
-        assert_eq!(editor.exited_at_ms, Some(4_000));
-        assert_eq!(editor.cpu_usage_percent, 22.0);
-        assert_eq!(editor.memory_bytes, 8_192);
-        assert!(!editor.is_running);
-
-        let events = event_journal
-            .query(&EventQueryParams::default())
-            .unwrap()
-            .events;
-        assert_eq!(events.len(), 2);
-        assert_eq!(
-            events[0].kind,
-            desktop_event_kinds::APPLICATION_PROCESS_OBSERVED_BATCH
-        );
-        assert_eq!(events[0].payload["started"][0]["processId"], 43);
-        assert_eq!(events[0].payload["started"][0]["appName"], "Browser");
-        assert_eq!(events[0].payload["exited"], json!([]));
-        assert!(
-            events[0].payload["started"][0]
-                .get("executablePath")
-                .is_none()
-        );
-        assert!(events[0].payload["started"][0].get("startedAtMs").is_none());
-        assert_eq!(events[1].payload["started"], json!([]));
-        assert_eq!(events[1].payload["exited"][0]["processId"], 42);
-        assert!(store.pending_process_events(100).unwrap().is_empty());
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].process_id, 42);
+        assert_eq!(processes[0].started_at_ms, 1_000);
+        assert_eq!(processes[0].last_observed_at_ms, 3_000);
+        assert_eq!(processes[0].exited_at_ms, Some(4_000));
+        assert_eq!(processes[0].cpu_usage_percent, 22.0);
+        assert_eq!(processes[0].memory_bytes, 8_192);
+        assert!(!processes[0].is_running);
     }
 
     #[tokio::test]

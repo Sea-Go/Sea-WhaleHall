@@ -2,10 +2,7 @@ import { expect, test } from "bun:test";
 import {
 	PetWindowController,
 	clampWindowPosition,
-	clampWindowPositionToVisibleBounds,
-	clampPetPositionForBelowWindow,
 	displayForPoint,
-	positionWindowBelowPet,
 } from "../src/bun/pet-window-controller";
 import type {
 	NativeDragEvent,
@@ -43,48 +40,11 @@ test("clamps the full pet window to the display work area", () => {
 	).toEqual({ x: -1280, y: -120 });
 });
 
-test("clamps transparent pet windows by their visible body instead of their full frame", () => {
-	const visibleWhale = { x: 34, y: 94, width: 267, height: 139 };
-	expect(
-		clampWindowPositionToVisibleBounds(
-			{ x: -500, y: -500 },
-			visibleWhale,
-			primary.workArea,
-			6,
-		),
-	).toEqual({ x: -28, y: -64 });
-	expect(
-		clampWindowPositionToVisibleBounds(
-			{ x: 5_000, y: 5_000 },
-			visibleWhale,
-			primary.workArea,
-			6,
-		),
-	).toEqual({ x: 1133, y: 661 });
-});
-
-test("keeps an attached companion panel below the visible pet", () => {
-	const panel = { width: 360, height: 430 };
-	const whale = { x: 34, y: 94, width: 267, height: 139 };
-	expect(
-		clampPetPositionForBelowWindow(
-			{ x: 1_133, y: 661 },
-			whale,
-			panel,
-			primary.workArea,
-		),
-	).toEqual({ x: 1_080, y: 265 });
-	expect(
-		positionWindowBelowPet({ x: 1_080, y: 265, width: 360, height: 300 }, whale),
-	).toEqual({ x: 1_080, y: 470 });
-});
-
 test("native drag preserves grab offset, crosses displays, and ends on release", () => {
 	let cursor = { x: 1050, y: 500 };
 	let buttons = 1n;
 	let frame: PetWindowFrame = { x: 900, y: 350, width: 360, height: 300 };
 	const events: NativeDragEvent[] = [];
-	const positions: Array<{ x: number; y: number }> = [];
 	const controller = new PetWindowController(
 		{
 			getFrame: () => frame,
@@ -100,18 +60,13 @@ test("native drag preserves grab offset, crosses displays, and ends on release",
 			getAllDisplays: () => [primary, secondary],
 			getPrimaryDisplay: () => primary,
 		},
-		{
-			pollIntervalMs: 60_000,
-			onDragStateChange: (event) => events.push(event),
-			onPositionChange: (position) => positions.push(position),
-		},
+		{ pollIntervalMs: 60_000, onDragStateChange: (event) => events.push(event) },
 	);
 
 	controller.beginDrag({ x: 8, y: 4 });
 	cursor = { x: -640, y: 160 };
 	controller.updateDrag();
 	expect(frame).toMatchObject({ x: -782, y: 14 });
-	expect(positions).toEqual([{ x: -782, y: 14 }]);
 
 	buttons = 0n;
 	controller.updateDrag();

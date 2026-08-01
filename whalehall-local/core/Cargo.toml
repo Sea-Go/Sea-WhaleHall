@@ -11,12 +11,10 @@ chrono.workspace = true
 directories.workspace = true
 display-info.workspace = true
 iana-time-zone.workspace = true
-libc.workspace = true
 network-interface.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 sysinfo.workspace = true
 sys-locale.workspace = true
 thiserror.workspace = true
@@ -27,8 +25,6 @@ whoami.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit.workspace = true
-objc2-core-foundation.workspace = true
-objc2-core-graphics.workspace = true
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 active-win-pos-rs.workspace = true

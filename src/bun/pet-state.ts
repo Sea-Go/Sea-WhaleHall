@@ -4,7 +4,6 @@ import type {
 } from "../agent/local-protocol";
 import { getPetAction } from "../shared/pet-actions";
 import type { PetInteractionMessage, PetState } from "../shared/contracts";
-import type { PetPresentationEvent } from "../shared/pet-presentation";
 
 export function petStateForRuntime(status: LocalRuntimeStatus): PetState {
 	if (status.activeCalls > 0) {
@@ -57,80 +56,6 @@ export function petStateHoldForToolEvent(event: LocalToolEvent): number {
 	if (event.event === "tool.started") return 600;
 	if (event.event === "tool.progress") return 0;
 	const action = petStateForToolEvent(event).action;
-	return action ? getPetAction(action).durationMs : 0;
-}
-
-export function petStateForPresentationEvent(
-	event: PetPresentationEvent,
-): PetState {
-	switch (event.kind) {
-		case "plan-generation-started":
-			return {
-				mood: "busy",
-				message: "正在一起整理计划…",
-				action: "searching",
-			};
-		case "plan-generation-succeeded":
-			return {
-				mood: "happy",
-				message: "计划草案准备好了。",
-				action: "taskComplete",
-			};
-		case "plan-generation-failed":
-			return {
-				mood: "error",
-				message: "计划暂时没有生成，再试一次吧。",
-				action: "operationFailed",
-			};
-		case "milestone-completed":
-			return {
-				mood: "happy",
-				message: "新的里程碑完成了！",
-				action: "taskComplete",
-			};
-		case "focus-started":
-			return {
-				mood: "busy",
-				message: "专注时间开始了。",
-				action: "focus",
-			};
-		case "user-inactive":
-			return {
-				mood: "idle",
-				message: "我先自己玩一会儿。",
-				action: "idleSelfEntertainment",
-			};
-		case "reflection-encourage":
-			return {
-				mood: "happy",
-				message: "你正在推进当前目标，保持这个节奏。",
-				action: "focus",
-			};
-		case "reflection-refocus":
-			return {
-				mood: "busy",
-				message: "当前活动可能偏离目标，建议确认下一步并把注意力拉回来。",
-				action: "searching",
-			};
-		case "reflection-clarify-goal":
-			return {
-				mood: "idle",
-				message: "当前活动与目标的关系不够明确，建议先确认现在想推进的事情。",
-				action: "think",
-			};
-		case "reflection-take-break":
-			return {
-				mood: "idle",
-				message: "检测到活动中断，可以短暂休息，或确认接下来的步骤。",
-				action: "idleSelfEntertainment",
-			};
-	}
-}
-
-export function petStateHoldForPresentationEvent(
-	event: PetPresentationEvent,
-): number {
-	const action = petStateForPresentationEvent(event).action;
 	return action ? getPetAction(action).durationMs : 0;
 }
 
@@ -226,18 +151,6 @@ export class PetStateArbiter {
 		this.showTransient(
 			petStateForToolEvent(event),
 			petStateHoldForToolEvent(event),
-			terminal ? 2 : 1,
-		);
-	}
-
-	showPresentationEvent(event: PetPresentationEvent): void {
-		const terminal =
-			event.kind === "plan-generation-succeeded" ||
-			event.kind === "plan-generation-failed" ||
-			event.kind === "milestone-completed";
-		this.showTransient(
-			petStateForPresentationEvent(event),
-			petStateHoldForPresentationEvent(event),
 			terminal ? 2 : 1,
 		);
 	}

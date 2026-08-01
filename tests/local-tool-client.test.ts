@@ -4,15 +4,9 @@ import {
 	JsonlProtocolError,
 	LocalClientError,
 	LocalToolClient,
-	STARTUP_GOAL_CHANGE_ENV,
 	type ChildTransport,
 } from "../src/agent/local-tool-client";
-import type {
-	LocalEventGoalChange,
-	LocalToolDescriptor,
-} from "../src/agent/local-protocol";
-import { parseLocalMessage } from "../src/agent/local-protocol";
-import type { DesktopEventV1 } from "../src/agent/reflection/types";
+import type { LocalToolDescriptor } from "../src/agent/local-protocol";
 
 class FakeChild implements ChildTransport {
 	pid = 4242;
@@ -102,93 +96,6 @@ describe("JsonlParser", () => {
 		const parser = new JsonlParser(() => {}, 4);
 		expect(() => parser.feed(encoder.encode("12345"))).toThrow(JsonlProtocolError);
 	});
-
-	test("rejects raw key fields and content hidden in metadata events", () => {
-		const event = desktopEvent();
-		expect(() =>
-			parseLocalMessage(
-				JSON.stringify({
-					event: "desktop.event",
-					data: { ...event, payload: { keyCount: 1, keyCode: 12 } },
-				}),
-			),
-		).toThrow("invalid shape");
-		expect(() =>
-			parseLocalMessage(
-				JSON.stringify({
-					event: "desktop.event",
-					data: {
-						...event,
-						kind: "browser.tabOpened",
-						payload: {
-							browserId: "safari",
-							tabId: "tab-1",
-							url: "https://private.example/",
-						},
-					},
-				}),
-			),
-		).toThrow("invalid shape");
-		expect(
-			parseLocalMessage(
-				JSON.stringify({
-					event: "desktop.event",
-					data: {
-						...event,
-						kind: "browser.tabOpened",
-						sensitivity: "content",
-						payload: {
-							browserId: "safari",
-							tabId: "tab-1",
-							url: "https://example.test/",
-						},
-					},
-				}),
-			),
-		).toMatchObject({ event: "desktop.event" });
-	});
-
-	test("validates each desktop payload with exact keys and sensitivity", () => {
-		const event = desktopEvent();
-		for (const payload of [
-			{ appId: "code", appName: "Code", characters: "secret" },
-			{ appId: "code", appName: "Code", sequence: ["a", "b"] },
-			{ appId: "code" },
-		]) {
-			expect(() =>
-				parseLocalMessage(
-					JSON.stringify({
-						event: "desktop.event",
-						data: { ...event, payload },
-					}),
-				),
-			).toThrow("invalid shape");
-		}
-		expect(() =>
-			parseLocalMessage(
-				JSON.stringify({
-					event: "desktop.event",
-					data: {
-						...event,
-						kind: "accessibility.focusChanged",
-						payload: { appId: "code", role: "textBox", label: "private" },
-					},
-				}),
-			),
-		).toThrow("invalid shape");
-		expect(
-			parseLocalMessage(
-				JSON.stringify({
-					event: "desktop.event",
-					data: {
-						...event,
-						kind: "authorization.granted",
-						payload: { permissions: ["input.monitoring"] },
-					},
-				}),
-			),
-		).toMatchObject({ event: "desktop.event" });
-	});
 });
 
 describe("LocalToolClient", () => {
@@ -196,10 +103,7 @@ describe("LocalToolClient", () => {
 		const child = new FakeChild();
 		let receivedEnvironment: Readonly<Record<string, string>> | undefined;
 		const client = new LocalToolClient("fake", {
-			environment: {
-				WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data",
-				[STARTUP_GOAL_CHANGE_ENV]: "stale-shell-value",
-			},
+			environment: { WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data" },
 			spawn: (_binaryPath, environment) => {
 				receivedEnvironment = environment;
 				return child;
@@ -212,130 +116,6 @@ describe("LocalToolClient", () => {
 		await client.stop();
 		expect(child.endCalled).toBe(true);
 		expect(child.killCalled).toBe(false);
-	});
-
-	test("injects only the explicitly prepared startup goal JSON", async () => {
-		const child = new FakeChild();
-		let receivedEnvironment: Readonly<Record<string, string>> | undefined;
-		const change: LocalEventGoalChange = {
-			previous: {
-				goalId: "old-goal",
-				planId: null,
-				version: 1,
-				text: "Old goal",
-				activatedAtMs: 500,
-			},
-			next: null,
-			occurredAtMs: 1_000,
-			deduplicationKey: "startup-clear-1",
-		};
-		const client = new LocalToolClient("fake", {
-			environment: { WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data" },
-			spawn: (_binaryPath, environment) => {
-				receivedEnvironment = environment;
-				return child;
-			},
-		});
-
-		await client.prepareStartupGoalChange(change);
-		await client.start();
-		expect(receivedEnvironment?.[STARTUP_GOAL_CHANGE_ENV]).toBe(
-			JSON.stringify(change),
-		);
-		await expect(client.prepareStartupGoalChange(null)).rejects.toThrow(
-			"after whalehall-local has started",
-		);
-		await client.stop();
-	});
-
-	test("replays the exact prepared JSON when the child exits before startup acknowledgement", async () => {
-		const first = new FakeChild();
-		const second = new FakeChild();
-		const environments: Array<Readonly<Record<string, string>> | undefined> = [];
-		let spawnIndex = 0;
-		const change: LocalEventGoalChange = {
-			previous: null,
-			next: {
-				goalId: "goal-1",
-				planId: null,
-				version: 1,
-				text: "Retry startup safely",
-				activatedAtMs: 1_000,
-			},
-			occurredAtMs: 1_001,
-			deduplicationKey: "startup-retry-1",
-		};
-		const client = new LocalToolClient("fake", {
-			spawn: (_binaryPath, environment) => {
-				environments.push(environment);
-				return [first, second][spawnIndex++] as FakeChild;
-			},
-		});
-
-		await client.prepareStartupGoalChange(change);
-		await client.start();
-		first.exit(1);
-		await first.exited;
-		await Bun.sleep(0);
-		await client.prepareStartupGoalChange({
-			...change,
-			occurredAtMs: 2_000,
-		});
-		await client.start();
-		expect(
-			environments.map((environment) => environment?.[STARTUP_GOAL_CHANGE_ENV]),
-		).toEqual([JSON.stringify(change), JSON.stringify(change)]);
-		await client.stop();
-	});
-
-	test("clears the one-shot startup JSON only after reflection acknowledges materialization", async () => {
-		const children = [
-			new FakeChild((line, process) => {
-				const request = JSON.parse(line) as { id: string; method: string };
-				if (request.method === "runtime.health") {
-					process.respond({
-						id: request.id,
-						ok: true,
-						result: {
-							service: "whalehall-local",
-							version: "0.1.0",
-							pid: 4242,
-							status: "ok",
-						},
-					});
-				}
-			}),
-			new FakeChild(),
-		];
-		const environments: Array<Readonly<Record<string, string>> | undefined> = [];
-		let spawnIndex = 0;
-		const client = new LocalToolClient("fake", {
-			spawn: (_binaryPath, environment) => {
-				environments.push(environment);
-				return children[spawnIndex++] as FakeChild;
-			},
-		});
-		await client.prepareStartupGoalChange({
-			previous: null,
-			next: {
-				goalId: "goal-ack",
-				planId: null,
-				version: 1,
-				text: "Acknowledge startup",
-				activatedAtMs: 1,
-			},
-			occurredAtMs: 1,
-			deduplicationKey: "acknowledged-startup",
-		});
-		await client.start();
-		await client.health();
-		await client.acknowledgeStartupGoalChange();
-		await client.stop();
-		await client.start();
-
-		expect(environments[0]?.[STARTUP_GOAL_CHANGE_ENV]).toBeDefined();
-		expect(environments[1]?.[STARTUP_GOAL_CHANGE_ENV]).toBeUndefined();
-		await client.stop();
 	});
 
 	test("correlates responses and routes streamed events", async () => {
@@ -373,124 +153,6 @@ describe("LocalToolClient", () => {
 			client.callTool({ callId: "call-1", name: "system.info", arguments: {} }),
 		).resolves.toEqual({ callId: "call-1", output: { os: "macos" } });
 		expect(events).toEqual(["tool.progress"]);
-		await client.stop();
-	});
-
-	test("pulls, commits, and proactively routes durable desktop events", async () => {
-		const event = desktopEvent();
-		const child = new FakeChild((line, process) => {
-			const request = JSON.parse(line) as {
-				id: string;
-				method: string;
-				params: Record<string, unknown>;
-			};
-			if (request.method === "event.query") {
-				process.respond({
-					id: request.id,
-					ok: true,
-					result: { events: [event], nextCursor: event.cursor, hasMore: false },
-				});
-				return;
-			}
-			if (request.method === "event.commit") {
-				process.respond({
-					id: request.id,
-					ok: true,
-					result: {
-						consumerId: request.params.consumerId,
-						cursor: request.params.cursor,
-						advanced: true,
-					},
-				});
-			}
-		});
-		const client = new LocalToolClient("fake", { spawn: () => child });
-		const pushed: DesktopEventV1[] = [];
-		client.onDesktopEvent((value) => pushed.push(value));
-		await client.start();
-		child.respond({ event: "desktop.event", data: event });
-		await Bun.sleep(0);
-		expect(pushed).toEqual([event]);
-		await expect(
-			client.queryEvents({ consumerId: "reflection-runtime", limit: 100 }),
-		).resolves.toEqual({
-			events: [event],
-			nextCursor: event.cursor,
-			hasMore: false,
-		});
-		await expect(
-			client.commitEventCursor("reflection-runtime", event.cursor),
-		).resolves.toEqual({
-			consumerId: "reflection-runtime",
-			cursor: event.cursor,
-			advanced: true,
-		});
-		await client.stop();
-	});
-
-	test("appends only the specific validated durable goal boundary", async () => {
-		const child = new FakeChild((line, process) => {
-			const request = JSON.parse(line) as {
-				id: string;
-				method: string;
-				params: Record<string, unknown>;
-			};
-			if (request.method !== "event.goal.change") return;
-			const previous = request.params.previous as null;
-			const next = request.params.next as {
-				goalId: string;
-				planId: string | null;
-				version: number;
-				text: string;
-				activatedAtMs: number;
-			};
-			const occurredAtMs = request.params.occurredAtMs as number;
-			process.respond({
-				id: request.id,
-				ok: true,
-				result: {
-					inserted: true,
-					event: {
-						schemaVersion: "desktop-event.v1",
-						eventId: "goal-event-1",
-						cursor: "ec1_0000000000000001",
-						deviceId: "native-device",
-						sessionId: "native-session",
-						kind: "goal.contextChanged",
-						source: "planning.controller",
-						occurredAtMs,
-						observedAtMs: occurredAtMs,
-						goalVersion: null,
-						sensitivity: "content",
-						payload: { previous, next },
-					},
-				},
-			});
-		});
-		const client = new LocalToolClient("fake", { spawn: () => child });
-		await client.start();
-		const next = {
-			goalId: "goal-1",
-			planId: null,
-			version: 1,
-			text: "完成实现",
-			activatedAtMs: 10_000,
-		};
-
-		await expect(
-			client.appendGoalChange({
-				previous: null,
-				next,
-				occurredAtMs: 10_000,
-				deduplicationKey: "goal-change-1",
-			}),
-		).resolves.toMatchObject({
-			inserted: true,
-			event: {
-				kind: "goal.contextChanged",
-				payload: { previous: null, next },
-			},
-		});
 		await client.stop();
 	});
 
@@ -532,20 +194,3 @@ describe("LocalToolClient", () => {
 		expect(client.isRunning).toBe(false);
 	});
 });
-
-function desktopEvent(): DesktopEventV1 {
-	return {
-		schemaVersion: "desktop-event.v1",
-		eventId: "event-1",
-		cursor: "ec1_0000000000000001",
-		deviceId: "device-1",
-		sessionId: "session-1",
-		kind: "application.foregroundChanged",
-		source: "activity.sensor",
-		occurredAtMs: 1_000,
-		observedAtMs: 1_001,
-		goalVersion: null,
-		sensitivity: "metadata",
-		payload: { appId: "com.microsoft.VSCode", appName: "Visual Studio Code" },
-	};
-}

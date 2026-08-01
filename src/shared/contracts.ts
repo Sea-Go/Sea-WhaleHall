@@ -1,19 +1,5 @@
 import type { RPCSchema } from 'electrobun/bun';
 import type { PetActionId } from './pet-actions';
-import type { PetPresentationEvent } from './pet-presentation';
-import type { PetTodaySchedule } from './pet-panel';
-import type { ActiveGoalContextV1 } from './goal-context';
-import type {
-	ConversationRpcResult,
-	ConversationRpcSendResult,
-	ConversationRpcThread,
-} from './conversation';
-import type {
-	TaskPlanningAnswer,
-	TaskPlanningInput,
-	TaskPlanningRpcResult,
-	TaskPlanningSession,
-} from './task-planning';
 import type {
 	LocalRuntimeStatus,
 	LocalToolCall,
@@ -30,22 +16,6 @@ export type {
 	LocalToolCancelResult,
 	LocalToolDescriptor,
 	LocalToolEvent,
-	PetPresentationEvent,
-	PetTodaySchedule,
-	ActiveGoalContextV1,
-};
-
-export type {
-	ConversationRpcResult,
-	ConversationRpcSendResult,
-	ConversationRpcThread,
-};
-
-export type {
-	TaskPlanningAnswer,
-	TaskPlanningInput,
-	TaskPlanningRpcResult,
-	TaskPlanningSession,
 };
 
 export type PetMood = 'idle' | 'happy' | 'busy' | 'error';
@@ -117,47 +87,6 @@ export type ClientRPC = {
 				params: { visible: boolean };
 				response: { visible: boolean };
 			};
-			presentPetEvent: {
-				params: PetPresentationEvent;
-				response: { accepted: boolean };
-			};
-			updatePetTodaySchedule: {
-				params: PetTodaySchedule;
-				response: { accepted: boolean };
-			};
-			setActiveGoalContext: {
-				params: { goal: ActiveGoalContextV1 | null };
-				response: { goal: ActiveGoalContextV1 | null };
-			};
-			loadActiveConversation: {
-				params: { userId: string };
-				response: ConversationRpcResult<ConversationRpcThread | null>;
-			};
-			createConversation: {
-				params: { userId: string; title?: string };
-				response: ConversationRpcResult<ConversationRpcThread>;
-			};
-			sendConversationMessage: {
-				params: {
-					userId: string;
-					conversationId: string;
-					clientMessageId: string;
-					text: string;
-				};
-				response: ConversationRpcResult<ConversationRpcSendResult>;
-			};
-			createTaskPlanningSession: {
-				params: { userId: string; input: TaskPlanningInput };
-				response: TaskPlanningRpcResult<TaskPlanningSession>;
-			};
-			submitTaskPlanningAnswers: {
-				params: {
-					userId: string;
-					sessionId: string;
-					answers: readonly TaskPlanningAnswer[];
-				};
-				response: TaskPlanningRpcResult<TaskPlanningSession>;
-			};
 		};
 		messages: Record<never, never>;
 	}>;
@@ -168,31 +97,6 @@ export type ClientRPC = {
 			localToolEvent: LocalToolEvent;
 			petVisibilityChanged: { visible: boolean };
 		};
-	}>;
-};
-
-/** RPC surface for the compact schedule panel opened by a single pet click. */
-export type PetPanelRPC = {
-	bun: RPCSchema<{
-		requests: {
-			getTodaySchedule: {
-				params: Record<never, never>;
-				response: PetTodaySchedule;
-			};
-			closePetPanel: {
-				params: Record<never, never>;
-				response: { visible: boolean };
-			};
-			openMainWindow: {
-				params: Record<never, never>;
-				response: { visible: boolean };
-			};
-		};
-		messages: Record<never, never>;
-	}>;
-	webview: RPCSchema<{
-		requests: Record<never, never>;
-		messages: { todayScheduleChanged: PetTodaySchedule };
 	}>;
 };
 

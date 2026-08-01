@@ -3,9 +3,9 @@
 ## Purpose and ownership
 
 The accessibility-tree sensor is implemented in
-`core/src/sensors/accessibility_tree.rs`. It is an explicitly enabled resident Rust service that
+`core/src/sensors/accessibility_tree.rs`. It is a resident Rust service that
 samples the foreground application's bounded accessibility tree and stores
-changed snapshots in `accessibility.sqlite3`. It is fail-closed by default.
+changed snapshots in `accessibility.sqlite3`.
 
 The sensor covers:
 
@@ -83,13 +83,6 @@ Accessibility data can contain private messages, document contents, form
 values, filenames, and account information. The implementation applies these
 limits before writing SQLite:
 
-- resident collection requires
-  `WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED=true`;
-- values and document excerpts require the separate
-  `WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED=true` switch;
-- metadata-only collection does not ask the native platform adapters for
-  values/document text and clears those fields again at the normalization
-  boundary, including bridge-supplied fields;
 - at most 300 nodes per snapshot by default, configurable up to 1,000;
 - control names are limited to 1,024 characters;
 - ordinary values are limited to 4,096 characters;
@@ -97,10 +90,6 @@ limits before writing SQLite:
   16,384;
 - roles marked password or secure, or nodes with `protected: true`, always have
   both `value` and `documentText` removed;
-- turning content monitoring off clears the semantic comparison state and
-  redacts content fields in pending events before the resident loop can start;
-  snapshots captured under earlier explicit authorization remain available
-  through the historical Tools until normal retention removes them;
 - only changed trees create a new SQLite snapshot;
 - snapshots older than seven days are deleted when a changed snapshot is
   stored; retention is configurable from 1 through 30 days.
@@ -109,19 +98,12 @@ limits before writing SQLite:
 `accessibility.tree` also redacts both fields unless callers explicitly set
 `includeValues` or `includeDocumentText`.
 
-Data stays in the local application-data directory. Completed semantic
-transitions are also written to the local Desktop EventJournal for the
-reflection pipeline; no network transport is performed by this sensor.
-Deployments should treat `accessibility.read` as a high-impact permission and
-show an explicit consent surface.
+Data stays in the local application-data directory and is not transmitted by
+this implementation. Deployments should treat `accessibility.read` as a
+high-impact permission and show an explicit consent surface.
 
 ## Configuration
 
-- `WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED`: fail-closed resident
-  collection switch, default `false`;
-- `WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED`: independent value and
-  document-content switch, default `false`; it is ineffective unless
-  monitoring is enabled;
 - `WHALEHALL_ACCESSIBILITY_POLL_MS`: polling interval, default 2 seconds,
   range 50 milliseconds through 60 seconds;
 - `WHALEHALL_ACCESSIBILITY_SNAPSHOT_PATH`: optional bridge path;
@@ -141,40 +123,10 @@ The database uses WAL mode and foreign keys:
 - `accessibility_nodes` stores ordered parent/child identity, depth, role, name,
   optional value, nullable selection state, focus, enabled state, optional
   document excerpt, and the protected-input marker.
-- `accessibility_semantic_state` stores the last sanitized focus/value/document
-  projection used to suppress repeated observations.
-- `accessibility_event_outbox` durably stages completed semantic transitions.
 
-The service opens SQLite with `whalehall-local` so Tools can query previously
-authorized snapshots. With monitoring disabled it reports `disabled` and does
-not invoke the bridge or platform provider. When explicitly enabled it remains
-resident independently of Agent calls and shuts down before the other desktop
-sensors. A content-only configuration remains fail-closed and reports a
-warning. Callers can provide a custom `AccessibilityProvider` for deterministic
-embedding or tests.
-
-## Desktop events and recovery
-
-When total monitoring is enabled, the production server connects this resident
-sensor to the shared Desktop EventJournal. It emits only completed transitions:
-
-- `accessibility.focusChanged` when the sanitized application/control identity
-  changes;
-- `accessibility.valueChanged` when the same focused control's sanitized value
-  changes;
-- `accessibility.documentChanged` when the same sanitized document changes.
-
-Application/control roles and change counts are metadata. `label`, `value`, and
-`text` are emitted only with `content` sensitivity and only while the content
-switch is enabled. Metadata-only mode omits those fields. Protected controls
-never contribute a value or document body.
-
-Snapshot rows, the comparison state, and outbox rows are committed in one
-SQLite transaction. The outbox is flushed at resident start, before each poll,
-after each changed snapshot, and during orderly shutdown. Every row carries a
-stable deduplication key; therefore an EventJournal failure leaves the row for
-retry, and a crash after append but before outbox deletion replays to the same
-event id rather than creating a duplicate.
+The service starts with `whalehall-local`, remains resident independently of
+Agent calls, and shuts down before the other desktop sensors. Callers can
+provide a custom `AccessibilityProvider` for deterministic embedding or tests.
 
 ## Agent Tools
 
@@ -197,8 +149,7 @@ Examples:
 
 `tests/native-integration.test.ts` discovers
 `accessibility_tree.rs` automatically and requires exactly one probe. The probe
-explicitly enables both accessibility switches and writes a fresh isolated
-bridge containing a window, button, menu, text box,
+writes a fresh isolated bridge containing a window, button, menu, text box,
 selected item, document excerpt, and protected password control. Through the
 real JSONL server it verifies:
 

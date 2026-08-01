@@ -13,16 +13,7 @@ use super::{
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 
-const SCHEMA_VERSION: i64 = 2;
-
-#[derive(Clone, Debug)]
-pub(crate) struct ActivityEventOutboxRecord {
-    pub id: i64,
-    pub occurred_at_ms: i64,
-    pub app_id: String,
-    pub app_name: String,
-    pub deduplication_key: String,
-}
+const SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ActivityStore {
@@ -47,28 +38,6 @@ impl ActivityStore {
         &self.path
     }
 
-    pub(crate) fn open_foreground_baseline(&self) -> Result<Option<ForegroundApp>, ActivityError> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT app_id, app_name, executable_path, process_id, window_title
-             FROM usage_sessions
-             WHERE ended_at_ms IS NULL
-             ORDER BY id DESC
-             LIMIT 1",
-        )?;
-        let mut rows = statement.query([])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        Ok(Some(ForegroundApp {
-            app_id: row.get(0)?,
-            app_name: row.get(1)?,
-            executable_path: row.get(2)?,
-            process_id: u64::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
-            window_title: row.get(4)?,
-        }))
-    }
-
     pub(crate) fn recover_open_sessions(&self) -> Result<usize, ActivityError> {
         let connection = self.connect()?;
         let changed = connection.execute(
@@ -88,7 +57,6 @@ impl ActivityStore {
         next: Option<&ForegroundApp>,
         observed_at_ms: i64,
         end_reason: &str,
-        enqueue_foreground_event: bool,
     ) -> Result<Option<i64>, ActivityError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -119,53 +87,12 @@ impl ActivityStore {
                     observed_at_ms,
                 ],
             )?;
-            let next_id = transaction.last_insert_rowid();
-            if enqueue_foreground_event {
-                transaction.execute(
-                    "INSERT OR IGNORE INTO activity_event_outbox (
-                        occurred_at_ms, app_id, app_name, deduplication_key
-                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        observed_at_ms,
-                        app.app_id,
-                        app.app_name,
-                        format!("foreground:{observed_at_ms}:{next_id}"),
-                    ],
-                )?;
-            }
-            Some(next_id)
+            Some(transaction.last_insert_rowid())
         } else {
             None
         };
         transaction.commit()?;
         Ok(next_id)
-    }
-
-    pub(crate) fn pending_foreground_events(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<ActivityEventOutboxRecord>, ActivityError> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT id, occurred_at_ms, app_id, app_name, deduplication_key
-             FROM activity_event_outbox ORDER BY id LIMIT ?1",
-        )?;
-        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-            Ok(ActivityEventOutboxRecord {
-                id: row.get(0)?,
-                occurred_at_ms: row.get(1)?,
-                app_id: row.get(2)?,
-                app_name: row.get(3)?,
-                deduplication_key: row.get(4)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub(crate) fn delete_foreground_event(&self, id: i64) -> Result<(), ActivityError> {
-        let connection = self.connect()?;
-        connection.execute("DELETE FROM activity_event_outbox WHERE id = ?1", [id])?;
-        Ok(())
     }
 
     pub(crate) fn touch(&self, session_id: i64, observed_at_ms: i64) -> Result<(), ActivityError> {
@@ -271,8 +198,9 @@ impl ActivityStore {
                 "activity database schema {version} is newer than supported schema {SCHEMA_VERSION}"
             )));
         }
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS usage_sessions (
+        if version == 0 {
+            connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS usage_sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     app_id TEXT NOT NULL,
                     app_name TEXT NOT NULL,
@@ -294,17 +222,9 @@ impl ActivityStore {
                     ON usage_sessions(started_at_ms DESC);
                  CREATE INDEX IF NOT EXISTS usage_sessions_app_started_at
                     ON usage_sessions(app_id, started_at_ms DESC);
-             CREATE TABLE IF NOT EXISTS activity_event_outbox (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                occurred_at_ms INTEGER NOT NULL,
-                app_id TEXT NOT NULL,
-                app_name TEXT NOT NULL,
-                deduplication_key TEXT NOT NULL UNIQUE
-             );
-             CREATE INDEX IF NOT EXISTS activity_event_outbox_order
-                ON activity_event_outbox(id);
-             PRAGMA user_version = 2;",
-        )?;
+                 PRAGMA user_version = 1;",
+            )?;
+        }
         Ok(())
     }
 

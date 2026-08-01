@@ -4,12 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
-use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use whalehall_local_protocol::desktop_event_kinds;
 
 use super::model::format_timestamp;
 use super::store::ActivityStore;
@@ -18,7 +16,6 @@ use super::{
     ActivityMonitorState, ActivityQuery, ActivityStatus, ForegroundApp, ForegroundAppProvider,
     UsageSession,
 };
-use crate::events::{DesktopEventDraft, EventJournal};
 
 pub const DEFAULT_ACTIVITY_POLL_INTERVAL_MS: u64 = 100;
 const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 5_000;
@@ -92,16 +89,7 @@ impl ActivityService {
         config: ActivityConfig,
         provider: Arc<dyn ForegroundAppProvider>,
     ) -> Result<Self, ActivityError> {
-        Self::start_with_event_journal(config, provider, None)
-    }
-
-    pub fn start_with_event_journal(
-        config: ActivityConfig,
-        provider: Arc<dyn ForegroundAppProvider>,
-        event_journal: Option<EventJournal>,
-    ) -> Result<Self, ActivityError> {
         let store = ActivityStore::open(&config.database_path)?;
-        let startup_foreground_baseline = store.open_foreground_baseline()?;
         store.recover_open_sessions()?;
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let inner = Arc::new(ActivityInner {
@@ -119,13 +107,7 @@ impl ActivityService {
             task: Mutex::new(None),
             commands,
         });
-        let task = tokio::spawn(run_monitor(
-            inner.clone(),
-            provider,
-            command_receiver,
-            event_journal,
-            startup_foreground_baseline,
-        ));
+        let task = tokio::spawn(run_monitor(inner.clone(), provider, command_receiver));
         *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
         Ok(Self { inner })
     }
@@ -182,30 +164,12 @@ async fn run_monitor(
     inner: Arc<ActivityInner>,
     provider: Arc<dyn ForegroundAppProvider>,
     mut commands: mpsc::UnboundedReceiver<ActivityCommand>,
-    event_journal: Option<EventJournal>,
-    startup_foreground_baseline: Option<ForegroundApp>,
 ) {
     let mut recorder = ActivityRecorder::new(
         inner.store.clone(),
         inner.config.heartbeat_interval.as_millis() as i64,
-    )
-    .with_event_journal(event_journal)
-    .with_startup_foreground_baseline(startup_foreground_baseline);
-    let startup_error = recorder
-        .flush_foreground_events()
-        .err()
-        .map(|error| error.to_string());
-    update_status(
-        &inner,
-        if startup_error.is_some() {
-            ActivityMonitorState::Degraded
-        } else {
-            ActivityMonitorState::Running
-        },
-        None,
-        None,
-        startup_error,
     );
+    update_status(&inner, ActivityMonitorState::Running, None, None, None);
     let mut ticker = interval(inner.config.poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let gap_threshold_ms = i64::try_from(inner.config.poll_interval.as_millis())
@@ -341,8 +305,6 @@ struct ActivityRecorder {
     current: Option<OpenSession>,
     heartbeat_interval_ms: i64,
     last_heartbeat_ms: i64,
-    event_journal: Option<EventJournal>,
-    startup_foreground_baseline: Option<ForegroundApp>,
 }
 
 impl ActivityRecorder {
@@ -352,22 +314,7 @@ impl ActivityRecorder {
             current: None,
             heartbeat_interval_ms,
             last_heartbeat_ms: 0,
-            event_journal: None,
-            startup_foreground_baseline: None,
         }
-    }
-
-    fn with_event_journal(mut self, event_journal: Option<EventJournal>) -> Self {
-        self.event_journal = event_journal;
-        self
-    }
-
-    fn with_startup_foreground_baseline(
-        mut self,
-        startup_foreground_baseline: Option<ForegroundApp>,
-    ) -> Self {
-        self.startup_foreground_baseline = startup_foreground_baseline;
-        self
     }
 
     fn observe(
@@ -375,7 +322,6 @@ impl ActivityRecorder {
         next: Option<ForegroundApp>,
         observed_at_ms: i64,
     ) -> Result<(), ActivityError> {
-        let initial_flush = self.flush_foreground_events();
         if let (Some(current), Some(next)) = (&self.current, &next)
             && current.app.same_usage_target(next)
         {
@@ -383,64 +329,29 @@ impl ActivityRecorder {
                 self.store.touch(current.id, observed_at_ms)?;
                 self.last_heartbeat_ms = observed_at_ms;
             }
-            return initial_flush;
+            return Ok(());
         }
 
         let current_id = self.current.as_ref().map(|session| session.id);
-        let suppress_startup_event = self
-            .startup_foreground_baseline
-            .as_ref()
-            .zip(next.as_ref())
-            .is_some_and(|(baseline, next)| {
-                baseline.app_id == next.app_id
-                    && baseline.process_id == next.process_id
-                    && baseline.window_title == next.window_title
-            });
-        let next_id = self.store.transition(
-            current_id,
-            next.as_ref(),
-            observed_at_ms,
-            "app_switch",
-            self.event_journal.is_some() && !suppress_startup_event,
-        )?;
-        self.startup_foreground_baseline = None;
+        let next_id =
+            self.store
+                .transition(current_id, next.as_ref(), observed_at_ms, "app_switch")?;
         self.current = next_id.zip(next).map(|(id, app)| OpenSession {
             id,
             app,
             started_at_ms: observed_at_ms,
         });
         self.last_heartbeat_ms = observed_at_ms;
-        self.flush_foreground_events()
+        Ok(())
     }
 
     fn stop(&mut self, observed_at_ms: i64, reason: &str) -> Result<(), ActivityError> {
         let Some(current) = self.current.as_ref() else {
             return Ok(());
         };
-        let current_id = current.id;
         self.store
-            .transition(Some(current_id), None, observed_at_ms, reason, false)?;
+            .transition(Some(current.id), None, observed_at_ms, reason)?;
         self.current = None;
-        Ok(())
-    }
-
-    fn flush_foreground_events(&self) -> Result<(), ActivityError> {
-        let Some(event_journal) = &self.event_journal else {
-            return Ok(());
-        };
-        for record in self.store.pending_foreground_events(100)? {
-            event_journal.append(DesktopEventDraft::metadata(
-                desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED,
-                "activity.sensor",
-                record.occurred_at_ms,
-                json!({
-                    "appId": record.app_id,
-                    "appName": record.app_name,
-                }),
-                record.deduplication_key,
-            ))?;
-            self.store.delete_foreground_event(record.id)?;
-        }
         Ok(())
     }
 
@@ -477,7 +388,6 @@ fn is_observation_gap(previous_ms: i64, current_ms: i64, threshold_ms: i64) -> b
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
-    use whalehall_local_protocol::EventQueryParams;
 
     use super::*;
 
@@ -519,99 +429,6 @@ mod tests {
         assert_eq!(sessions[1].last_seen_at_ms, 2_500);
         assert_eq!(sessions[1].ended_at_ms, Some(2_500));
         assert_eq!(sessions[1].duration_ms, Some(1_500));
-    }
-
-    #[test]
-    fn publishes_each_real_foreground_transition_without_heartbeat_duplicates() {
-        let (directory, store) = test_store();
-        let event_journal =
-            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
-        let mut recorder =
-            ActivityRecorder::new(store, 500).with_event_journal(Some(event_journal.clone()));
-
-        recorder.observe(Some(app("editor", 10)), 1_000).unwrap();
-        recorder.observe(Some(app("editor", 10)), 1_600).unwrap();
-        recorder.observe(Some(app("browser", 20)), 2_500).unwrap();
-        recorder.stop(3_100, "shutdown").unwrap();
-
-        let events = event_journal
-            .query(&EventQueryParams::default())
-            .unwrap()
-            .events;
-        assert_eq!(events.len(), 2);
-        assert!(
-            events
-                .iter()
-                .all(|event| event.kind == desktop_event_kinds::APPLICATION_FOREGROUND_CHANGED)
-        );
-        assert_eq!(events[0].payload["appId"], "editor");
-        assert_eq!(events[0].payload["appName"], "editor");
-        assert!(events[0].payload.get("windowTitle").is_none());
-        assert_eq!(events[1].payload["appId"], "browser");
-        assert!(events[0].payload.get("previous").is_none());
-        assert!(events[0].payload.get("processId").is_none());
-        assert!(events[0].payload.get("executablePath").is_none());
-    }
-
-    #[test]
-    fn restart_baseline_suppresses_duplicate_foreground_but_not_real_change() {
-        let (directory, store) = test_store();
-        let event_journal =
-            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
-        {
-            let mut first = ActivityRecorder::new(store.clone(), 500)
-                .with_event_journal(Some(event_journal.clone()));
-            first.observe(Some(app("editor", 10)), 1_000).unwrap();
-        }
-
-        let baseline = store
-            .open_foreground_baseline()
-            .expect("load startup baseline");
-        assert!(baseline.is_some());
-        assert_eq!(store.recover_open_sessions().unwrap(), 1);
-        let mut restarted = ActivityRecorder::new(store, 500)
-            .with_event_journal(Some(event_journal.clone()))
-            .with_startup_foreground_baseline(baseline);
-        restarted.observe(Some(app("editor", 10)), 2_000).unwrap();
-        assert_eq!(
-            event_journal
-                .query(&EventQueryParams::default())
-                .unwrap()
-                .events
-                .len(),
-            1
-        );
-
-        restarted.observe(Some(app("browser", 20)), 2_500).unwrap();
-        let events = event_journal
-            .query(&EventQueryParams::default())
-            .unwrap()
-            .events;
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].payload["appId"], "browser");
-    }
-
-    #[test]
-    fn foreground_outbox_retries_one_failed_append_exactly_once() {
-        let (directory, store) = test_store();
-        let event_journal =
-            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
-        event_journal.fail_next_appends_for_test(1);
-        let mut recorder = ActivityRecorder::new(store.clone(), 500)
-            .with_event_journal(Some(event_journal.clone()));
-
-        assert!(recorder.observe(Some(app("editor", 10)), 1_000).is_err());
-        assert_eq!(store.pending_foreground_events(100).unwrap().len(), 1);
-        recorder.observe(Some(app("editor", 10)), 1_600).unwrap();
-        recorder.observe(Some(app("editor", 10)), 2_200).unwrap();
-
-        assert!(store.pending_foreground_events(100).unwrap().is_empty());
-        let events = event_journal
-            .query(&EventQueryParams::default())
-            .unwrap()
-            .events;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].payload["appId"], "editor");
     }
 
     #[test]

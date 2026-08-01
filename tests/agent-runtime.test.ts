@@ -5,11 +5,6 @@ import {
 	type LocalToolProcess,
 } from "../src/agent/local-tool-client";
 import type {
-	LocalEventCommitResult,
-	LocalEventGoalChange,
-	LocalEventGoalChangeResult,
-	LocalEventQuery,
-	LocalEventQueryResult,
 	LocalRuntimeHealth,
 	LocalToolCall,
 	LocalToolCallResult,
@@ -17,31 +12,14 @@ import type {
 	LocalToolDescriptor,
 	LocalToolEvent,
 } from "../src/agent/local-protocol";
-import type { DesktopEventV1 } from "../src/agent/reflection/types";
 
 class FakeLocalProcess implements LocalToolProcess {
 	pid: number | null = null;
 	isRunning = false;
 	startError: Error | null = null;
-	appendGoalError: Error | null = null;
 	startCount = 0;
-	readonly preparedStartupGoalChanges: Array<LocalEventGoalChange | null> = [];
-	readonly appendedGoalChanges: LocalEventGoalChange[] = [];
-	startupGoalAcknowledgements = 0;
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
-	private readonly desktopEventListeners = new Set<(event: DesktopEventV1) => void>();
 	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
-
-	async prepareStartupGoalChange(
-		change: LocalEventGoalChange | null,
-	): Promise<void> {
-		if (this.isRunning) throw new Error("already running");
-		this.preparedStartupGoalChanges.push(structuredClone(change));
-	}
-
-	async acknowledgeStartupGoalChange(): Promise<void> {
-		this.startupGoalAcknowledgements += 1;
-	}
 
 	async start(): Promise<void> {
 		this.startCount += 1;
@@ -82,44 +60,6 @@ class FakeLocalProcess implements LocalToolProcess {
 		return { callId, cancelled: true };
 	}
 
-	async queryEvents(_query: LocalEventQuery): Promise<LocalEventQueryResult> {
-		return { events: [], nextCursor: null, hasMore: false };
-	}
-
-	async commitEventCursor(
-		consumerId: string,
-		cursor: string,
-	): Promise<LocalEventCommitResult> {
-		return { consumerId, cursor, advanced: true };
-	}
-
-	async appendGoalChange(
-		change: LocalEventGoalChange,
-	): Promise<LocalEventGoalChangeResult> {
-		this.appendedGoalChanges.push(structuredClone(change));
-		if (this.appendGoalError) throw this.appendGoalError;
-		return {
-			inserted: true,
-			event: {
-				schemaVersion: "desktop-event.v1",
-				eventId: "goal-event",
-				cursor: "ec1_0000000000000001",
-				deviceId: "device",
-				sessionId: "session",
-				kind: "goal.contextChanged",
-				source: "planning.controller",
-				occurredAtMs: change.occurredAtMs,
-				observedAtMs: change.occurredAtMs,
-				goalVersion: change.previous?.version ?? null,
-				sensitivity: "content",
-				payload: {
-					previous: structuredClone(change.previous),
-					next: structuredClone(change.next),
-				},
-			},
-		};
-	}
-
 	async stop(): Promise<void> {
 		this.pid = null;
 		this.isRunning = false;
@@ -128,11 +68,6 @@ class FakeLocalProcess implements LocalToolProcess {
 	onEvent(listener: (event: LocalToolEvent) => void): () => void {
 		this.eventListeners.add(listener);
 		return () => this.eventListeners.delete(listener);
-	}
-
-	onDesktopEvent(listener: (event: DesktopEventV1) => void): () => void {
-		this.desktopEventListeners.add(listener);
-		return () => this.desktopEventListeners.delete(listener);
 	}
 
 	onFailure(listener: (error: LocalClientError) => void): () => void {
@@ -144,10 +79,6 @@ class FakeLocalProcess implements LocalToolProcess {
 		for (const listener of this.eventListeners) listener(event);
 	}
 
-	emitDesktop(event: DesktopEventV1): void {
-		for (const listener of this.desktopEventListeners) listener(event);
-	}
-
 	fail(error: LocalClientError): void {
 		this.isRunning = false;
 		this.pid = null;
@@ -156,127 +87,6 @@ class FakeLocalProcess implements LocalToolProcess {
 }
 
 describe("AgentRuntime", () => {
-	test("production startup gate rejects lazy RPC starts until goal preparation", async () => {
-		const local = new FakeLocalProcess();
-		const runtime = new AgentRuntime(local, {
-			requireStartupGoalPreparation: true,
-		});
-
-		await expect(runtime.listLocalTools()).rejects.toThrow(
-			"gated until its goal boundary is prepared",
-		);
-		expect(local.startCount).toBe(0);
-		await runtime.prepareStartupGoalChange(null);
-		await expect(runtime.listLocalTools()).resolves.toHaveLength(1);
-		expect(local.startCount).toBe(1);
-		await runtime.stop();
-		await expect(runtime.listLocalTools()).rejects.toThrow(
-			"gated until its goal boundary is prepared",
-		);
-		expect(local.startCount).toBe(1);
-	});
-
-	test("production startup gate relocks after an unexpected native exit", async () => {
-		const local = new FakeLocalProcess();
-		const runtime = new AgentRuntime(local, {
-			requireStartupGoalPreparation: true,
-		});
-		await runtime.prepareStartupGoalChange(null);
-		await runtime.start();
-		local.fail(new LocalClientError("PROCESS_EXITED", "native exited"));
-
-		await expect(
-			runtime.callLocalTool({
-				callId: "early-retry",
-				name: "system.info",
-				arguments: {},
-			}),
-		).rejects.toThrow("gated until its goal boundary is prepared");
-		expect(local.startCount).toBe(1);
-	});
-
-	test("an acknowledged runtime re-prepares its goal intent before automatic restart", async () => {
-		const local = new FakeLocalProcess();
-		const runtime = new AgentRuntime(local, {
-			requireStartupGoalPreparation: true,
-		});
-		const change: LocalEventGoalChange = {
-			previous: null,
-			next: {
-				goalId: "goal-1",
-				planId: null,
-				version: 1,
-				text: "Keep restart ordered",
-				activatedAtMs: 1_000,
-			},
-			occurredAtMs: 1_000,
-			deduplicationKey: "restart-intent",
-		};
-		await runtime.prepareStartupGoalChange(change);
-		await runtime.start();
-		await runtime.acknowledgeStartupGoalChange();
-		local.fail(new LocalClientError("PROCESS_EXITED", "native exited"));
-
-		await expect(runtime.listLocalTools()).resolves.toHaveLength(1);
-		expect(local.startCount).toBe(2);
-		expect(local.preparedStartupGoalChanges).toEqual([change, change]);
-	});
-
-	test("a lost goal response cannot make automatic restart roll back the requested target", async () => {
-		const local = new FakeLocalProcess();
-		const runtime = new AgentRuntime(local, {
-			requireStartupGoalPreparation: true,
-		});
-		await runtime.prepareStartupGoalChange(null);
-		await runtime.start();
-		await runtime.acknowledgeStartupGoalChange();
-		const requested: LocalEventGoalChange = {
-			previous: null,
-			next: {
-				goalId: "goal-b",
-				planId: "plan-b",
-				version: 1,
-				text: "Newest user target",
-				activatedAtMs: 2_000,
-			},
-			occurredAtMs: 2_000,
-			deduplicationKey: "goal-b-request",
-		};
-		local.appendGoalError = new Error("response lost after durable append");
-		await expect(runtime.appendDesktopGoalChange(requested)).rejects.toThrow(
-			"response lost",
-		);
-		local.appendGoalError = null;
-		local.fail(new LocalClientError("PROCESS_EXITED", "native exited"));
-
-		await expect(runtime.listLocalTools()).resolves.toHaveLength(1);
-		expect(local.preparedStartupGoalChanges.at(-1)).toEqual(requested);
-	});
-
-	test("prepares the startup goal boundary before starting the native process", async () => {
-		const local = new FakeLocalProcess();
-		const runtime = new AgentRuntime(local);
-		const change: LocalEventGoalChange = {
-			previous: null,
-			next: {
-				goalId: "goal-1",
-				planId: null,
-				version: 1,
-				text: "Ship startup ordering",
-				activatedAtMs: 1_000,
-			},
-			occurredAtMs: 1_000,
-			deduplicationKey: "startup-goal-1",
-		};
-
-		await runtime.prepareStartupGoalChange(change);
-		expect(local.preparedStartupGoalChanges).toEqual([change]);
-		await runtime.start();
-		await expect(runtime.prepareStartupGoalChange(null)).rejects.toThrow(
-			"already started",
-		);
-	});
-
 	test("moves from stopped through starting to ready", async () => {
 		const local = new FakeLocalProcess();
 		const runtime = new AgentRuntime(local);
@@ -333,41 +143,4 @@ describe("AgentRuntime", () => {
 			lastError: "local process exited",
 		});
 	});
-
-	test("forwards proactive desktop events independently from tool lifecycle events", async () => {
-		const local = new FakeLocalProcess();
-		const runtime = new AgentRuntime(local);
-		const received: DesktopEventV1[] = [];
-		runtime.onDesktopEvent((event) => received.push(event));
-		await runtime.start();
-		local.emitDesktop(desktopEvent());
-		expect(received.map((event) => event.kind)).toEqual([
-			"input.activityAggregated",
-		]);
-		expect(runtime.getLocalStatus().activeCalls).toBe(0);
-	});
 });
-
-function desktopEvent(): DesktopEventV1 {
-	return {
-		schemaVersion: "desktop-event.v1",
-		eventId: "event-1",
-		cursor: "ec1_0000000000000001",
-		deviceId: "device-1",
-		sessionId: "session-1",
-		kind: "input.activityAggregated",
-		source: "input.sensor",
-		occurredAtMs: 1_000,
-		observedAtMs: 1_001,
-		goalVersion: null,
-		sensitivity: "metadata",
-		payload: {
-			bucketStartedAtMs: 995,
-			bucketEndedAtMs: 1_000,
-			keyCount: 3,
-			clickCount: 1,
-			scrollDelta: 0,
-			mouseDistance: 0,
-		},
-	};
-}

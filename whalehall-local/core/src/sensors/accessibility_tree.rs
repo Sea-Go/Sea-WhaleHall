@@ -15,33 +15,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use directories::ProjectDirs;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value as JsonValue, json};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use whalehall_local_protocol::{DesktopEventSensitivity, desktop_event_kinds};
-
-use crate::events::{DesktopEventDraft, EventJournal, EventJournalError};
 
 pub const DEFAULT_ACCESSIBILITY_POLL_INTERVAL_MS: u64 = 2_000;
 pub const DEFAULT_ACCESSIBILITY_BRIDGE_MAX_AGE_MS: u64 = 15_000;
 pub const DEFAULT_ACCESSIBILITY_MAX_NODES: usize = 300;
 pub const DEFAULT_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT: usize = 4_096;
 pub const DEFAULT_ACCESSIBILITY_RETENTION_DAYS: u64 = 7;
-const ACCESSIBILITY_SCHEMA_VERSION: i64 = 2;
+const ACCESSIBILITY_SCHEMA_VERSION: i64 = 1;
 const MAX_QUERY_LIMIT: usize = 1_000;
 const MAX_NODE_NAME_CHARS: usize = 1_024;
 const MAX_NODE_VALUE_CHARS: usize = 4_096;
 const MAX_WARNING_CHARS: usize = 2_048;
-const MAX_EVENT_APP_ID_CHARS: usize = 512;
-const MAX_EVENT_ROLE_CHARS: usize = 512;
-const MAX_EVENT_LABEL_CHARS: usize = 2_048;
-const MAX_EVENT_DOCUMENT_ID_CHARS: usize = 512;
-const MAX_EVENT_TEXT_CHARS: usize = 4_096;
-const ACCESSIBILITY_EVENT_SOURCE: &str = "accessibility.tree.sensor";
 
 #[derive(Debug, Error)]
 pub enum AccessibilityError {
@@ -55,16 +45,12 @@ pub enum AccessibilityError {
     Sqlite(#[from] rusqlite::Error),
     #[error("accessibility sensor collection error: {0}")]
     Collection(String),
-    #[error("accessibility event publication failed: {0}")]
-    EventJournal(#[from] EventJournalError),
 }
 
 #[derive(Clone, Debug)]
 pub struct AccessibilityConfig {
     pub database_path: PathBuf,
     pub bridge_path: PathBuf,
-    pub monitoring_enabled: bool,
-    pub content_monitoring_enabled: bool,
     pub poll_interval: Duration,
     pub bridge_max_age: Duration,
     pub max_nodes: usize,
@@ -93,14 +79,6 @@ impl AccessibilityConfig {
         Ok(Self {
             database_path: data_dir.join("accessibility.sqlite3"),
             bridge_path,
-            monitoring_enabled: bool_from_environment(
-                "WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED",
-                false,
-            )?,
-            content_monitoring_enabled: bool_from_environment(
-                "WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
-                false,
-            )?,
             poll_interval: duration_from_environment(
                 "WHALEHALL_ACCESSIBILITY_POLL_MS",
                 DEFAULT_ACCESSIBILITY_POLL_INTERVAL_MS,
@@ -143,7 +121,6 @@ impl AccessibilityConfig {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AccessibilitySensorState {
-    Disabled,
     Starting,
     Running,
     Degraded,
@@ -243,9 +220,6 @@ impl AccessibilityObservation {
                 node.protected = true;
                 node.value = None;
                 node.document_text = None;
-            } else if !config.content_monitoring_enabled {
-                node.value = None;
-                node.document_text = None;
             }
         }
         self.warnings = self
@@ -258,9 +232,8 @@ impl AccessibilityObservation {
             self.capabilities.tree = true;
             self.capabilities.focused_control |= self.nodes.iter().any(|node| node.focused);
             self.capabilities.selection |= self.nodes.iter().any(|node| node.selected.is_some());
-            self.capabilities.document_text = config.content_monitoring_enabled
-                && (self.capabilities.document_text
-                    || self.nodes.iter().any(|node| node.document_text.is_some()));
+            self.capabilities.document_text |=
+                self.nodes.iter().any(|node| node.document_text.is_some());
         }
     }
 
@@ -294,66 +267,6 @@ impl From<&AccessibilityNode> for AccessibilityControlSummary {
             protected: node.protected,
         }
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct AccessibilitySemanticState {
-    #[serde(default)]
-    focus: Option<AccessibilitySemanticFocus>,
-    #[serde(default)]
-    document: Option<AccessibilitySemanticDocument>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct AccessibilitySemanticFocus {
-    app_id: String,
-    node_id: String,
-    role: String,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    value: Option<String>,
-}
-
-impl AccessibilitySemanticFocus {
-    fn same_control(&self, other: &Self) -> bool {
-        self.app_id == other.app_id && self.node_id == other.node_id && self.role == other.role
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct AccessibilitySemanticDocument {
-    app_id: String,
-    document_id: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-impl AccessibilitySemanticDocument {
-    fn same_document(&self, other: &Self) -> bool {
-        self.app_id == other.app_id && self.document_id == other.document_id
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PendingAccessibilityEvent {
-    kind: &'static str,
-    sensitivity: DesktopEventSensitivity,
-    payload: JsonValue,
-}
-
-#[derive(Clone, Debug)]
-struct AccessibilityEventOutboxRecord {
-    id: i64,
-    kind: String,
-    occurred_at_ms: i64,
-    sensitivity: DesktopEventSensitivity,
-    payload: JsonValue,
-    deduplication_key: String,
-    redacted_after_capture: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -437,8 +350,6 @@ pub struct AccessibilityStatus {
     pub state: AccessibilitySensorState,
     pub database_path: String,
     pub bridge_path: String,
-    pub monitoring_enabled: bool,
-    pub content_monitoring_enabled: bool,
     pub poll_interval_ms: u64,
     pub bridge_max_age_ms: u64,
     pub max_nodes: usize,
@@ -505,39 +416,13 @@ impl AccessibilityService {
         config: AccessibilityConfig,
         provider: Arc<dyn AccessibilityProvider>,
     ) -> Result<Self, AccessibilityError> {
-        Self::start_with_event_journal(config, provider, None)
-    }
-
-    pub fn start_with_event_journal(
-        config: AccessibilityConfig,
-        provider: Arc<dyn AccessibilityProvider>,
-        event_journal: Option<EventJournal>,
-    ) -> Result<Self, AccessibilityError> {
         let store = AccessibilityStore::open(&config.database_path)?;
-        store.enforce_content_policy(
-            config.monitoring_enabled && config.content_monitoring_enabled,
-        )?;
         let snapshot_count = store.snapshot_count()?;
-        let content_monitoring_enabled =
-            config.monitoring_enabled && config.content_monitoring_enabled;
-        let mut warnings = Vec::new();
-        if config.content_monitoring_enabled && !config.monitoring_enabled {
-            warnings.push(
-                "accessibility content monitoring is ignored until accessibility monitoring is enabled"
-                    .to_owned(),
-            );
-        }
         let inner = Arc::new(AccessibilityInner {
             status: Mutex::new(AccessibilityStatus {
-                state: if config.monitoring_enabled {
-                    AccessibilitySensorState::Starting
-                } else {
-                    AccessibilitySensorState::Disabled
-                },
+                state: AccessibilitySensorState::Starting,
                 database_path: config.database_path.to_string_lossy().into_owned(),
                 bridge_path: config.bridge_path.to_string_lossy().into_owned(),
-                monitoring_enabled: config.monitoring_enabled,
-                content_monitoring_enabled,
                 poll_interval_ms: config.poll_interval.as_millis() as u64,
                 bridge_max_age_ms: config.bridge_max_age.as_millis() as u64,
                 max_nodes: config.max_nodes,
@@ -552,7 +437,7 @@ impl AccessibilityService {
                 snapshot_count,
                 current_control: None,
                 capabilities: AccessibilityCapabilities::default(),
-                warnings,
+                warnings: Vec::new(),
                 last_error: None,
             }),
             config,
@@ -560,14 +445,8 @@ impl AccessibilityService {
             cancellation: CancellationToken::new(),
             task: Mutex::new(None),
         });
-        if inner.config.monitoring_enabled {
-            let task = tokio::spawn(run_accessibility_monitor(
-                inner.clone(),
-                provider,
-                event_journal,
-            ));
-            *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
-        }
+        let task = tokio::spawn(run_accessibility_monitor(inner.clone(), provider));
+        *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
         Ok(Self { inner })
     }
 
@@ -607,26 +486,14 @@ impl AccessibilityService {
 async fn run_accessibility_monitor(
     inner: Arc<AccessibilityInner>,
     provider: Arc<dyn AccessibilityProvider>,
-    event_journal: Option<EventJournal>,
 ) {
     let mut ticker = interval(inner.config.poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_fingerprint = None;
 
-    if let Some(journal) = &event_journal
-        && let Err(error) = flush_accessibility_event_outbox(&inner.store, journal)
-    {
-        update_degraded_status(&inner, now_ms(), error.to_string());
-    }
-
     loop {
         tokio::select! {
             () = inner.cancellation.cancelled() => {
-                if let Some(journal) = &event_journal
-                    && let Err(error) = flush_accessibility_event_outbox(&inner.store, journal)
-                {
-                    update_degraded_status(&inner, now_ms(), error.to_string());
-                }
                 inner.status.lock().unwrap_or_else(|error| error.into_inner()).state =
                     AccessibilitySensorState::Stopped;
                 break;
@@ -635,11 +502,6 @@ async fn run_accessibility_monitor(
                 let config = inner.config.clone();
                 let provider = provider.clone();
                 let observed_at_ms = now_ms();
-                if let Some(journal) = &event_journal
-                    && let Err(error) = flush_accessibility_event_outbox(&inner.store, journal)
-                {
-                    update_degraded_status(&inner, observed_at_ms, error.to_string());
-                }
                 let result = tokio::task::spawn_blocking(move || provider.observe(&config)).await;
                 let observation = match result {
                     Ok(Ok(mut observation)) => {
@@ -675,22 +537,9 @@ async fn run_accessibility_monitor(
                         &observation,
                         observed_at_ms,
                         inner.config.retention,
-                        inner.config.content_monitoring_enabled,
-                        event_journal.is_some(),
                     ) {
                         Ok(snapshot) => {
                             last_fingerprint = Some(fingerprint);
-                            if let Some(journal) = &event_journal
-                                && let Err(error) =
-                                    flush_accessibility_event_outbox(&inner.store, journal)
-                            {
-                                update_degraded_status(
-                                    &inner,
-                                    observed_at_ms,
-                                    error.to_string(),
-                                );
-                                continue;
-                            }
                             Some(snapshot)
                         }
                         Err(error) => {
@@ -813,40 +662,8 @@ impl AccessibilityStore {
                 PRIMARY KEY(snapshot_id, node_index),
                 FOREIGN KEY(snapshot_id) REFERENCES accessibility_snapshots(id)
                     ON DELETE CASCADE
-             );
-             CREATE TABLE IF NOT EXISTS accessibility_semantic_state (
-                singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
-                state_json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS accessibility_event_outbox (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind TEXT NOT NULL,
-                occurred_at_ms INTEGER NOT NULL,
-                sensitivity TEXT NOT NULL
-                    CHECK(sensitivity IN ('metadata', 'content')),
-                payload_json TEXT NOT NULL,
-                deduplication_key TEXT NOT NULL UNIQUE,
-                redacted_after_capture INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE INDEX IF NOT EXISTS accessibility_event_outbox_order
-                ON accessibility_event_outbox(id);",
+             );",
         )?;
-        let outbox_has_redaction_marker = {
-            let mut statement =
-                connection.prepare("PRAGMA table_info(accessibility_event_outbox)")?;
-            let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
-            columns
-                .collect::<Result<Vec<_>, _>>()?
-                .iter()
-                .any(|column| column == "redacted_after_capture")
-        };
-        if !outbox_has_redaction_marker {
-            connection.execute(
-                "ALTER TABLE accessibility_event_outbox
-                 ADD COLUMN redacted_after_capture INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
         connection.execute(
             "INSERT INTO accessibility_meta(key, value) VALUES('schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -866,39 +683,14 @@ impl AccessibilityStore {
         Ok(connection)
     }
 
-    fn enforce_content_policy(
-        &self,
-        content_monitoring_enabled: bool,
-    ) -> Result<(), AccessibilityError> {
-        if content_monitoring_enabled {
-            return Ok(());
-        }
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        redact_pending_accessibility_content(&transaction)?;
-        if let Some(mut state) = load_semantic_state(&transaction)? {
-            if let Some(focus) = &mut state.focus {
-                focus.label = None;
-                focus.value = None;
-            }
-            state.document = None;
-            save_semantic_state(&transaction, &state)?;
-        }
-        transaction.commit()?;
-        Ok(())
-    }
-
     fn record_snapshot(
         &self,
         observation: &AccessibilityObservation,
         observed_at_ms: i64,
         retention: Duration,
-        content_monitoring_enabled: bool,
-        enqueue_events: bool,
     ) -> Result<AccessibilitySnapshotRecord, AccessibilityError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let previous_semantic_state = load_semantic_state(&transaction)?.unwrap_or_default();
         transaction.execute(
             "INSERT INTO accessibility_snapshots(
                 observed_at_ms, application_name, process_id, window_title, node_count
@@ -937,13 +729,6 @@ impl AccessibilityStore {
                 ])?;
             }
         }
-        let semantic_state = accessibility_semantic_state(observation, content_monitoring_enabled);
-        if enqueue_events {
-            for event in accessibility_semantic_events(&previous_semantic_state, &semantic_state) {
-                enqueue_accessibility_event(&transaction, snapshot_id, observed_at_ms, event)?;
-            }
-        }
-        save_semantic_state(&transaction, &semantic_state)?;
         let cutoff_at_ms =
             observed_at_ms.saturating_sub(retention.as_millis().min(i64::MAX as u128) as i64);
         transaction.execute(
@@ -960,70 +745,6 @@ impl AccessibilityStore {
             window_title: observation.window_title.clone(),
             node_count: observation.nodes.len(),
         })
-    }
-
-    fn pending_accessibility_events(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<AccessibilityEventOutboxRecord>, AccessibilityError> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT id, kind, occurred_at_ms, sensitivity, payload_json, deduplication_key,
-                    redacted_after_capture
-             FROM accessibility_event_outbox
-             ORDER BY id
-             LIMIT ?1",
-        )?;
-        let rows = statement.query_map(
-            [i64::try_from(limit).unwrap_or(i64::MAX)],
-            |row| -> Result<AccessibilityEventOutboxRecord, rusqlite::Error> {
-                let sensitivity = match row.get::<_, String>(3)?.as_str() {
-                    "metadata" => DesktopEventSensitivity::Metadata,
-                    "content" => DesktopEventSensitivity::Content,
-                    _ => {
-                        return Err(rusqlite::Error::InvalidColumnType(
-                            3,
-                            "sensitivity".to_owned(),
-                            rusqlite::types::Type::Text,
-                        ));
-                    }
-                };
-                let payload_json = row.get::<_, String>(4)?;
-                let payload = serde_json::from_str(&payload_json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        4,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?;
-                Ok(AccessibilityEventOutboxRecord {
-                    id: row.get(0)?,
-                    kind: row.get(1)?,
-                    occurred_at_ms: row.get(2)?,
-                    sensitivity,
-                    payload,
-                    deduplication_key: row.get(5)?,
-                    redacted_after_capture: row.get(6)?,
-                })
-            },
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    fn delete_accessibility_event(&self, id: i64) -> Result<(), AccessibilityError> {
-        let connection = self.connect()?;
-        connection.execute("DELETE FROM accessibility_event_outbox WHERE id = ?1", [id])?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn accessibility_event_outbox_count(&self) -> Result<usize, AccessibilityError> {
-        let connection = self.connect()?;
-        Ok(connection.query_row(
-            "SELECT COUNT(*) FROM accessibility_event_outbox",
-            [],
-            |row| row.get::<_, i64>(0),
-        )? as usize)
     }
 
     fn latest_snapshot(&self) -> Result<Option<AccessibilitySnapshotRecord>, AccessibilityError> {
@@ -1137,329 +858,6 @@ impl AccessibilityStore {
     }
 }
 
-fn redact_pending_accessibility_content(
-    transaction: &Transaction<'_>,
-) -> Result<(), AccessibilityError> {
-    let pending = {
-        let mut statement = transaction.prepare(
-            "SELECT id, kind, payload_json
-             FROM accessibility_event_outbox
-             WHERE sensitivity = 'content'
-             ORDER BY id",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-    for (id, kind, payload_json) in pending {
-        let mut payload = serde_json::from_str::<JsonValue>(&payload_json)?;
-        let Some(payload) = payload.as_object_mut() else {
-            return Err(AccessibilityError::Collection(format!(
-                "accessibility event outbox row {id} has a non-object payload"
-            )));
-        };
-        match kind.as_str() {
-            desktop_event_kinds::ACCESSIBILITY_FOCUS_CHANGED => {
-                payload.remove("label");
-            }
-            desktop_event_kinds::ACCESSIBILITY_VALUE_CHANGED => {
-                payload.remove("value");
-            }
-            desktop_event_kinds::ACCESSIBILITY_DOCUMENT_CHANGED => {
-                payload.remove("text");
-            }
-            _ => {
-                return Err(AccessibilityError::Collection(format!(
-                    "accessibility event outbox row {id} has unsupported kind {kind}"
-                )));
-            }
-        }
-        transaction.execute(
-            "UPDATE accessibility_event_outbox
-             SET sensitivity = 'metadata', payload_json = ?1, redacted_after_capture = 1
-             WHERE id = ?2",
-            params![serde_json::to_string(payload)?, id],
-        )?;
-    }
-    Ok(())
-}
-
-fn load_semantic_state(
-    transaction: &Transaction<'_>,
-) -> Result<Option<AccessibilitySemanticState>, AccessibilityError> {
-    let state_json = transaction
-        .query_row(
-            "SELECT state_json FROM accessibility_semantic_state WHERE singleton_id = 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    state_json
-        .map(|state_json| serde_json::from_str(&state_json))
-        .transpose()
-        .map_err(Into::into)
-}
-
-fn save_semantic_state(
-    transaction: &Transaction<'_>,
-    state: &AccessibilitySemanticState,
-) -> Result<(), AccessibilityError> {
-    transaction.execute(
-        "INSERT INTO accessibility_semantic_state(singleton_id, state_json)
-         VALUES(1, ?1)
-         ON CONFLICT(singleton_id) DO UPDATE SET state_json = excluded.state_json",
-        [serde_json::to_string(state)?],
-    )?;
-    Ok(())
-}
-
-fn accessibility_semantic_state(
-    observation: &AccessibilityObservation,
-    content_monitoring_enabled: bool,
-) -> AccessibilitySemanticState {
-    let app_id = if observation.application_name.trim().is_empty() {
-        observation
-            .process_id
-            .map(|process_id| format!("process-{process_id}"))
-            .unwrap_or_else(|| "unknown".to_owned())
-    } else {
-        truncate_chars(observation.application_name.trim(), MAX_EVENT_APP_ID_CHARS)
-    };
-    let focus = observation
-        .nodes
-        .iter()
-        .find(|node| node.focused)
-        .map(|node| AccessibilitySemanticFocus {
-            app_id: app_id.clone(),
-            node_id: truncate_chars(&node.node_id, MAX_EVENT_DOCUMENT_ID_CHARS),
-            role: truncate_chars(&node.role, MAX_EVENT_ROLE_CHARS),
-            label: content_monitoring_enabled
-                .then(|| truncate_chars(&node.name, MAX_EVENT_LABEL_CHARS))
-                .filter(|label| !label.is_empty()),
-            value: content_monitoring_enabled
-                .then(|| node.value.clone())
-                .flatten()
-                .map(|value| truncate_chars(&value, MAX_NODE_VALUE_CHARS)),
-        });
-    let document = content_monitoring_enabled
-        .then(|| {
-            observation
-                .nodes
-                .iter()
-                .filter(|node| accessibility_node_is_document(node))
-                .min_by_key(|node| (!node.focused, node.depth))
-                .map(|node| AccessibilitySemanticDocument {
-                    app_id,
-                    document_id: truncate_chars(&node.node_id, MAX_EVENT_DOCUMENT_ID_CHARS),
-                    text: node
-                        .document_text
-                        .as_deref()
-                        .map(|text| truncate_chars(text, MAX_EVENT_TEXT_CHARS)),
-                })
-        })
-        .flatten();
-    AccessibilitySemanticState { focus, document }
-}
-
-fn accessibility_node_is_document(node: &AccessibilityNode) -> bool {
-    if node.document_text.is_some() {
-        return true;
-    }
-    let role = node.role.to_ascii_lowercase();
-    role.contains("document")
-        || role.contains("text area")
-        || role.contains("textarea")
-        || role.contains("text editor")
-}
-
-fn accessibility_semantic_events(
-    previous: &AccessibilitySemanticState,
-    next: &AccessibilitySemanticState,
-) -> Vec<PendingAccessibilityEvent> {
-    let mut events = Vec::new();
-    if let Some(next_focus) = &next.focus
-        && previous
-            .focus
-            .as_ref()
-            .is_none_or(|previous_focus| !previous_focus.same_control(next_focus))
-    {
-        let mut payload = json!({
-            "appId": next_focus.app_id,
-            "role": next_focus.role,
-        });
-        let sensitivity = if let Some(label) = &next_focus.label {
-            payload
-                .as_object_mut()
-                .expect("accessibility focus payload is an object")
-                .insert("label".to_owned(), JsonValue::String(label.clone()));
-            DesktopEventSensitivity::Content
-        } else {
-            DesktopEventSensitivity::Metadata
-        };
-        events.push(PendingAccessibilityEvent {
-            kind: desktop_event_kinds::ACCESSIBILITY_FOCUS_CHANGED,
-            sensitivity,
-            payload,
-        });
-    }
-    if let (Some(previous_focus), Some(next_focus)) = (&previous.focus, &next.focus)
-        && previous_focus.same_control(next_focus)
-        && previous_focus.value != next_focus.value
-    {
-        let mut payload = json!({
-            "appId": next_focus.app_id,
-            "role": next_focus.role,
-        });
-        if let Some(value) = &next_focus.value {
-            payload
-                .as_object_mut()
-                .expect("accessibility value payload is an object")
-                .insert("value".to_owned(), JsonValue::String(value.clone()));
-        }
-        events.push(PendingAccessibilityEvent {
-            kind: desktop_event_kinds::ACCESSIBILITY_VALUE_CHANGED,
-            sensitivity: DesktopEventSensitivity::Content,
-            payload,
-        });
-    }
-    if let (Some(previous_document), Some(next_document)) = (&previous.document, &next.document)
-        && previous_document.same_document(next_document)
-        && previous_document.text != next_document.text
-    {
-        let previous_text = previous_document.text.as_deref().unwrap_or_default();
-        let next_text = next_document.text.as_deref().unwrap_or_default();
-        let (inserted_chars, deleted_chars) = text_change_counts(previous_text, next_text);
-        let mut payload = json!({
-            "appId": next_document.app_id,
-            "documentId": next_document.document_id,
-            "insertedChars": inserted_chars,
-            "deletedChars": deleted_chars,
-        });
-        if let Some(text) = &next_document.text {
-            payload
-                .as_object_mut()
-                .expect("accessibility document payload is an object")
-                .insert("text".to_owned(), JsonValue::String(text.clone()));
-        }
-        events.push(PendingAccessibilityEvent {
-            kind: desktop_event_kinds::ACCESSIBILITY_DOCUMENT_CHANGED,
-            sensitivity: DesktopEventSensitivity::Content,
-            payload,
-        });
-    }
-    events
-}
-
-fn text_change_counts(previous: &str, next: &str) -> (usize, usize) {
-    let previous = previous.chars().collect::<Vec<_>>();
-    let next = next.chars().collect::<Vec<_>>();
-    let prefix = previous
-        .iter()
-        .zip(&next)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let suffix = previous[prefix..]
-        .iter()
-        .rev()
-        .zip(next[prefix..].iter().rev())
-        .take_while(|(left, right)| left == right)
-        .count();
-    (
-        next.len().saturating_sub(prefix + suffix),
-        previous.len().saturating_sub(prefix + suffix),
-    )
-}
-
-fn enqueue_accessibility_event(
-    transaction: &Transaction<'_>,
-    snapshot_id: i64,
-    occurred_at_ms: i64,
-    event: PendingAccessibilityEvent,
-) -> Result<(), AccessibilityError> {
-    let sensitivity = match event.sensitivity {
-        DesktopEventSensitivity::Metadata => "metadata",
-        DesktopEventSensitivity::Content => "content",
-    };
-    transaction.execute(
-        "INSERT OR IGNORE INTO accessibility_event_outbox(
-            kind, occurred_at_ms, sensitivity, payload_json, deduplication_key
-         ) VALUES(?1, ?2, ?3, ?4, ?5)",
-        params![
-            event.kind,
-            occurred_at_ms,
-            sensitivity,
-            serde_json::to_string(&event.payload)?,
-            format!("accessibility-event:{snapshot_id}:{}", event.kind),
-        ],
-    )?;
-    Ok(())
-}
-
-trait AccessibilityEventSink {
-    fn append_accessibility_event(
-        &self,
-        draft: DesktopEventDraft,
-    ) -> Result<(), AccessibilityError>;
-}
-
-impl AccessibilityEventSink for EventJournal {
-    fn append_accessibility_event(
-        &self,
-        draft: DesktopEventDraft,
-    ) -> Result<(), AccessibilityError> {
-        self.append(draft)?;
-        Ok(())
-    }
-}
-
-fn publish_accessibility_outbox_record(
-    event_sink: &(impl AccessibilityEventSink + ?Sized),
-    record: &AccessibilityEventOutboxRecord,
-) -> Result<(), AccessibilityError> {
-    event_sink.append_accessibility_event(DesktopEventDraft {
-        kind: record.kind.clone(),
-        source: ACCESSIBILITY_EVENT_SOURCE.to_owned(),
-        occurred_at_ms: record.occurred_at_ms,
-        observed_at_ms: record.occurred_at_ms,
-        goal_version: None,
-        sensitivity: record.sensitivity.clone(),
-        payload: record.payload.clone(),
-        deduplication_key: record.deduplication_key.clone(),
-    })
-}
-
-fn flush_accessibility_event_outbox(
-    store: &AccessibilityStore,
-    event_sink: &(impl AccessibilityEventSink + ?Sized),
-) -> Result<(), AccessibilityError> {
-    loop {
-        let records = store.pending_accessibility_events(100)?;
-        if records.is_empty() {
-            return Ok(());
-        }
-        for record in &records {
-            if let Err(error) = publish_accessibility_outbox_record(event_sink, record) {
-                let was_materialized_before_redaction = record.redacted_after_capture
-                    && matches!(
-                        &error,
-                        AccessibilityError::EventJournal(
-                            EventJournalError::IdempotencyConflict { .. }
-                        )
-                    );
-                if !was_materialized_before_redaction {
-                    return Err(error);
-                }
-            }
-            store.delete_accessibility_event(record.id)?;
-        }
-    }
-}
-
 fn snapshot_from_row(
     row: &rusqlite::Row<'_>,
 ) -> Result<AccessibilitySnapshotRecord, rusqlite::Error> {
@@ -1559,22 +957,6 @@ fn non_empty_option(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-fn bool_from_environment(name: &str, default: bool) -> Result<bool, AccessibilityError> {
-    match env::var(name) {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Ok(true),
-            "0" | "false" | "no" | "off" => Ok(false),
-            _ => Err(AccessibilityError::Configuration(format!(
-                "{name} must be one of true, false, 1, 0, yes, no, on, or off"
-            ))),
-        },
-        Err(env::VarError::NotPresent) => Ok(default),
-        Err(env::VarError::NotUnicode(_)) => Err(AccessibilityError::Configuration(format!(
-            "{name} must be valid Unicode"
-        ))),
-    }
-}
-
 fn duration_from_environment(
     name: &str,
     default_ms: u64,
@@ -1655,14 +1037,13 @@ const root = windows.length > 0 ? windows[0] : process;
 const nodes = [];
 const maxNodes = Number($.getenv("WHALEHALL_ACCESSIBILITY_MAX_NODES") || "300");
 const textLimit = Number($.getenv("WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT") || "4096");
-const captureContent = String($.getenv("WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED") || "false").toLowerCase() === "true";
 function visit(element, parentId, depth) {
   if (nodes.length >= maxNodes) return;
   const id = "node-" + nodes.length;
   const role = String(safe(() => element.role(), "unknown"));
   const subrole = String(safe(() => element.subrole(), ""));
   const protectedInput = /password|secure/i.test(role + " " + subrole);
-  let value = (!captureContent || protectedInput) ? null : safe(() => element.value(), null);
+  let value = protectedInput ? null : safe(() => element.value(), null);
   if (value !== null && typeof value !== "string") value = String(value);
   if (value !== null) value = value.slice(0, 4096);
   const documentRole = /document|text area|AXTextArea|AXDocument/i.test(role + " " + subrole);
@@ -1676,7 +1057,7 @@ function visit(element, parentId, depth) {
     selected: safe(() => Boolean(element.selected()), null),
     focused: Boolean(safe(() => element.focused(), false)),
     enabled: safe(() => Boolean(element.enabled()), null),
-    documentText: (captureContent && !protectedInput && documentRole && value !== null) ? value.slice(0, textLimit) : null,
+    documentText: (!protectedInput && documentRole && value !== null) ? value.slice(0, textLimit) : null,
     protected: protectedInput
   });
   const children = safe(() => element.uiElements(), []);
@@ -1688,7 +1069,7 @@ JSON.stringify({
   applicationName: String(safe(() => process.name(), "")),
   processId: Number(safe(() => process.unixId(), 0)) || null,
   windowTitle: windows.length > 0 ? String(safe(() => windows[0].name(), "")) : "",
-  capabilities: {tree: true, focusedControl: nodes.some(n => n.focused), selection: true, documentText: captureContent},
+  capabilities: {tree: true, focusedControl: nodes.some(n => n.focused), selection: true, documentText: true},
   nodes: nodes,
   warnings: nodes.length >= maxNodes ? ["accessibility tree was truncated at the configured node limit"] : []
 });
@@ -1707,10 +1088,6 @@ JSON.stringify({
             .env(
                 "WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT",
                 config.document_text_limit.to_string(),
-            )
-            .env(
-                "WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
-                config.content_monitoring_enabled.to_string(),
             );
         command_observation(command, "macOS")
     }
@@ -1741,7 +1118,6 @@ $textLimitValue = $env:WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT
 if ([string]::IsNullOrWhiteSpace($textLimitValue)) { $textLimitValue = "4096" }
 $script:maxNodes = [int]$maxNodesValue
 $script:textLimit = [int]$textLimitValue
-$script:captureContent = $env:WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED -eq "true"
 function Visit-Element($element, $parentId, [int]$depth) {
   if ($script:nodes.Count -ge $script:maxNodes) { return }
   $id = "node-$($script:nodes.Count)"
@@ -1749,7 +1125,7 @@ function Visit-Element($element, $parentId, [int]$depth) {
   $role = $current.ControlType.ProgrammaticName -replace "^ControlType\\.", ""
   $protectedInput = $current.IsPassword -or $role -match "Password|Secure"
   $value = $null
-  if ($script:captureContent -and -not $protectedInput) {
+  if (-not $protectedInput) {
     try {
       $pattern = $null
       if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
@@ -1765,7 +1141,7 @@ function Visit-Element($element, $parentId, [int]$depth) {
     }
   } catch {}
   $documentText = $null
-  if ($script:captureContent -and -not $protectedInput -and $role -match "Document|Edit") {
+  if (-not $protectedInput -and $role -match "Document|Edit") {
     try {
       $textPattern = $null
       if ($element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
@@ -1807,7 +1183,7 @@ $applicationName = try { (Get-Process -Id $processId).ProcessName } catch { "" }
     tree = $true
     focusedControl = [bool]($script:nodes | Where-Object focused | Select-Object -First 1)
     selection = $true
-    documentText = [bool]$script:captureContent
+    documentText = $true
   }
   nodes = $script:nodes
   warnings = @($(if ($script:nodes.Count -ge $script:maxNodes) { "accessibility tree was truncated at the configured node limit" }))
@@ -1828,10 +1204,6 @@ $applicationName = try { (Get-Process -Id $processId).ProcessName } catch { "" }
             .env(
                 "WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT",
                 config.document_text_limit.to_string(),
-            )
-            .env(
-                "WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
-                config.content_monitoring_enabled.to_string(),
             );
         command_observation(command, "Windows")
     }
@@ -1846,7 +1218,6 @@ import json, os
 import pyatspi
 max_nodes = int(os.environ.get("WHALEHALL_ACCESSIBILITY_MAX_NODES", "300"))
 text_limit = int(os.environ.get("WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT", "4096"))
-capture_content = os.environ.get("WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED", "false").lower() == "true"
 desktop = pyatspi.Registry.getDesktop(0)
 active_app = None
 for app in desktop:
@@ -1878,7 +1249,7 @@ def visit(element, parent_id, depth):
     protected = "password" in role.lower()
     value = None
     document_text = None
-    if capture_content and not protected and any(token in role.lower() for token in ("text", "document", "entry")):
+    if not protected and any(token in role.lower() for token in ("text", "document", "entry")):
         try:
             text = element.queryText()
             value = text.getText(0, min(text.characterCount, text_limit))
@@ -1915,7 +1286,7 @@ print(json.dumps({
         "tree": True,
         "focusedControl": any(node["focused"] for node in nodes),
         "selection": True,
-        "documentText": capture_content,
+        "documentText": True,
     },
     "nodes": nodes,
     "warnings": ["accessibility tree was truncated at the configured node limit"] if len(nodes) >= max_nodes else [],
@@ -1935,10 +1306,6 @@ print(json.dumps({
             .env(
                 "WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT",
                 config.document_text_limit.to_string(),
-            )
-            .env(
-                "WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
-                config.content_monitoring_enabled.to_string(),
             );
         command_observation(command, "Linux AT-SPI")
     }
@@ -1962,7 +1329,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tempfile::TempDir;
-    use whalehall_local_protocol::EventQueryParams;
 
     use super::*;
 
@@ -2027,25 +1393,12 @@ mod tests {
         AccessibilityConfig {
             database_path: directory.path().join("accessibility.sqlite3"),
             bridge_path: directory.path().join("accessibility-current-tree.json"),
-            monitoring_enabled: true,
-            content_monitoring_enabled: true,
             poll_interval: Duration::from_millis(20),
             bridge_max_age: Duration::from_secs(60),
             max_nodes: 100,
             document_text_limit: 1_024,
             retention: Duration::from_secs(7 * 24 * 60 * 60),
         }
-    }
-
-    fn all_events(journal: &EventJournal) -> Vec<whalehall_local_protocol::DesktopEvent> {
-        journal
-            .query(&EventQueryParams {
-                after_cursor: None,
-                consumer_id: None,
-                limit: 100,
-            })
-            .expect("query accessibility events")
-            .events
     }
 
     #[test]
@@ -2057,13 +1410,7 @@ mod tests {
         let mut observation = sample_observation();
         observation.sanitize(&config);
         store
-            .record_snapshot(
-                &observation,
-                2_000,
-                config.retention,
-                config.content_monitoring_enabled,
-                false,
-            )
+            .record_snapshot(&observation, 2_000, config.retention)
             .expect("record accessibility snapshot");
 
         let redacted = store
@@ -2155,404 +1502,6 @@ mod tests {
             Some("textBox")
         );
         assert!(service.database_path().exists());
-        service.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn resident_start_flushes_recovered_outbox_without_duplicate_observation_events() {
-        let directory = tempfile::tempdir().expect("create accessibility restart directory");
-        let config = test_config(&directory);
-        let store =
-            AccessibilityStore::open(&config.database_path).expect("open accessibility store");
-        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
-            .expect("open event journal");
-        let mut baseline = sample_observation();
-        baseline.sanitize(&config);
-        store
-            .record_snapshot(&baseline, 2_000, config.retention, true, true)
-            .expect("stage pre-restart accessibility event");
-
-        let service = AccessibilityService::start_with_event_journal(
-            config.clone(),
-            Arc::new(FakeProvider {
-                calls: AtomicUsize::new(0),
-            }),
-            Some(journal.clone()),
-        )
-        .expect("restart accessibility service");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if all_events(&journal).len() == 1
-                    && service.status().state == AccessibilitySensorState::Running
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("recovered outbox should flush at resident start");
-        tokio::time::sleep(config.poll_interval * 3).await;
-        assert_eq!(all_events(&journal).len(), 1);
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 0);
-        service.shutdown().await;
-    }
-
-    #[test]
-    fn metadata_only_accessibility_storage_removes_values_and_document_text() {
-        let directory = tempfile::tempdir().expect("create accessibility privacy directory");
-        let mut config = test_config(&directory);
-        config.content_monitoring_enabled = false;
-        let store =
-            AccessibilityStore::open(&config.database_path).expect("open accessibility store");
-        let mut observation = sample_observation();
-        observation.sanitize(&config);
-        store
-            .record_snapshot(
-                &observation,
-                2_000,
-                config.retention,
-                config.content_monitoring_enabled,
-                false,
-            )
-            .expect("record metadata-only snapshot");
-
-        let result = store
-            .query_tree(&AccessibilityTreeQuery {
-                include_values: true,
-                include_document_text: true,
-                ..AccessibilityTreeQuery::default()
-            })
-            .expect("query stored metadata");
-        assert!(result.nodes.iter().all(|node| node.value.is_none()));
-        assert!(result.nodes.iter().all(|node| node.document_text.is_none()));
-        assert!(!observation.capabilities.document_text);
-    }
-
-    #[test]
-    fn semantic_events_follow_content_policy_and_never_expose_protected_values() {
-        let directory = tempfile::tempdir().expect("create accessibility event directory");
-        let mut config = test_config(&directory);
-        config.content_monitoring_enabled = false;
-        let store =
-            AccessibilityStore::open(&config.database_path).expect("open accessibility store");
-        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
-            .expect("open event journal");
-
-        let mut metadata_observation = sample_observation();
-        metadata_observation.sanitize(&config);
-        store
-            .record_snapshot(&metadata_observation, 2_000, config.retention, false, true)
-            .expect("record metadata observation");
-        flush_accessibility_event_outbox(&store, &journal).expect("flush metadata focus event");
-
-        let events = all_events(&journal);
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].kind,
-            desktop_event_kinds::ACCESSIBILITY_FOCUS_CHANGED
-        );
-        assert_eq!(events[0].sensitivity, DesktopEventSensitivity::Metadata);
-        assert_eq!(
-            events[0].payload,
-            json!({"appId": "Editor", "role": "textBox"})
-        );
-
-        let mut protected_observation = sample_observation();
-        protected_observation.nodes[1].focused = false;
-        protected_observation.nodes[2].focused = true;
-        protected_observation.sanitize(&test_config(&directory));
-        store
-            .record_snapshot(&protected_observation, 3_000, config.retention, true, true)
-            .expect("record protected observation");
-        flush_accessibility_event_outbox(&store, &journal).expect("flush protected focus event");
-
-        let events = all_events(&journal);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].sensitivity, DesktopEventSensitivity::Content);
-        assert_eq!(
-            events[1].payload,
-            json!({"appId": "Editor", "role": "passwordText", "label": "Password"})
-        );
-        assert!(
-            events
-                .iter()
-                .all(|event| !event.payload.to_string().contains("secret"))
-        );
-
-        let mut repeated_protected_observation = sample_observation();
-        repeated_protected_observation.nodes[1].focused = false;
-        repeated_protected_observation.nodes[2].focused = true;
-        repeated_protected_observation.nodes[2].value = Some("different secret".to_owned());
-        repeated_protected_observation.nodes[2].document_text = Some("different secret".to_owned());
-        repeated_protected_observation.sanitize(&test_config(&directory));
-        store
-            .record_snapshot(
-                &repeated_protected_observation,
-                4_000,
-                config.retention,
-                true,
-                true,
-            )
-            .expect("record repeated protected observation");
-        flush_accessibility_event_outbox(&store, &journal)
-            .expect("flush repeated protected observation");
-        assert_eq!(all_events(&journal).len(), 2);
-    }
-
-    #[test]
-    fn changed_content_emits_schema_compatible_events_and_repeats_are_deduplicated() {
-        let directory = tempfile::tempdir().expect("create accessibility semantic directory");
-        let config = test_config(&directory);
-        let store =
-            AccessibilityStore::open(&config.database_path).expect("open accessibility store");
-        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
-            .expect("open event journal");
-        let mut baseline = sample_observation();
-        baseline.sanitize(&config);
-        store
-            .record_snapshot(&baseline, 2_000, config.retention, true, true)
-            .expect("record semantic baseline");
-        store
-            .record_snapshot(&baseline, 2_100, config.retention, true, true)
-            .expect("record repeated baseline");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 1);
-
-        let mut changed = sample_observation();
-        changed.nodes[1].value = Some("draft body plus".to_owned());
-        changed.nodes[1].document_text = Some("Partial document text plus".to_owned());
-        changed.sanitize(&config);
-        store
-            .record_snapshot(&changed, 3_000, config.retention, true, true)
-            .expect("record changed content");
-        store
-            .record_snapshot(&changed, 3_100, config.retention, true, true)
-            .expect("record repeated content");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 3);
-
-        flush_accessibility_event_outbox(&store, &journal).expect("flush accessibility events");
-        let events = all_events(&journal);
-        assert_eq!(
-            events
-                .iter()
-                .map(|event| event.kind.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                desktop_event_kinds::ACCESSIBILITY_FOCUS_CHANGED,
-                desktop_event_kinds::ACCESSIBILITY_VALUE_CHANGED,
-                desktop_event_kinds::ACCESSIBILITY_DOCUMENT_CHANGED,
-            ]
-        );
-        assert_eq!(events[0].sensitivity, DesktopEventSensitivity::Content);
-        assert_eq!(
-            events[1].payload,
-            json!({
-                "appId": "Editor",
-                "role": "textBox",
-                "value": "draft body plus",
-            })
-        );
-        assert_eq!(
-            events[2].payload,
-            json!({
-                "appId": "Editor",
-                "documentId": "editor",
-                "insertedChars": 5,
-                "deletedChars": 0,
-                "text": "Partial document text plus",
-            })
-        );
-        assert!(
-            events[1..]
-                .iter()
-                .all(|event| event.sensitivity == DesktopEventSensitivity::Content)
-        );
-    }
-
-    struct FailOnceEventSink {
-        calls: AtomicUsize,
-        journal: EventJournal,
-    }
-
-    impl AccessibilityEventSink for FailOnceEventSink {
-        fn append_accessibility_event(
-            &self,
-            draft: DesktopEventDraft,
-        ) -> Result<(), AccessibilityError> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(AccessibilityError::Collection(
-                    "injected one-shot EventJournal failure".to_owned(),
-                ));
-            }
-            self.journal.append(draft)?;
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn transactional_outbox_recovers_append_failure_and_post_append_crash() {
-        let directory = tempfile::tempdir().expect("create accessibility recovery directory");
-        let config = test_config(&directory);
-        let store =
-            AccessibilityStore::open(&config.database_path).expect("open accessibility store");
-        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
-            .expect("open event journal");
-        let mut baseline = sample_observation();
-        baseline.sanitize(&config);
-        store
-            .record_snapshot(&baseline, 2_000, config.retention, true, true)
-            .expect("record baseline and outbox atomically");
-        let sink = FailOnceEventSink {
-            calls: AtomicUsize::new(0),
-            journal: journal.clone(),
-        };
-
-        assert!(flush_accessibility_event_outbox(&store, &sink).is_err());
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 1);
-        assert!(all_events(&journal).is_empty());
-        flush_accessibility_event_outbox(&store, &sink).expect("retry failed append");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 0);
-        assert_eq!(all_events(&journal).len(), 1);
-
-        let mut changed = sample_observation();
-        changed.nodes[1].value = Some("updated".to_owned());
-        changed.nodes[1].document_text = Some("updated document".to_owned());
-        changed.sanitize(&config);
-        store
-            .record_snapshot(&changed, 3_000, config.retention, true, true)
-            .expect("record changed content and outbox");
-        let pending = store
-            .pending_accessibility_events(100)
-            .expect("read pending events");
-        assert_eq!(pending.len(), 2);
-
-        // Simulate a crash after EventJournal append and before deleting the
-        // durable outbox row. Replay must materialize the same event id once.
-        publish_accessibility_outbox_record(&journal, &pending[0])
-            .expect("publish before simulated crash");
-        flush_accessibility_event_outbox(&store, &journal).expect("recover outbox after crash");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 0);
-        assert_eq!(all_events(&journal).len(), 3);
-    }
-
-    #[test]
-    fn disabling_content_preserves_authorized_history_but_redacts_pending_events_and_state() {
-        let directory = tempfile::tempdir().expect("create accessibility revoke directory");
-        let config = test_config(&directory);
-        let store =
-            AccessibilityStore::open(&config.database_path).expect("open accessibility store");
-        let journal = EventJournal::open(directory.path().join("events.sqlite3"))
-            .expect("open event journal");
-        let mut baseline = sample_observation();
-        baseline.sanitize(&config);
-        store
-            .record_snapshot(&baseline, 2_000, config.retention, true, true)
-            .expect("record authorized content");
-        let mut changed = sample_observation();
-        changed.nodes[1].value = Some("new private value".to_owned());
-        changed.nodes[1].document_text = Some("new private document".to_owned());
-        changed.sanitize(&config);
-        let authorized_snapshot = store
-            .record_snapshot(&changed, 3_000, config.retention, true, true)
-            .expect("record changed authorized content");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 3);
-        let captured_pending = store
-            .pending_accessibility_events(10)
-            .expect("read captured pending events");
-        publish_accessibility_outbox_record(&journal, &captured_pending[0])
-            .expect("materialize content event before simulated crash");
-
-        store
-            .enforce_content_policy(false)
-            .expect("apply fail-closed content policy");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 3);
-        let pending = store
-            .pending_accessibility_events(10)
-            .expect("read redacted pending events");
-        assert!(
-            pending
-                .iter()
-                .all(|event| event.sensitivity == DesktopEventSensitivity::Metadata)
-        );
-        assert_eq!(
-            pending[0].payload,
-            json!({"appId": "Editor", "role": "textBox"})
-        );
-        assert_eq!(
-            pending[1].payload,
-            json!({"appId": "Editor", "role": "textBox"})
-        );
-        assert_eq!(
-            pending[2].payload.get("text"),
-            None,
-            "document content must be removed"
-        );
-        assert!(
-            pending
-                .iter()
-                .all(|event| !event.payload.to_string().contains("private"))
-        );
-        flush_accessibility_event_outbox(&store, &journal)
-            .expect("reconcile redacted outbox after pre-redaction append");
-        assert_eq!(store.accessibility_event_outbox_count().unwrap(), 0);
-        assert_eq!(all_events(&journal).len(), 3);
-        let stored = store
-            .query_tree(&AccessibilityTreeQuery {
-                snapshot_id: Some(authorized_snapshot.id),
-                include_values: true,
-                include_document_text: true,
-                ..AccessibilityTreeQuery::default()
-            })
-            .expect("query previously authorized snapshot");
-        let authorized_editor = stored
-            .nodes
-            .iter()
-            .find(|node| node.node_id == "editor")
-            .expect("authorized editor node");
-        assert_eq!(
-            authorized_editor.value.as_deref(),
-            Some("new private value")
-        );
-        assert_eq!(
-            authorized_editor.document_text.as_deref(),
-            Some("new private document")
-        );
-        let connection = store.connect().expect("connect accessibility store");
-        let state_json = connection
-            .query_row(
-                "SELECT state_json FROM accessibility_semantic_state WHERE singleton_id = 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read scrubbed semantic state");
-        assert!(!state_json.contains("private"));
-    }
-
-    #[tokio::test]
-    async fn disabled_accessibility_service_never_calls_resident_provider() {
-        let directory = tempfile::tempdir().expect("create accessibility disabled directory");
-        let mut config = test_config(&directory);
-        config.monitoring_enabled = false;
-        config.content_monitoring_enabled = false;
-        let provider = Arc::new(FakeProvider {
-            calls: AtomicUsize::new(0),
-        });
-        let service = AccessibilityService::start(config, provider.clone())
-            .expect("start disabled accessibility service");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let status = service.status();
-        assert_eq!(status.state, AccessibilitySensorState::Disabled);
-        assert!(!status.monitoring_enabled);
-        assert!(!status.content_monitoring_enabled);
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-        assert!(
-            service
-                .tree(&AccessibilityTreeQuery::default())
-                .expect("query disabled history")
-                .snapshot
-                .is_none()
-        );
         service.shutdown().await;
     }
 

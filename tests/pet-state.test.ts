@@ -2,11 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
 	PetStateArbiter,
 	petStateForInteraction,
-	petStateForPresentationEvent,
 	petStateForRuntime,
 	petStateForToolEvent,
 	petStateHoldForInteraction,
-	petStateHoldForPresentationEvent,
 	petStateHoldForToolEvent,
 } from "../src/bun/pet-state";
 import type { LocalRuntimeStatus, LocalToolEvent } from "../src/agent/local-protocol";
@@ -36,23 +34,6 @@ describe("production pet state mapping", () => {
 		expect(petStateForToolEvent(event("tool.completed")).action).toBe("taskComplete");
 		expect(petStateForToolEvent(event("tool.failed")).action).toBe("operationFailed");
 		expect(petStateForToolEvent(event("tool.cancelled")).action).toBe("wronged");
-	});
-
-	test("maps product presentation events without carrying user content", () => {
-		const cases = [
-			["plan-generation-started", "searching"],
-			["plan-generation-succeeded", "taskComplete"],
-			["plan-generation-failed", "operationFailed"],
-			["milestone-completed", "taskComplete"],
-			["focus-started", "focus"],
-			["user-inactive", "idleSelfEntertainment"],
-		] as const;
-		for (const [kind, action] of cases) {
-			const presentation = { kind };
-			expect(petStateForPresentationEvent(presentation).action).toBe(action);
-			expect(petStateHoldForPresentationEvent(presentation)).toBeGreaterThan(0);
-			expect(JSON.stringify(presentation)).not.toContain("title");
-		}
 	});
 
 	test("preserves the renderer action in production interaction feedback", () => {
