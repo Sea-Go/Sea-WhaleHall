@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
 	AuditExportControl,
 	auditExportStatusMessage,
+	privateTrainingExportStatusMessage,
 	recentCompleteFiveMinuteStart,
 	type AuditExportService,
 } from "../src/views/client/features/audit-export/public";
@@ -22,6 +23,12 @@ describe("audit export UI", () => {
 			async cancelCapture() {
 				return null;
 			},
+			async startPrivateTrainingExport() {
+				throw new Error("not invoked while rendering");
+			},
+			async getPrivateTrainingExportStatus() {
+				return idlePrivateTrainingStatus();
+			},
 		};
 		const markup = renderToStaticMarkup(
 			<AuditExportControl service={service} nowMs={() => 600_000} />,
@@ -36,6 +43,11 @@ describe("audit export UI", () => {
 		expect(markup).toContain("刷新");
 		expect(markup).toContain("导出本次范围");
 		expect(markup).toContain("导出过去五分钟");
+		expect(markup).toContain("导出用于本地训练");
+		expect(markup).toContain("最近一个已完成窗口");
+		expect(markup).toContain("最近 24 小时已完成窗口");
+		expect(markup).toContain("全部仍保留的已完成窗口");
+		expect(markup).toContain("只需一次原生确认");
 		expect(markup).toContain("生产分析仍只来自按 64 条/5 分钟或边界自然封窗");
 		expect(markup).toContain("audit-only 确定性投影");
 		expect(markup).toContain("不会写回生产时间线");
@@ -44,6 +56,22 @@ describe("audit export UI", () => {
 		expect(markup).not.toContain("checked");
 		expect(markup).not.toContain("/Users/");
 		expect(markup).not.toContain("rawObservations");
+	});
+
+	test("maps private training progress without exposing ids or absolute paths", () => {
+		const message = privateTrainingExportStatusMessage({
+			state: "exporting",
+			jobId: "training_export_internal",
+			scope: "all_committed",
+			windowCount: 12,
+			completedWindowCount: 5,
+			basename: null,
+			failureCode: null,
+			updatedAtMs: 1,
+		});
+		expect(message).toContain("5/12");
+		expect(message).not.toContain("training_export_internal");
+		expect(message).not.toContain("/Users/");
 	});
 
 	test("maps success, cancellation, and failures to bounded UI messages", () => {
@@ -73,3 +101,16 @@ describe("audit export UI", () => {
 		expect(() => recentCompleteFiveMinuteStart(-1)).toThrow();
 	});
 });
+
+function idlePrivateTrainingStatus() {
+	return {
+		state: "idle" as const,
+		jobId: null,
+		scope: null,
+		windowCount: 0,
+		completedWindowCount: 0,
+		basename: null,
+		failureCode: null,
+		updatedAtMs: null,
+	};
+}

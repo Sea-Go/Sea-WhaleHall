@@ -55,6 +55,8 @@ export const clientApi = {
 	exportPrivateTrainingWindows: (
 		request: PrivateTrainingWindowExportRequest,
 	) => rpc.request.exportPrivateTrainingWindows(request),
+	getPrivateTrainingWindowExportStatus: () =>
+		rpc.request.getPrivateTrainingWindowExportStatus({}),
 	startFiveMinuteAuditCapture: () =>
 		rpc.request.startFiveMinuteAuditCapture({}),
 	getFiveMinuteAuditCaptureStatus: () =>

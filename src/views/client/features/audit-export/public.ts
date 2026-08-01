@@ -5,5 +5,6 @@ export {
 } from "./AuditExportControl";
 export {
 	auditExportStatusMessage,
+	privateTrainingExportStatusMessage,
 	type AuditExportService,
 } from "./audit-export-service";

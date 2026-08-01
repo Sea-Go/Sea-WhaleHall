@@ -29,6 +29,21 @@ const auditExportService: AuditExportService = {
 	async cancelCapture() {
 		return null;
 	},
+	async startPrivateTrainingExport() {
+		throw new Error("not used");
+	},
+	async getPrivateTrainingExportStatus() {
+		return {
+			state: "idle",
+			jobId: null,
+			scope: null,
+			windowCount: 0,
+			completedWindowCount: 0,
+			basename: null,
+			failureCode: null,
+			updatedAtMs: null,
+		};
+	},
 };
 
 const user = {

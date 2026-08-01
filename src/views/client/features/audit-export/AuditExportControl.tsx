@@ -6,10 +6,15 @@ import {
 	X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { FiveMinuteAuditCaptureStatus } from "../../../../shared/contracts";
+import type {
+	FiveMinuteAuditCaptureStatus,
+	PrivateTrainingWindowExportScope,
+	PrivateTrainingWindowExportStatus,
+} from "../../../../shared/contracts";
 import { Button } from "../../shared/ui/Button";
 import {
 	auditExportStatusMessage,
+	privateTrainingExportStatusMessage,
 	type AuditExportService,
 } from "./audit-export-service";
 
@@ -37,6 +42,11 @@ export function AuditExportControl({
 		useState<FiveMinuteAuditCaptureStatus | null>(null);
 	const [captureBusy, setCaptureBusy] = useState(false);
 	const [captureMessage, setCaptureMessage] = useState<string | null>(null);
+	const [trainingScope, setTrainingScope] =
+		useState<PrivateTrainingWindowExportScope>("latest_committed");
+	const [trainingStatus, setTrainingStatus] =
+		useState<PrivateTrainingWindowExportStatus | null>(null);
+	const [trainingBusy, setTrainingBusy] = useState(false);
 
 	useEffect(() => {
 		let mounted = true;
@@ -79,6 +89,44 @@ export function AuditExportControl({
 			globalThis.clearInterval(intervalId);
 		};
 	}, [capture?.state, service]);
+
+	useEffect(() => {
+		let mounted = true;
+		void service
+			.getPrivateTrainingExportStatus()
+			.then((status) => {
+				if (mounted) setTrainingStatus(status);
+			})
+			.catch(() => {
+				if (mounted) {
+					setTrainingStatus(privateTrainingUiFailure());
+				}
+			});
+		return () => {
+			mounted = false;
+		};
+	}, [service]);
+
+	useEffect(() => {
+		if (!isPrivateTrainingExportActive(trainingStatus)) return;
+		let mounted = true;
+		const poll = async () => {
+			try {
+				const status = await service.getPrivateTrainingExportStatus();
+				if (mounted) setTrainingStatus(status);
+			} catch {
+				if (mounted) setTrainingStatus(privateTrainingUiFailure());
+			}
+		};
+		const intervalId = globalThis.setInterval(
+			() => void poll(),
+			ACTIVE_CAPTURE_POLL_MS,
+		);
+		return () => {
+			mounted = false;
+			globalThis.clearInterval(intervalId);
+		};
+	}, [service, trainingStatus?.state]);
 
 	async function exportFiveMinutes(fromMs: number) {
 		if (state.status === "exporting") return;
@@ -143,6 +191,20 @@ export function AuditExportControl({
 			setCaptureMessage("无法取消五分钟采集，请刷新状态后重试。");
 		} finally {
 			setCaptureBusy(false);
+		}
+	}
+
+	async function startPrivateTrainingExport() {
+		if (trainingBusy || isPrivateTrainingExportActive(trainingStatus)) return;
+		setTrainingBusy(true);
+		try {
+			setTrainingStatus(
+				await service.startPrivateTrainingExport(trainingScope),
+			);
+		} catch {
+			setTrainingStatus(privateTrainingUiFailure());
+		} finally {
+			setTrainingBusy(false);
 		}
 	}
 
@@ -273,8 +335,92 @@ export function AuditExportControl({
 					{state.message}
 				</p>
 			) : null}
+			<div className="audit-export-control__training">
+				<div>
+					<strong>导出用于本地训练</strong>
+					<p>
+						导出已完成窗口及其 raw→event→fact→episode 血缘，包含仍可解密的可见文本和网址。只写入你选择的本机文件夹，不会上传；点击后只需一次原生确认，再选择一次文件夹。
+					</p>
+				</div>
+				<label>
+					<span>导出范围</span>
+					<select
+						aria-label="本地训练导出范围"
+						value={trainingScope}
+						disabled={
+							trainingBusy || isPrivateTrainingExportActive(trainingStatus)
+						}
+						onChange={(event) =>
+							setTrainingScope(
+								event.currentTarget
+									.value as PrivateTrainingWindowExportScope,
+							)
+						}
+					>
+						<option value="latest_committed">最近一个已完成窗口</option>
+						<option value="last_24_hours">最近 24 小时已完成窗口</option>
+						<option value="all_committed">全部仍保留的已完成窗口</option>
+					</select>
+				</label>
+				<Button
+					variant="secondary"
+					icon={<Download size={15} aria-hidden="true" />}
+					disabled={
+						trainingBusy || isPrivateTrainingExportActive(trainingStatus)
+					}
+					onClick={() => void startPrivateTrainingExport()}
+				>
+					{trainingBusy || isPrivateTrainingExportActive(trainingStatus)
+						? "正在准备本地导出…"
+						: "导出用于本地训练"}
+				</Button>
+				{trainingStatus !== null && trainingStatus.state !== "idle" ? (
+					<p
+						className={privateTrainingStatusClassName(trainingStatus)}
+						role={trainingStatus.state === "failed" ? "alert" : "status"}
+					>
+						{privateTrainingExportStatusMessage(trainingStatus)}
+					</p>
+				) : null}
+			</div>
 		</section>
 	);
+}
+
+function isPrivateTrainingExportActive(
+	status: PrivateTrainingWindowExportStatus | null,
+): boolean {
+	return (
+		status?.state === "preparing" ||
+		status?.state === "awaiting_confirmation" ||
+		status?.state === "choosing_directory" ||
+		status?.state === "exporting"
+	);
+}
+
+function privateTrainingUiFailure(): PrivateTrainingWindowExportStatus {
+	return {
+		state: "failed",
+		jobId: null,
+		scope: null,
+		windowCount: 0,
+		completedWindowCount: 0,
+		basename: null,
+		failureCode: "export_failed",
+		updatedAtMs: null,
+	};
+}
+
+function privateTrainingStatusClassName(
+	status: PrivateTrainingWindowExportStatus,
+): string {
+	const tone =
+		status.state === "failed"
+			? "error"
+			: status.state === "exported"
+				? "success"
+				: null;
+	return `audit-export-control__result${tone ? ` audit-export-control__result--${tone}` : ""}`;
 }
 
 function captureStatusLabel(

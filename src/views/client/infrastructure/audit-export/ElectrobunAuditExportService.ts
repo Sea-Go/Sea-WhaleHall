@@ -2,6 +2,8 @@ import type {
 	FiveMinuteAuditCaptureStatus,
 	FiveMinuteAuditFileExportRequest,
 	FiveMinuteAuditFileExportResult,
+	PrivateTrainingWindowExportScope,
+	PrivateTrainingWindowExportStatus,
 } from "../../../../shared/contracts";
 import type { AuditExportService } from "../../features/audit-export/public";
 
@@ -16,6 +18,10 @@ export interface AuditExportTransport {
 	cancelFiveMinuteAuditCapture(captureId: string): Promise<{
 		capture: FiveMinuteAuditCaptureStatus | null;
 	}>;
+	exportPrivateTrainingWindows(request: {
+		scope: PrivateTrainingWindowExportScope;
+	}): Promise<PrivateTrainingWindowExportStatus>;
+	getPrivateTrainingWindowExportStatus(): Promise<PrivateTrainingWindowExportStatus>;
 }
 
 export type ElectrobunAuditExportServiceOptions = {
@@ -63,6 +69,20 @@ export class ElectrobunAuditExportService implements AuditExportService {
 		const transport = await this.loadTransport();
 		return (await transport.cancelFiveMinuteAuditCapture(captureId)).capture;
 	}
+
+	async startPrivateTrainingExport(
+		scope: PrivateTrainingWindowExportScope,
+	): Promise<PrivateTrainingWindowExportStatus> {
+		if (!this.runtimeAvailable()) return notReadyPrivateTrainingStatus();
+		const transport = await this.loadTransport();
+		return transport.exportPrivateTrainingWindows({ scope });
+	}
+
+	async getPrivateTrainingExportStatus(): Promise<PrivateTrainingWindowExportStatus> {
+		if (!this.runtimeAvailable()) return idlePrivateTrainingStatus();
+		const transport = await this.loadTransport();
+		return transport.getPrivateTrainingWindowExportStatus();
+	}
 }
 
 async function loadClientTransport(): Promise<AuditExportTransport> {
@@ -76,6 +96,31 @@ async function loadClientTransport(): Promise<AuditExportTransport> {
 			clientApi.getFiveMinuteAuditCaptureStatus(),
 		cancelFiveMinuteAuditCapture: (captureId) =>
 			clientApi.cancelFiveMinuteAuditCapture(captureId),
+		exportPrivateTrainingWindows: (request) =>
+			clientApi.exportPrivateTrainingWindows(request),
+		getPrivateTrainingWindowExportStatus: () =>
+			clientApi.getPrivateTrainingWindowExportStatus(),
+	};
+}
+
+function idlePrivateTrainingStatus(): PrivateTrainingWindowExportStatus {
+	return {
+		state: "idle",
+		jobId: null,
+		scope: null,
+		windowCount: 0,
+		completedWindowCount: 0,
+		basename: null,
+		failureCode: null,
+		updatedAtMs: null,
+	};
+}
+
+function notReadyPrivateTrainingStatus(): PrivateTrainingWindowExportStatus {
+	return {
+		...idlePrivateTrainingStatus(),
+		state: "failed",
+		failureCode: "not_ready",
 	};
 }
 
