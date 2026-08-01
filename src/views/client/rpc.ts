@@ -1,9 +1,12 @@
 import { Electroview } from "electrobun/view";
 import type {
 	ClientRPC,
+	ActiveGoalContextV1,
 	LocalRuntimeStatus,
 	LocalToolCall,
 	LocalToolEvent,
+	PetPresentationEvent,
+	PetTodaySchedule,
 } from "../../shared/contracts";
 
 type StatusListener = (status: LocalRuntimeStatus) => void;
@@ -40,7 +43,30 @@ export const clientApi = {
 	callLocalTool: (call: LocalToolCall) => rpc.request.callLocalTool(call),
 	cancelLocalTool: (callId: string) => rpc.request.cancelLocalTool({ callId }),
 	setPetVisible: (visible: boolean) => rpc.request.setPetVisible({ visible }),
-		onStatus(listener: StatusListener): () => void {
+	presentPetEvent: (event: PetPresentationEvent) =>
+		rpc.request.presentPetEvent(event),
+	updatePetTodaySchedule: (schedule: PetTodaySchedule) =>
+		rpc.request.updatePetTodaySchedule(schedule),
+	setActiveGoalContext: (goal: ActiveGoalContextV1 | null) =>
+		rpc.request.setActiveGoalContext({ goal }),
+	loadActiveConversation: (userId: string) =>
+		rpc.request.loadActiveConversation({ userId }),
+	createConversation: (userId: string, title?: string) =>
+		rpc.request.createConversation({ userId, title }),
+	sendConversationMessage: (input: {
+		userId: string;
+		conversationId: string;
+		clientMessageId: string;
+		text: string;
+	}) => rpc.request.sendConversationMessage(input),
+	createTaskPlanningSession: (userId: string, input: import("../../shared/task-planning").TaskPlanningInput) =>
+		rpc.request.createTaskPlanningSession({ userId, input }),
+	submitTaskPlanningAnswers: (
+		userId: string,
+		sessionId: string,
+		answers: readonly import("../../shared/task-planning").TaskPlanningAnswer[],
+	) => rpc.request.submitTaskPlanningAnswers({ userId, sessionId, answers }),
+	onStatus(listener: StatusListener): () => void {
 		statusListeners.add(listener);
 		return () => statusListeners.delete(listener);
 	},

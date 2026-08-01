@@ -1,0 +1,9 @@
+.gitignore
+src/**
+scripts/**
+tsconfig.json
+bun.lock
+dist/test/**
+node_modules/**
+*.vsix
+**/*.map

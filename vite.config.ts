@@ -19,6 +19,7 @@ export default defineConfig({
 				client: resolve(viewsRoot, "client/index.html"),
 				pet: resolve(viewsRoot, "pet/index.html"),
 				"pet-demo": resolve(viewsRoot, "pet/demo.html"),
+				"pet-panel": resolve(viewsRoot, "panel/index.html"),
 			},
 		},
 	},

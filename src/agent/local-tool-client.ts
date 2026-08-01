@@ -2,9 +2,16 @@ import {
 	LOCAL_CONTROL_TIMEOUT_MS,
 	LOCAL_TOOL_TIMEOUT_MS,
 	MAX_JSONL_LINE_BYTES,
+	isDesktopEvent,
 	isLocalToolDescriptor,
 	isRecord,
 	parseLocalMessage,
+	type LocalDesktopEventFrame,
+	type LocalEventCommitResult,
+	type LocalEventGoalChange,
+	type LocalEventGoalChangeResult,
+	type LocalEventQuery,
+	type LocalEventQueryResult,
 	type LocalMessage,
 	type LocalMethod,
 	type LocalRequest,
@@ -53,16 +60,25 @@ export type SpawnLocalProcess = (
 	environment?: Readonly<Record<string, string>>,
 ) => ChildTransport;
 
+export const STARTUP_GOAL_CHANGE_ENV =
+	"WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
+
 export interface LocalToolProcess {
 	readonly pid: number | null;
 	readonly isRunning: boolean;
+	prepareStartupGoalChange(change: LocalEventGoalChange | null): Promise<void>;
+	acknowledgeStartupGoalChange(): Promise<void>;
 	start(): Promise<void>;
 	health(): Promise<LocalRuntimeHealth>;
 	listTools(): Promise<LocalToolDescriptor[]>;
 	callTool(call: LocalToolCall): Promise<LocalToolCallResult>;
 	cancelTool(callId: string): Promise<LocalToolCancelResult>;
+	queryEvents(query: LocalEventQuery): Promise<LocalEventQueryResult>;
+	commitEventCursor(consumerId: string, cursor: string): Promise<LocalEventCommitResult>;
+	appendGoalChange(change: LocalEventGoalChange): Promise<LocalEventGoalChangeResult>;
 	stop(): Promise<void>;
 	onEvent(listener: (event: LocalToolEvent) => void): () => void;
+	onDesktopEvent(listener: (event: LocalDesktopEventFrame["data"]) => void): () => void;
 	onFailure(listener: (error: LocalClientError) => void): () => void;
 }
 
@@ -77,9 +93,18 @@ function spawnLocal(
 	binaryPath: string,
 	environment: Readonly<Record<string, string>> = {},
 ): ChildTransport {
+	const inheritedEnvironment = { ...process.env };
+	// The Rust sensor process never calls the model endpoint. Keep bearer
+	// credentials in the Bun host that owns inference instead of widening
+	// their process exposure.
+	delete inheritedEnvironment.WHALEHALL_MODERNBERT_TOKEN;
+	// This value is a one-shot control-plane handoff. Never inherit a stale
+	// shell value into a sensor process; LocalToolClient adds only the payload
+	// prepared for this exact spawn.
+	delete inheritedEnvironment[STARTUP_GOAL_CHANGE_ENV];
 	return Bun.spawn({
 		cmd: [binaryPath],
-		env: { ...process.env, ...environment },
+		env: { ...inheritedEnvironment, ...environment },
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -90,8 +115,16 @@ export class LocalToolClient implements LocalToolProcess {
 	private child: ChildTransport | null = null;
 	private readonly pending = new Map<string, PendingRequest>();
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
+	private readonly desktopEventListeners = new Set<
+		(event: LocalDesktopEventFrame["data"]) => void
+	>();
 	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
 	private stopping = false;
+	private preparedStartupGoalChange:
+		| LocalEventGoalChange
+		| null
+		| undefined;
+	private preparedStartupGoalChangeJson: string | null | undefined;
 
 	constructor(
 		private readonly binaryPath: string,
@@ -112,14 +145,72 @@ export class LocalToolClient implements LocalToolProcess {
 		return this.child !== null;
 	}
 
+	async prepareStartupGoalChange(
+		change: LocalEventGoalChange | null,
+	): Promise<void> {
+		if (this.child) {
+			throw new LocalClientError(
+				"INVALID_STATE",
+				"Cannot prepare a startup goal boundary after whalehall-local has started.",
+			);
+		}
+		if (change === null) {
+			this.preparedStartupGoalChange = null;
+			this.preparedStartupGoalChangeJson = null;
+			return;
+		}
+		if (
+			this.preparedStartupGoalChange !== null &&
+			this.preparedStartupGoalChange !== undefined &&
+			this.preparedStartupGoalChange.deduplicationKey ===
+				change.deduplicationKey
+		) {
+			if (
+				!sameGoalContext(
+					this.preparedStartupGoalChange.previous,
+					change.previous,
+				) ||
+				!sameGoalContext(
+					this.preparedStartupGoalChange.next,
+					change.next,
+				)
+			) {
+				throw new LocalClientError(
+					"INVALID_ARGUMENTS",
+					"Startup goal deduplication key was reused for different goal contexts.",
+				);
+			}
+			// A prior process may have appended this exact payload and crashed
+			// before the reflection consumer materialized it. Preserve its
+			// original occurredAtMs so native idempotency remains exact.
+			return;
+		}
+		this.preparedStartupGoalChange = structuredClone(change);
+		this.preparedStartupGoalChangeJson = JSON.stringify(change);
+	}
+
+	async acknowledgeStartupGoalChange(): Promise<void> {
+		this.preparedStartupGoalChange = undefined;
+		this.preparedStartupGoalChangeJson = undefined;
+	}
+
 	async start(): Promise<void> {
 		if (this.child) return;
 		this.stopping = false;
+		const environment = { ...this.options.environment };
+		delete environment[STARTUP_GOAL_CHANGE_ENV];
+		if (
+			this.preparedStartupGoalChangeJson !== null &&
+			this.preparedStartupGoalChangeJson !== undefined
+		) {
+			environment[STARTUP_GOAL_CHANGE_ENV] =
+				this.preparedStartupGoalChangeJson;
+		}
 		let child: ChildTransport;
 		try {
 			child = (this.options.spawn ?? spawnLocal)(
 				this.binaryPath,
-				this.options.environment,
+				environment,
 			);
 		} catch (error) {
 			const clientError = new LocalClientError(
@@ -182,6 +273,64 @@ export class LocalToolClient implements LocalToolProcess {
 		return result as LocalToolCancelResult;
 	}
 
+	async queryEvents(query: LocalEventQuery): Promise<LocalEventQueryResult> {
+		if (query.afterCursor !== undefined && query.consumerId !== undefined) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"event.query accepts afterCursor or consumerId, not both.",
+			);
+		}
+		const result = await this.request<unknown>("event.query", query);
+		if (
+			!isRecord(result) ||
+			!Array.isArray(result.events) ||
+			!result.events.every(isDesktopEvent) ||
+			(result.nextCursor !== null && typeof result.nextCursor !== "string") ||
+			typeof result.hasMore !== "boolean"
+		) {
+			throw this.protocolFailure("event.query returned an invalid result.");
+		}
+		return result as LocalEventQueryResult;
+	}
+
+	async commitEventCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalEventCommitResult> {
+		const result = await this.request<unknown>("event.commit", { consumerId, cursor });
+		if (
+			!isRecord(result) ||
+			result.consumerId !== consumerId ||
+			result.cursor !== cursor ||
+			typeof result.advanced !== "boolean"
+		) {
+			throw this.protocolFailure("event.commit returned an invalid result.");
+		}
+		return result as LocalEventCommitResult;
+	}
+
+	async appendGoalChange(
+		change: LocalEventGoalChange,
+	): Promise<LocalEventGoalChangeResult> {
+		const result = await this.request<unknown>("event.goal.change", change);
+		if (
+			!isRecord(result) ||
+			typeof result.inserted !== "boolean" ||
+			!isDesktopEvent(result.event) ||
+			result.event.kind !== "goal.contextChanged" ||
+			result.event.source !== "planning.controller" ||
+			result.event.occurredAtMs !== change.occurredAtMs ||
+			result.event.observedAtMs !== change.occurredAtMs ||
+			result.event.goalVersion !== (change.previous?.version ?? null) ||
+			result.event.sensitivity !== "content" ||
+			!sameGoalContext(result.event.payload.previous, change.previous) ||
+			!sameGoalContext(result.event.payload.next, change.next)
+		) {
+			throw this.protocolFailure("event.goal.change returned an invalid result.");
+		}
+		return result as LocalEventGoalChangeResult;
+	}
+
 	async stop(): Promise<void> {
 		this.stopping = true;
 		const child = this.child;
@@ -194,6 +343,13 @@ export class LocalToolClient implements LocalToolProcess {
 	onEvent(listener: (event: LocalToolEvent) => void): () => void {
 		this.eventListeners.add(listener);
 		return () => this.eventListeners.delete(listener);
+	}
+
+	onDesktopEvent(
+		listener: (event: LocalDesktopEventFrame["data"]) => void,
+	): () => void {
+		this.desktopEventListeners.add(listener);
+		return () => this.desktopEventListeners.delete(listener);
 	}
 
 	onFailure(listener: (error: LocalClientError) => void): () => void {
@@ -301,6 +457,10 @@ export class LocalToolClient implements LocalToolProcess {
 	private handleLine(child: ChildTransport, line: string): void {
 		if (child !== this.child) return;
 		const message = parseLocalMessage(line);
+		if (isDesktopEventFrame(message)) {
+			for (const listener of this.desktopEventListeners) listener(message.data);
+			return;
+		}
 		if (isToolEvent(message)) {
 			for (const listener of this.eventListeners) listener(message);
 			return;
@@ -374,6 +534,21 @@ export class LocalToolClient implements LocalToolProcess {
 	}
 }
 
+function sameGoalContext(
+	left: unknown,
+	right: LocalEventGoalChange["previous"],
+): boolean {
+	if (left === null || right === null) return left === right;
+	if (!isRecord(left)) return false;
+	return (
+		left.goalId === right.goalId &&
+		left.planId === right.planId &&
+		left.version === right.version &&
+		left.text === right.text &&
+		left.activatedAtMs === right.activatedAtMs
+	);
+}
+
 async function closeGracefully(child: ChildTransport): Promise<void> {
 	try {
 		void child.stdin.end();
@@ -443,7 +618,11 @@ export class JsonlParser {
 }
 
 function isToolEvent(message: LocalMessage): message is LocalToolEvent {
-	return "event" in message;
+	return "event" in message && message.event !== "desktop.event";
+}
+
+function isDesktopEventFrame(message: LocalMessage): message is LocalDesktopEventFrame {
+	return "event" in message && message.event === "desktop.event";
 }
 
 function errorMessage(error: unknown): string {

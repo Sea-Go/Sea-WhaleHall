@@ -1,0 +1,135 @@
+import { join } from "node:path";
+import type { AgentRuntime } from "../agent/agent-runtime";
+import { OllamaJsonClient } from "../agent/model/ollama-json-client";
+import {
+	WHALEHALL_TEACHER_MODEL_LOCK,
+	verifyOllamaModelLock,
+} from "../agent/model/ollama-model-lock";
+import {
+	DesktopReflectionService,
+	ModernBertHttpClient,
+	ReflectionInference,
+	SqliteReflectionRepository,
+	loadOrCreateReflectionIdentity,
+	type ActiveGoalContextV1,
+} from "../agent/reflection";
+import {
+	ReflectionFeedbackSink,
+	type ActiveReflectionFeedbackCode,
+} from "./reflection-feedback";
+
+export type WhaleHallReflectionRuntime = {
+	service: DesktopReflectionService;
+	repository: SqliteReflectionRepository;
+	teacherVerified: boolean;
+	close(): Promise<void>;
+};
+
+export type CreateWhaleHallReflectionRuntimeOptions = {
+	agent: AgentRuntime;
+	dataDirectory: string;
+	environment?: Readonly<Record<string, string | undefined>>;
+	onError?: (error: unknown) => void;
+	onFeedback?: (code: ActiveReflectionFeedbackCode) => void | Promise<void>;
+	canPresentFeedback?: () => boolean;
+};
+
+export async function createWhaleHallReflectionRuntime(
+	options: CreateWhaleHallReflectionRuntimeOptions,
+): Promise<WhaleHallReflectionRuntime> {
+	const environment = options.environment ?? process.env;
+	const onError =
+		options.onError ?? ((error: unknown) => console.error("[reflection]", error));
+	const identity = loadOrCreateReflectionIdentity(
+		join(options.dataDirectory, "reflection-identity.v1.json"),
+	);
+	const repository = new SqliteReflectionRepository(
+		join(options.dataDirectory, "reflections.sqlite3"),
+	);
+
+	let teacherVerified = false;
+	let fallback: OllamaJsonClient | undefined;
+	try {
+		await verifyOllamaModelLock();
+		teacherVerified = true;
+		fallback = new OllamaJsonClient({
+			baseUrl: WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
+			model: WHALEHALL_TEACHER_MODEL_LOCK.model,
+			contextLength: WHALEHALL_TEACHER_MODEL_LOCK.numCtx,
+			keepAlive: "30m",
+		});
+	} catch (error) {
+		// ModernBERT remains usable. Low-confidence windows will be retried
+		// instead of silently using an unreviewed local model.
+		onError(error);
+	}
+
+	try {
+		const primary = new ModernBertHttpClient({
+			endpoint: environment.WHALEHALL_MODERNBERT_ENDPOINT,
+			allowedOrigins: parseOrigins(
+				environment.WHALEHALL_MODERNBERT_ALLOWED_ORIGINS,
+			),
+			authorizationToken: environment.WHALEHALL_MODERNBERT_TOKEN,
+		});
+		const inference = new ReflectionInference({
+			primary,
+			fallback,
+			fallbackModelVersion: teacherVerified
+				? `${WHALEHALL_TEACHER_MODEL_LOCK.model}@${WHALEHALL_TEACHER_MODEL_LOCK.digest.slice(0, 12)}`
+				: WHALEHALL_TEACHER_MODEL_LOCK.model,
+		});
+		const service = new DesktopReflectionService({
+			transport: options.agent,
+			repository,
+			inference,
+			identity,
+			// The v1 planning mock does not restore a goal across application
+			// launches. Clear any recovered collector goal before native sensors
+			// start so early events cannot be attributed to a stale account goal.
+			startupGoal: null,
+			sinks: options.onFeedback
+				? [
+						new ReflectionFeedbackSink({
+							repository,
+							present: options.onFeedback,
+							canPresent: options.canPresentFeedback,
+						}),
+					]
+				: [],
+			onError,
+		});
+		return {
+			service,
+			repository,
+			teacherVerified,
+			async close() {
+				await service.stop();
+				repository.close();
+			},
+		};
+	} catch (error) {
+		repository.close();
+		throw error;
+	}
+}
+
+export async function setRuntimeGoal(
+	runtime: WhaleHallReflectionRuntime,
+	goal: {
+		goalId: string;
+		planId: string | null;
+		text: string;
+		activatedAtMs: number;
+	} | null,
+): Promise<ActiveGoalContextV1 | null> {
+	return runtime.service.setActiveGoal(goal);
+}
+
+function parseOrigins(value: string | undefined): string[] {
+	if (!value) return [];
+	return value
+		.split(",")
+		.map((origin) => origin.trim())
+		.filter((origin) => origin.length > 0);
+}
