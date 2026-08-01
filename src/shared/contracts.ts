@@ -94,24 +94,41 @@ export type FiveMinuteAuditFileExportResult = {
 	basename: string | null;
 };
 
+export type PrivateTrainingWindowExportScope =
+	| "latest_committed"
+	| "last_24_hours"
+	| "all_committed";
+
 export type PrivateTrainingWindowExportRequest = {
-	/** Exact immutable production Timeline windows selected by local id. */
-	windowIds: string[];
-	participantId: string;
-	/** IANA timezone used to derive stable session-day boundaries. */
-	sessionTimezone: string;
+	/** Bun resolves immutable COMMITTED window ids for this renderer-safe scope. */
+	scope: PrivateTrainingWindowExportScope;
 };
 
-export type PrivateTrainingWindowExportResult = {
-	status:
+export type PrivateTrainingWindowExportStatus = {
+	state:
+		| "idle"
+		| "preparing"
+		| "awaiting_confirmation"
+		| "choosing_directory"
+		| "exporting"
 		| "exported"
 		| "cancelled"
+		| "failed";
+	jobId: string | null;
+	scope: PrivateTrainingWindowExportScope | null;
+	windowCount: number;
+	completedWindowCount: number;
+	/** Directory basename only; the selected absolute path remains native-only. */
+	basename: string | null;
+	failureCode:
 		| "invalid_request"
 		| "not_ready"
-		| "failed";
-	/** Directory basename only; the selected local path remains native-only. */
-	basename: string | null;
-	windowCount: number;
+		| "no_committed_windows"
+		| "too_many_windows"
+		| "invalid_destination"
+		| "export_failed"
+		| null;
+	updatedAtMs: number | null;
 };
 
 export type FiveMinuteAuditCaptureState =
@@ -204,7 +221,11 @@ export type ClientRPC = {
 			};
 			exportPrivateTrainingWindows: {
 				params: PrivateTrainingWindowExportRequest;
-				response: PrivateTrainingWindowExportResult;
+				response: PrivateTrainingWindowExportStatus;
+			};
+			getPrivateTrainingWindowExportStatus: {
+				params: Record<string, never>;
+				response: PrivateTrainingWindowExportStatus;
 			};
 			startFiveMinuteAuditCapture: {
 				params: Record<string, never>;

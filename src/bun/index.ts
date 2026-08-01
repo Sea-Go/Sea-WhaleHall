@@ -41,7 +41,7 @@ import {
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
-import { exportPrivateTrainingWindowsLocally } from "./private-training-window-export";
+import { PrivateTrainingWindowExportCoordinator } from "./private-training-window-export";
 import {
 	FileAuditCaptureStore,
 	FiveMinuteAuditCaptureCoordinator,
@@ -178,6 +178,50 @@ const auditCaptureCoordinator = new FiveMinuteAuditCaptureCoordinator({
 	},
 });
 await auditCaptureCoordinator.initialize();
+
+const privateTrainingExportCoordinator =
+	new PrivateTrainingWindowExportCoordinator({
+		getExporter: () =>
+			timelineLifecycle.current?.privateTrainingExport ?? null,
+		async listCommittedWindowIds(options) {
+			const repository = timelineLifecycle.current?.repository;
+			if (repository === undefined) {
+				throw new Error("Timeline repository is not ready.");
+			}
+			return repository.listCommittedWindowIds(options);
+		},
+		dialogs: {
+			async confirmDecryptedTrainingExport(windowCount) {
+				const { response } = await Utils.showMessageBox({
+					type: "warning",
+					title: "导出本地训练数据？",
+					message: `将导出 ${windowCount} 个已完成分析窗口，其中包含可解密的可见文本和网址。`,
+					detail:
+						"导出只写入你下一步选择的本机文件夹，不会上传。生成目录和文件仅当前用户可访问。",
+					buttons: ["继续选择文件夹", "取消"],
+					defaultId: 1,
+					cancelId: 1,
+				});
+				return response === 0;
+			},
+			async chooseDirectory() {
+				const selected = await Utils.openFileDialog({
+					startingFolder: Utils.paths.downloads,
+					allowedFileTypes: "*",
+					canChooseFiles: false,
+					canChooseDirectory: true,
+					allowsMultipleSelection: false,
+				});
+				const directory = selected[0]?.trim();
+				return directory ? directory : null;
+			},
+		},
+		participantId: runtimeIdentity.deviceId.startsWith("device_")
+			? runtimeIdentity.deviceId.replace(/^device_/u, "participant_")
+			: `participant_${runtimeIdentity.deviceId}`,
+		sessionTimezone:
+			Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+	});
 
 let clientWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow;
@@ -347,36 +391,9 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 					},
 				}),
 			exportPrivateTrainingWindows: (request) =>
-				exportPrivateTrainingWindowsLocally(request, {
-					getExporter: () =>
-						timelineLifecycle.current?.privateTrainingExport ?? null,
-					dialogs: {
-						async confirmDecryptedTrainingExport(windowCount) {
-							const { response } = await Utils.showMessageBox({
-								type: "warning",
-								title: "导出本地训练数据？",
-								message: `将导出 ${windowCount} 个已完成分析窗口，其中包含可解密的可见文本和网址。`,
-								detail:
-									"导出只写入你下一步选择的本机文件夹，不会上传。生成目录和文件仅当前用户可访问。",
-								buttons: ["继续选择文件夹", "取消"],
-								defaultId: 1,
-								cancelId: 1,
-							});
-							return response === 0;
-						},
-						async chooseDirectory() {
-							const selected = await Utils.openFileDialog({
-								startingFolder: Utils.paths.downloads,
-								allowedFileTypes: "*",
-								canChooseFiles: false,
-								canChooseDirectory: true,
-								allowsMultipleSelection: false,
-							});
-							const directory = selected[0]?.trim();
-							return directory ? directory : null;
-						},
-					},
-				}),
+				privateTrainingExportCoordinator.start(request),
+			getPrivateTrainingWindowExportStatus: () =>
+				privateTrainingExportCoordinator.getStatus(),
 			startFiveMinuteAuditCapture: () =>
 				auditCaptureCoordinator.start(),
 			getFiveMinuteAuditCaptureStatus: async () => ({
