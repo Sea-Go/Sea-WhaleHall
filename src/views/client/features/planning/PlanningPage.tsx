@@ -234,6 +234,12 @@ export function PlanningPage({
 								onCancel={() => controller.cancel()}
 							/>
 						) : null}
+						{state.status === "restore-error" ? (
+							<RestoreErrorStage
+								message={state.message}
+								onRetry={() => void controller.retryRestore()}
+							/>
+						) : null}
 						{state.status === "clarifying" ? (
 							<ClarificationStage state={state} controller={controller} />
 						) : null}
@@ -474,7 +480,7 @@ function DraftingStage({
 							}
 						}}
 					/>
-					<small id="plan-goal-help">按 ⌘ Enter 继续。先描述结果，不必自己拆任务。</small>
+					<small id="plan-goal-help">按 Ctrl/⌘ Enter 继续。先描述结果，不必自己拆任务。</small>
 					{issueFor(state, "goal") ? (
 						<p id="plan-goal-error" className="planning-field__error">
 							{issueFor(state, "goal")}
@@ -1189,10 +1195,16 @@ function ApplyFailureStage({
 			tone="error"
 			icon={<AlertTriangle size={22} />}
 			eyebrow={
-				state.result.kind === "partial" ? "部分写入失败" : "写入失败"
+				state.result.calendarState === "unknown"
+					? "提交结果待恢复"
+					: state.result.kind === "partial"
+						? "部分写入失败"
+						: "写入失败"
 			}
 			title={
-				state.result.kind === "partial"
+				state.result.calendarState === "unknown"
+					? "本地提交状态已经保留"
+					: state.result.kind === "partial"
 					? `已写入 ${state.result.committedCount} 项，另有 ${state.result.failedProposalIds.length} 项失败`
 					: "正式日历没有改变"
 			}
@@ -1224,7 +1236,9 @@ function SuccessStage({
 			icon={<CheckCircle2 size={23} />}
 			eyebrow="计划已确认"
 			title={`“${state.planTitle}”已进入日历`}
-			description={`成功写入 ${state.committedCount} 项安排。你可以在日历中继续移动、缩放或编辑。`}
+			description={state.effectWarning
+				? `成功写入 ${state.committedCount} 项安排。${state.effectWarning}`
+				: `成功写入 ${state.committedCount} 项安排。你可以在日历中继续移动、缩放或编辑。`}
 			actions={
 				<>
 					<Button
@@ -1236,6 +1250,27 @@ function SuccessStage({
 					</Button>
 					<Button onClick={onStartNew}>再制定一个计划</Button>
 				</>
+			}
+		/>
+	);
+}
+
+function RestoreErrorStage({
+	message,
+	onRetry,
+}: {
+	message: string;
+	onRetry: () => void;
+}) {
+	return (
+		<FeedbackStage
+			tone="error"
+			icon={<AlertTriangle size={22} />}
+			eyebrow="本地计划暂不可用"
+			title="没有丢弃任何草案或提交状态"
+			description={message}
+			actions={
+				<Button variant="primary" onClick={onRetry}>重试恢复</Button>
 			}
 		/>
 	);

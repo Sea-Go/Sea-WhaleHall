@@ -11,105 +11,435 @@ import type {
 	PlanningGenerationContext,
 	PlanningGenerationResult,
 	PlanningGenerationService,
+	RestorablePlanningGeneration,
 } from "../../features/planning/planning-service";
+import type {
+	AgentRunEventEnvelope,
+	AgentRunRpcResult,
+	AgentRunSnapshot,
+} from "../../../../shared/agent-runs";
 import type {
 	TaskPlanningAnswer,
 	TaskPlanningInput,
-	TaskPlanningRpcResult,
 	TaskPlanningSession,
 } from "../../../../shared/task-planning";
 
-const weekdayByNumber: Record<number, Weekday> = {
-	1: "monday", 2: "tuesday", 3: "wednesday", 4: "thursday",
-	5: "friday", 6: "saturday", 7: "sunday",
-};
+interface ActivePlanningRun {
+	runId: string;
+	revision: number;
+}
 
-/** Maps Agent output into the existing plan review and calendar-confirmation flow. */
+type ClientApi = typeof import("../../rpc")["clientApi"];
+
+/** Maps the local Mastra run into the existing review/confirmation flow. */
 export class AgentPlanningGenerationService implements PlanningGenerationService {
-	constructor(private readonly userId: string) {}
+	private readonly sessions = new Map<string, ActivePlanningRun>();
+	private active: ActivePlanningRun | null = null;
 
-	async generate(input: PlanInput, availability: readonly PlanningBusyWindow[], context: PlanningGenerationContext): Promise<PlanningGenerationResult> {
-		this.notifyStart(context);
+	async findRestorable(): Promise<RestorablePlanningGeneration | null> {
 		const { clientApi } = await import("../../rpc");
-		const result = await clientApi.createTaskPlanningSession(this.userId, toAgentInput(input, context.timeZone));
-		return this.resolve(result, input, availability, context);
+		const listed = unwrap(await clientApi.listRestorableAgentRuns({
+			kind: "task-planning",
+		}));
+		const latest = [...listed.runs].sort(
+			(left, right) => right.updatedAtMs - left.updatedAtMs,
+		)[0];
+		if (!latest) return null;
+		const snapshot = unwrap(await clientApi.getAgentRunSnapshot({ runId: latest.runId }));
+		if (snapshot.kind !== "task-planning") throw new Error("可恢复运行不是规划类型。");
+		return { runId: snapshot.runId, input: fromAgentInput(snapshot.input) };
 	}
 
-	async continueAfterClarification(input: PlanInput, sessionId: string, answers: readonly TaskPlanningAnswer[], availability: readonly PlanningBusyWindow[], context: PlanningGenerationContext): Promise<PlanningGenerationResult> {
+	async restore(
+		run: RestorablePlanningGeneration,
+		availability: readonly PlanningBusyWindow[],
+		context: PlanningGenerationContext,
+	): Promise<PlanningGenerationResult> {
+		const { clientApi } = await import("../../rpc");
+		const snapshot = unwrap(await clientApi.getAgentRunSnapshot({ runId: run.runId }));
+		if (snapshot.kind !== "task-planning") throw new Error("可恢复运行不是规划类型。");
+		this.active = { runId: snapshot.runId, revision: snapshot.revision };
+		if (snapshot.session) {
+			this.active = null;
+			if (snapshot.session.status === "clarifying") {
+				this.sessions.set(snapshot.session.id, {
+					runId: snapshot.runId,
+					revision: snapshot.revision,
+				});
+				return {
+					kind: "clarification",
+					sessionId: snapshot.session.id,
+					questions: snapshot.session.questions,
+				};
+			}
+			return {
+				kind: "draft",
+				draft: toGeneratedDraft(snapshot.session, run.input, availability, context),
+			};
+		}
+		if (snapshot.status === "interrupted") {
+			this.active = null;
+			throw new Error("计划生成曾被中断；已恢复输入，请重新生成。");
+		}
+		if (snapshot.status === "cancelling" || snapshot.status === "cancelled") {
+			this.active = null;
+			throw new Error("这次计划生成已经取消。");
+		}
+		if (snapshot.status === "failed") {
+			this.active = null;
+			throw new Error(snapshot.failure?.message ?? "计划生成失败。");
+		}
+		const waiter = createPlanningWaiter(
+			clientApi,
+			snapshot.requestId,
+			context,
+			snapshot.runId,
+		);
+		waiter.bindRun(snapshot.runId);
+		try {
+			const session = await waiter.result;
+			this.active = null;
+			if (session.status === "clarifying") {
+				this.sessions.set(session.id, {
+					runId: snapshot.runId,
+					revision: waiter.revision(),
+				});
+				return { kind: "clarification", sessionId: session.id, questions: session.questions };
+			}
+			return { kind: "draft", draft: toGeneratedDraft(session, run.input, availability, context) };
+		} catch (error) {
+			waiter.dispose();
+			this.active = null;
+			throw error;
+		}
+	}
+
+	async generate(
+		input: PlanInput,
+		availability: readonly PlanningBusyWindow[],
+		context: PlanningGenerationContext,
+	): Promise<PlanningGenerationResult> {
 		this.notifyStart(context);
 		const { clientApi } = await import("../../rpc");
-		const result = await clientApi.submitTaskPlanningAnswers(this.userId, sessionId, answers);
-		return this.resolve(result, input, availability, context);
+		const requestId = crypto.randomUUID();
+		const waiter = createPlanningWaiter(clientApi, requestId, context);
+		try {
+			const result = await clientApi.startTaskPlanningRun({
+				requestId,
+				input: toAgentInput(input, context.timeZone),
+			});
+			const accepted = unwrap(result);
+			this.active = { runId: accepted.runId, revision: accepted.revision };
+			waiter.bindRun(accepted.runId);
+			const session = await waiter.result;
+			this.active = null;
+			if (context.isCancelled()) throw new Error("已取消计划生成。");
+			if (session.status === "clarifying") {
+				this.sessions.set(session.id, {
+					runId: accepted.runId,
+					revision: waiter.revision(),
+				});
+				return { kind: "clarification", sessionId: session.id, questions: session.questions };
+			}
+			context.onStatus("ready");
+			return { kind: "draft", draft: toGeneratedDraft(session, input, availability, context) };
+		} catch (error) {
+			waiter.dispose();
+			this.active = null;
+			throw error;
+		}
+	}
+
+	async continueAfterClarification(
+		input: PlanInput,
+		sessionId: string,
+		answers: readonly TaskPlanningAnswer[],
+		availability: readonly PlanningBusyWindow[],
+		context: PlanningGenerationContext,
+	): Promise<PlanningGenerationResult> {
+		this.notifyStart(context);
+		const active = this.sessions.get(sessionId);
+		if (!active) throw new Error("找不到可恢复的本地澄清会话，请重新生成计划。");
+		const { clientApi } = await import("../../rpc");
+		const requestId = crypto.randomUUID();
+		const waiter = createPlanningWaiter(clientApi, requestId, context, active.runId);
+		this.active = active;
+		try {
+			const accepted = unwrap(await clientApi.submitPlanningClarification({
+				requestId,
+				runId: active.runId,
+				expectedRevision: active.revision,
+				answers,
+			}));
+			active.revision = accepted.revision;
+			const session = await waiter.result;
+			this.active = null;
+			if (session.status === "clarifying") {
+				this.sessions.set(session.id, { runId: active.runId, revision: waiter.revision() });
+				return { kind: "clarification", sessionId: session.id, questions: session.questions };
+			}
+			this.sessions.delete(sessionId);
+			context.onStatus("ready");
+			return { kind: "draft", draft: toGeneratedDraft(session, input, availability, context) };
+		} catch (error) {
+			waiter.dispose();
+			this.active = null;
+			throw error;
+		}
+	}
+
+	async cancel(): Promise<void> {
+		const active = this.active;
+		if (!active) return;
+		const { clientApi } = await import("../../rpc");
+		await clientApi.cancelAgentRun({
+			requestId: crypto.randomUUID(),
+			runId: active.runId,
+			expectedRevision: active.revision,
+		});
 	}
 
 	private notifyStart(context: PlanningGenerationContext): void {
 		context.onStatus("understood");
 		if (context.isCancelled()) throw new Error("已取消计划生成。");
 	}
+}
 
-	private resolve(
-		result: TaskPlanningRpcResult<TaskPlanningSession>,
-		input: PlanInput,
-		availability: readonly PlanningBusyWindow[],
-		context: PlanningGenerationContext,
-	): PlanningGenerationResult {
-		if (result.kind !== "success") throw new Error(result.message);
-		if (context.isCancelled()) throw new Error("已取消计划生成。");
-		if (result.data.status === "clarifying") return { kind: "clarification", sessionId: result.data.id, questions: result.data.questions };
-		context.onStatus("split-phases");
-		context.onStatus("checking-calendar");
-		const draft = toGeneratedDraft(result.data, input, availability, context);
-		context.onStatus("arranging");
-		context.onStatus("ready");
-		return { kind: "draft", draft };
+function createPlanningWaiter(
+	clientApi: ClientApi,
+	requestId: string,
+	context: PlanningGenerationContext,
+	initialRunId?: string,
+): {
+	result: Promise<TaskPlanningSession>;
+	bindRun(runId: string): void;
+	revision(): number;
+	dispose(): void;
+} {
+	let runId = initialRunId;
+	let latestRevision = 0;
+	let settled = false;
+	let resolveResult!: (session: TaskPlanningSession) => void;
+	let rejectResult!: (error: Error) => void;
+	const result = new Promise<TaskPlanningSession>((resolve, reject) => {
+		resolveResult = resolve;
+		rejectResult = reject;
+	});
+	const unsubscribe = clientApi.onAgentRunEvent((envelope) => {
+		if (envelope.requestId !== requestId && envelope.runId !== runId) return;
+		latestRevision = Math.max(latestRevision, envelope.revision);
+		acceptPlanningEvent(envelope, context, finish, fail);
+	});
+	const cancelPoll = setInterval(() => {
+		if (!settled && context.isCancelled()) fail(new Error("已取消计划生成。"));
+	}, 100);
+
+	function finish(session: TaskPlanningSession): void {
+		if (settled) return;
+		settled = true;
+		clearInterval(cancelPoll);
+		unsubscribe();
+		resolveResult(session);
 	}
+	function fail(error: Error): void {
+		if (settled) return;
+		settled = true;
+		clearInterval(cancelPoll);
+		unsubscribe();
+		rejectResult(error);
+	}
+	return {
+		result,
+		bindRun(value) {
+			runId = value;
+			void clientApi.getAgentRunSnapshot({ runId: value }).then((snapshot) => {
+				if (snapshot.kind !== "success" || snapshot.data.kind !== "task-planning") return;
+				latestRevision = Math.max(latestRevision, snapshot.data.revision);
+				acceptPlanningSnapshot(snapshot.data, context, finish, fail);
+			});
+		},
+		revision: () => latestRevision,
+		dispose: () => {
+			if (settled) return;
+			settled = true;
+			clearInterval(cancelPoll);
+			unsubscribe();
+		},
+	};
+}
+
+function acceptPlanningEvent(
+	envelope: AgentRunEventEnvelope,
+	context: PlanningGenerationContext,
+	finish: (session: TaskPlanningSession) => void,
+	fail: (error: Error) => void,
+): void {
+	const event = envelope.event;
+	if (event.type === "run.started") context.onStatus("checking-calendar");
+	if (event.type === "run.progress") context.onStatus(event.phase === "finalizing" ? "arranging" : "split-phases");
+	if (event.type === "planning.clarification.requested") {
+		finish({ id: event.sessionId, status: "clarifying", questions: event.questions });
+	}
+	if (event.type === "planning.draft.ready") finish(event.session);
+	if (event.type === "planning.completed") finish(event.session);
+	if (event.type === "run.failed") fail(new Error(event.failure.message));
+	if (event.type === "run.cancelled") fail(new Error(event.message ?? "已取消计划生成。"));
+	if (event.type === "run.interrupted") fail(new Error(event.message));
+}
+
+function acceptPlanningSnapshot(
+	snapshot: Extract<AgentRunSnapshot, { kind: "task-planning" }>,
+	context: PlanningGenerationContext,
+	finish: (session: TaskPlanningSession) => void,
+	fail: (error: Error) => void,
+): void {
+	if (snapshot.session) finish(snapshot.session);
+	else if (snapshot.status === "failed") fail(new Error(snapshot.failure?.message ?? "计划生成失败。"));
+	else if (snapshot.status === "cancelled") fail(new Error("已取消计划生成。"));
+	else if (snapshot.status === "running") context.onStatus("checking-calendar");
+}
+
+function unwrap<T>(result: AgentRunRpcResult<T>): T {
+	if (result.kind === "success") return result.data;
+	throw new Error(result.message);
 }
 
 function toAgentInput(input: PlanInput, timeZone: string): TaskPlanningInput {
 	if (!input.type) throw new Error("生成计划前必须选择计划类型。");
-	return { goal: input.goal, planType: input.type, deadline: input.deadline, priority: input.priority, weeklyCapacityHours: input.weeklyCapacityHours, unavailableDays: input.unavailableDays, preferredSessionMinutes: input.preferredSessionMinutes, preferredDayPart: input.preferredDayPart, timeZone };
+	return {
+		goal: input.goal,
+		planType: input.type,
+		deadline: input.deadline,
+		priority: input.priority,
+		weeklyCapacityHours: input.weeklyCapacityHours,
+		unavailableDays: input.unavailableDays,
+		preferredSessionMinutes: input.preferredSessionMinutes,
+		preferredDayPart: input.preferredDayPart,
+		timeZone,
+	};
 }
 
-function toGeneratedDraft(session: Extract<TaskPlanningSession, { status: "draft" }>, input: PlanInput, busyWindows: readonly PlanningBusyWindow[], context: PlanningGenerationContext): GeneratedPlanDraft {
+function fromAgentInput(input: TaskPlanningInput): PlanInput {
+	const unavailableDays = input.unavailableDays.filter(isWeekday);
+	if (unavailableDays.length !== input.unavailableDays.length) {
+		throw new Error("本地规划快照包含无效的不可用星期，已拒绝恢复。");
+	}
+	return {
+		goal: input.goal,
+		type: input.planType,
+		deadline: input.deadline,
+		priority: input.priority,
+		weeklyCapacityHours: input.weeklyCapacityHours,
+		unavailableDays,
+		preferredSessionMinutes: input.preferredSessionMinutes,
+		preferredDayPart: input.preferredDayPart,
+	};
+}
+
+function isWeekday(value: string): value is Weekday {
+	return [
+		"monday",
+		"tuesday",
+		"wednesday",
+		"thursday",
+		"friday",
+		"saturday",
+		"sunday",
+	].includes(value);
+}
+
+function toGeneratedDraft(
+	session: Exclude<TaskPlanningSession, { status: "clarifying" }>,
+	input: PlanInput,
+	busyWindows: readonly PlanningBusyWindow[],
+	context: PlanningGenerationContext,
+): GeneratedPlanDraft {
 	const agentDraft = session.draft;
 	if (!input.type) throw new Error("生成计划前必须选择计划类型。");
 	const planId = agentDraft.id;
-	const phases = agentDraft.milestones.map((milestone, index) => ({ id: `${planId}-phase-${index + 1}`, title: milestone.title, objective: milestone.description, order: index + 1 }));
-	const phaseByMilestone = new Map(agentDraft.milestones.map((milestone, index) => [milestone.id, phases[index]!.id]));
+	const phases = agentDraft.phases.map((phase) => ({ ...phase }));
+	const phaseByMilestone = new Map(
+		agentDraft.milestones.map((milestone) => [milestone.id, milestone.phaseId]),
+	);
 	const plan: Plan = {
-		id: planId, type: input.type, title: agentDraft.title, goal: input.goal.trim(), deadline: input.deadline, priority: input.priority,
+		id: planId,
+		type: input.type,
+		title: agentDraft.title,
+		goal: input.goal.trim(),
+		deadline: input.deadline,
+		priority: input.priority,
 		weeklyCapacityHours: input.weeklyCapacityHours,
+		calendarRevision: agentDraft.calendarRevision,
 		totalEstimatedMinutes: agentDraft.tasks.reduce((total, task) => total + task.estimatedMinutes, 0),
 		phases,
-		milestones: agentDraft.milestones.map((milestone, index) => ({ id: milestone.id, phaseId: phases[index]!.id, title: milestone.title, targetDate: validDate(milestone.targetDate) ? milestone.targetDate : input.deadline })),
-		tasks: agentDraft.tasks.map((task) => ({ id: task.id, phaseId: phaseByMilestone.get(task.milestoneId) ?? phases[0]?.id ?? `${planId}-phase-unassigned`, milestoneId: task.milestoneId, title: task.title, estimatedMinutes: Math.max(15, task.estimatedMinutes) })),
-		scheduleWindow: { startDate: context.today, endDateExclusive: Temporal.PlainDate.from(input.deadline).add({ days: 1 }).toString() },
-		generationRun: { id: `agent-${session.id}`, startedAt: Temporal.Now.instant().toString(), completedAt: Temporal.Now.instant().toString(), statuses: ["understood", "split-phases", "checking-calendar", "arranging", "ready"], revision: context.revision },
+		milestones: agentDraft.milestones.map((milestone) => ({
+			id: milestone.id,
+			phaseId: milestone.phaseId,
+			title: milestone.title,
+			targetDate: validDate(milestone.targetDate) ? milestone.targetDate : input.deadline,
+		})),
+		tasks: agentDraft.tasks.map((task) => ({
+			id: task.id,
+			phaseId: phaseByMilestone.get(task.milestoneId) ?? phases[0]?.id ?? `${planId}-phase-unassigned`,
+			milestoneId: task.milestoneId,
+			title: task.title,
+			estimatedMinutes: Math.max(15, task.estimatedMinutes),
+		})),
+		scheduleWindow: {
+			startDate: context.today,
+			endDateExclusive: Temporal.PlainDate.from(input.deadline).add({ days: 1 }).toString(),
+		},
+		generationRun: {
+			id: `agent-${session.id}`,
+			startedAt: Temporal.Now.instant().toString(),
+			completedAt: Temporal.Now.instant().toString(),
+			statuses: ["understood", "split-phases", "checking-calendar", "arranging", "ready"],
+			revision: context.revision,
+		},
 	};
-	const proposals = buildProposals(plan, input, context);
-	const conflicts = detectPlanningConflicts(proposals, busyWindows);
-	return { plan, proposals, busyWindows, conflicts, suggestions: conflicts.length > 0 ? ["可在下一步调整与日历冲突的时段。"] : [] };
-}
-
-function buildProposals(plan: Plan, input: PlanInput, context: PlanningGenerationContext): GeneratedPlanDraft["proposals"] {
-	const hour = input.preferredDayPart === "morning" ? 9 : input.preferredDayPart === "afternoon" ? 14 : input.preferredDayPart === "evening" ? 19 : 14;
-	const dates: string[] = [];
-	let cursor = Temporal.PlainDate.from(context.today);
-	const end = Temporal.PlainDate.from(plan.scheduleWindow.endDateExclusive);
-	while (Temporal.PlainDate.compare(cursor, end) < 0 && dates.length < plan.tasks.length) {
-		const weekday = weekdayByNumber[cursor.dayOfWeek];
-		if (weekday && !input.unavailableDays.includes(weekday)) dates.push(cursor.toString());
-		cursor = cursor.add({ days: 1 });
-	}
-	const limit = Math.min(plan.tasks.length, Math.max(1, Math.floor(input.weeklyCapacityHours * 60 / input.preferredSessionMinutes)));
-	return dates.slice(0, limit).map((date, index) => {
-		const task = plan.tasks[index]!;
-		const start = Temporal.PlainDate.from(date).toZonedDateTime({ timeZone: context.timeZone, plainTime: Temporal.PlainTime.from({ hour }) }).toInstant().toString();
-		return { id: `${plan.id}-proposal-${index + 1}`, sourcePlanId: plan.id, taskId: task.id, title: task.title, state: "proposed" as const, start, end: Temporal.Instant.from(start).add({ minutes: task.estimatedMinutes }).toString(), timeZone: context.timeZone, version: 0 };
-	});
+	const proposals = agentDraft.schedule.map((proposal) => ({
+		id: proposal.id,
+		sourcePlanId: planId,
+		taskId: proposal.taskId,
+		title: proposal.title,
+		state: "proposed" as const,
+		start: proposal.start,
+		end: proposal.end,
+		timeZone: proposal.timeZone,
+		version: 0,
+	}));
+	const conflicts = [
+		...detectPlanningConflicts(proposals, busyWindows),
+		...(session.status === "conflict"
+			? session.validationIssues.map((issue) => ({
+					proposalId: issue.proposalId ?? null,
+					busyWindowId: issue.busyEventIds?.[0] ?? null,
+					reason: "agent-validation" as const,
+					severity: "error" as const,
+					message: issue.message,
+					suggestions: ["move-session" as const],
+				}))
+			: []),
+	];
+	return {
+		plan,
+		proposals,
+		busyWindows,
+		conflicts,
+		suggestions: conflicts.length > 0
+			? ["草案保留了冲突，请调整后再确认写入。"]
+			: agentDraft.unscheduledTaskIds.length > 0
+				? ["部分任务因容量限制未安排，可调整约束后重新生成。"]
+				: [],
+	};
 }
 
 function validDate(value: string | undefined): value is string {
 	if (!value) return false;
-	try { Temporal.PlainDate.from(value); return true; } catch { return false; }
+	try {
+		Temporal.PlainDate.from(value);
+		return true;
+	} catch {
+		return false;
+	}
 }

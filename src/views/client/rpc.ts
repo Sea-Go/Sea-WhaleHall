@@ -2,33 +2,49 @@ import { Electroview } from "electrobun/view";
 import type {
 	ClientRPC,
 	ActiveGoalContextV1,
-	LocalRuntimeStatus,
-	LocalToolCall,
-	LocalToolEvent,
-	PetPresentationEvent,
+	AgentRunEventEnvelope,
+	CalendarMutation,
+	CancelAgentRunRequest,
+	DecideAgentToolApprovalRequest,
+		GetAgentRunSnapshotRequest,
+		ListRestorableAgentRunsRequest,
+		LocalRuntimeStatus,
+		PetPresentationEvent,
 	PetTodaySchedule,
+	SetAgentReadPermissionsRequest,
+	StartConversationTurnRequest,
+	StartTaskPlanningRunRequest,
+		SubmitPlanningClarificationRequest,
+		SavePlanningDraftRequest,
+		CommitPlanningDraftRequest,
 } from "../../shared/contracts";
+import type { AuthCredentials } from "../../shared/auth";
 
 type StatusListener = (status: LocalRuntimeStatus) => void;
-type ToolEventListener = (event: LocalToolEvent) => void;
 type VisibilityListener = (visible: boolean) => void;
+type AgentRunEventListener = (event: AgentRunEventEnvelope) => void;
+type AuthSessionExpiredListener = () => void;
 
 const statusListeners = new Set<StatusListener>();
-const toolEventListeners = new Set<ToolEventListener>();
 const visibilityListeners = new Set<VisibilityListener>();
+const agentRunEventListeners = new Set<AgentRunEventListener>();
+const authSessionExpiredListeners = new Set<AuthSessionExpiredListener>();
 
 const rpc = Electroview.defineRPC<ClientRPC>({
 	maxRequestTime: 35_000,
 	handlers: {
 		requests: {},
 		messages: {
+			agentRunEvent: (event) => {
+				for (const listener of agentRunEventListeners) listener(event);
+			},
+			authSessionExpired: () => {
+				for (const listener of authSessionExpiredListeners) listener();
+			},
 			localStatusChanged: (status) => {
 				for (const listener of statusListeners) listener(status);
 			},
-			localToolEvent: (event) => {
-				for (const listener of toolEventListeners) listener(event);
-			},
-			petVisibilityChanged: ({ visible }) => {
+				petVisibilityChanged: ({ visible }) => {
 				for (const listener of visibilityListeners) listener(visible);
 			},
 		},
@@ -38,44 +54,62 @@ const rpc = Electroview.defineRPC<ClientRPC>({
 new Electroview({ rpc });
 
 export const clientApi = {
-	getLocalStatus: () => rpc.request.getLocalStatus({}),
-	listLocalTools: () => rpc.request.listLocalTools({}),
-	callLocalTool: (call: LocalToolCall) => rpc.request.callLocalTool(call),
-	cancelLocalTool: (callId: string) => rpc.request.cancelLocalTool({ callId }),
-	setPetVisible: (visible: boolean) => rpc.request.setPetVisible({ visible }),
+	getAgentReadPermissions: () => rpc.request.getAgentReadPermissions({}),
+	setAgentReadPermissions: (input: SetAgentReadPermissionsRequest) =>
+		rpc.request.setAgentReadPermissions(input),
+	restoreAuthSession: () => rpc.request.restoreAuthSession({}),
+	signIn: (credentials: AuthCredentials) => rpc.request.signIn(credentials),
+	signOut: () => rpc.request.signOut({}),
+	loadCalendar: () => rpc.request.loadCalendar({}),
+	mutateCalendar: (mutation: CalendarMutation) =>
+		rpc.request.mutateCalendar(mutation),
+	mutateCalendarBatch: (input: {
+		batchId: string;
+		mutations: readonly CalendarMutation[];
+		expectedRevision?: number;
+		}) => rpc.request.mutateCalendarBatch(input),
+		getLocalStatus: () => rpc.request.getLocalStatus({}),
+		setPetVisible: (visible: boolean) => rpc.request.setPetVisible({ visible }),
 	presentPetEvent: (event: PetPresentationEvent) =>
 		rpc.request.presentPetEvent(event),
 	updatePetTodaySchedule: (schedule: PetTodaySchedule) =>
 		rpc.request.updatePetTodaySchedule(schedule),
 	setActiveGoalContext: (goal: ActiveGoalContextV1 | null) =>
 		rpc.request.setActiveGoalContext({ goal }),
-	loadActiveConversation: (userId: string) =>
-		rpc.request.loadActiveConversation({ userId }),
-	createConversation: (userId: string, title?: string) =>
-		rpc.request.createConversation({ userId, title }),
-	sendConversationMessage: (input: {
-		userId: string;
-		conversationId: string;
-		clientMessageId: string;
-		text: string;
-	}) => rpc.request.sendConversationMessage(input),
-	createTaskPlanningSession: (userId: string, input: import("../../shared/task-planning").TaskPlanningInput) =>
-		rpc.request.createTaskPlanningSession({ userId, input }),
-	submitTaskPlanningAnswers: (
-		userId: string,
-		sessionId: string,
-		answers: readonly import("../../shared/task-planning").TaskPlanningAnswer[],
-	) => rpc.request.submitTaskPlanningAnswers({ userId, sessionId, answers }),
+	startConversationTurn: (input: StartConversationTurnRequest) =>
+		rpc.request.startConversationTurn(input),
+	startTaskPlanningRun: (input: StartTaskPlanningRunRequest) =>
+		rpc.request.startTaskPlanningRun(input),
+	submitPlanningClarification: (input: SubmitPlanningClarificationRequest) =>
+		rpc.request.submitPlanningClarification(input),
+	decideAgentToolApproval: (input: DecideAgentToolApprovalRequest) =>
+		rpc.request.decideAgentToolApproval(input),
+	cancelAgentRun: (input: CancelAgentRunRequest) =>
+		rpc.request.cancelAgentRun(input),
+	getAgentRunSnapshot: (input: GetAgentRunSnapshotRequest) =>
+		rpc.request.getAgentRunSnapshot(input),
+	listRestorableAgentRuns: (input: ListRestorableAgentRunsRequest = {}) =>
+		rpc.request.listRestorableAgentRuns(input),
+	getActiveConversation: () => rpc.request.getActiveConversation({}),
+	loadPlanningAuthority: () => rpc.request.loadPlanningAuthority({}),
+	savePlanningDraft: (input: SavePlanningDraftRequest) =>
+		rpc.request.savePlanningDraft(input),
+	commitPlanningDraft: (input: CommitPlanningDraftRequest) =>
+		rpc.request.commitPlanningDraft(input),
 	onStatus(listener: StatusListener): () => void {
 		statusListeners.add(listener);
 		return () => statusListeners.delete(listener);
 	},
-	onToolEvent(listener: ToolEventListener): () => void {
-		toolEventListeners.add(listener);
-		return () => toolEventListeners.delete(listener);
-	},
 	onPetVisibility(listener: VisibilityListener): () => void {
 		visibilityListeners.add(listener);
 		return () => visibilityListeners.delete(listener);
+	},
+	onAgentRunEvent(listener: AgentRunEventListener): () => void {
+		agentRunEventListeners.add(listener);
+		return () => agentRunEventListeners.delete(listener);
+	},
+	onAuthSessionExpired(listener: AuthSessionExpiredListener): () => void {
+		authSessionExpiredListeners.add(listener);
+		return () => authSessionExpiredListeners.delete(listener);
 	},
 };

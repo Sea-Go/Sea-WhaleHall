@@ -18,6 +18,7 @@ export type {
 } from "./domain";
 export type {
 	PlanApplyResult,
+	PlanningAuthorityGateway,
 	PlanningCalendarGateway,
 	PlanningGenerationService,
 } from "./planning-service";

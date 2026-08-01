@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AppShell } from "../src/views/client/app/AppShell";
+import {
+	AppShell,
+	calendarStateToPetTodaySchedule,
+} from "../src/views/client/app/AppShell";
 import {
 	PAGE_IDS,
 	PAGE_LABELS,
 	isPageId,
 } from "../src/views/client/app/navigation";
 import { CalendarPage } from "../src/views/client/features/calendar/CalendarPage";
+import { calendarScenarioEvents } from "../src/views/client/features/calendar/fixtures";
 import { PlanningController } from "../src/views/client/features/planning/PlanningController";
 import { PlanningPage } from "../src/views/client/features/planning/PlanningPage";
 import { ReportsPage } from "../src/views/client/features/reports/ReportsPage";
@@ -131,6 +135,29 @@ describe("client app shell", () => {
 		);
 
 		expect(markup).toContain("重新加载");
+	});
+
+	test("never publishes cached calendar tasks to the pet while account data is loading", () => {
+		const schedule = calendarStateToPetTodaySchedule(
+			{
+				loadState: "loading",
+				events: calendarScenarioEvents("normal"),
+				timeZone: "Asia/Shanghai",
+				scenario: "normal",
+				pendingEventIds: new Set(),
+				conflict: null,
+				message: null,
+				undo: null,
+			},
+			"2026-07-29",
+		);
+
+		expect(schedule).toEqual({
+			status: "unavailable",
+			date: "2026-07-29",
+			timeZone: "Asia/Shanghai",
+			tasks: [],
+		});
 	});
 });
 

@@ -6,13 +6,33 @@ export {
 export {
 	ConversationController,
 	type ConversationPageState,
+	type ConversationTurnState,
 } from "./ConversationController";
 export type {
 	ConversationDraft,
 	ConversationMessage,
 	ConversationMessageState,
+	ConversationRestorableRun,
 	ConversationRole,
+	ConversationRun,
+	ConversationRunPhase,
+	ConversationRunStatus,
 	ConversationThread,
+	ConversationToolApproval,
+	ConversationToolApprovalDecision,
+	ConversationToolCall,
+	ConversationToolCallStatus,
+	ConversationToolRisk,
 	CreateConversationInput,
 } from "./domain";
-export type { ConversationExchange, ConversationService } from "./conversation-service";
+export type {
+	CancelConversationRunInput,
+	ConversationCommandAccepted,
+	ConversationRunAccepted,
+	ConversationRunEvent,
+	ConversationRunEventEnvelope,
+	ConversationRunSnapshot,
+	ConversationService,
+	ConversationStartInput,
+	DecideConversationToolApprovalInput,
+} from "./conversation-service";

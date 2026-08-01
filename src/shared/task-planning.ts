@@ -38,8 +38,16 @@ export interface TaskPlanningDraft {
 	id: string;
 	title: string;
 	assumptions: readonly string[];
+	calendarRevision: number;
+	phases: readonly {
+		id: string;
+		title: string;
+		objective: string;
+		order: number;
+	}[];
 	milestones: readonly {
 		id: string;
+		phaseId: string;
 		title: string;
 		description: string;
 		targetDate?: string;
@@ -55,6 +63,22 @@ export interface TaskPlanningDraft {
 		dependencies: readonly string[];
 		completionCriteria: readonly string[];
 	}[];
+	schedule: readonly {
+		id: string;
+		taskId: string;
+		title: string;
+		start: string;
+		end: string;
+		timeZone: string;
+	}[];
+	unscheduledTaskIds: readonly string[];
+}
+
+export interface TaskPlanningValidationIssue {
+	code: string;
+	message: string;
+	proposalId?: string;
+	busyEventIds?: readonly string[];
 }
 
 export type TaskPlanningSession =
@@ -63,7 +87,13 @@ export type TaskPlanningSession =
 			status: "clarifying";
 			questions: readonly TaskPlanningQuestion[];
 	  }
-	| { id: string; status: "draft"; draft: TaskPlanningDraft };
+	| { id: string; status: "draft"; draft: TaskPlanningDraft }
+	| {
+			id: string;
+			status: "conflict";
+			draft: TaskPlanningDraft;
+			validationIssues: readonly TaskPlanningValidationIssue[];
+	  };
 
 export type TaskPlanningRpcResult<T> =
 	| { kind: "success"; data: T }

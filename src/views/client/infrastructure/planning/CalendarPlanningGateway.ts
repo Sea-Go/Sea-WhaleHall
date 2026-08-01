@@ -83,6 +83,7 @@ function calendarConflictToPlanning(
 }
 
 export class CalendarPlanningGateway implements PlanningCalendarGateway {
+	private expectedRevision: number | undefined;
 	constructor(
 		private readonly service: CalendarService,
 		private readonly createId: () => string = () => crypto.randomUUID(),
@@ -92,6 +93,7 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 		request: PlanningAvailabilityRequest,
 	): Promise<readonly PlanningBusyWindow[]> {
 		const result = await this.service.load();
+		this.expectedRevision = result.revision;
 		return result.events
 			.map((event) => eventToBusyWindow(event, request.timeZone))
 			.filter((item): item is PlanningBusyWindow => item !== null)
@@ -141,7 +143,11 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 			};
 		});
 		try {
-			const result = await this.service.mutateBatch(applyId, mutations);
+			const result = await this.service.mutateBatch(
+				applyId,
+				mutations,
+				plan.calendarRevision ?? this.expectedRevision,
+			);
 			if (!result.ok) {
 				return {
 					ok: false,
@@ -154,6 +160,7 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 						"写入未完成，所有草案都保留在计划中。",
 				};
 			}
+			this.expectedRevision = result.calendarRevision ?? this.expectedRevision;
 			return {
 				ok: true,
 				kind: "success",

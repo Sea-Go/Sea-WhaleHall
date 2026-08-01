@@ -96,6 +96,8 @@ export interface Plan {
 	deadline: string;
 	priority: PlanPriority;
 	weeklyCapacityHours: number;
+	/** Authoritative local calendar revision used by the generated schedule. */
+	calendarRevision?: number;
 	totalEstimatedMinutes: number;
 	phases: readonly PlanPhase[];
 	milestones: readonly Milestone[];
@@ -126,7 +128,8 @@ export type PlanningConflictReason =
 	| "external-event"
 	| "committed-plan"
 	| "insufficient-capacity"
-	| "invalid-duration";
+	| "invalid-duration"
+	| "agent-validation";
 
 export interface PlanningConflict {
 	proposalId: string | null;

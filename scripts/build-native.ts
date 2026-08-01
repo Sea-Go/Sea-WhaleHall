@@ -6,7 +6,11 @@ type TargetOS = "macos" | "linux" | "win";
 type TargetArch = "arm64" | "x64";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const manifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
+const localToolManifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
+const credentialHelperManifestPath = resolve(
+	projectRoot,
+	"whalehall-credential-helper/Cargo.toml",
+);
 
 function hostOS(): TargetOS {
 	if (process.platform === "darwin") return "macos";
@@ -45,9 +49,19 @@ export function buildNative(): string {
 		"--release",
 		"--locked",
 		"--manifest-path",
-		manifestPath,
+		localToolManifestPath,
 		"--package",
 		"whalehall-local-server",
+	]);
+	run([
+		"cargo",
+		"build",
+		"--release",
+		"--locked",
+		"--manifest-path",
+		credentialHelperManifestPath,
+		"--package",
+		"whalehall-credential-helper",
 	]);
 
 	const binaryName = os === "win" ? "whalehall-local.exe" : "whalehall-local";
@@ -57,6 +71,24 @@ export function buildNative(): string {
 	copyFileSync(source, destination);
 	if (os !== "win") chmodSync(destination, 0o755);
 	console.log(`[native] ${source} -> ${destination}`);
+
+	const helperBinaryName =
+		os === "win"
+			? "whalehall-credential-helper.exe"
+			: "whalehall-credential-helper";
+	const helperSource = resolve(
+		projectRoot,
+		"whalehall-credential-helper/target/release",
+		helperBinaryName,
+	);
+	const helperDestination = resolve(
+		projectRoot,
+		`.native/${os}-${arch}`,
+		helperBinaryName,
+	);
+	copyFileSync(helperSource, helperDestination);
+	if (os !== "win") chmodSync(helperDestination, 0o755);
+	console.log(`[native] ${helperSource} -> ${helperDestination}`);
 	return destination;
 }
 

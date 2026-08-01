@@ -387,8 +387,6 @@ const sensorCiProbes: SensorCiProbe[] = [
 			expect(status).toMatchObject({
 				state: "running",
 				enabled: true,
-				bridgeRoot: context.vscodeBridgeRoot,
-				spoolDirectory: join(context.vscodeBridgeRoot, ".whalehall-vscode-spool-v1"),
 				databasePath: join(context.dataDirectory, "editor-bridge", "editor.sqlite3"),
 				pollIntervalMs: 250,
 				pendingSegments: 0,
@@ -398,6 +396,12 @@ const sensorCiProbes: SensorCiProbe[] = [
 				warnings: [],
 				lastError: null,
 			});
+			expect(normalizeCanonicalWindowsPath(status.bridgeRoot)).toBe(
+				resolve(context.vscodeBridgeRoot),
+			);
+			expect(normalizeCanonicalWindowsPath(status.spoolDirectory)).toBe(
+				resolve(context.vscodeBridgeRoot, ".whalehall-vscode-spool-v1"),
+			);
 			expect(typeof status.lastImportedAtMs).toBe("number");
 			expect(typeof status.lastPublishedAtMs).toBe("number");
 		},
@@ -1493,6 +1497,14 @@ async function withTimeout(
 			throw new Error(`Timed out waiting for ${label}`);
 		}),
 	]);
+}
+
+function normalizeCanonicalWindowsPath(value: string | null): string | null {
+	if (value === null) return null;
+	const withoutDevicePrefix = process.platform === "win32" && value.startsWith("\\\\?\\")
+		? value.slice(4)
+		: value;
+	return resolve(withoutDevicePrefix);
 }
 
 async function collectMessages(

@@ -10,6 +10,8 @@ export interface ConversationRpcMessage {
 	role: ConversationRpcRole;
 	content: string;
 	createdAtMs: number;
+	/** Omitted by legacy persisted conversations, which are treated as complete. */
+	state?: "queued" | "streaming" | "complete" | "failed" | "cancelled";
 }
 
 export interface ConversationRpcThread {

@@ -3,6 +3,15 @@ export {
 	type PreferencesOperation,
 	type PreferencesState,
 } from "./PreferencesController";
+export {
+	AgentPermissionsController,
+	type AgentPermissionsState,
+} from "./AgentPermissionsController";
+export {
+	AgentPermissionsServiceError,
+	type AgentPermissionsFailureKind,
+	type AgentPermissionsService,
+} from "./agent-permissions-service";
 export type { PreferencesService } from "./preferences-service";
 export {
 	APPEARANCE_THEME_IDS,

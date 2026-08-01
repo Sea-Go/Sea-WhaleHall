@@ -29,16 +29,18 @@ export interface CalendarControllerState {
 	undo: DeletedCalendarEvent | null;
 }
 
-const defaultState: CalendarControllerState = {
-	loadState: "idle",
-	events: [],
-	timeZone: "Asia/Shanghai",
-	scenario: "normal",
-	pendingEventIds: new Set(),
-	conflict: null,
-	message: null,
-	undo: null,
-};
+function createDefaultState(): CalendarControllerState {
+	return {
+		loadState: "idle",
+		events: [],
+		timeZone: "Asia/Shanghai",
+		scenario: "normal",
+		pendingEventIds: new Set(),
+		conflict: null,
+		message: null,
+		undo: null,
+	};
+}
 
 function unavailableConflict(message: string): CalendarConflict {
 	return {
@@ -51,10 +53,11 @@ function unavailableConflict(message: string): CalendarConflict {
 }
 
 export class CalendarController {
-	private state: CalendarControllerState = defaultState;
+	private state: CalendarControllerState = createDefaultState();
 	private readonly listeners = new Set<() => void>();
 	private readonly mutationOwners = new Map<string, string>();
 	private loadSequence = 0;
+	private accountGeneration = 0;
 
 	constructor(
 		private readonly service: CalendarService,
@@ -74,9 +77,12 @@ export class CalendarController {
 		const requestedScenario = scenario ?? this.state.scenario;
 		this.patch({
 			loadState: "loading",
+			events: [],
 			scenario: requestedScenario,
+			pendingEventIds: new Set(),
 			conflict: null,
 			message: null,
+			undo: null,
 		});
 		try {
 			const result = await this.service.load(scenario);
@@ -100,6 +106,18 @@ export class CalendarController {
 					: "日程加载失败，请重试。",
 			});
 		}
+	}
+
+	/**
+	 * Synchronously removes account-owned renderer state and invalidates any
+	 * load that was started for the previous authenticated account.
+	 */
+	clearAccountData(): void {
+		this.loadSequence += 1;
+		this.accountGeneration += 1;
+		this.mutationOwners.clear();
+		this.state = createDefaultState();
+		for (const listener of this.listeners) listener();
 	}
 
 	clearFeedback(): void {
@@ -177,6 +195,7 @@ export class CalendarController {
 	async confirmProposed(
 		eventIds: readonly string[],
 	): Promise<CalendarBatchMutationResult> {
+		const accountGeneration = this.accountGeneration;
 		const proposed = this.state.events.filter(
 			(event) => eventIds.includes(event.id) && event.state === "proposed",
 		);
@@ -204,6 +223,7 @@ export class CalendarController {
 		});
 		try {
 			const result = await this.service.mutateBatch(batchId, mutations);
+			if (accountGeneration !== this.accountGeneration) return result;
 			if (result.ok) {
 				const authoritative = new Map(result.events.map((event) => [event.id, event]));
 				this.patch({
@@ -229,6 +249,9 @@ export class CalendarController {
 			return result;
 		} catch {
 			const conflict = unavailableConflict("同步失败，所有待确认计划均已恢复。");
+			if (accountGeneration !== this.accountGeneration) {
+				return { ok: false, batchId, conflicts: [conflict] };
+			}
 			this.patch({
 				events: this.restoreEvents(proposed),
 				pendingEventIds: this.withoutPending(proposed.map((event) => event.id)),
@@ -243,6 +266,7 @@ export class CalendarController {
 		occurrenceStart: string,
 		edited: CalendarEvent,
 	): Promise<CalendarBatchMutationResult> {
+		const accountGeneration = this.accountGeneration;
 		const series = this.state.events.find((event) => event.id === seriesId);
 		if (!series?.recurrence) {
 			const conflict: CalendarConflict = {
@@ -297,6 +321,7 @@ export class CalendarController {
 		});
 		try {
 			const result = await this.service.mutateBatch(batchId, mutations);
+			if (accountGeneration !== this.accountGeneration) return result;
 			if (result.ok) {
 				const authoritative = new Map(
 					result.events.map((event) => [event.id, event]),
@@ -322,6 +347,9 @@ export class CalendarController {
 			return result;
 		} catch {
 			const conflict = unavailableConflict("同步失败，单次修改已撤销。");
+			if (accountGeneration !== this.accountGeneration) {
+				return { ok: false, batchId, conflicts: [conflict] };
+			}
 			this.patch({
 				events: this.state.events
 					.filter((event) => event.id !== occurrence.id)

@@ -18,6 +18,7 @@ import type { AuthUser } from "../features/auth/public";
 import {
 	CalendarPage,
 	CalendarController,
+	type CalendarControllerState,
 	type CalendarService,
 } from "../features/calendar/public";
 import { Temporal } from "temporal-polyfill";
@@ -38,6 +39,7 @@ import {
 } from "../features/conversation/public";
 import {
 	SettingsPage,
+	type AgentPermissionsController,
 	type PreferencesController,
 	type PreferencesSnapshot,
 	type SettingsCategory,
@@ -73,6 +75,48 @@ const userMenuItems = [
 	icon: typeof UserRound;
 }>;
 
+export function calendarStateToPetTodaySchedule(
+	snapshot: CalendarControllerState,
+	dateOverride?: string,
+): PetTodaySchedule {
+	const timeZone = snapshot.timeZone;
+	const date = dateOverride ?? Temporal.Now.zonedDateTimeISO(timeZone).toPlainDate().toString();
+	if (snapshot.loadState !== "ready") {
+		return { status: "unavailable", date, timeZone, tasks: [] };
+	}
+	return {
+		status: "ready",
+		date,
+		timeZone,
+		tasks: snapshot.events
+			.filter((event) => event.kind === "plan")
+			.filter((event) => {
+				if (event.schedule.allDay) {
+					return event.schedule.startDate <= date && date < event.schedule.endDateExclusive;
+				}
+				return Temporal.Instant.from(event.schedule.start)
+					.toZonedDateTimeISO(event.schedule.timeZone)
+					.toPlainDate()
+					.toString() === date;
+			})
+			.map((event) => {
+				if (event.schedule.allDay) {
+					return { id: event.id, title: event.title, timeLabel: "全天", state: event.state };
+				}
+				const start = Temporal.Instant.from(event.schedule.start)
+					.toZonedDateTimeISO(event.schedule.timeZone)
+					.toPlainTime()
+					.toString({ smallestUnit: "minute" });
+				const end = Temporal.Instant.from(event.schedule.end)
+					.toZonedDateTimeISO(event.schedule.timeZone)
+					.toPlainTime()
+					.toString({ smallestUnit: "minute" });
+				return { id: event.id, title: event.title, timeLabel: `${start}–${end}`, state: event.state };
+			})
+			.sort((left, right) => left.timeLabel.localeCompare(right.timeLabel)),
+	};
+}
+
 export interface AppShellProps {
 	user: AuthUser;
 	onLogout: () => void;
@@ -81,6 +125,7 @@ export interface AppShellProps {
 	planningController: PlanningController;
 	reportController: ReportController;
 	preferencesController: PreferencesController;
+	agentPermissionsController?: AgentPermissionsController;
 	petBridge: PetPresentationBridge;
 	conversationState: ConversationPageState;
 	conversationActions?: ConversationPageActions;
@@ -96,6 +141,7 @@ export function AppShell({
 	planningController,
 	reportController,
 	preferencesController,
+	agentPermissionsController,
 	petBridge,
 	conversationState,
 	conversationActions,
@@ -128,43 +174,9 @@ export function AppShell({
 
 	useEffect(() => {
 		const publish = () => {
-			const snapshot = resolvedCalendarController.getSnapshot();
-			const timeZone = snapshot.timeZone;
-			const date = Temporal.Now.zonedDateTimeISO(timeZone).toPlainDate().toString();
-			const schedule: PetTodaySchedule = {
-				status: snapshot.loadState === "ready" ? "ready" : "unavailable",
-				date,
-				timeZone,
-				tasks: snapshot.loadState === "ready"
-					? snapshot.events
-						.filter((event) => event.kind === "plan")
-						.filter((event) => {
-							if (event.schedule.allDay) {
-								return event.schedule.startDate <= date && date < event.schedule.endDateExclusive;
-							}
-							return Temporal.Instant.from(event.schedule.start)
-								.toZonedDateTimeISO(event.schedule.timeZone)
-								.toPlainDate()
-								.toString() === date;
-						})
-						.map((event) => {
-							if (event.schedule.allDay) {
-								return { id: event.id, title: event.title, timeLabel: "全天", state: event.state };
-							}
-							const start = Temporal.Instant.from(event.schedule.start)
-								.toZonedDateTimeISO(event.schedule.timeZone)
-								.toPlainTime()
-								.toString({ smallestUnit: "minute" });
-							const end = Temporal.Instant.from(event.schedule.end)
-								.toZonedDateTimeISO(event.schedule.timeZone)
-								.toPlainTime()
-								.toString({ smallestUnit: "minute" });
-							return { id: event.id, title: event.title, timeLabel: `${start}–${end}`, state: event.state };
-						})
-						.sort((left, right) => left.timeLabel.localeCompare(right.timeLabel))
-					: [],
-			};
-			void petBridge.updateTodaySchedule(schedule);
+			void petBridge.updateTodaySchedule(
+				calendarStateToPetTodaySchedule(resolvedCalendarController.getSnapshot()),
+			);
 		};
 		publish();
 		return resolvedCalendarController.subscribe(publish);
@@ -449,6 +461,7 @@ export function AppShell({
 					<SettingsPage
 						user={user}
 						controller={preferencesController}
+						agentPermissionsController={agentPermissionsController}
 						category={settingsCategory}
 						onCategoryChange={setSettingsCategory}
 						onLogout={() => setLogoutDialogOpen(true)}
@@ -467,7 +480,7 @@ export function AppShell({
 			{logoutDialogOpen ? (
 				<ConfirmationDialog
 					title="退出当前账号？"
-					description="WhaleHall 会立即清理当前受保护的 UI 会话并返回登录页。本机计划、日程和偏好不会被删除。"
+					description="WhaleHall 会立即清理当前本地测试会话并返回登录页。本机计划、日程和偏好不会被删除。"
 					confirmLabel="退出登录"
 					onCancel={() => setLogoutDialogOpen(false)}
 					onConfirm={() => {
