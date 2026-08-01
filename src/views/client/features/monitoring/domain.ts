@@ -5,8 +5,7 @@ export const MONITORING_PERMISSION_IDS = [
 	"browserAutomation",
 ] as const;
 
-export type MonitoringPermissionId =
-	(typeof MONITORING_PERMISSION_IDS)[number];
+export type MonitoringPermissionId = (typeof MONITORING_PERMISSION_IDS)[number];
 
 /**
  * The full local-content setup. Input Monitoring remains in the status
@@ -79,6 +78,9 @@ export interface MonitoringSnapshot {
 	permissionSetupAttempted: boolean;
 	excludedAppIds: string[];
 	lastObservationAtMs: number | null;
+	tapReady: boolean;
+	lastCallbackAtMs: number | null;
+	lastBucketAtMs: number | null;
 	coverageGaps: string[];
 }
 
@@ -126,8 +128,7 @@ export function monitoringSetupStatus(
 		permissions,
 		missingPermissions,
 		firstMissingPermission: missingPermissions[0] ?? null,
-		grantedPermissionCount:
-			permissions.length - missingPermissions.length,
+		grantedPermissionCount: permissions.length - missingPermissions.length,
 		requiredPermissionCount: permissions.length,
 	};
 
@@ -168,6 +169,15 @@ export function monitoringStatusLabel(snapshot: MonitoringSnapshot): string {
 		case "paused":
 			return "已暂停";
 		case "degraded":
+			if (snapshot.coverageGaps.includes("observer_disconnected")) {
+				return "观察器正在重新连接";
+			}
+			if (snapshot.coverageGaps.includes("accessibility_permission_revoked")) {
+				return "辅助功能权限已关闭";
+			}
+			if (snapshot.coverageGaps.includes("input_sensor_unavailable")) {
+				return "键鼠活动传感器恢复中";
+			}
 			return "权限不完整";
 		case "disabled":
 			return "未启用";
@@ -182,8 +192,7 @@ export function missingRequiredPermissions(
 	return snapshot.permissions.filter(
 		(permission) =>
 			permission.required &&
-			(permission.state === "denied" ||
-				permission.state === "notDetermined"),
+			(permission.state === "denied" || permission.state === "notDetermined"),
 	);
 }
 
@@ -204,8 +213,7 @@ export function isMonitoringSnapshot(
 		!isPermissionCheckState(value.permissionCheckState) ||
 		typeof value.permissionSetupAvailable !== "boolean" ||
 		typeof value.permissionSetupAttempted !== "boolean" ||
-		(value.permissionSetupAttempted &&
-			!value.permissionSetupAvailable) ||
+		(value.permissionSetupAttempted && !value.permissionSetupAvailable) ||
 		!(
 			value.permissionsCheckedAtMs === null ||
 			(typeof value.permissionsCheckedAtMs === "number" &&
@@ -218,6 +226,9 @@ export function isMonitoringSnapshot(
 			value.permissionsCheckedAtMs === null) ||
 		!Array.isArray(value.excludedAppIds) ||
 		!Array.isArray(value.coverageGaps) ||
+		typeof value.tapReady !== "boolean" ||
+		!isNullableTimestamp(value.lastCallbackAtMs) ||
+		!isNullableTimestamp(value.lastBucketAtMs) ||
 		!(
 			value.lastObservationAtMs === null ||
 			(typeof value.lastObservationAtMs === "number" &&
@@ -231,6 +242,13 @@ export function isMonitoringSnapshot(
 		value.permissions.every(isPermissionStatus) &&
 		value.excludedAppIds.every((item) => typeof item === "string") &&
 		value.coverageGaps.every((item) => typeof item === "string")
+	);
+}
+
+function isNullableTimestamp(value: unknown): boolean {
+	return (
+		value === null ||
+		(typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
 	);
 }
 
@@ -249,7 +267,9 @@ function isContentVaultStatus(value: unknown): value is ContentVaultStatus {
 	);
 }
 
-function isPermissionStatus(value: unknown): value is MonitoringPermissionStatus {
+function isPermissionStatus(
+	value: unknown,
+): value is MonitoringPermissionStatus {
 	return (
 		isRecord(value) &&
 		MONITORING_PERMISSION_IDS.includes(value.id as MonitoringPermissionId) &&

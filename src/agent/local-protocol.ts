@@ -194,6 +194,9 @@ export type LocalMonitoringStatus = {
 	lastSequence: number | null;
 	lastAckedSequence: number | null;
 	lastHeartbeatAtMs: number | null;
+	tapReady: boolean;
+	lastCallbackAtMs: number | null;
+	lastBucketAtMs: number | null;
 	permissions: LocalMonitoringPermissions;
 	permissionCheckState: LocalMonitoringPermissionCheckState;
 	permissionsCheckedAtMs: number | null;
@@ -536,6 +539,9 @@ export function isLocalMonitoringStatus(
 			"lastSequence",
 			"lastAckedSequence",
 			"lastHeartbeatAtMs",
+			"tapReady",
+			"lastCallbackAtMs",
+			"lastBucketAtMs",
 			"permissions",
 			"permissionCheckState",
 			"permissionsCheckedAtMs",
@@ -567,6 +573,19 @@ export function isLocalMonitoringStatus(
 		!isNullableNonNegativeSafeInteger(value.lastSequence) ||
 		!isNullableNonNegativeSafeInteger(value.lastAckedSequence) ||
 		!isNullableNonNegativeSafeInteger(value.lastHeartbeatAtMs) ||
+		typeof value.tapReady !== "boolean" ||
+		!isNullableHealthTimestamp(
+			value.lastCallbackAtMs,
+			value.lastHeartbeatAtMs,
+		) ||
+		!isNullableHealthTimestamp(
+			value.lastBucketAtMs,
+			value.lastHeartbeatAtMs,
+		) ||
+		(value.tapReady &&
+			(value.state !== "running" ||
+				value.helperPid === null ||
+				value.bootId === null)) ||
 		!isMonitoringPermissions(value.permissions) ||
 		!isMonitoringPermissionCheckState(value.permissionCheckState) ||
 		!isNullableNonNegativeSafeInteger(value.permissionsCheckedAtMs) ||
@@ -590,6 +609,18 @@ export function isLocalMonitoringStatus(
 		return false;
 	}
 	return true;
+}
+
+function isNullableHealthTimestamp(
+	value: unknown,
+	frameTimestamp: unknown,
+): boolean {
+	if (value === null) return true;
+	return (
+		isNonNegativeSafeInteger(value) &&
+		isNonNegativeSafeInteger(frameTimestamp) &&
+		(value as number) <= (frameTimestamp as number)
+	);
 }
 
 export function isLocalMonitoringConfigure(

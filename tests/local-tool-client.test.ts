@@ -523,6 +523,10 @@ describe("LocalToolClient", () => {
 						request.method === "monitoring.configure"
 							? request.params.enabled === true
 							: true,
+					tapReady:
+						request.method !== "monitoring.pause" &&
+						!(request.method === "monitoring.configure" &&
+							request.params.enabled === false),
 				}),
 			});
 		});
@@ -703,6 +707,9 @@ function monitoringStatus(
 		lastSequence: 10,
 		lastAckedSequence: 10,
 		lastHeartbeatAtMs: 1_800_000_000_000,
+		tapReady: true,
+		lastCallbackAtMs: 1_799_999_999_999,
+		lastBucketAtMs: 1_799_999_995_000,
 		permissions: {
 			accessibility: "granted",
 			screenRecording: "granted",

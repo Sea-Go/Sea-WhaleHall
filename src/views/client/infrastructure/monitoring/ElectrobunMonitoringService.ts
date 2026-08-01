@@ -139,7 +139,7 @@ export function toMonitoringSnapshot(
 	status: LocalMonitoringStatus,
 	vault: LocalVaultKeyStatus = unavailableVaultStatus(),
 ): MonitoringSnapshot {
-	const state =
+	const nativeState =
 		status.state === "stopped"
 			? status.enabled
 				? "unavailable"
@@ -150,10 +150,32 @@ export function toMonitoringSnapshot(
 		status.bootId !== null &&
 		status.state !== "disabled" &&
 		status.state !== "stopped";
+	const observerDisconnected =
+		status.enabled && status.state === "running" && !observerConnected;
+	const accessibilityPermissionRevoked =
+		status.enabled &&
+		status.state === "running" &&
+		status.permissions.accessibility === "denied";
+	const inputSensorUnavailable =
+		status.enabled &&
+		status.state === "running" &&
+		status.permissions.inputMonitoring === "granted" &&
+		!status.tapReady;
+	const state =
+		observerDisconnected ||
+		accessibilityPermissionRevoked ||
+		inputSensorUnavailable
+			? "degraded"
+			: nativeState;
 	const coverageGaps: string[] = status.coverage.filter(
 		(level) => level !== "content" && level !== "metadata",
 	);
 	if (!status.helperPathAvailable) coverageGaps.push("observer_unavailable");
+	if (observerDisconnected) coverageGaps.push("observer_disconnected");
+	if (accessibilityPermissionRevoked) {
+		coverageGaps.push("accessibility_permission_revoked");
+	}
+	if (inputSensorUnavailable) coverageGaps.push("input_sensor_unavailable");
 	if (status.lastError !== null) coverageGaps.push("observer_error");
 
 	return {
@@ -168,26 +190,14 @@ export function toMonitoringSnapshot(
 		permissionSetupAvailable: status.permissionSetupAvailable,
 		permissionSetupAttempted: status.permissionSetupAttempted,
 		permissions: [
-			permission(
-				"accessibility",
-				status.permissions.accessibility,
-				true,
-			),
+			permission("accessibility", status.permissions.accessibility, true),
 			permission(
 				"screenRecording",
 				status.permissions.screenRecording,
 				status.captureContent,
 			),
-			permission(
-				"inputMonitoring",
-				status.permissions.inputMonitoring,
-				false,
-			),
-			permission(
-				"browserAutomation",
-				status.permissions.automation,
-				false,
-			),
+			permission("inputMonitoring", status.permissions.inputMonitoring, false),
+			permission("browserAutomation", status.permissions.automation, false),
 		],
 		contentVault: {
 			availability: vault.availability,
@@ -198,6 +208,9 @@ export function toMonitoringSnapshot(
 		// The native status currently reports its heartbeat, not the time of the
 		// last accepted observation. Keep this honest until that field exists.
 		lastObservationAtMs: null,
+		tapReady: status.tapReady,
+		lastCallbackAtMs: status.lastCallbackAtMs,
+		lastBucketAtMs: status.lastBucketAtMs,
 		coverageGaps: [...new Set(coverageGaps)],
 	};
 }
@@ -206,14 +219,11 @@ async function loadClientTransport(): Promise<MonitoringTransport> {
 	const { clientApi } = await import("../../rpc");
 	return {
 		status: () => clientApi.getMonitoringStatus(),
-		configure: (configuration) =>
-			clientApi.configureMonitoring(configuration),
+		configure: (configuration) => clientApi.configureMonitoring(configuration),
 		pause: () => clientApi.pauseMonitoring(),
 		resume: () => clientApi.resumeMonitoring(),
-		refreshPermissions: () =>
-			clientApi.refreshMonitoringPermissions(),
-		setupPermissions: () =>
-			clientApi.setupMonitoringPermissions(),
+		refreshPermissions: () => clientApi.refreshMonitoringPermissions(),
+		setupPermissions: () => clientApi.setupMonitoringPermissions(),
 		vaultStatus: () => clientApi.getContentVaultStatus(),
 		migrateLegacyVault: () => clientApi.migrateLegacyContentVault(),
 		openPermissionSettings: (permission) =>
@@ -246,6 +256,9 @@ function unavailableSnapshot(): MonitoringSnapshot {
 		},
 		excludedAppIds: [],
 		lastObservationAtMs: null,
+		tapReady: false,
+		lastCallbackAtMs: null,
+		lastBucketAtMs: null,
 		coverageGaps: ["runtime_unavailable"],
 	};
 }

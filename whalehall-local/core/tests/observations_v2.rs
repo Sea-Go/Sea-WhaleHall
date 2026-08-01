@@ -877,6 +877,34 @@ fn anonymous_coverage_gap_is_ignored_and_rejects_real_application_identity() {
                 .contains(&CoverageLevelV2::Unavailable)
         );
     }
+    for (index, reason) in [
+        "input_monitoring_unavailable",
+        "input_event_tap_disabled",
+        "input_event_tap_start_timeout",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut unavailable = gap.clone();
+        unavailable.interval.started_at_ms += 100 + i64::try_from(index).unwrap();
+        unavailable.interval.ended_at_ms = unavailable.interval.started_at_ms;
+        unavailable.source.sensor = ObservationSensorV2::CgActivity;
+        unavailable.coverage = vec![CoverageLevelV2::Unavailable];
+        unavailable.redactions = vec![(*reason).to_owned()];
+        let stored = journal
+            .ingest(&format!("anonymous-gap:cg-activity:{reason}"), unavailable)
+            .expect("ingest native input activity coverage gap");
+        assert_eq!(
+            stored.semantic_event.count_class,
+            SemanticCountClassV2::Ignored
+        );
+        assert!(
+            stored
+                .semantic_event
+                .coverage
+                .contains(&CoverageLevelV2::Unavailable)
+        );
+    }
     let mut browser_privacy_boundary = browser_observation(13_000, "must not be persisted");
     browser_privacy_boundary.content = None;
     browser_privacy_boundary.coverage = vec![CoverageLevelV2::Unavailable];

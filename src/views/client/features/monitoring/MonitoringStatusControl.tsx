@@ -1,14 +1,6 @@
-import {
-	Pause,
-	Play,
-	ShieldAlert,
-	ShieldCheck,
-} from "lucide-react";
+import { Pause, Play, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useEffect, useSyncExternalStore } from "react";
-import {
-	monitoringSetupStatus,
-	monitoringStatusLabel,
-} from "./domain";
+import { monitoringSetupStatus, monitoringStatusLabel } from "./domain";
 import type { MonitoringController } from "./MonitoringController";
 import "./MonitoringStatusControl.css";
 
@@ -34,7 +26,10 @@ export function MonitoringStatusControl({
 
 	if (state.status === "idle" || state.status === "loading") {
 		return (
-			<section className="monitoring-control monitoring-control--loading" aria-busy="true">
+			<section
+				className="monitoring-control monitoring-control--loading"
+				aria-busy="true"
+			>
 				<span className="monitoring-control__pulse" aria-hidden="true" />
 				<div>
 					<strong>正在连接观察器</strong>
@@ -46,7 +41,10 @@ export function MonitoringStatusControl({
 
 	if (state.status === "error" && state.snapshot === null) {
 		return (
-			<section className="monitoring-control monitoring-control--error" role="alert">
+			<section
+				className="monitoring-control monitoring-control--error"
+				role="alert"
+			>
 				<ShieldAlert size={17} aria-hidden="true" />
 				<div>
 					<strong>观察器暂不可用</strong>
@@ -74,8 +72,14 @@ export function MonitoringStatusControl({
 			: snapshot.state === "paused"
 				? "paused"
 				: "limited";
-	const StatusIcon =
-		snapshot.state === "running" ? ShieldCheck : ShieldAlert;
+	const StatusIcon = snapshot.state === "running" ? ShieldCheck : ShieldAlert;
+	const degradedDetail = snapshot.coverageGaps.includes("observer_disconnected")
+		? "内置观察器已断开，正在自动重新连接"
+		: snapshot.coverageGaps.includes("accessibility_permission_revoked")
+			? "辅助功能权限已关闭，键鼠与界面监测已暂停"
+			: snapshot.coverageGaps.includes("input_sensor_unavailable")
+				? "键鼠活动量暂时不可用，正在自动恢复"
+				: "仅采集当前可用的本地信号";
 
 	return (
 		<section
@@ -95,13 +99,13 @@ export function MonitoringStatusControl({
 									? "旧版本本地加密需要一次迁移"
 									: setup.phase === "unavailable"
 										? "本机监测设置当前不可用"
-							: snapshot.state === "running"
-								? "前台可见内容 · 本地加密"
-								: snapshot.state === "starting"
-									? "正在连接内置 macOS 观察器"
-									: snapshot.state === "degraded"
-										? "仅采集当前可用的本地信号"
-										: "不会采集新的内容"}
+										: snapshot.state === "running"
+											? "前台可见内容 · 本地加密"
+											: snapshot.state === "starting"
+												? "正在连接内置 macOS 观察器"
+												: snapshot.state === "degraded"
+													? degradedDetail
+													: "不会采集新的内容"}
 					</span>
 				</div>
 			</header>
@@ -112,24 +116,16 @@ export function MonitoringStatusControl({
 			) : null}
 			<div className="monitoring-control__actions">
 				{setupActionable ? (
-					<button
-						type="button"
-						onClick={onOpenPrivacy}
-						disabled={updating}
-					>
+					<button type="button" onClick={onOpenPrivacy} disabled={updating}>
 						<ShieldCheck size={14} aria-hidden="true" />
-						{setup.phase === "not_started"
-							? "设置本机监测"
-							: "修复监测设置"}
+						{setup.phase === "not_started" ? "设置本机监测" : "修复监测设置"}
 					</button>
 				) : null}
 				{setupReady ? (
 					<button
 						type="button"
 						onClick={() =>
-							void (snapshot.paused
-								? controller.resume()
-								: controller.pause())
+							void (snapshot.paused ? controller.resume() : controller.pause())
 						}
 						disabled={updating || snapshot.state === "unavailable"}
 					>

@@ -20,6 +20,9 @@ function status(
 		lastSequence: 9,
 		lastAckedSequence: 9,
 		lastHeartbeatAtMs: 1_800_000_000_000,
+		tapReady: true,
+		lastCallbackAtMs: 1_799_999_999_999,
+		lastBucketAtMs: 1_799_999_995_000,
 		permissions: {
 			accessibility: "granted",
 			screenRecording: "granted",
@@ -57,6 +60,20 @@ describe("monitoring local protocol", () => {
 		).toBeFalse();
 		expect(
 			isLocalMonitoringStatus(status({ bootId: "boot/id" })),
+		).toBeFalse();
+		expect(
+			isLocalMonitoringStatus(status({ lastCallbackAtMs: -1 })),
+		).toBeFalse();
+		expect(
+			isLocalMonitoringStatus(status({ lastBucketAtMs: Number.NaN })),
+		).toBeFalse();
+		expect(
+			isLocalMonitoringStatus(status({ state: "paused", tapReady: true })),
+		).toBeFalse();
+		expect(
+			isLocalMonitoringStatus(
+				status({ lastCallbackAtMs: 1_800_000_000_001 }),
+			),
 		).toBeFalse();
 		expect(
 			isLocalMonitoringStatus(

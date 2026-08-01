@@ -3,6 +3,65 @@ import Foundation
 @main
 enum AccessibilityMonitorPolicyTests {
     static func main() {
+        let readyHandshake = InputTapStartupHandshake()
+        DispatchQueue.global().async {
+            readyHandshake.complete(ready: true)
+        }
+        precondition(readyHandshake.wait(timeout: .seconds(1)) == true)
+
+        let failedHandshake = InputTapStartupHandshake()
+        failedHandshake.complete(ready: false)
+        precondition(failedHandshake.wait(timeout: .seconds(1)) == false)
+
+        let timedOutHandshake = InputTapStartupHandshake()
+        precondition(timedOutHandshake.wait(timeout: .milliseconds(1)) == nil)
+
+        // A cancelled timer from generation 1 must not drain generation 3's
+        // accumulator after stop (generation 2) followed by start.
+        precondition(!InputBucketTimerPolicy.accepts(
+            callbackGeneration: 1,
+            currentGeneration: 3,
+            stopped: false,
+            tapReady: true
+        ))
+        precondition(InputBucketTimerPolicy.accepts(
+            callbackGeneration: 3,
+            currentGeneration: 3,
+            stopped: false,
+            tapReady: true
+        ))
+        precondition(!InputBucketTimerPolicy.accepts(
+            callbackGeneration: 3,
+            currentGeneration: 3,
+            stopped: true,
+            tapReady: true
+        ))
+        precondition(InputMonitorRetryPolicy.delay(forAttempt: 0) == 1)
+        precondition(InputMonitorRetryPolicy.delay(forAttempt: 1) == 5)
+        precondition(InputMonitorRetryPolicy.delay(forAttempt: 2) == 15)
+        precondition(InputMonitorRetryPolicy.delay(forAttempt: 3) == 60)
+        precondition(InputMonitorRetryPolicy.delay(forAttempt: 99) == 60)
+        precondition(
+            InputMonitorFailurePolicy.disposition(permissionAvailable: true)
+                == .retrySensor
+        )
+        precondition(
+            InputMonitorFailurePolicy.disposition(permissionAvailable: false)
+                == .permissionRevoked
+        )
+        precondition(InputCollectionGatePolicy.enabledAfterStart(
+            tapReady: true,
+            activeCaptureAllowed: true
+        ))
+        precondition(!InputCollectionGatePolicy.enabledAfterStart(
+            tapReady: true,
+            activeCaptureAllowed: false
+        ))
+        precondition(!InputCollectionGatePolicy.enabledAfterStart(
+            tapReady: false,
+            activeCaptureAllowed: true
+        ))
+
         precondition(
             AccessibilityTextFlushPolicy.action(
                 pendingNotification: "ax.valueChanged",

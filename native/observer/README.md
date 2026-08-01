@@ -69,6 +69,19 @@ The helper emits `ready`, `permissionStatus`, `heartbeat`, `commandResult`,
 the parent is behind, new observations are dropped with an explicit `gap`
 frame and no plaintext spill file is created.
 
+`InputActivityMonitor.start()` waits up to two seconds for its capture thread
+to create, attach, and enable the listen-only `CGEventTap`; it never reports a
+successful tap merely because the thread was launched. `ready`,
+`permissionStatus`, and `heartbeat` expose only the health metadata
+`tapReady`, `lastCallbackAtMs`, and `lastBucketAtMs`. These fields contain one
+boolean and epoch timestamps only—never key values, text, pointer coordinates,
+or clipboard data. The parent accepts frames from older helpers without these
+additive fields, but a partial or future-dated health triplet is rejected.
+If tap creation times out or an authorized tap becomes disabled, the helper
+performs one passive, non-prompting permission preflight. A confirmed revoke
+downgrades permission state; otherwise the sensor retries after 1, 5, 15, then
+60 seconds (remaining capped at 60 seconds) without asking the user again.
+
 When stdin closes, the helper stops all sensors and exits. The parent should
 restart an unexpected exit after `1s`, `5s`, `15s`, then `60s`; five failures
 inside ten minutes should enter a visible degraded state.

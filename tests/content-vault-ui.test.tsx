@@ -44,6 +44,9 @@ function snapshot(
 		},
 		excludedAppIds: [],
 		lastObservationAtMs: null,
+		tapReady: true,
+		lastCallbackAtMs: 1_799_999_999_999,
+		lastBucketAtMs: 1_799_999_995_000,
 		coverageGaps: [],
 	};
 }

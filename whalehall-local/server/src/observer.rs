@@ -679,6 +679,9 @@ impl ObserverSupervisor {
             last_sequence: None,
             last_acked_sequence: None,
             last_heartbeat_at_ms: None,
+            tap_ready: false,
+            last_callback_at_ms: None,
+            last_bucket_at_ms: None,
             permissions: cached_permissions
                 .as_ref()
                 .map(|cached| cached.permissions.clone())
@@ -1141,6 +1144,9 @@ async fn run_helper_session(
         current.last_sequence = None;
         current.last_acked_sequence = None;
         current.last_heartbeat_at_ms = None;
+        current.tap_ready = false;
+        current.last_callback_at_ms = None;
+        current.last_bucket_at_ms = None;
         current.last_error = observation_key_warning(journal).map(ToOwned::to_owned);
     }
     if send_start_command(&mut stdin, "start-1", settings)
@@ -1151,8 +1157,7 @@ async fn run_helper_session(
         stderr_task.abort();
         {
             let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
-            current.helper_pid = None;
-            current.boot_id = None;
+            clear_helper_connection(&mut current);
             current.permission_check_state = MonitoringPermissionCheckState::Failed;
         }
         return SessionOutcome::Restart;
@@ -1269,8 +1274,7 @@ async fn run_helper_session(
     let _ = stderr_task.await;
     {
         let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
-        current.helper_pid = None;
-        current.boot_id = None;
+        clear_helper_connection(&mut current);
     }
     outcome
 }
@@ -1695,6 +1699,7 @@ async fn run_permission_probe(
         let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
         current.helper_pid = child.id();
         current.boot_id = None;
+        current.tap_ready = false;
     }
 
     let probe = async {
@@ -1759,8 +1764,7 @@ async fn run_permission_probe(
 
     {
         let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
-        current.helper_pid = None;
-        current.boot_id = None;
+        clear_helper_connection(&mut current);
         current.state = resting_state;
         match &result {
             Ok(()) => {
@@ -1826,6 +1830,14 @@ struct AuthorizationFrame {
     observed_at_ms: i64,
     permissions: MonitoringPermissions,
     reason: String,
+    input_activity_health: Option<InputActivityHealthFrame>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InputActivityHealthFrame {
+    tap_ready: bool,
+    last_callback_at_ms: Option<i64>,
+    last_bucket_at_ms: Option<i64>,
 }
 
 async fn handle_helper_frame(
@@ -2183,6 +2195,7 @@ fn parse_authorization_frame(value: &Value) -> Result<AuthorizationFrame, &'stat
                 .and_then(Value::as_object)
         })
         .ok_or("observer_invalid_permission_frame")?;
+    let input_activity_health = parse_input_activity_health(value, observed_at_ms)?;
     Ok(AuthorizationFrame {
         boot_id: boot_id.to_owned(),
         observed_at_ms,
@@ -2197,7 +2210,45 @@ fn parse_authorization_frame(value: &Value) -> Result<AuthorizationFrame, &'stat
                 .ok_or("observer_invalid_permission_frame")?,
         },
         reason: reason.to_owned(),
+        input_activity_health,
     })
+}
+
+fn parse_input_activity_health(
+    value: &Value,
+    observed_at_ms: i64,
+) -> Result<Option<InputActivityHealthFrame>, &'static str> {
+    let tap_ready = value.get("tapReady");
+    let last_callback_at_ms = value.get("lastCallbackAtMs");
+    let last_bucket_at_ms = value.get("lastBucketAtMs");
+    if tap_ready.is_none() && last_callback_at_ms.is_none() && last_bucket_at_ms.is_none() {
+        return Ok(None);
+    }
+    let tap_ready = tap_ready
+        .and_then(Value::as_bool)
+        .ok_or("observer_invalid_input_activity_health")?;
+    let last_callback_at_ms = parse_health_timestamp(last_callback_at_ms, observed_at_ms)?;
+    let last_bucket_at_ms = parse_health_timestamp(last_bucket_at_ms, observed_at_ms)?;
+    Ok(Some(InputActivityHealthFrame {
+        tap_ready,
+        last_callback_at_ms,
+        last_bucket_at_ms,
+    }))
+}
+
+fn parse_health_timestamp(
+    value: Option<&Value>,
+    observed_at_ms: i64,
+) -> Result<Option<i64>, &'static str> {
+    match value {
+        Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .filter(|timestamp| *timestamp >= 0 && *timestamp <= observed_at_ms)
+            .map(Some)
+            .ok_or("observer_invalid_input_activity_health"),
+        None => Err("observer_invalid_input_activity_health"),
+    }
 }
 
 fn apply_permission_frame(status: &Arc<Mutex<MonitoringStatusResult>>, frame: &AuthorizationFrame) {
@@ -2207,6 +2258,11 @@ fn apply_permission_frame(status: &Arc<Mutex<MonitoringStatusResult>>, frame: &A
     current.permissions_checked_at_ms = Some(frame.observed_at_ms);
     current.boot_id = Some(frame.boot_id.clone());
     current.last_heartbeat_at_ms = Some(frame.observed_at_ms);
+    if let Some(health) = frame.input_activity_health {
+        current.tap_ready = health.tap_ready;
+        current.last_callback_at_ms = health.last_callback_at_ms;
+        current.last_bucket_at_ms = health.last_bucket_at_ms;
+    }
     let preserve_gap = current.coverage.contains(&CoverageLevelV2::Unavailable);
     current.coverage = vec![CoverageLevelV2::Metadata];
     if current.capture_content
@@ -2355,6 +2411,9 @@ fn set_state(
 ) {
     let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
     current.state = state;
+    if state != MonitoringState::Running {
+        current.tap_ready = false;
+    }
     let preserve_warning = error_code.is_none()
         && matches!(
             current.last_error.as_deref(),
@@ -2384,6 +2443,12 @@ fn status_snapshot(status: &Arc<Mutex<MonitoringStatusResult>>) -> MonitoringSta
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone()
+}
+
+fn clear_helper_connection(status: &mut MonitoringStatusResult) {
+    status.helper_pid = None;
+    status.boot_id = None;
+    status.tap_ready = false;
 }
 
 fn push_coverage(values: &mut Vec<CoverageLevelV2>, value: CoverageLevelV2) {
@@ -2736,6 +2801,9 @@ mod tests {
             last_sequence: None,
             last_acked_sequence: None,
             last_heartbeat_at_ms: None,
+            tap_ready: false,
+            last_callback_at_ms: None,
+            last_bucket_at_ms: None,
             permissions: MonitoringPermissions::default(),
             permission_check_state: MonitoringPermissionCheckState::Unchecked,
             permissions_checked_at_ms: None,
@@ -3203,6 +3271,7 @@ TeamIdentifier=not set
             observed_at_ms: 200,
             permissions,
             reason: "heartbeat_check".to_owned(),
+            input_activity_health: None,
         };
 
         persist_permission_frame(&store, &status, &frame).expect("unchanged heartbeat is accepted");
@@ -3716,6 +3785,30 @@ TeamIdentifier=not set
         assert_eq!(snapshot.permissions_checked_at_ms, Some(1_800_000_000_000));
     }
 
+    #[test]
+    fn helper_disconnect_clears_tap_readiness_before_restart_backoff() {
+        let status = test_status();
+        {
+            let mut current = status.lock().unwrap_or_else(|error| error.into_inner());
+            current.state = MonitoringState::Running;
+            current.helper_pid = Some(42);
+            current.boot_id = Some("boot-disconnected".to_owned());
+            current.tap_ready = true;
+            current.last_callback_at_ms = Some(1_800_000_000_000);
+            current.last_bucket_at_ms = Some(1_799_999_995_000);
+            clear_helper_connection(&mut current);
+        }
+
+        let snapshot = status_snapshot(&status);
+        assert_eq!(snapshot.helper_pid, None);
+        assert_eq!(snapshot.boot_id, None);
+        assert!(!snapshot.tap_ready);
+        // Last-seen timestamps remain useful diagnostics while the helper is
+        // backing off; only live readiness must be cleared immediately.
+        assert_eq!(snapshot.last_callback_at_ms, Some(1_800_000_000_000));
+        assert_eq!(snapshot.last_bucket_at_ms, Some(1_799_999_995_000));
+    }
+
     #[tokio::test]
     async fn permission_refresh_deadline_does_not_wait_for_the_health_tick() {
         let deadline = Instant::now();
@@ -3754,7 +3847,10 @@ TeamIdentifier=not set
                 "screenRecording":"denied",
                 "inputMonitoring":"not_determined",
                 "automation":"unsupported"
-            }
+            },
+            "tapReady":true,
+            "lastCallbackAtMs":1799999999998,
+            "lastBucketAtMs":1799999995000
         }"#;
         assert!(matches!(
             handle_permission_probe_frame(permission_frame, &status, &permissions_store, &journal,),
@@ -3770,6 +3866,9 @@ TeamIdentifier=not set
             snapshot.permissions.accessibility,
             MonitoringPermissionState::Granted
         );
+        assert!(snapshot.tap_ready);
+        assert_eq!(snapshot.last_callback_at_ms, Some(1_799_999_999_998));
+        assert_eq!(snapshot.last_bucket_at_ms, Some(1_799_999_995_000));
         let legacy_frame = br#"{
             "type":"permissionStatus",
             "schemaVersion":"observer-frame.v1",
@@ -3786,6 +3885,12 @@ TeamIdentifier=not set
             handle_permission_probe_frame(legacy_frame, &status, &permissions_store, &journal,),
             Ok(HelperFrameEvent::PermissionStatus)
         ));
+        // Additive health fields remain backward-compatible with an older
+        // helper, and an old frame cannot erase the latest known health.
+        let snapshot = status_snapshot(&status);
+        assert!(snapshot.tap_ready);
+        assert_eq!(snapshot.last_callback_at_ms, Some(1_799_999_999_998));
+        assert_eq!(snapshot.last_bucket_at_ms, Some(1_799_999_995_000));
         let authorization_events = journal
             .query_semantic(&whalehall_local_protocol::SemanticQueryParams {
                 after_cursor: None,
@@ -3812,5 +3917,51 @@ TeamIdentifier=not set
             .err(),
             Some("observer_probe_started_sensors")
         );
+
+        for invalid_health in [
+            br#"{
+                "type":"permissionStatus",
+                "schemaVersion":"observer-frame.v1",
+                "bootId":"boot-invalid-partial",
+                "observedAtMs":1800000000000,
+                "authorizationReason":"manual_refresh",
+                "permissions":{
+                    "accessibility":"authorized",
+                    "screenRecording":"authorized",
+                    "inputMonitoring":"authorized",
+                    "automation":"unsupported"
+                },
+                "tapReady":true
+            }"#
+            .as_slice(),
+            br#"{
+                "type":"heartbeat",
+                "schemaVersion":"observer-frame.v1",
+                "bootId":"boot-invalid-future",
+                "observedAtMs":1800000000000,
+                "authorizationReason":"heartbeat_check",
+                "permissions":{
+                    "accessibility":"authorized",
+                    "screenRecording":"authorized",
+                    "inputMonitoring":"authorized",
+                    "automation":"unsupported"
+                },
+                "tapReady":true,
+                "lastCallbackAtMs":1800000000001,
+                "lastBucketAtMs":null
+            }"#
+            .as_slice(),
+        ] {
+            assert_eq!(
+                handle_permission_probe_frame(
+                    invalid_health,
+                    &status,
+                    &permissions_store,
+                    &journal,
+                )
+                .err(),
+                Some("observer_invalid_input_activity_health")
+            );
+        }
     }
 }

@@ -3,11 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
 	MonitoringController,
 	MonitoringPermissionsControl,
-	parseExcludedAppIds,
-	MonitoringStatusControl,
-	monitoringSetupStatus,
 	type MonitoringService,
 	type MonitoringSnapshot,
+	MonitoringStatusControl,
+	monitoringSetupStatus,
+	parseExcludedAppIds,
 } from "../src/views/client/features/monitoring/public";
 
 function monitoringSnapshot(): MonitoringSnapshot {
@@ -55,6 +55,9 @@ function monitoringSnapshot(): MonitoringSnapshot {
 		},
 		excludedAppIds: [],
 		lastObservationAtMs: null,
+		tapReady: true,
+		lastCallbackAtMs: 1_799_999_999_999,
+		lastBucketAtMs: 1_799_999_995_000,
 		coverageGaps: ["screen_recording_denied"],
 	};
 }
@@ -102,13 +105,115 @@ describe("monitoring status UI", () => {
 		const controller = new MonitoringController(service);
 		await controller.load();
 		const markup = renderToStaticMarkup(
-			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
+			<MonitoringStatusControl
+				controller={controller}
+				onOpenPrivacy={() => {}}
+			/>,
 		);
 		expect(markup).toContain("权限不完整");
 		expect(markup).toContain("还有 1 项系统权限待完成");
 		expect(markup).toContain("修复监测设置");
 		expect(markup).not.toContain("暂停观察");
 		expect(markup).not.toContain("screen_recording_denied");
+	});
+
+	test("shows input sensor recovery instead of claiming observation is healthy", async () => {
+		const recovering: MonitoringSnapshot = {
+			...monitoringSnapshot(),
+			state: "degraded",
+			tapReady: false,
+			permissions: monitoringSnapshot().permissions.map((permission) => ({
+				...permission,
+				state: "granted" as const,
+			})),
+			coverageGaps: ["input_sensor_unavailable"],
+		};
+		const service: MonitoringService = {
+			async status() {
+				return recovering;
+			},
+			async configure() {
+				return recovering;
+			},
+			async pause() {
+				return recovering;
+			},
+			async resume() {
+				return recovering;
+			},
+			async requestRequiredPermissions() {
+				return recovering;
+			},
+			async refreshPermissions() {
+				return recovering;
+			},
+			async migrateContentVault() {
+				return recovering;
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		const markup = renderToStaticMarkup(
+			<MonitoringStatusControl
+				controller={controller}
+				onOpenPrivacy={() => {}}
+			/>,
+		);
+		expect(markup).toContain("键鼠活动传感器恢复中");
+		expect(markup).toContain("键鼠活动量暂时不可用，正在自动恢复");
+		expect(markup).not.toContain("前台可见内容 · 本地加密");
+	});
+
+	test("shows revoked accessibility permission instead of claiming observation is healthy", async () => {
+		const revoked: MonitoringSnapshot = {
+			...monitoringSnapshot(),
+			state: "degraded",
+			tapReady: false,
+			permissions: monitoringSnapshot().permissions.map((permission) => ({
+				...permission,
+				state:
+					permission.id === "accessibility"
+						? ("denied" as const)
+						: ("granted" as const),
+			})),
+			coverageGaps: ["accessibility_permission_revoked"],
+		};
+		const service: MonitoringService = {
+			async status() {
+				return revoked;
+			},
+			async configure() {
+				return revoked;
+			},
+			async pause() {
+				return revoked;
+			},
+			async resume() {
+				return revoked;
+			},
+			async requestRequiredPermissions() {
+				return revoked;
+			},
+			async refreshPermissions() {
+				return revoked;
+			},
+			async migrateContentVault() {
+				return revoked;
+			},
+			async openPermissionSettings() {},
+		};
+		const controller = new MonitoringController(service);
+		await controller.load();
+		const markup = renderToStaticMarkup(
+			<MonitoringStatusControl
+				controller={controller}
+				onOpenPrivacy={() => {}}
+			/>,
+		);
+		expect(markup).toContain("辅助功能权限已关闭");
+		expect(markup).toContain("还有 1 项系统权限待完成");
+		expect(markup).not.toContain("观察中");
 	});
 
 	test("offers an explicit enable action without treating mock privacy preferences as consent", async () => {
@@ -144,7 +249,10 @@ describe("monitoring status UI", () => {
 		const controller = new MonitoringController(service);
 		await controller.load();
 		const markup = renderToStaticMarkup(
-			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
+			<MonitoringStatusControl
+				controller={controller}
+				onOpenPrivacy={() => {}}
+			/>,
 		);
 		expect(markup).toContain("未启用");
 		expect(markup).toContain("设置本机监测");
@@ -189,7 +297,10 @@ describe("monitoring status UI", () => {
 		const controller = new MonitoringController(service);
 		await controller.load();
 		const markup = renderToStaticMarkup(
-			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
+			<MonitoringStatusControl
+				controller={controller}
+				onOpenPrivacy={() => {}}
+			/>,
 		);
 		expect(markup).not.toContain("缺少 4 项系统权限");
 	});
@@ -327,10 +438,9 @@ describe("monitoring status UI", () => {
 			<MonitoringPermissionsControl controller={controller} />,
 		);
 		expect(monitoringSetupStatus(ready).phase).toBe("ready");
-		expect(monitoringSetupStatus(ready).permissions.map(({ id }) => id)).toEqual([
-			"accessibility",
-			"screenRecording",
-		]);
+		expect(
+			monitoringSetupStatus(ready).permissions.map(({ id }) => id),
+		).toEqual(["accessibility", "screenRecording"]);
 		expect(markup).toContain("本机监测已设置");
 		expect(markup).toContain("2/2 项完成");
 		expect(markup).not.toContain("<ol");
@@ -384,7 +494,10 @@ describe("monitoring status UI", () => {
 			<MonitoringPermissionsControl controller={controller} />,
 		);
 		const sidebarMarkup = renderToStaticMarkup(
-			<MonitoringStatusControl controller={controller} onOpenPrivacy={() => {}} />,
+			<MonitoringStatusControl
+				controller={controller}
+				onOpenPrivacy={() => {}}
+			/>,
 		);
 		expect(settingsMarkup).toContain("当前应用没有稳定签名");
 		expect(settingsMarkup).not.toContain("<button");

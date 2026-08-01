@@ -130,52 +130,69 @@ final class FrameEmitter: @unchecked Sendable {
         bootIdentifier
     }
 
-    func emitReady(permissionSnapshot: PermissionSnapshot) {
+    func emitReady(
+        permissionSnapshot: PermissionSnapshot,
+        inputActivityHealth: InputActivityHealth
+    ) {
+        var fields = inputActivityHealth.protocolFields
+        fields.merge([
+            "adapterVersion": observerAdapterVersion,
+            "authorizationReason": "startup_snapshot",
+            "minimumMacOSVersion": "14.0",
+            "capabilities": [
+                "workspace": true,
+                "accessibility": true,
+                "screenOCR": true,
+                "browserAppleEvents": true,
+                "browserAppleEventsPrompted": false,
+                "inputActivity": true,
+                "storesScreenshots": false,
+                "readsKeyValues": false,
+            ],
+            "permissions": permissionSnapshot.dictionary,
+        ]) { _, new in new }
         emitUnsequenced(
             type: "ready",
-            fields: [
-                "adapterVersion": observerAdapterVersion,
-                "authorizationReason": "startup_snapshot",
-                "minimumMacOSVersion": "14.0",
-                "capabilities": [
-                    "workspace": true,
-                    "accessibility": true,
-                    "screenOCR": true,
-                    "browserAppleEvents": true,
-                    "browserAppleEventsPrompted": false,
-                    "inputActivity": true,
-                    "storesScreenshots": false,
-                    "readsKeyValues": false,
-                ],
-                "permissions": permissionSnapshot.dictionary,
-            ]
+            fields: fields
         )
     }
 
-    func emitPermissionStatus(_ snapshot: PermissionSnapshot, reason: String) {
+    func emitPermissionStatus(
+        _ snapshot: PermissionSnapshot,
+        reason: String,
+        inputActivityHealth: InputActivityHealth
+    ) {
+        var fields = inputActivityHealth.protocolFields
+        fields.merge([
+            "authorizationReason": reason,
+            "permissions": snapshot.dictionary,
+        ]) { _, new in new }
         emitUnsequenced(
             type: "permissionStatus",
-            fields: [
-                "authorizationReason": reason,
-                "permissions": snapshot.dictionary,
-            ]
+            fields: fields
         )
     }
 
-    func emitHeartbeat(state: String, permissionSnapshot: PermissionSnapshot) {
+    func emitHeartbeat(
+        state: String,
+        permissionSnapshot: PermissionSnapshot,
+        inputActivityHealth: InputActivityHealth
+    ) {
         lock.lock()
         let queuedFrames = unacknowledged.count
         let queuedBytes = unacknowledgedBytes
         lock.unlock()
+        var fields = inputActivityHealth.protocolFields
+        fields.merge([
+            "state": state,
+            "authorizationReason": "heartbeat_check",
+            "permissions": permissionSnapshot.dictionary,
+            "unackedFrames": queuedFrames,
+            "unackedBytes": queuedBytes,
+        ]) { _, new in new }
         emitUnsequenced(
             type: "heartbeat",
-            fields: [
-                "state": state,
-                "authorizationReason": "heartbeat_check",
-                "permissions": permissionSnapshot.dictionary,
-                "unackedFrames": queuedFrames,
-                "unackedBytes": queuedBytes,
-            ]
+            fields: fields
         )
     }
 

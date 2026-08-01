@@ -7,12 +7,80 @@ func hasInputActivityAccess() -> Bool {
 }
 
 struct InputActivityBucket {
+    let generation: UInt64
     let startedAtMs: Int64
     let endedAtMs: Int64
     let keyCount: Int
     let clickCount: Int
     let scrollDelta: Double
     let mouseDistance: Double
+}
+
+struct InputActivityHealth: Equatable {
+    let tapReady: Bool
+    let lastCallbackAtMs: Int64?
+    let lastBucketAtMs: Int64?
+
+    var protocolFields: [String: Any] {
+        var fields: [String: Any] = [
+            "tapReady": tapReady,
+            "lastCallbackAtMs": NSNull(),
+            "lastBucketAtMs": NSNull(),
+        ]
+        if let lastCallbackAtMs {
+            fields["lastCallbackAtMs"] = lastCallbackAtMs
+        }
+        if let lastBucketAtMs {
+            fields["lastBucketAtMs"] = lastBucketAtMs
+        }
+        return fields
+    }
+}
+
+final class InputTapStartupHandshake: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var result: Bool?
+
+    func complete(ready: Bool) {
+        lock.lock()
+        guard result == nil else {
+            lock.unlock()
+            return
+        }
+        result = ready
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    /// Returns nil only when the capture thread did not settle before the
+    /// deadline. A false result is an explicit event-tap creation failure.
+    func wait(timeout: DispatchTimeInterval) -> Bool? {
+        lock.lock()
+        let completed = result
+        lock.unlock()
+        if let completed {
+            return completed
+        }
+        guard semaphore.wait(timeout: .now() + timeout) == .success else {
+            return nil
+        }
+        lock.lock()
+        let settled = result
+        lock.unlock()
+        return settled
+    }
+}
+
+enum InputBucketTimerPolicy {
+    static func accepts(
+        callbackGeneration: UInt64,
+        currentGeneration: UInt64,
+        stopped: Bool,
+        tapReady: Bool
+    ) -> Bool {
+        callbackGeneration == currentGeneration && !stopped && tapReady
+    }
 }
 
 private final class InputAccumulator: @unchecked Sendable {
@@ -22,6 +90,8 @@ private final class InputAccumulator: @unchecked Sendable {
     private var scrollDelta = 0.0
     private var mouseDistance = 0.0
     private var enabled = false
+    private var lastCallbackAtMs: Int64?
+    private var lastBucketAtMs: Int64?
 
     func setEnabled(_ enabled: Bool) {
         lock.lock()
@@ -35,9 +105,10 @@ private final class InputAccumulator: @unchecked Sendable {
         lock.unlock()
     }
 
-    func record(type: CGEventType, event: CGEvent) -> CGPoint? {
+    func record(type: CGEventType, event: CGEvent, observedAtMs: Int64) -> CGPoint? {
         lock.lock()
         defer { lock.unlock() }
+        lastCallbackAtMs = observedAtMs
         guard enabled else {
             return nil
         }
@@ -57,6 +128,25 @@ private final class InputAccumulator: @unchecked Sendable {
             break
         }
         return nil
+    }
+
+    func markBucket(endedAtMs: Int64) {
+        lock.lock()
+        lastBucketAtMs = endedAtMs
+        lock.unlock()
+    }
+
+    func resetHealth() {
+        lock.lock()
+        lastCallbackAtMs = nil
+        lastBucketAtMs = nil
+        lock.unlock()
+    }
+
+    func healthTimestamps() -> (lastCallbackAtMs: Int64?, lastBucketAtMs: Int64?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (lastCallbackAtMs, lastBucketAtMs)
     }
 
     func drain() -> (keys: Int, clicks: Int, scroll: Double, distance: Double) {
@@ -89,6 +179,9 @@ final class InputActivityMonitor: @unchecked Sendable {
     private var bucketTimer: DispatchSourceTimer?
     private var currentBucketStartMs: Int64 = 0
     private var stopped = true
+    private var tapReady = false
+    private var captureGeneration: UInt64 = 0
+    private static let startupTimeout = DispatchTimeInterval.seconds(2)
 
     init(
         onBucket: @escaping BucketHandler,
@@ -104,25 +197,92 @@ final class InputActivityMonitor: @unchecked Sendable {
 
     func start() -> Bool {
         stateLock.lock()
-        defer { stateLock.unlock() }
         guard stopped else {
-            return eventTap != nil
+            let ready = tapReady
+            stateLock.unlock()
+            return ready
         }
         guard hasInputActivityAccess() else {
+            stateLock.unlock()
             onGap("input_monitoring_unavailable")
             return false
         }
         stopped = false
+        tapReady = false
+        captureGeneration &+= 1
+        let generation = captureGeneration
         let now = epochMilliseconds()
         currentBucketStartMs = (now / 5_000) * 5_000
+        let startup = InputTapStartupHandshake()
         let thread = Thread { [weak self] in
-            self?.runCaptureLoop()
+            guard let self else {
+                startup.complete(ready: false)
+                return
+            }
+            self.runCaptureLoop(generation: generation, startup: startup)
         }
         thread.name = "WhaleHall Input Monitor"
         captureThread = thread
+        stateLock.unlock()
+        accumulator.resetHealth()
         thread.start()
-        startBucketTimer()
-        return true
+
+        let startupResult = startup.wait(timeout: Self.startupTimeout)
+        stateLock.lock()
+        let ownsGeneration = captureGeneration == generation
+        let ready = startupResult == true
+            && ownsGeneration
+            && !stopped
+            && tapReady
+        let tap = !ready && ownsGeneration ? eventTap : nil
+        let source = !ready && ownsGeneration ? runLoopSource : nil
+        if !ready, ownsGeneration {
+            stopped = true
+            tapReady = false
+            captureGeneration &+= 1
+            eventTap = nil
+            runLoopSource = nil
+            captureThread = nil
+            accumulator.setEnabled(false)
+        }
+        stateLock.unlock()
+
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source {
+            CFRunLoopSourceInvalidate(source)
+        }
+        guard ready else {
+            if startupResult == nil, ownsGeneration {
+                onGap("input_event_tap_start_timeout")
+            }
+            return false
+        }
+        return startBucketTimer(generation: generation)
+    }
+
+    func healthSnapshot() -> InputActivityHealth {
+        stateLock.lock()
+        let ready = tapReady && !stopped
+        stateLock.unlock()
+        let timestamps = accumulator.healthTimestamps()
+        return InputActivityHealth(
+            tapReady: ready,
+            lastCallbackAtMs: timestamps.lastCallbackAtMs,
+            lastBucketAtMs: timestamps.lastBucketAtMs
+        )
+    }
+
+    func owns(generation: UInt64) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return InputBucketTimerPolicy.accepts(
+            callbackGeneration: generation,
+            currentGeneration: captureGeneration,
+            stopped: stopped,
+            tapReady: tapReady
+        )
     }
 
     func setCollectionEnabled(_ enabled: Bool) {
@@ -132,14 +292,18 @@ final class InputActivityMonitor: @unchecked Sendable {
     func stop() {
         stateLock.lock()
         stopped = true
+        tapReady = false
+        captureGeneration &+= 1
         let tap = eventTap
         let source = runLoopSource
+        let timer = bucketTimer
         eventTap = nil
         runLoopSource = nil
+        captureThread = nil
+        bucketTimer = nil
         stateLock.unlock()
 
-        bucketTimer?.cancel()
-        bucketTimer = nil
+        timer?.cancel()
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
@@ -151,26 +315,49 @@ final class InputActivityMonitor: @unchecked Sendable {
     }
 
     fileprivate func consume(type: CGEventType, event: CGEvent) {
+        stateLock.lock()
+        let acceptingCallbacks = tapReady && !stopped
+        let generation = captureGeneration
+        stateLock.unlock()
+        guard acceptingCallbacks else {
+            return
+        }
+        let clickPoint = accumulator.record(
+            type: type,
+            event: event,
+            observedAtMs: epochMilliseconds()
+        )
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             stateLock.lock()
             let tap = eventTap
             stateLock.unlock()
+            var enabled = false
             if let tap, hasInputActivityAccess() {
                 CGEvent.tapEnable(tap: tap, enable: true)
-            } else {
+                enabled = CGEvent.tapIsEnabled(tap: tap)
+            }
+            stateLock.lock()
+            let stillCurrent = captureGeneration == generation && !stopped
+            if stillCurrent {
+                tapReady = enabled
+            }
+            stateLock.unlock()
+            if !enabled, stillCurrent {
                 accumulator.setEnabled(false)
                 onGap("input_event_tap_disabled")
             }
             return
         }
-        let clickPoint = accumulator.record(type: type, event: event)
         onActivity()
         if let clickPoint {
             onClick(clickPoint)
         }
     }
 
-    private func runCaptureLoop() {
+    private func runCaptureLoop(
+        generation: UInt64,
+        startup: InputTapStartupHandshake
+    ) {
         let observedTypes: [CGEventType] = [
             .keyDown,
             .leftMouseDown,
@@ -196,28 +383,65 @@ final class InputActivityMonitor: @unchecked Sendable {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             stateLock.lock()
-            stopped = true
+            let shouldReportFailure = captureGeneration == generation && !stopped
+            if shouldReportFailure {
+                stopped = true
+                tapReady = false
+                captureThread = nil
+            }
             stateLock.unlock()
-            accumulator.setEnabled(false)
-            onGap("input_monitoring_unavailable")
+            startup.complete(ready: false)
+            if shouldReportFailure {
+                accumulator.setEnabled(false)
+                onGap("input_monitoring_unavailable")
+            }
             return
         }
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
         stateLock.lock()
-        if stopped {
+        let cancelled = stopped || captureGeneration != generation
+        let enabled = CGEvent.tapIsEnabled(tap: tap)
+        if cancelled || !enabled {
             stateLock.unlock()
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFRunLoopSourceInvalidate(source)
+            startup.complete(ready: false)
+            if !cancelled {
+                onGap("input_monitoring_unavailable")
+            }
             return
         }
         eventTap = tap
         runLoopSource = source
+        tapReady = true
         stateLock.unlock()
 
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        startup.complete(ready: true)
         CFRunLoopRun()
+
+        stateLock.lock()
+        let stoppedUnexpectedly = captureGeneration == generation && !stopped
+        var timer: DispatchSourceTimer?
+        if captureGeneration == generation {
+            stopped = true
+            tapReady = false
+            eventTap = nil
+            runLoopSource = nil
+            captureThread = nil
+            timer = bucketTimer
+            bucketTimer = nil
+        }
+        stateLock.unlock()
+        timer?.cancel()
+        if stoppedUnexpectedly {
+            accumulator.setEnabled(false)
+            onGap("input_event_tap_disabled")
+        }
     }
 
-    private func startBucketTimer() {
+    private func startBucketTimer(generation: UInt64) -> Bool {
         let timer = DispatchSource.makeTimerSource(
             flags: [],
             queue: DispatchQueue(label: "com.seago.whalehall.observer.input-buckets")
@@ -230,15 +454,28 @@ final class InputActivityMonitor: @unchecked Sendable {
             leeway: .milliseconds(100)
         )
         timer.setEventHandler { [weak self] in
-            self?.sealCompletedBucket()
+            self?.sealCompletedBucket(generation: generation)
+        }
+        timer.resume()
+        stateLock.lock()
+        guard captureGeneration == generation, !stopped, tapReady else {
+            stateLock.unlock()
+            timer.cancel()
+            return false
         }
         bucketTimer = timer
-        timer.resume()
+        stateLock.unlock()
+        return true
     }
 
-    private func sealCompletedBucket() {
+    private func sealCompletedBucket(generation: UInt64) {
         stateLock.lock()
-        guard !stopped else {
+        guard InputBucketTimerPolicy.accepts(
+            callbackGeneration: generation,
+            currentGeneration: captureGeneration,
+            stopped: stopped,
+            tapReady: tapReady
+        ) else {
             stateLock.unlock()
             return
         }
@@ -246,8 +483,6 @@ final class InputActivityMonitor: @unchecked Sendable {
         let completedBoundary = (now / 5_000) * 5_000
         let startedAtMs = currentBucketStartMs
         currentBucketStartMs = completedBoundary
-        stateLock.unlock()
-
         let values = accumulator.drain()
         guard completedBoundary > startedAtMs,
               values.keys > 0
@@ -255,18 +490,21 @@ final class InputActivityMonitor: @unchecked Sendable {
                 || abs(values.scroll) > 0.000_1
                 || values.distance > 0.000_1
         else {
+            stateLock.unlock()
             return
         }
-        onBucket(
-            InputActivityBucket(
-                startedAtMs: startedAtMs,
-                endedAtMs: completedBoundary,
-                keyCount: values.keys,
-                clickCount: values.clicks,
-                scrollDelta: values.scroll,
-                mouseDistance: values.distance
-            )
+        accumulator.markBucket(endedAtMs: completedBoundary)
+        let bucket = InputActivityBucket(
+            generation: generation,
+            startedAtMs: startedAtMs,
+            endedAtMs: completedBoundary,
+            keyCount: values.keys,
+            clickCount: values.clicks,
+            scrollDelta: values.scroll,
+            mouseDistance: values.distance
         )
+        stateLock.unlock()
+        onBucket(bucket)
     }
 }
 

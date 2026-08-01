@@ -17,6 +17,9 @@ type ObserverFrame = {
 	authorizationReason?: string;
 	capabilities?: Record<string, boolean>;
 	permissions?: Record<string, string>;
+	tapReady?: boolean;
+	lastCallbackAtMs?: number | null;
+	lastBucketAtMs?: number | null;
 	observation?: {
 		schemaVersion: string;
 		kind: string;
@@ -158,12 +161,87 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 	expect(ocrSource).toContain("CGPreflightScreenCaptureAccess");
 	expect(ocrSource).not.toContain("CGRequestScreenCaptureAccess");
 	expect(inputSource).toContain('onGap("input_monitoring_unavailable")');
+	const inputStart = inputSource.slice(
+		inputSource.indexOf("func start() -> Bool"),
+		inputSource.indexOf("func healthSnapshot()"),
+	);
+	expect(inputStart).toContain("startup.wait(timeout: Self.startupTimeout)");
+	expect(inputStart.indexOf("startup.wait")).toBeLessThan(
+		inputStart.indexOf("startBucketTimer(generation:"),
+	);
+	expect(inputStart.indexOf("startup.wait")).toBeLessThan(
+		inputStart.lastIndexOf("return startBucketTimer"),
+	);
+	expect(inputStart).toContain(
+		"let ownsGeneration = captureGeneration == generation",
+	);
+	expect(inputStart).toContain(
+		"let tap = !ready && ownsGeneration ? eventTap : nil",
+	);
+	expect(inputSource).toContain(
+		"self?.sealCompletedBucket(generation: generation)",
+	);
+	expect(inputSource).toContain(
+		"callbackGeneration: generation",
+	);
+	const bucketSeal = inputSource.slice(
+		inputSource.indexOf("private func sealCompletedBucket("),
+		inputSource.indexOf("private func inputEventCallback("),
+	);
+	const drainIndex = bucketSeal.indexOf("let values = accumulator.drain()");
+	const markIndex = bucketSeal.indexOf("accumulator.markBucket(");
+	const successUnlockIndex = bucketSeal.indexOf(
+		"stateLock.unlock()",
+		markIndex,
+	);
+	expect(drainIndex).toBeGreaterThan(-1);
+	expect(markIndex).toBeGreaterThan(drainIndex);
+	expect(successUnlockIndex).toBeGreaterThan(markIndex);
+	expect(bucketSeal.indexOf("onBucket(bucket)")).toBeGreaterThan(
+		successUnlockIndex,
+	);
+	expect(runtimeSource).toContain(
+		"inputMonitor.owns(generation: bucket.generation)",
+	);
 	expect(ocrSource).toContain(
 		"self.onGap(Self.sanitizedCaptureError(error))",
 	);
 	expect(runtimeSource).toContain("guard updated != previous else");
+	expect(runtimeSource).toContain('reason: "runtime_change"');
 	expect(runtimeSource).toContain(
-		'emitter.emitPermissionStatus(updated, reason: "runtime_change")',
+		"inputActivityHealth: inputMonitor.healthSnapshot()",
+	);
+	const inputGapHandler = runtimeSource.slice(
+		runtimeSource.indexOf("private func handleInputGap("),
+		runtimeSource.indexOf("private func scheduleInputMonitorRetry("),
+	);
+	expect(inputGapHandler).toContain(
+		"permissionAvailable: hasInputActivityAccess()",
+	);
+	expect(inputGapHandler).toContain(
+		"if disposition == .permissionRevoked {",
+	);
+	expect(inputGapHandler).toContain("scheduleInputMonitorRetry()");
+	expect(
+		inputGapHandler.indexOf("if disposition == .permissionRevoked {"),
+	).toBeLessThan(
+		inputGapHandler.indexOf("markCachedPermissionUnavailable("),
+	);
+	expect(inputGapHandler).toContain("accessibility: true");
+	expect(inputGapHandler).toContain("inputMonitoring: true");
+	expect(runtimeSource).toContain(
+		"InputMonitorRetryPolicy.delay(forAttempt: inputRetryAttempt)",
+	);
+	const startInputMonitor = runtimeSource.slice(
+		runtimeSource.indexOf("private func startInputMonitor()"),
+		runtimeSource.indexOf("private func cancelInputMonitorRetry()"),
+	);
+	expect(startInputMonitor).toContain("let started = inputMonitor.start()");
+	expect(startInputMonitor).toContain(
+		"InputCollectionGatePolicy.enabledAfterStart(",
+	);
+	expect(startInputMonitor).toContain(
+		"activeCaptureAllowed: activeCaptureAllowed",
 	);
 	const foregroundHandler = runtimeSource.slice(
 		runtimeSource.indexOf("private func handleForegroundApplication("),
@@ -255,6 +333,9 @@ macOSTest(
 		expect(ready.capabilities?.readsKeyValues).toBe(false);
 		expect(ready.capabilities?.browserAppleEventsPrompted).toBe(false);
 		expect(ready.permissions?.automation).toBe("unavailable");
+		expect(ready.tapReady).toBe(false);
+		expect(ready.lastCallbackAtMs).toBeNull();
+		expect(ready.lastBucketAtMs).toBeNull();
 
 		child.stdin.write(
 			`${JSON.stringify({
@@ -283,14 +364,29 @@ macOSTest(
 
 		let observation: ObserverFrame | undefined;
 		let startResult: ObserverFrame | undefined;
-		for (let index = 0; index < 8 && (!observation || !startResult); index += 1) {
+		let healthHeartbeat: ObserverFrame | undefined;
+		for (
+			let index = 0;
+			index < 12 && (!observation || !startResult || !healthHeartbeat);
+			index += 1
+		) {
 			const frame = await frames.next();
 			if (frame.type === "observation") observation = frame;
+			if (frame.type === "heartbeat") healthHeartbeat = frame;
 			if (frame.type === "commandResult" && frame.id === "start-1") {
 				startResult = frame;
 			}
 		}
 		expect(startResult?.ok).toBe(true);
+		expect(typeof healthHeartbeat?.tapReady).toBe("boolean");
+		expect(
+			healthHeartbeat?.lastCallbackAtMs === null ||
+				typeof healthHeartbeat?.lastCallbackAtMs === "number",
+		).toBe(true);
+		expect(
+			healthHeartbeat?.lastBucketAtMs === null ||
+				typeof healthHeartbeat?.lastBucketAtMs === "number",
+		).toBe(true);
 		expect(observation?.observation?.schemaVersion).toBe("raw-observation.v2");
 		// A locked/non-interactive macOS session must fail closed with an
 		// explicit coverage gap. An unlocked session reports the foreground

@@ -48,6 +48,34 @@ final class WorkspaceMonitor: NSObject {
     }
 }
 
+enum InputMonitorRetryPolicy {
+    private static let delays: [TimeInterval] = [1, 5, 15, 60]
+
+    static func delay(forAttempt attempt: Int) -> TimeInterval {
+        delays[min(max(attempt, 0), delays.count - 1)]
+    }
+}
+
+enum InputMonitorFailureDisposition: Equatable {
+    case permissionRevoked
+    case retrySensor
+}
+
+enum InputMonitorFailurePolicy {
+    static func disposition(permissionAvailable: Bool) -> InputMonitorFailureDisposition {
+        permissionAvailable ? .retrySensor : .permissionRevoked
+    }
+}
+
+enum InputCollectionGatePolicy {
+    static func enabledAfterStart(
+        tapReady: Bool,
+        activeCaptureAllowed: Bool
+    ) -> Bool {
+        tapReady && activeCaptureAllowed
+    }
+}
+
 @MainActor
 final class ObserverRuntime: @unchecked Sendable {
     private let emitter = FrameEmitter()
@@ -90,6 +118,8 @@ final class ObserverRuntime: @unchecked Sendable {
     )
     private let browserMetadataReader = BrowserMetadataReader()
     private var heartbeatTimer: Timer?
+    private var inputRetryTimer: Timer?
+    private var inputRetryAttempt = 0
     private var state = "idle"
     private var configuration = ObserverConfiguration(dictionary: nil)
     private var activeApplication: NSRunningApplication?
@@ -117,6 +147,7 @@ final class ObserverRuntime: @unchecked Sendable {
         "accessibility_unavailable",
         "accessibility_target_unavailable",
         "input_event_tap_disabled",
+        "input_event_tap_start_timeout",
         "input_monitoring_unavailable",
     ]
 
@@ -125,11 +156,16 @@ final class ObserverRuntime: @unchecked Sendable {
             emitter.emitError(code: "unsupported_macos_version", recoverable: false)
             exit(EXIT_FAILURE)
         }
-        // This is the observer process's only automatic TCC preflight.
-        // All later background work consumes this cached snapshot.
+        // This is the observer process's only automatic full TCC snapshot.
+        // Later polling consumes the cache; an actual input-sensor failure may
+        // perform one targeted, non-prompting preflight to distinguish a
+        // revoked grant from a transient CGEventTap failure.
         let permissions = passivePermissionSnapshot()
         lastPermissionSnapshot = permissions
-        emitter.emitReady(permissionSnapshot: permissions)
+        emitter.emitReady(
+            permissionSnapshot: permissions,
+            inputActivityHealth: inputMonitor.healthSnapshot()
+        )
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) {
             [weak self] _ in
             MainActor.assumeIsolated {
@@ -189,7 +225,11 @@ final class ObserverRuntime: @unchecked Sendable {
             emitter.emitCommandResult(id: id, ok: true, state: state)
         case "status":
             let permissions = cachedPermissionSnapshot()
-            emitter.emitPermissionStatus(permissions, reason: "status_request")
+            emitter.emitPermissionStatus(
+                permissions,
+                reason: "status_request",
+                inputActivityHealth: inputMonitor.healthSnapshot()
+            )
             emitter.emitCommandResult(id: id, ok: true, state: state)
         case "refreshPermissions":
             let permissions = passivePermissionSnapshot()
@@ -215,7 +255,11 @@ final class ObserverRuntime: @unchecked Sendable {
     private func applyRefreshedPermissions(_ permissions: PermissionSnapshot) {
         let changed = permissions != lastPermissionSnapshot
         lastPermissionSnapshot = permissions
-        emitter.emitPermissionStatus(permissions, reason: "manual_refresh")
+        emitter.emitPermissionStatus(
+            permissions,
+            reason: "manual_refresh",
+            inputActivityHealth: inputMonitor.healthSnapshot()
+        )
         if changed, state == "running" {
             stopMonitoring(nextState: "idle")
             startMonitoring()
@@ -239,11 +283,19 @@ final class ObserverRuntime: @unchecked Sendable {
         screenOCRMonitor.start()
         let permissions = cachedPermissionSnapshot()
         if permissions.inputMonitoring {
-            _ = inputMonitor.start()
+            if startInputMonitor() {
+                cancelInputMonitorRetry()
+            }
         }
+        // `InputActivityMonitor.start()` does not return until the capture
+        // thread has either created and enabled its event tap or failed. Emit
+        // that settled state immediately instead of waiting up to ten seconds
+        // for the periodic heartbeat.
+        emitHeartbeat()
     }
 
     private func stopMonitoring(nextState: String) {
+        cancelInputMonitorRetry()
         workspaceMonitor.stop()
         accessibilityMonitor.detach()
         inputMonitor.stop()
@@ -263,7 +315,11 @@ final class ObserverRuntime: @unchecked Sendable {
 
     private func emitHeartbeat() {
         let permissions = cachedPermissionSnapshot()
-        emitter.emitHeartbeat(state: state, permissionSnapshot: permissions)
+        emitter.emitHeartbeat(
+            state: state,
+            permissionSnapshot: permissions,
+            inputActivityHealth: inputMonitor.healthSnapshot()
+        )
     }
 
     private func handleForegroundApplication(_ application: NSRunningApplication) {
@@ -763,17 +819,83 @@ final class ObserverRuntime: @unchecked Sendable {
         guard state == "running" else {
             return
         }
+        inputMonitor.stop()
         if reason == "input_monitoring_unavailable"
             || reason == "input_event_tap_disabled"
+            || reason == "input_event_tap_start_timeout"
         {
-            markCachedPermissionUnavailable(inputMonitoring: true)
-            inputMonitor.stop()
+            // Creation timeouts and disabled taps can be transient sensor
+            // failures. Only a passive, non-prompting preflight is evidence
+            // that authorization itself was revoked.
+            let disposition = InputMonitorFailurePolicy.disposition(
+                permissionAvailable: hasInputActivityAccess()
+            )
+            if disposition == .permissionRevoked {
+                cancelInputMonitorRetry()
+                markCachedPermissionUnavailable(
+                    accessibility: true,
+                    inputMonitoring: true
+                )
+            } else {
+                scheduleInputMonitorRetry()
+            }
         }
         emitAnonymousCoverageGap(sensor: "cg_activity", redaction: reason)
+        emitHeartbeat()
+    }
+
+    private func scheduleInputMonitorRetry() {
+        guard state == "running",
+              cachedPermissionSnapshot().inputMonitoring,
+              inputRetryTimer == nil
+        else {
+            return
+        }
+        let delay = InputMonitorRetryPolicy.delay(forAttempt: inputRetryAttempt)
+        inputRetryAttempt = min(inputRetryAttempt + 1, 3)
+        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) {
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.retryInputMonitor()
+            }
+        }
+        timer.tolerance = min(0.25, delay / 10)
+        inputRetryTimer = timer
+    }
+
+    private func retryInputMonitor() {
+        inputRetryTimer?.invalidate()
+        inputRetryTimer = nil
+        guard state == "running", cachedPermissionSnapshot().inputMonitoring else {
+            inputRetryAttempt = 0
+            return
+        }
+        if startInputMonitor() {
+            inputRetryAttempt = 0
+            emitHeartbeat()
+        }
+    }
+
+    private func startInputMonitor() -> Bool {
+        let started = inputMonitor.start()
+        inputMonitor.setCollectionEnabled(
+            InputCollectionGatePolicy.enabledAfterStart(
+                tapReady: started,
+                activeCaptureAllowed: activeCaptureAllowed
+            )
+        )
+        return started
+    }
+
+    private func cancelInputMonitorRetry() {
+        inputRetryTimer?.invalidate()
+        inputRetryTimer = nil
+        inputRetryAttempt = 0
     }
 
     private func handleInputBucket(_ bucket: InputActivityBucket) {
         guard state == "running",
+              inputMonitor.owns(generation: bucket.generation),
               let application = activeApplication,
               activeCaptureAllowed
         else {
@@ -996,7 +1118,11 @@ final class ObserverRuntime: @unchecked Sendable {
             return
         }
         lastPermissionSnapshot = updated
-        emitter.emitPermissionStatus(updated, reason: "runtime_change")
+        emitter.emitPermissionStatus(
+            updated,
+            reason: "runtime_change",
+            inputActivityHealth: inputMonitor.healthSnapshot()
+        )
     }
 
     private func passivePermissionSnapshot() -> PermissionSnapshot {

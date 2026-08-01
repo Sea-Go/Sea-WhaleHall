@@ -3296,7 +3296,10 @@ fn validate_kind_payload(input: &RawObservationInputV2) -> Result<(), Observatio
                 .and_then(|reason| anonymous_coverage_level(input.source.sensor, reason));
             matches!(
                 input.source.sensor,
-                ObservationSensorV2::Workspace | ObservationSensorV2::Ax | ObservationSensorV2::Ocr
+                ObservationSensorV2::Workspace
+                    | ObservationSensorV2::Ax
+                    | ObservationSensorV2::Ocr
+                    | ObservationSensorV2::CgActivity
             ) && input.subject.app_id == "redacted"
                 && input.subject.app_name == "Protected application"
                 && input.subject.opaque_window_id.is_none()
@@ -3495,6 +3498,16 @@ fn anonymous_coverage_level(sensor: ObservationSensorV2, reason: &str) -> Option
                     | "thermal_critical"
                     | "foreground_window_unavailable"
                     | "screen_capture_failed"
+            ) =>
+        {
+            Some(CoverageLevelV2::Unavailable)
+        }
+        ObservationSensorV2::CgActivity
+            if matches!(
+                reason,
+                "input_monitoring_unavailable"
+                    | "input_event_tap_disabled"
+                    | "input_event_tap_start_timeout"
             ) =>
         {
             Some(CoverageLevelV2::Unavailable)
@@ -4849,6 +4862,16 @@ mod coverage_gap_policy_tests {
             );
         }
         for reason in [
+            "input_monitoring_unavailable",
+            "input_event_tap_disabled",
+            "input_event_tap_start_timeout",
+        ] {
+            assert_eq!(
+                anonymous_coverage_level(ObservationSensorV2::CgActivity, reason),
+                Some(CoverageLevelV2::Unavailable)
+            );
+        }
+        for reason in [
             "browser_privacy_state_unavailable",
             "thermal_critical",
             "foreground_window_unavailable",
@@ -4876,6 +4899,10 @@ mod coverage_gap_policy_tests {
         );
         assert_eq!(
             anonymous_coverage_level(ObservationSensorV2::Ocr, "invented_reason"),
+            None
+        );
+        assert_eq!(
+            anonymous_coverage_level(ObservationSensorV2::CgActivity, "screen_capture_failed"),
             None
         );
     }
