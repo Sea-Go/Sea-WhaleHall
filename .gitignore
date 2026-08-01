@@ -6,7 +6,24 @@ artifacts/
 whalehall-local/target/
 native/**/target/
 
+# Local runtime configuration and credentials. Keep .env.example versioned.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.sqlite
+*.sqlite3
+*.db
+
 .DS_Store
 *.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
 .idea/
 .vscode/

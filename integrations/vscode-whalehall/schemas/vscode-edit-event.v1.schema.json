@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whalehall.local/schemas/vscode-edit-event.v1.schema.json",
+  "title": "WhaleHall VS Code edit event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "kind",
+    "source",
+    "occurredAtMs",
+    "observedAtMs",
+    "sensitivity",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "whalehall-vscode-edit.v1"
+    },
+    "eventId": {
+      "type": "string",
+      "pattern": "^vse1_[0-9a-f]{32}$"
+    },
+    "kind": {
+      "const": "editor.documentChanged"
+    },
+    "source": {
+      "const": "vscode.extension"
+    },
+    "occurredAtMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "observedAtMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sensitivity": {
+      "enum": [
+        "metadata",
+        "content"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspaceId",
+        "document",
+        "changeCount",
+        "emittedChangeCount",
+        "changesTruncated",
+        "changes"
+      ],
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^wsp1_[0-9a-f]{32}$"
+        },
+        "document": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relativePath",
+            "languageId",
+            "version"
+          ],
+          "properties": {
+            "relativePath": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000]+$"
+            },
+            "languageId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "changeCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "emittedChangeCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "changesTruncated": {
+          "type": "boolean"
+        },
+        "changes": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/change"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rangeOffset",
+        "deletedChars",
+        "insertedChars"
+      ],
+      "properties": {
+        "rangeOffset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletedChars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "insertedChars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "insertedText": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "insertedTextTruncated": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "sensitivity": {
+            "const": "metadata"
+          }
+        },
+        "required": [
+          "sensitivity"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "properties": {
+              "changes": {
+                "items": {
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "insertedText"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "insertedTextTruncated"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

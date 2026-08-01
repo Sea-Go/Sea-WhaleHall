@@ -1,0 +1,84 @@
+{
+  "name": "whalehall-vscode-bridge",
+  "displayName": "WhaleHall Local Edit Bridge",
+  "description": "Consent-gated, local-only VS Code edit metadata bridge for WhaleHall.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "whalehall",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "whalehall",
+    "local",
+    "privacy"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Editing activity is never collected from an untrusted workspace."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Only files inside a local workspace are eligible."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "whalehall.monitoring.showStatus",
+        "title": "WhaleHall: Show Edit Monitoring Status",
+        "category": "WhaleHall"
+      },
+      {
+        "command": "whalehall.monitoring.flushSpool",
+        "title": "WhaleHall: Flush Pending Edit Events",
+        "category": "WhaleHall",
+        "enablement": "config.whalehall.monitoring.enabled"
+      }
+    ],
+    "configuration": {
+      "title": "WhaleHall Local Edit Bridge",
+      "properties": {
+        "whalehall.monitoring.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Explicitly enable local edit-delta monitoring for trusted local workspaces."
+        },
+        "whalehall.monitoring.includeText": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Include bounded inserted text. Disabled by default; deleted text is never collected."
+        },
+        "whalehall.monitoring.bridgeDirectory": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Absolute local directory explicitly shared with WhaleHall. Events are atomically published under its `.whalehall-vscode-spool-v1` child directory."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "bun run clean && tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "test": "bun run build && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/vscode": "1.95.0",
+    "typescript": "7.0.2"
+  },
+  "packageManager": "bun@1.3.14"
+}

@@ -17,6 +17,8 @@ The sensor records two related datasets:
 - refreshes installed applications every `WHALEHALL_INSTALLED_APPLICATION_REFRESH_MS` milliseconds (default six hours, accepted range one second through seven days);
 - writes each successful scan in one immediate SQLite transaction;
 - marks a previously open process as exited when its `(PID, start time)` pair disappears from a successful snapshot;
+- after the initial baseline, merges every scan's started/exited transitions
+  into at most one `application.processObservedBatch` DesktopEvent;
 - stops without inventing process exits when the sensor itself shuts down.
 
 CPU usage is the latest `sysinfo` sampling value and may exceed 100 percent for a multithreaded process using more than one logical CPU. Memory is resident physical memory in bytes. Exit time is the first successful observation where the process is absent, so it normally lags by at most one polling interval but can lag longer when a scan is delayed. After an unclean sensor stop, unresolved rows are bounded at their last successful observation and can be reopened if the same PID/start-time identity is seen again.
@@ -31,13 +33,25 @@ Collection is platform-specific but lives in the single public sensor file:
 
 Missing roots and inaccessible subdirectories are skipped. Paths are de-duplicated before persistence. Minimal server/container systems may therefore have zero installed desktop applications without the process sensor being degraded.
 
+The process event payload contains only `processId`, an opaque deterministic
+`appId`, and a leaf `appName`; it never includes an executable path, start
+time, CPU, or memory. An unchanged/empty scan produces no event. The first
+successful scan after startup is a baseline and does not claim that processes
+already running before WhaleHall were newly started.
+
 ## SQLite schema
 
-The database uses WAL mode, normal synchronization, a five-second busy timeout, and schema version `1`.
+The database uses WAL mode, normal synchronization, a five-second busy timeout, and schema version `2`.
 
 `installed_applications` uses the executable/bundle path as its stable unique key. A repeated discovery updates the name, source, and latest discovery time without losing the first discovery time. Each successful scan uses a temporary key table to delete paths absent from the new snapshot, so `applications.installed` represents the current discoverable inventory rather than an append-only history.
 
 `process_runs` uses `(process_id, started_at_ms)` as its unique key. This prevents PID reuse from joining unrelated runs. Each successful refresh updates the latest name/path/resource fields and clears `exited_at_ms` while that exact process identity is still present. Queries are indexed by observation time, running state, and name.
+
+`process_event_outbox` is written in the same transaction as process
+lifecycles. After commit, records are appended idempotently to
+`events.sqlite3` and then removed from the outbox. Restarting after either side
+of that delivery replays the deterministic key without producing a duplicate
+DesktopEvent.
 
 Both SQLite timestamps and JSON `*AtMs` values are Unix epoch milliseconds. JSON also exposes RFC 3339 UTC strings for every timestamp.
 
