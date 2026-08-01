@@ -13,8 +13,9 @@ import type {
 	AuthSession,
 } from "../src/views/client/features/auth/domain";
 import {
-	MockAuthService,
 	MOCK_AUTH_EXPERIENCE,
+	MOCK_AUTH_SCENARIOS,
+	MockAuthService,
 } from "../src/views/client/infrastructure/auth/MockAuthService";
 
 const demoSession: AuthSession = {
@@ -28,14 +29,14 @@ const demoSession: AuthSession = {
 	},
 };
 
+const demoCredentials: AuthCredentials = { ...MOCK_AUTH_EXPERIENCE };
+
 class FakeAuthService implements AuthService {
 	restoreCalls = 0;
 	signInCalls = 0;
 	signOutCalls = 0;
 	restoreImplementation: () => Promise<AuthSession | null> = async () => null;
-	signInImplementation: (
-		credentials: AuthCredentials,
-	) => Promise<AuthSession> = async () => demoSession;
+	signInImplementation: (_credentials: AuthCredentials) => Promise<AuthSession> = async () => demoSession;
 	signOutImplementation: () => Promise<void> = async () => {};
 	private readonly expiryListeners = new Set<SessionExpiredListener>();
 
@@ -108,7 +109,7 @@ describe("AuthController", () => {
 		const controller = new AuthController(service);
 		await controller.start();
 
-		const request = controller.signIn(MOCK_AUTH_EXPERIENCE);
+		const request = controller.signIn(demoCredentials);
 		expect(controller.getSnapshot()).toEqual({
 			status: "authenticating",
 			email: MOCK_AUTH_EXPERIENCE.email,
@@ -131,14 +132,15 @@ describe("AuthController", () => {
 		await controller.start();
 
 		await controller.signIn({
-			email: "person@example.com",
-			password: "incorrect",
+			email: MOCK_AUTH_EXPERIENCE.email,
+			password: "wrong-password",
 		});
 		const state = controller.getSnapshot();
 		expect(state.status).toBe("error");
 		if (state.status !== "error") return;
 		expect(state.failure.kind).toBe("invalid-credentials");
-		expect(state.failure.message).toBe("邮箱或密码不正确，请检查后重新登录。");
+		expect(state.failure.message).toContain("邮箱或密码不正确");
+		expect(state.email).toBe(MOCK_AUTH_EXPERIENCE.email);
 		expect(state.failure.message).not.toContain("Authentication service failure");
 	});
 
@@ -150,10 +152,7 @@ describe("AuthController", () => {
 			};
 			const controller = new AuthController(service);
 			await controller.start();
-			await controller.signIn({
-				email: `${kind}@example.com`,
-				password: "password",
-			});
+			await controller.signIn(demoCredentials);
 
 			const state = controller.getSnapshot();
 			expect(state.status).toBe("error");
@@ -170,8 +169,8 @@ describe("AuthController", () => {
 		const controller = new AuthController(service);
 		await controller.start();
 
-		const first = controller.signIn(MOCK_AUTH_EXPERIENCE);
-		const second = controller.signIn(MOCK_AUTH_EXPERIENCE);
+		const first = controller.signIn(demoCredentials);
+		const second = controller.signIn(demoCredentials);
 		expect(first).toBe(second);
 		expect(service.signInCalls).toBe(1);
 
@@ -255,12 +254,12 @@ describe("AuthController", () => {
 });
 
 describe("MockAuthService", () => {
-	test("accepts only deterministic experience credentials and returns no token", async () => {
+	test("activates a deterministic test account and returns no token", async () => {
 		const service = new MockAuthService({
 			latencyMs: 0,
 			now: () => 1_800_000_000_000,
 		});
-		const session = await service.signIn(MOCK_AUTH_EXPERIENCE);
+		const session = await service.signIn(demoCredentials);
 
 		expect(session.user).toEqual(demoSession.user);
 		expect(JSON.stringify(session)).not.toContain("token");
@@ -269,13 +268,13 @@ describe("MockAuthService", () => {
 
 	test("offers deterministic offline and unavailable scenarios", async () => {
 		for (const [email, kind] of [
-			["offline@whalehall.local", "offline"],
-			["service@whalehall.local", "service-unavailable"],
+			[MOCK_AUTH_SCENARIOS.offlineEmail, "offline"],
+			[MOCK_AUTH_SCENARIOS.serviceUnavailableEmail, "service-unavailable"],
 		] as const) {
 			try {
 				await new MockAuthService({ latencyMs: 0 }).signIn({
 					email,
-					password: "irrelevant",
+					password: demoCredentials.password,
 				});
 				throw new Error("Expected mock authentication to fail");
 			} catch (reason) {
@@ -289,7 +288,7 @@ describe("MockAuthService", () => {
 });
 
 describe("authentication UI", () => {
-	const noSubmit = async () => {};
+	const noSubmit = async (_credentials?: AuthCredentials) => {};
 
 	test("AuthGate renders a neutral boot screen before protected content", () => {
 		const service = new FakeAuthService();
@@ -304,7 +303,7 @@ describe("authentication UI", () => {
 		expect(markup).not.toContain("受保护的工作空间");
 	});
 
-	test("login form uses visible labels and accessible password control", () => {
+	test("login page pre-fills the fixed experience account and shows its password", () => {
 		const markup = renderToStaticMarkup(
 			<AuthPage
 				state={{ status: "unauthenticated", notice: null }}
@@ -314,11 +313,12 @@ describe("authentication UI", () => {
 			/>,
 		);
 
-		expect(markup).toContain('<label for="auth-email">邮箱</label>');
-		expect(markup).toContain('<label for="auth-password">密码</label>');
-		expect(markup).toContain('aria-label="显示密码"');
+		expect(markup).toContain("登录");
 		expect(markup).toContain('type="submit"');
-		expect(markup).not.toContain('value="whalehall"');
+		expect(markup).toContain(`value="${MOCK_AUTH_EXPERIENCE.email}"`);
+		expect(markup).toContain(`体验密码：${MOCK_AUTH_EXPERIENCE.password}`);
+		expect(markup).toContain("邮箱和密码只提交给桌面主进程");
+		expect(markup).not.toContain("userId");
 	});
 
 	test("error, offline, retry, authenticating, and expired states are explicit", () => {
@@ -326,7 +326,7 @@ describe("authentication UI", () => {
 			<AuthPage
 				state={{
 					status: "error",
-					email: "offline@whalehall.local",
+					email: MOCK_AUTH_EXPERIENCE.email,
 					failure: {
 						kind: "offline",
 						message: "当前设备似乎已离线。请检查网络连接后重试。",

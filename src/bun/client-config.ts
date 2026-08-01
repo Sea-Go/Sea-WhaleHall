@@ -11,8 +11,6 @@ import { dirname, isAbsolute, join } from "node:path";
 
 export const CLIENT_CONFIGURATION_SCHEMA_VERSION =
 	"whalehall-client-config.v1" as const;
-export const ACTIVITY_EVENT_WORKER_ENDPOINT =
-	"https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze";
 
 const MAXIMUM_CONFIGURATION_BYTES = 64 * 1024;
 
@@ -30,11 +28,6 @@ export type ClientConfiguration = {
 			manifestEndpoint: string;
 			pinnedManifest: string;
 		};
-		activityEventWorker: {
-			enabled: boolean;
-			endpoint: string;
-			scoreThreshold: number;
-		};
 	};
 };
 
@@ -51,11 +44,6 @@ export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 			endpoint: "",
 			manifestEndpoint: "",
 			pinnedManifest: "",
-		},
-		activityEventWorker: {
-			enabled: true,
-			endpoint: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			scoreThreshold: 1,
 		},
 	},
 };
@@ -75,12 +63,6 @@ export type ClientConfigurationLoadResult = {
 export type LoadOrCreateClientConfigurationOptions = {
 	userDataDirectory: string;
 	bundledTemplatePath: string;
-};
-
-export type ActivityEventWorkerRuntimeConfiguration = {
-	endpoint: string;
-	authorizationToken: string;
-	scoreThreshold: number;
 };
 
 /**
@@ -141,32 +123,6 @@ export function timelineModernBertEnvironmentFromConfiguration(
 	};
 }
 
-/**
- * The activity worker is the one reviewed cloud exception to the otherwise
- * local-only request configuration. Its exact HTTPS endpoint is pinned here;
- * a dedicated token remains environment-only and is never copied to YAML or
- * passed to whalehall-local.
- */
-export function activityEventWorkerConfigurationFromConfiguration(
-	configuration: ClientConfiguration,
-	environment: Readonly<Record<string, string | undefined>>,
-): ActivityEventWorkerRuntimeConfiguration | null {
-	const worker = configuration.request.activityEventWorker;
-	const authorizationToken = environment.WHALEHALL_ACTIVITY_WORKER_TOKEN?.trim() ?? "";
-	if (
-		!worker.enabled ||
-		authorizationToken.length === 0 ||
-		Array.from(authorizationToken).some((character) => /\s/u.test(character))
-	) {
-		return null;
-	}
-	return {
-		endpoint: worker.endpoint,
-		authorizationToken,
-		scoreThreshold: worker.scoreThreshold,
-	};
-}
-
 function defaultConfiguration(
 	path: string,
 	status: "invalid" | "defaults",
@@ -215,20 +171,17 @@ function parseConfiguration(source: string): ClientConfiguration {
 	}
 	if (
 		!isRecord(value.request) ||
-		!hasRequiredAndAllowedKeys(value.request, [
+		!hasExactKeys(value.request, [
 			"teacherOllama",
 			"reflectionModernBert",
 			"timelineModernBert",
-		], ["activityEventWorker"])
+		])
 	) {
 		throw new Error("Client request configuration is invalid.");
 	}
 	const teacherOllama = value.request.teacherOllama;
 	const reflectionModernBert = value.request.reflectionModernBert;
 	const timelineModernBert = value.request.timelineModernBert;
-	const activityEventWorker = parseActivityEventWorker(
-		value.request.activityEventWorker,
-	);
 	if (
 		!isRecord(teacherOllama) ||
 		!hasExactKeys(teacherOllama, ["baseUrl"]) ||
@@ -288,7 +241,6 @@ function parseConfiguration(source: string): ClientConfiguration {
 					manifestEndpoint: normalizedManifestEndpoint,
 					pinnedManifest,
 				},
-				activityEventWorker,
 			},
 		};
 	}
@@ -308,47 +260,8 @@ function parseConfiguration(source: string): ClientConfiguration {
 				manifestEndpoint: "",
 				pinnedManifest: "",
 			},
-			activityEventWorker,
 		},
 	};
-}
-
-function parseActivityEventWorker(
-	value: unknown,
-): ClientConfiguration["request"]["activityEventWorker"] {
-	if (value === undefined) {
-		return structuredClone(DEFAULT_CLIENT_CONFIGURATION.request.activityEventWorker);
-	}
-	if (
-		!isRecord(value) ||
-		!hasExactKeys(value, ["enabled", "endpoint", "scoreThreshold"]) ||
-		typeof value.enabled !== "boolean" ||
-		typeof value.endpoint !== "string" ||
-		typeof value.scoreThreshold !== "number" ||
-		!Number.isFinite(value.scoreThreshold) ||
-		value.scoreThreshold <= 0 ||
-		value.scoreThreshold > 10_000
-	) {
-		throw new Error("Activity event worker configuration is invalid.");
-	}
-	return {
-		enabled: value.enabled,
-		endpoint: normalizeActivityEventWorkerEndpoint(value.endpoint),
-		scoreThreshold: value.scoreThreshold,
-	};
-}
-
-function normalizeActivityEventWorkerEndpoint(value: string): string {
-	let url: URL;
-	try {
-		url = new URL(value.trim());
-	} catch {
-		throw new Error("Activity event worker endpoint is invalid.");
-	}
-	if (url.toString() !== ACTIVITY_EVENT_WORKER_ENDPOINT) {
-		throw new Error("Activity event worker endpoint is not allowlisted.");
-	}
-	return ACTIVITY_EVENT_WORKER_ENDPOINT;
 }
 
 function normalizeLoopbackOllamaBaseUrl(value: string): string {
@@ -404,18 +317,6 @@ function hasExactKeys(
 ): boolean {
 	const actual = Object.keys(value);
 	return actual.length === keys.length && keys.every((key) => key in value);
-}
-
-function hasRequiredAndAllowedKeys(
-	value: Record<string, unknown>,
-	required: readonly string[],
-	optional: readonly string[],
-): boolean {
-	const actual = Object.keys(value);
-	return (
-		required.every((key) => key in value) &&
-		actual.every((key) => required.includes(key) || optional.includes(key))
-	);
 }
 
 function nonEmptyOrUndefined(value: string): string | undefined {

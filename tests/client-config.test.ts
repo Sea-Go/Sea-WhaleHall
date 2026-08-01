@@ -10,9 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	ACTIVITY_EVENT_WORKER_ENDPOINT,
 	DEFAULT_CLIENT_CONFIGURATION,
-	activityEventWorkerConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
 	timelineModernBertEnvironmentFromConfiguration,
 } from "../src/bun/client-config";
@@ -51,6 +49,14 @@ function writeTemplate(directory: string, source = validConfiguration()): string
 	return path;
 }
 
+function expectPrivateFile(path: string): void {
+	const metadata = lstatSync(path);
+	expect(metadata.isFile()).toBeTrue();
+	if (process.platform !== "win32") {
+		expect(metadata.mode & 0o777).toBe(0o600);
+	}
+}
+
 describe("WhaleHall client config.yaml", () => {
 	test("seeds a private editable user copy from the bundled template", () => {
 		const directory = temporaryDirectory();
@@ -68,7 +74,7 @@ describe("WhaleHall client config.yaml", () => {
 		expect(readFileSync(result.path, "utf8")).toBe(
 			readFileSync(templatePath, "utf8"),
 		);
-		expect(lstatSync(result.path).mode & 0o777).toBe(0o600);
+		expectPrivateFile(result.path);
 	});
 
 	test("loads the user copy without overwriting a configured local endpoint", () => {
@@ -174,63 +180,39 @@ request:
 		});
 	});
 
-	test("permits only the reviewed activity worker endpoint and keeps its token environment-only", () => {
-		const directory = temporaryDirectory();
-		const source = `${validConfiguration()}  activityEventWorker:
+	test("rejects every removed activity worker or unknown public endpoint setting", () => {
+		const sources = [
+			`${validConfiguration()}  activityEventWorker:
     enabled: true
-    endpoint: "${ACTIVITY_EVENT_WORKER_ENDPOINT}"
-    scoreThreshold: 1.25
-`;
-		const templatePath = writeTemplate(directory);
-		const userDataDirectory = join(directory, "user-data");
-		const path = join(userDataDirectory, "config.yaml");
-		mkdirSync(userDataDirectory, { mode: 0o700 });
-		writeFileSync(path, source);
-
-		const result = loadOrCreateClientConfiguration({
-			userDataDirectory,
-			bundledTemplatePath: templatePath,
-		});
-
-		expect(result.status).toBe("loaded");
-		expect(result.configuration.request.activityEventWorker).toEqual({
-			enabled: true,
-			endpoint: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			scoreThreshold: 1.25,
-		});
-		expect(
-			activityEventWorkerConfigurationFromConfiguration(result.configuration, {
-				WHALEHALL_ACTIVITY_WORKER_TOKEN: "dedicated-token",
-			}),
-		).toEqual({
-			endpoint: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			authorizationToken: "dedicated-token",
-			scoreThreshold: 1.25,
-		});
-		expect(
-			activityEventWorkerConfigurationFromConfiguration(result.configuration, {}),
-		).toBeNull();
-	});
-
-	test("rejects an unapproved activity worker endpoint", () => {
-		const directory = temporaryDirectory();
-		const source = `${validConfiguration()}  activityEventWorker:
-    enabled: true
-    endpoint: "https://other.example.test/v1/activity/analyze"
+    endpoint: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
     scoreThreshold: 1
-`;
-		const templatePath = writeTemplate(directory);
-		const userDataDirectory = join(directory, "user-data");
-		const path = join(userDataDirectory, "config.yaml");
-		mkdirSync(userDataDirectory, { mode: 0o700 });
-		writeFileSync(path, source);
+`,
+			`${validConfiguration()}  activityEventWorker:
+    enabled: false
+    endpoint: "http://127.0.0.1:8767/v1/activity/analyze"
+    scoreThreshold: 1
+`,
+			validConfiguration(
+				"publicActivityAnalysis: https://other.example.test/v1/activity/analyze\n",
+			),
+		];
 
-		const result = loadOrCreateClientConfiguration({
-			userDataDirectory,
-			bundledTemplatePath: templatePath,
-		});
+		for (const source of sources) {
+			const directory = temporaryDirectory();
+			const templatePath = writeTemplate(directory);
+			const userDataDirectory = join(directory, "user-data");
+			const path = join(userDataDirectory, "config.yaml");
+			mkdirSync(userDataDirectory, { mode: 0o700 });
+			writeFileSync(path, source);
 
-		expect(result.status).toBe("invalid");
-		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
+			const result = loadOrCreateClientConfiguration({
+				userDataDirectory,
+				bundledTemplatePath: templatePath,
+			});
+
+			expect(result.status).toBe("invalid");
+			expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
+			expect(readFileSync(path, "utf8")).toBe(source);
+		}
 	});
 });

@@ -11,6 +11,7 @@ import { PlanningController } from "../src/views/client/features/planning/Planni
 import { PlanningPage } from "../src/views/client/features/planning/PlanningPage";
 import { ReportsPage } from "../src/views/client/features/reports/ReportsPage";
 import { ReportController } from "../src/views/client/features/reports/ReportController";
+import { ConversationPage } from "../src/views/client/features/conversation/ConversationPage";
 import { MockCalendarService } from "../src/views/client/infrastructure/calendar/MockCalendarService";
 import { CalendarPlanningGateway } from "../src/views/client/infrastructure/planning/CalendarPlanningGateway";
 import { MockPlanningGenerationService } from "../src/views/client/infrastructure/planning/MockPlanningGenerationService";
@@ -143,14 +144,22 @@ const auditExportService: AuditExportService = {
 
 describe("client app shell", () => {
 	test("defines the stable product destinations including settings", () => {
-		expect(PAGE_IDS).toEqual(["planning", "calendar", "reports", "settings"]);
+		expect(PAGE_IDS).toEqual([
+			"planning",
+			"calendar",
+			"conversation",
+			"reports",
+			"settings",
+		]);
 		expect(PAGE_LABELS).toEqual({
 			planning: "计划",
 			calendar: "日程",
+			conversation: "对话",
 			reports: "成长报告",
 			settings: "设置",
 		});
 		expect(isPageId("calendar")).toBe(true);
+		expect(isPageId("conversation")).toBe(true);
 		expect(isPageId("settings")).toBe(true);
 	});
 
@@ -166,6 +175,10 @@ describe("client app shell", () => {
 				petBridge={petBridge}
 				monitoringController={monitoringController}
 				auditExportService={auditExportService}
+				conversationState={{
+					status: "unavailable",
+					message: "对话服务尚未接入。",
+				}}
 			/>,
 		);
 
@@ -173,6 +186,7 @@ describe("client app shell", () => {
 		expect(markup).toContain("工作空间");
 		expect(markup).toContain("计划");
 		expect(markup).toContain("日程");
+		expect(markup).toContain("对话");
 		expect(markup).toContain("成长报告");
 		expect(markup).toContain('aria-haspopup="menu"');
 		expect(markup).toContain("王一鸣");
@@ -181,6 +195,37 @@ describe("client app shell", () => {
 		expect(markup).toContain("暂停观察");
 		expect(markup).not.toContain("Local tool control room");
 	});
+
+	test("conversation renders an explicit unavailable state when the desktop bridge is absent", () => {
+		const markup = renderToStaticMarkup(
+			<ConversationPage
+				state={{
+					status: "unavailable",
+					message: "等待应用层接入。",
+				}}
+			/>,
+		);
+
+		expect(markup).toContain("对话功能正在准备中");
+		expect(markup).toContain("等待应用层接入。");
+		expect(markup).not.toContain("apiKey");
+	});
+
+	test("conversation offers a recovery action after an initial offline load", () => {
+		const markup = renderToStaticMarkup(
+			<ConversationPage
+				state={{
+					status: "offline",
+					message: "无法连接到对话服务。",
+					cachedThread: null,
+				}}
+				actions={{ onRetry: () => {} }}
+			/>,
+		);
+
+		expect(markup).toContain("重新加载");
+	});
+
 });
 
 describe("client page shells", () => {

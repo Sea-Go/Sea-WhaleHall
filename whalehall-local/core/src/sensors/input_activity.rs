@@ -1196,13 +1196,15 @@ mod tests {
             bucket_ended_at_ms: 6_000,
         };
         let value = serde_json::to_value(aggregate).unwrap();
+        let mut serialized_keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        serialized_keys.sort_unstable();
         assert_eq!(
-            value
-                .as_object()
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>(),
+            serialized_keys,
             vec![
                 "bucketEndedAtMs",
                 "bucketStartedAtMs",
@@ -1304,14 +1306,29 @@ mod tests {
         journal: &EventJournal,
         minimum_count: usize,
     ) -> Vec<whalehall_local_protocol::DesktopEvent> {
-        for _ in 0..100 {
-            let events = journal.query(&EventQueryParams::default()).unwrap().events;
-            if events.len() >= minimum_count {
-                return events;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_input_condition("expected desktop events were not published", || {
+            journal
+                .query(&EventQueryParams::default())
+                .is_ok_and(|result| result.events.len() >= minimum_count)
+        })
+        .await;
         journal.query(&EventQueryParams::default()).unwrap().events
+    }
+
+    async fn wait_for_input_condition(
+        description: &'static str,
+        mut condition: impl FnMut() -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if condition() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect(description);
     }
 
     #[tokio::test]
@@ -1345,8 +1362,7 @@ mod tests {
             journal.clone(),
         )
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(75)).await;
-        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        let events = wait_for_events(&journal, 1).await;
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].kind,
@@ -1359,56 +1375,93 @@ mod tests {
         assert!(events[0].payload.get("keyCode").is_none());
         assert!(events[0].payload.get("mouseX").is_none());
         assert_eq!(service.status().published_buckets, 1);
+
+        let published_at_ms = service
+            .status()
+            .last_published_at_ms
+            .expect("published event must expose its bucket boundary");
+        wait_for_input_condition("empty follow-up bucket was not observed", || {
+            service
+                .status()
+                .last_bucket_ended_at_ms
+                .is_some_and(|ended_at_ms| ended_at_ms > published_at_ms)
+        })
+        .await;
+        assert_eq!(
+            journal
+                .query(&EventQueryParams::default())
+                .unwrap()
+                .events
+                .len(),
+            1
+        );
+        assert_eq!(service.status().published_buckets, 1);
         service.shutdown().await;
         assert_eq!(service.status().state, InputActivitySensorState::Stopped);
     }
 
-    #[tokio::test]
-    async fn aggregate_outbox_retries_one_failed_append_exactly_once() {
+    #[test]
+    fn aggregate_outbox_retries_one_failed_append_exactly_once() {
         let directory = tempfile::tempdir().expect("create input retry directory");
         let journal =
             EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
-        journal.fail_next_appends_for_test(1);
+        let config = InputActivityConfig {
+            bucket_duration: Duration::from_millis(30),
+            enabled: true,
+        };
+        let provider_status = InputActivityProviderStatus {
+            supported: true,
+            permission_granted: true,
+            available: true,
+            warnings: Vec::new(),
+        };
         let provider = Arc::new(SequenceProvider {
-            status: InputActivityProviderStatus {
-                supported: true,
-                permission_granted: true,
-                available: true,
-                warnings: Vec::new(),
-            },
-            deltas: Mutex::new(VecDeque::from([InputActivityDelta {
-                key_count: 7,
-                click_count: 2,
-                ..InputActivityDelta::default()
-            }])),
+            status: provider_status.clone(),
+            deltas: Mutex::new(VecDeque::new()),
         });
-        let service = InputActivityService::start(
-            InputActivityConfig {
-                bucket_duration: Duration::from_millis(30),
-                enabled: true,
-            },
+        let inner = InputActivityInner {
+            config: config.clone(),
             provider,
-            journal.clone(),
-        )
-        .unwrap();
+            event_journal: journal.clone(),
+            store: InputActivityStore::open(directory.path().join("input-activity.sqlite3"))
+                .expect("open input outbox"),
+            initial_revocation_pending: false,
+            status: Mutex::new(status_from_provider(&config, provider_status)),
+            cancellation: CancellationToken::new(),
+            task: Mutex::new(None),
+        };
+        let aggregate = InputActivityAggregate {
+            key_count: 7,
+            click_count: 2,
+            scroll_delta: 0,
+            mouse_distance: 0.0,
+            bucket_started_at_ms: 30_000,
+            bucket_ended_at_ms: 30_030,
+        };
+        inner
+            .store
+            .enqueue_aggregate(&aggregate)
+            .expect("persist aggregate before publication");
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if service.status().published_buckets == 1 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("pending aggregate should retry");
-        tokio::time::sleep(Duration::from_millis(70)).await;
+        journal.fail_next_appends_for_test(1);
+        assert!(flush_input_event_outbox(&inner).is_err());
+        assert_eq!(inner.store.pending_aggregates(100).unwrap().len(), 1);
+
+        flush_input_event_outbox(&inner).expect("retry failed aggregate");
+        flush_input_event_outbox(&inner).expect("repeat flush must be idempotent");
 
         let events = journal.query(&EventQueryParams::default()).unwrap().events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["keyCount"], 7);
-        assert_eq!(service.status().published_buckets, 1);
-        service.shutdown().await;
+        assert!(inner.store.pending_aggregates(100).unwrap().is_empty());
+        assert_eq!(
+            inner
+                .status
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .published_buckets,
+            1
+        );
     }
 
     #[tokio::test]
@@ -1438,7 +1491,11 @@ mod tests {
             journal.clone(),
         )
         .expect("permission absence must not fail startup");
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        wait_for_input_condition(
+            "disabled sensor did not complete a background bucket",
+            || service.status().last_bucket_ended_at_ms.is_some(),
+        )
+        .await;
         let status = service.status();
         assert_eq!(status.state, InputActivitySensorState::Disabled);
         assert!(!status.enabled);
@@ -1605,12 +1662,7 @@ mod tests {
             restarted_journal.clone(),
         )
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let events = restarted_journal
-            .query(&EventQueryParams::default())
-            .unwrap()
-            .events;
+        let events = wait_for_events(&restarted_journal, 2).await;
         assert_eq!(
             events
                 .iter()

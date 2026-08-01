@@ -66,13 +66,14 @@ export function AuthPage({
 		} else if (!normalizedEmail.includes("@")) {
 			nextValidation.email = "请输入有效的邮箱地址。";
 		}
-		if (!password) {
-			nextValidation.password = "请输入密码。";
-		}
+		if (!password) nextValidation.password = "请输入密码。";
 		setValidation(nextValidation);
 		if (nextValidation.email || nextValidation.password) return;
 
-		void onSubmit({ email: normalizedEmail, password });
+		const submittedPassword = password;
+		setPassword("");
+		setShowPassword(false);
+		void onSubmit({ email: normalizedEmail, password: submittedPassword });
 	}
 
 	function handleFormKeyDown(event: ReactKeyboardEvent<HTMLFormElement>) {
@@ -128,7 +129,7 @@ export function AuthPage({
 					<ShieldCheck size={17} aria-hidden="true" />
 					<div>
 						<strong>登录信息由安全边界处理</strong>
-						<span>客户端页面不会读取或保存长期登录凭据。</span>
+						<span>体验密码只用于本机校验，不会发送到远端。</span>
 					</div>
 				</div>
 			</section>
@@ -138,7 +139,7 @@ export function AuthPage({
 					<header className="auth-panel__header">
 						<p>欢迎回来</p>
 						<h2 id="auth-panel-title">登录 WhaleHall</h2>
-						<span>继续查看你的计划、日程和成长记录。</span>
+						<span>当前体验账号只在本机验证，正式远端账户认证将在后续提供。</span>
 					</header>
 
 					{notice ? <AuthNotice notice={notice} onRetry={onRetry} /> : null}
@@ -254,7 +255,7 @@ export function AuthPage({
 						<div className="auth-experience-note">
 							<strong>本地体验模式</strong>
 							<span>
-								体验账号已预填。异常场景仅在本地模拟，任何输入都不会上传。
+								体验账号已预填。邮箱和密码只提交给桌面主进程做固定值校验，不会上传。
 							</span>
 						</div>
 					) : null}

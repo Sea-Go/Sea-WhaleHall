@@ -1,4 +1,5 @@
 import { buildNative } from "./build-native";
+import { buildAgentHost } from "./build-agent-host";
 import { stageViewAssets } from "./stage-view-assets";
 
 function run(command: string[]): void {
@@ -15,5 +16,7 @@ function run(command: string[]): void {
 console.log("[prebuild] building React views");
 run(["bun", "x", "vite", "build"]);
 stageViewAssets();
-console.log("[prebuild] building Rust child process");
+console.log("[prebuild] building Rust child processes");
 buildNative();
+console.log("[prebuild] staging pinned Node and building local Mastra sidecar");
+await buildAgentHost();

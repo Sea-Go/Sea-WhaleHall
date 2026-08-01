@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 use std::env;
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Read;

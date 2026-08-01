@@ -1,7 +1,6 @@
 import { Temporal } from "temporal-polyfill";
 import {
 	detectPlanningConflicts,
-	type GeneratedPlanDraft,
 	type GenerationStatus,
 	type Milestone,
 	type Plan,
@@ -14,8 +13,10 @@ import {
 } from "../../features/planning/domain";
 import type {
 	PlanningGenerationContext,
+	PlanningGenerationResult,
 	PlanningGenerationService,
 } from "../../features/planning/planning-service";
+import type { TaskPlanningAnswer } from "../../../../shared/task-planning";
 
 export interface MockPlanningGenerationServiceOptions {
 	latencyMs?: number;
@@ -83,7 +84,7 @@ export class MockPlanningGenerationService
 		input: PlanInput,
 		availability: readonly PlanningBusyWindow[],
 		context: PlanningGenerationContext,
-	): Promise<GeneratedPlanDraft> {
+	): Promise<PlanningGenerationResult> {
 		for (const status of statuses) {
 			this.assertActive(context);
 			context.onStatus(status);
@@ -100,30 +101,46 @@ export class MockPlanningGenerationService
 		if (this.nextEmpty || input.unavailableDays.length === 7) {
 			this.nextEmpty = false;
 			return {
-				plan,
-				proposals: [],
-				busyWindows: availability,
-				conflicts: [],
-				suggestions: [
-					"延后截止日期，留出更多可安排日期",
-					"缩小本轮目标范围",
-					"增加每周可投入时间",
-				],
+				kind: "draft",
+				draft: {
+					plan,
+					proposals: [],
+					busyWindows: availability,
+					conflicts: [],
+					suggestions: [
+						"延后截止日期，留出更多可安排日期",
+						"缩小本轮目标范围",
+						"增加每周可投入时间",
+					],
+				},
 			};
 		}
 
 		const proposals = this.buildProposals(input, plan, context);
 		const conflicts = detectPlanningConflicts(proposals, availability);
 		return {
-			plan,
-			proposals,
-			busyWindows: availability,
-			conflicts,
-			suggestions:
-				conflicts.length > 0
-					? ["拖动冲突安排到空闲时段，或删除本轮不做的任务"]
-					: [],
+			kind: "draft",
+			draft: {
+				plan,
+				proposals,
+				busyWindows: availability,
+				conflicts,
+				suggestions:
+					conflicts.length > 0
+						? ["拖动冲突安排到空闲时段，或删除本轮不做的任务"]
+						: [],
+			},
 		};
+	}
+
+	continueAfterClarification(
+		input: PlanInput,
+		_sessionId: string,
+		_answers: readonly TaskPlanningAnswer[],
+		availability: readonly PlanningBusyWindow[],
+		context: PlanningGenerationContext,
+	): Promise<PlanningGenerationResult> {
+		return this.generate(input, availability, context);
 	}
 
 	private buildPlan(input: PlanInput, context: PlanningGenerationContext): Plan {

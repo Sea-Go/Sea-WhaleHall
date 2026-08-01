@@ -4,6 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrivateTrainingWindowExportCoordinator } from "../src/bun/private-training-window-export";
 
+function expectPrivateDirectory(path: string): void {
+	const metadata = statSync(path);
+	expect(metadata.isDirectory()).toBeTrue();
+	if (process.platform !== "win32") {
+		expect(metadata.mode & 0o777).toBe(0o700);
+	}
+}
+
 describe("private training window local RPC boundary", () => {
 	test("selects COMMITTED ids in Bun and returns immediately with content-free progress", async () => {
 		const parent = mkdtempSync(join(tmpdir(), "whalehall-training-rpc-"));
@@ -85,9 +93,7 @@ describe("private training window local RPC boundary", () => {
 					includeDecryptedContent: true,
 				}),
 			]);
-			expect(statSync(join(parent, completed.basename!)).mode & 0o777).toBe(
-				0o700,
-			);
+			expectPrivateDirectory(join(parent, completed.basename!));
 		} finally {
 			rmSync(parent, { recursive: true, force: true });
 		}

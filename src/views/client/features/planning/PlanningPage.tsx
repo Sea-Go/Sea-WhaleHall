@@ -21,6 +21,7 @@ import {
 	useRef,
 	useState,
 	useSyncExternalStore,
+	type FormEvent,
 	type KeyboardEvent,
 	type ReactNode,
 } from "react";
@@ -36,6 +37,7 @@ import {
 	type ProposedScheduleItem,
 	type Weekday,
 } from "./domain";
+import type { TaskPlanningAnswer } from "../../../../shared/task-planning";
 
 export interface PlanningSchedulePreviewProps {
 	proposals: readonly ProposedScheduleItem[];
@@ -60,6 +62,7 @@ const steps = [
 	{ id: "describe", label: "描述目标" },
 	{ id: "type", label: "选择类型" },
 	{ id: "constraints", label: "补充约束" },
+	{ id: "clarify", label: "补充信息" },
 	{ id: "generate", label: "生成计划" },
 	{ id: "structure", label: "审阅结构" },
 	{ id: "schedule", label: "调整日程" },
@@ -231,6 +234,15 @@ export function PlanningPage({
 								onCancel={() => controller.cancel()}
 							/>
 						) : null}
+						{state.status === "restore-error" ? (
+							<RestoreErrorStage
+								message={state.message}
+								onRetry={() => void controller.retryRestore()}
+							/>
+						) : null}
+						{state.status === "clarifying" ? (
+							<ClarificationStage state={state} controller={controller} />
+						) : null}
 						{state.status === "empty-draft" ? (
 							<EmptyDraftStage
 								message={state.message}
@@ -310,6 +322,109 @@ export function PlanningPage({
 				/>
 			) : null}
 		</div>
+	);
+}
+
+function ClarificationStage({
+	state,
+	controller,
+}: {
+	state: Extract<PlanningState, { status: "clarifying" }>;
+	controller: PlanningController;
+}) {
+	const [answers, setAnswers] = useState<Record<string, string>>({});
+	const [showErrors, setShowErrors] = useState(false);
+
+	useEffect(() => {
+		setAnswers({});
+		setShowErrors(false);
+	}, [state.sessionId]);
+
+	function submit(event: FormEvent<HTMLFormElement>) {
+		event.preventDefault();
+		if (
+			state.questions.some(
+				(question) => question.required && !answers[question.key]?.trim(),
+			)
+		) {
+			setShowErrors(true);
+			return;
+		}
+		const payload: TaskPlanningAnswer[] = state.questions
+			.map((question) => ({
+				questionKey: question.key,
+				answerText: answers[question.key]?.trim() ?? "",
+			}))
+			.filter((answer) => answer.answerText.length > 0);
+		void controller.submitClarificationAnswers(payload);
+	}
+
+	return (
+		<section
+			className="planning-card planning-card--form"
+			aria-labelledby="planning-clarification-title"
+		>
+			<div className="planning-card__heading">
+				<span>补充</span>
+				<div>
+					<p>任务拆分 Agent 还需要一点上下文</p>
+					<h2 id="planning-clarification-title">
+						补充这些信息后，我就开始拆分
+					</h2>
+				</div>
+			</div>
+			<form onSubmit={submit}>
+				<div className="planning-clarification-fields">
+					{state.questions.map((question) => {
+						const id = `planning-question-${question.key}`;
+						const invalid =
+							showErrors &&
+							question.required &&
+							!answers[question.key]?.trim();
+						return (
+							<div className="planning-field" key={question.key}>
+								<label htmlFor={id}>
+									{question.text}
+									{question.required ? "（必填）" : "（可选）"}
+								</label>
+								<textarea
+									id={id}
+									rows={3}
+									value={answers[question.key] ?? ""}
+									aria-invalid={invalid}
+									onChange={(event) => {
+										const value = event.currentTarget.value;
+										setAnswers((current) => ({
+											...current,
+											[question.key]: value,
+										}));
+									}}
+								/>
+								{invalid ? (
+									<p className="planning-field__error">请先回答这个问题。</p>
+								) : null}
+							</div>
+						);
+					})}
+				</div>
+				<div className="planning-card__actions">
+					<Button
+						variant="ghost"
+						type="button"
+						onClick={() => controller.editConstraints()}
+					>
+						返回调整约束
+					</Button>
+					<Button
+						variant="primary"
+						type="submit"
+						icon={<Sparkles size={16} aria-hidden="true" />}
+					>
+						继续拆分
+					</Button>
+				</div>
+			</form>
+		</section>
 	);
 }
 
@@ -400,7 +515,7 @@ function DraftingStage({
 							}
 						}}
 					/>
-					<small id="plan-goal-help">按 ⌘ Enter 继续。先描述结果，不必自己拆任务。</small>
+					<small id="plan-goal-help">按 Ctrl/⌘ Enter 继续。先描述结果，不必自己拆任务。</small>
 					{issueFor(state, "goal") ? (
 						<p id="plan-goal-error" className="planning-field__error">
 							{issueFor(state, "goal")}
@@ -1115,10 +1230,16 @@ function ApplyFailureStage({
 			tone="error"
 			icon={<AlertTriangle size={22} />}
 			eyebrow={
-				state.result.kind === "partial" ? "部分写入失败" : "写入失败"
+				state.result.calendarState === "unknown"
+					? "提交结果待恢复"
+					: state.result.kind === "partial"
+						? "部分写入失败"
+						: "写入失败"
 			}
 			title={
-				state.result.kind === "partial"
+				state.result.calendarState === "unknown"
+					? "本地提交状态已经保留"
+					: state.result.kind === "partial"
 					? `已写入 ${state.result.committedCount} 项，另有 ${state.result.failedProposalIds.length} 项失败`
 					: "正式日历没有改变"
 			}
@@ -1150,7 +1271,9 @@ function SuccessStage({
 			icon={<CheckCircle2 size={23} />}
 			eyebrow="计划已确认"
 			title={`“${state.planTitle}”已进入日历`}
-			description={`成功写入 ${state.committedCount} 项安排。你可以在日历中继续移动、缩放或编辑。`}
+			description={state.effectWarning
+				? `成功写入 ${state.committedCount} 项安排。${state.effectWarning}`
+				: `成功写入 ${state.committedCount} 项安排。你可以在日历中继续移动、缩放或编辑。`}
 			actions={
 				<>
 					<Button
@@ -1162,6 +1285,27 @@ function SuccessStage({
 					</Button>
 					<Button onClick={onStartNew}>再制定一个计划</Button>
 				</>
+			}
+		/>
+	);
+}
+
+function RestoreErrorStage({
+	message,
+	onRetry,
+}: {
+	message: string;
+	onRetry: () => void;
+}) {
+	return (
+		<FeedbackStage
+			tone="error"
+			icon={<AlertTriangle size={22} />}
+			eyebrow="本地计划暂不可用"
+			title="没有丢弃任何草案或提交状态"
+			description={message}
+			actions={
+				<Button variant="primary" onClick={onRetry}>重试恢复</Button>
 			}
 		/>
 	);

@@ -97,9 +97,10 @@ export async function createWhaleHallReflectionRuntime(
 			repository,
 			inference,
 			identity,
-			// The v1 planning mock does not restore a goal across application
-			// launches. Clear any recovered collector goal before native sensors
-			// start so early events cannot be attributed to a stale account goal.
+			// The local test session is not restored across application launches.
+			// Clear any recovered collector goal before native sensors start so
+			// early events cannot be attributed to a stale account; an authenticated
+			// account's authoritative goal is restored afterwards by Bun.
 			startupGoal: null,
 			onWindowSealed: options.onWindowSealed,
 			sinks: options.onFeedback

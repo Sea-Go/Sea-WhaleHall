@@ -26,6 +26,13 @@ function currentTarget(): { os: "macos" | "linux" | "win"; arch: "arm64" | "x64"
 const target = currentTarget();
 const nativeBinary = target.os === "win" ? "whalehall-local.exe" : "whalehall-local";
 const nativeSource = `.native/${target.os}-${target.arch}/${nativeBinary}`;
+const credentialHelperBinary = target.os === "win"
+	? "whalehall-credential-helper.exe"
+	: "whalehall-credential-helper";
+const credentialHelperSource = `.native/${target.os}-${target.arch}/${credentialHelperBinary}`;
+const nodeBinary = target.os === "win" ? "node.exe" : "node";
+const nodeSource = `.native/${target.os}-${target.arch}/${nodeBinary}`;
+const agentHostSource = `.native/${target.os}-${target.arch}/whalehall-agent-host.mjs`;
 const buildEnvironment =
 	process.argv
 		.find((argument) => argument.startsWith("--env="))
@@ -61,6 +68,9 @@ if (
 }
 const nativeCopies: Record<string, string> = {
 	[nativeSource]: `native/${nativeBinary}`,
+	[credentialHelperSource]: `native/${credentialHelperBinary}`,
+	[nodeSource]: `node/${nodeBinary}`,
+	[agentHostSource]: "agent/whalehall-agent-host.mjs",
 };
 if (target.os === "macos") {
 	nativeCopies[`.native/macos-${target.arch}/WhaleHall Observer.app`] =
@@ -96,9 +106,15 @@ export default {
 			"whalehall-local/server/src",
 			"native/observer",
 			"native/vault-broker",
+			"whalehall-credential-helper/src",
 			"scripts",
 		],
-		watchIgnore: ["dist/**", ".native/**", "whalehall-local/target/**"],
+		watchIgnore: [
+			"dist/**",
+			".native/**",
+			"whalehall-local/target/**",
+			"whalehall-credential-helper/target/**",
+		],
 		mac: {
 			bundleCEF: false,
 			codesign: macCodeSigningEnabled,

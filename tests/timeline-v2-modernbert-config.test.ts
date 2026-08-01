@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
 	mkdtempSync,
+	mkdirSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -118,10 +119,17 @@ describe("Timeline v2 ModernBERT Bun configuration", () => {
 		).toMatchObject({ code: "invalid_config" });
 
 		const directory = temporaryDirectory();
-		const target = join(directory, "manifest.json");
-		const link = join(directory, "manifest-link.json");
+		const targetDirectory = join(directory, "manifest-target");
+		const linkedDirectory = join(directory, "manifest-link");
+		mkdirSync(targetDirectory);
+		const target = join(targetDirectory, "manifest.json");
+		const link = join(linkedDirectory, "manifest.json");
 		writeFileSync(target, JSON.stringify(manifest()));
-		symlinkSync(target, link);
+		symlinkSync(
+			targetDirectory,
+			linkedDirectory,
+			process.platform === "win32" ? "junction" : "dir",
+		);
 		expect(
 			loadTimelineModernBertConfiguration(
 				completeEnvironment(link),

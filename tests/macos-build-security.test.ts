@@ -11,14 +11,19 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { credentialHelperCodesignCommand } from "../scripts/build-native";
 import {
+	MACOS_CREDENTIAL_HELPER_EXECUTABLE,
+	MACOS_CREDENTIAL_HELPER_IDENTIFIER,
 	MACOS_USAGE_DESCRIPTIONS,
+	assertRequiredMacNativeComponents,
 	normalizeDesignatedRequirement,
 	prepareMacWrapper,
 	validateLocalWrapperArchiveEntryTypes,
 	validateLocalWrapperArchiveEntries,
 	validateLocalDesignatedRequirementContinuity,
 	validateObserverEntitlements,
+	validateSignedComponentDetails,
 	verifyMacWrapper,
 } from "../scripts/macos-build-security";
 import {
@@ -230,6 +235,139 @@ describe("local designated requirement continuity", () => {
 				expectedIdentifier: "com.seago.whalehall.local",
 			}),
 		).toThrow("differs from the staged");
+	});
+});
+
+describe("macOS credential helper signing contract", () => {
+	const fingerprint = "A".repeat(40);
+
+	test("uses one fixed identifier for local and Developer ID signing plans", () => {
+		const local = credentialHelperCodesignCommand({
+			executable: "/tmp/whalehall-credential-helper",
+			signing: {
+				kind: "local",
+				identity: fingerprint,
+				releaseRequired: false,
+			},
+		});
+		expect(local).toContain("--identifier");
+		expect(local).toContain(MACOS_CREDENTIAL_HELPER_IDENTIFIER);
+		expect(local).toContain(
+			`=designated => identifier "${MACOS_CREDENTIAL_HELPER_IDENTIFIER}" `
+				+ `and certificate leaf = H"${fingerprint}"`,
+		);
+		expect(local).toContain("runtime");
+		expect(local).toContain("--timestamp=none");
+
+		const developer = credentialHelperCodesignCommand({
+			executable: "/tmp/whalehall-credential-helper",
+			signing: {
+				kind: "developer-id",
+				identity: "B".repeat(40),
+				teamIdentifier: "ABCDE12345",
+				releaseRequired: true,
+			},
+		});
+		expect(developer).toContain(MACOS_CREDENTIAL_HELPER_IDENTIFIER);
+		expect(developer).toContain("runtime");
+		expect(developer).toContain("--timestamp");
+		expect(developer.join(" ")).toContain(
+			'certificate leaf[subject.OU] = "ABCDE12345"',
+		);
+
+		const adHoc = credentialHelperCodesignCommand({
+			executable: "/tmp/whalehall-credential-helper",
+			signing: { kind: "ad-hoc", releaseRequired: false },
+		});
+		expect(adHoc).toContain(MACOS_CREDENTIAL_HELPER_IDENTIFIER);
+		expect(adHoc).toContain("--timestamp=none");
+	});
+
+	test("fails closed when a required signing identity is incomplete", () => {
+		expect(() =>
+			credentialHelperCodesignCommand({
+				executable: "/tmp/whalehall-credential-helper",
+				signing: {
+					kind: "developer-id",
+					teamIdentifier: "ABCDE12345",
+					releaseRequired: true,
+				},
+			}),
+		).toThrow("signing is incomplete");
+		expect(() =>
+			credentialHelperCodesignCommand({
+				executable: "/tmp/whalehall-credential-helper",
+				signing: { kind: "local", releaseRequired: false },
+			}),
+		).toThrow("identity is unavailable");
+	});
+
+	test("rejects a package that omits the credential helper", () => {
+		const nativeDirectory = mkdtempSync(
+			join(tmpdir(), "whalehall-native-contract-"),
+		);
+		temporaryDirectories.push(nativeDirectory);
+		writeFileSync(join(nativeDirectory, "whalehall-local"), "local");
+		mkdirSync(join(nativeDirectory, "WhaleHall Observer.app"));
+		writeFileSync(
+			join(nativeDirectory, "whalehall-vault-broker-v2"),
+			"broker",
+		);
+
+		expect(() =>
+			assertRequiredMacNativeComponents(nativeDirectory),
+		).toThrow(MACOS_CREDENTIAL_HELPER_EXECUTABLE);
+		const helperPath = join(
+			nativeDirectory,
+			MACOS_CREDENTIAL_HELPER_EXECUTABLE,
+		);
+		mkdirSync(helperPath);
+		expect(() =>
+			assertRequiredMacNativeComponents(nativeDirectory),
+		).toThrow("unsafe type");
+		rmSync(helperPath, { recursive: true });
+		writeFileSync(helperPath, "helper");
+		expect(() =>
+			assertRequiredMacNativeComponents(nativeDirectory),
+		).not.toThrow();
+	});
+
+	test("rejects credential helper identifier and Team ID mismatches", () => {
+		const canonical =
+			`Executable=/tmp/${MACOS_CREDENTIAL_HELPER_EXECUTABLE}\n`
+			+ `Identifier=${MACOS_CREDENTIAL_HELPER_IDENTIFIER}\n`
+			+ "TeamIdentifier=ABCDE12345\n";
+		expect(() =>
+			validateSignedComponentDetails({
+				details: canonical,
+				expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				expectedTeamIdentifier: "ABCDE12345",
+			}),
+		).not.toThrow();
+		expect(() =>
+			validateSignedComponentDetails({
+				details: canonical.replace(
+					MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+					"com.seago.whalehall.rewritten",
+				),
+				expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				expectedTeamIdentifier: "ABCDE12345",
+			}),
+		).toThrow("canonical identifier");
+		expect(() =>
+			validateSignedComponentDetails({
+				details: canonical.replace("ABCDE12345", "ZYXWV98765"),
+				expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				expectedTeamIdentifier: "ABCDE12345",
+			}),
+		).toThrow("does not share the wrapper TeamIdentifier");
+		expect(() =>
+			validateSignedComponentDetails({
+				details: canonical.replace("TeamIdentifier=ABCDE12345\n", ""),
+				expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				expectedTeamIdentifier: "ABCDE12345",
+			}),
+		).toThrow("does not share the wrapper TeamIdentifier");
 	});
 });
 
@@ -446,6 +584,16 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		copyFileSync("/usr/bin/true", localServerPath);
 		chmodSync(localServerPath, 0o755);
 		signAdHoc(localServerPath, "com.seago.whalehall.local");
+		const credentialHelperPath = join(
+			nativeDirectory,
+			MACOS_CREDENTIAL_HELPER_EXECUTABLE,
+		);
+		copyFileSync("/usr/bin/true", credentialHelperPath);
+		chmodSync(credentialHelperPath, 0o755);
+		signAdHoc(
+			credentialHelperPath,
+			MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+		);
 		const vaultBrokerPath = join(
 			nativeDirectory,
 			"whalehall-vault-broker-v2",

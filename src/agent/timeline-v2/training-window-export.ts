@@ -13,7 +13,7 @@ import {
 	unlinkSync,
 	writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { canonicalJson } from "../reflection/hash";
 import type { RawFiveMinuteAuditSource } from "./audit";
 import type {
@@ -1542,7 +1542,7 @@ function assertExportOptions(options: {
 	if (
 		typeof options.directory !== "string" ||
 		options.directory.length === 0 ||
-		!options.directory.startsWith("/")
+		!isAbsolute(options.directory)
 	) {
 		throw new Error("Private training export directory must be absolute.");
 	}
@@ -1629,7 +1629,7 @@ function cleanupStaleStagingDirectories(
 				!metadata.isDirectory() ||
 				metadata.isSymbolicLink() ||
 				metadata.uid !== effectiveUserId ||
-				(metadata.mode & 0o777) !== 0o700 ||
+				!hasPrivateMode(metadata.mode, 0o700) ||
 				!Number.isFinite(metadata.mtimeMs) ||
 				metadata.mtimeMs > staleBeforeMs
 			) {
@@ -1656,7 +1656,7 @@ function tryRemoveStagingDirectory(
 			directoryBefore.isSymbolicLink() ||
 			(effectiveUserId !== null &&
 				directoryBefore.uid !== effectiveUserId) ||
-			(directoryBefore.mode & 0o777) !== 0o700
+			!hasPrivateMode(directoryBefore.mode, 0o700)
 		) {
 			return false;
 		}
@@ -1677,7 +1677,7 @@ function tryRemoveStagingDirectory(
 				!metadata.isFile() ||
 				metadata.isSymbolicLink() ||
 				(effectiveUserId !== null && metadata.uid !== effectiveUserId) ||
-				(metadata.mode & 0o777) !== 0o600
+				!hasPrivateMode(metadata.mode, 0o600)
 			) {
 				throw new Error("Private training staging file is not owned data.");
 			}
@@ -1699,7 +1699,7 @@ function tryRemoveStagingDirectory(
 				!metadata.isFile() ||
 				metadata.isSymbolicLink() ||
 				(effectiveUserId !== null && metadata.uid !== effectiveUserId) ||
-				(metadata.mode & 0o777) !== 0o600
+				!hasPrivateMode(metadata.mode, 0o600)
 			) {
 				return false;
 			}
@@ -1716,6 +1716,14 @@ function currentEffectiveUserId(): number | null {
 	if (typeof process.geteuid !== "function") return null;
 	const value = process.geteuid();
 	return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function hasPrivateMode(mode: number, expected: 0o600 | 0o700): boolean {
+	// Windows' stat mode reports synthesized DOS permission bits rather than
+	// an ACL equivalent of POSIX owner-only modes. File type, symlink, exact
+	// staging names, ownership where available, and inode/device stability
+	// remain mandatory on every platform.
+	return process.platform === "win32" || (mode & 0o777) === expected;
 }
 
 function fsyncDirectory(path: string): void {

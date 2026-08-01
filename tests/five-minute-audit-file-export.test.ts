@@ -32,6 +32,14 @@ function createDirectory(): string {
 	return directory;
 }
 
+function expectPrivateFile(path: string): void {
+	const metadata = statSync(path);
+	expect(metadata.isFile()).toBeTrue();
+	if (process.platform !== "win32") {
+		expect(metadata.mode & 0o777).toBe(0o600);
+	}
+}
+
 function realFileSystem(
 	options: {
 		maximumWriteBytes?: number;
@@ -181,7 +189,7 @@ describe("secure five-minute audit file export", () => {
 		expect(confirmations).toBe(0);
 		expect(calls).toEqual([{ fromMs: 300_000, decrypted: false }]);
 		const path = join(directory, response.basename ?? "");
-		expect(statSync(path).mode & 0o777).toBe(0o600);
+		expectPrivateFile(path);
 		const serialized = readFileSync(path, "utf8");
 		expect(serialized).toContain("[redacted]");
 		expect(serialized).not.toContain("机密文本 ABC-123");

@@ -19,8 +19,10 @@ import {
 	resolveMacSigningPlan,
 } from "./macos-signing-identity";
 import {
+	MACOS_CREDENTIAL_HELPER_IDENTIFIER,
 	normalizeDesignatedRequirement,
 	validateObserverEntitlements,
+	validateSignedComponentDetails,
 } from "./macos-build-security";
 
 export const vaultBrokerExecutableName = "whalehall-vault-broker-v2";
@@ -34,7 +36,11 @@ export type TargetArch = "arm64" | "x64";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const vaultBrokerRoot = resolve(projectRoot, "native/vault-broker");
-const manifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
+const localToolManifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
+const credentialHelperManifestPath = resolve(
+	projectRoot,
+	"whalehall-credential-helper/Cargo.toml",
+);
 const observerRoot = resolve(projectRoot, "native/observer");
 const observerBundleName = "WhaleHall Observer.app";
 const observerExecutableName = "whalehall-observer";
@@ -540,6 +546,78 @@ function signNativeChild(executable: string, arch: TargetArch): void {
 	}
 }
 
+export function credentialHelperCodesignCommand({
+	executable,
+	signing,
+}: {
+	executable: string;
+	signing: MacSigningPlan;
+}): string[] {
+	const command = [
+		"codesign",
+		"--force",
+		"--sign",
+		signing.identity || "-",
+		"--identifier",
+		MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+	];
+	if (signing.kind === "developer-id") {
+		if (!signing.identity || !signing.teamIdentifier) {
+			throw new Error("Developer ID credential helper signing is incomplete.");
+		}
+		command.push(
+			"--requirements",
+			`=designated => identifier "${MACOS_CREDENTIAL_HELPER_IDENTIFIER}" `
+				+ "and anchor apple generic and certificate leaf[subject.OU] = "
+				+ `"${signing.teamIdentifier}"`,
+			"--options",
+			"runtime",
+			"--timestamp",
+		);
+	} else if (signing.kind === "local") {
+		if (!signing.identity) {
+			throw new Error("Local credential helper signing identity is unavailable.");
+		}
+		command.push(
+			"--requirements",
+			localDesignatedRequirement(
+				MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				signing.identity,
+			),
+			"--options",
+			"runtime",
+			"--timestamp=none",
+		);
+	} else {
+		command.push("--timestamp=none");
+	}
+	command.push(executable);
+	return command;
+}
+
+function signCredentialHelper(executable: string): void {
+	const signing = macSigningPlan();
+	run(credentialHelperCodesignCommand({ executable, signing }));
+	run(["codesign", "--verify", "--strict", executable]);
+	validateSignedComponentDetails({
+		details: capture([
+			"codesign",
+			"--display",
+			"--verbose=4",
+			executable,
+		]),
+		expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+		expectedTeamIdentifier:
+			signing.kind === "developer-id" ? signing.teamIdentifier ?? null : null,
+	});
+	if (signing.kind === "ad-hoc") {
+		console.warn(
+			"[native] whalehall-credential-helper is ad-hoc signed. This build "
+				+ "cannot provide reusable local signature continuity.",
+		);
+	}
+}
+
 export function buildNative(): string {
 	const os = (process.env.ELECTROBUN_OS as TargetOS | undefined) ?? hostOS();
 	const arch = (process.env.ELECTROBUN_ARCH as TargetArch | undefined) ?? hostArch();
@@ -556,9 +634,19 @@ export function buildNative(): string {
 		"--release",
 		"--locked",
 		"--manifest-path",
-		manifestPath,
+		localToolManifestPath,
 		"--package",
 		"whalehall-local-server",
+	]);
+	run([
+		"cargo",
+		"build",
+		"--release",
+		"--locked",
+		"--manifest-path",
+		credentialHelperManifestPath,
+		"--package",
+		"whalehall-credential-helper",
 	]);
 
 	const binaryName = os === "win" ? "whalehall-local.exe" : "whalehall-local";
@@ -574,6 +662,26 @@ export function buildNative(): string {
 		signNativeChild(destination, arch);
 	}
 	console.log(`[native] ${source} -> ${destination}`);
+
+	const helperBinaryName =
+		os === "win"
+			? "whalehall-credential-helper.exe"
+			: "whalehall-credential-helper";
+	const helperSource = resolve(
+		projectRoot,
+		"whalehall-credential-helper/target/release",
+		helperBinaryName,
+	);
+	const helperDestination = resolve(
+		projectRoot,
+		`.native/${os}-${arch}`,
+		helperBinaryName,
+	);
+	copyFileSync(helperSource, helperDestination);
+	if (os !== "win") chmodSync(helperDestination, 0o755);
+	if (os === "macos") signCredentialHelper(helperDestination);
+	console.log(`[native] ${helperSource} -> ${helperDestination}`);
+
 	if (os === "macos") {
 		buildVaultBroker(arch);
 		buildObserverApp(arch);

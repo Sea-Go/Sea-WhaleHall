@@ -1,0 +1,9 @@
+{
+	"extends": "../../tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"rootDir": ".",
+		"outDir": "../../build/model-relay"
+	},
+	"include": ["./**/*.ts"]
+}

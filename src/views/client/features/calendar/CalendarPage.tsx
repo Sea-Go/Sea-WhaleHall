@@ -574,6 +574,7 @@ export function EventEditor({
 export interface CalendarPageProps {
 	onNotify: (message: string) => void;
 	service: CalendarService;
+	controller?: CalendarController;
 	initialScenario?: CalendarScenarioId | null;
 	showScenarioControl?: boolean;
 }
@@ -581,10 +582,14 @@ export interface CalendarPageProps {
 export function CalendarPage({
 	onNotify,
 	service,
+	controller: suppliedController,
 	initialScenario = "normal",
 	showScenarioControl = false,
 }: CalendarPageProps) {
-	const controller = useMemo(() => new CalendarController(service), [service]);
+	const controller = useMemo(
+		() => suppliedController ?? new CalendarController(service),
+		[service, suppliedController],
+	);
 	const calendar = useSyncExternalStore(
 		controller.subscribe,
 		controller.getSnapshot,
