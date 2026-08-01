@@ -446,6 +446,16 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		copyFileSync("/usr/bin/true", localServerPath);
 		chmodSync(localServerPath, 0o755);
 		signAdHoc(localServerPath, "com.seago.whalehall.local");
+		const vaultBrokerPath = join(
+			nativeDirectory,
+			"whalehall-vault-broker-v2",
+		);
+		copyFileSync("/usr/bin/true", vaultBrokerPath);
+		chmodSync(vaultBrokerPath, 0o755);
+		signAdHoc(
+			vaultBrokerPath,
+			"com.seago.whalehall.vault-broker.v2",
+		);
 
 		const observerPath = join(nativeDirectory, "WhaleHall Observer.app");
 		const observerContents = join(observerPath, "Contents");
