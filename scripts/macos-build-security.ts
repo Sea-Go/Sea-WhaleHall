@@ -389,9 +389,13 @@ function materializeLocalSignedWrapper({
 	let payloadInstalled = false;
 	try {
 		run([zigZstd, "decompress", "-i", archive, "-o", tarPath]);
-		validateLocalWrapperArchiveEntries(
+		const archiveEntries = validateLocalWrapperArchiveEntries(
 			capture(["/usr/bin/tar", "-tf", tarPath]),
 			basename(bundlePath),
+		);
+		validateLocalWrapperArchiveEntryTypes(
+			capture(["/usr/bin/tar", "-tvf", tarPath]),
+			archiveEntries.length,
 		);
 		run([
 			"/usr/bin/tar",
@@ -534,6 +538,31 @@ export function validateLocalWrapperArchiveEntries(
 	return entries;
 }
 
+export function validateLocalWrapperArchiveEntryTypes(
+	verboseListing: string,
+	expectedEntryCount: number,
+): void {
+	if (!Number.isSafeInteger(expectedEntryCount) || expectedEntryCount <= 0) {
+		throw new Error("A positive local Canary archive entry count is required.");
+	}
+	const entries = verboseListing
+		.split(/\r?\n/u)
+		.filter((entry) => entry.length > 0);
+	if (entries.length !== expectedEntryCount) {
+		throw new Error(
+			"The local Canary application archive entry types could not be verified.",
+		);
+	}
+	for (const entry of entries) {
+		const type = entry[0];
+		if (type !== "-" && type !== "d") {
+			throw new Error(
+				"The local Canary application archive contains a link or special entry.",
+			);
+		}
+	}
+}
+
 function assertArchiveTreeContainsNoLinks(root: string): void {
 	const resolvedRoot = realpathSync(root);
 	for (const entry of readdirSync(root, { recursive: true })) {
@@ -658,9 +687,13 @@ function verifyLocalUpdateArchive({
 	const payloadBundle = join(stagingDirectory, expectedBundleName);
 	try {
 		run([zigZstd, "decompress", "-i", archive, "-o", tarPath]);
-		validateLocalWrapperArchiveEntries(
+		const archiveEntries = validateLocalWrapperArchiveEntries(
 			capture(["/usr/bin/tar", "-tf", tarPath]),
 			expectedBundleName,
+		);
+		validateLocalWrapperArchiveEntryTypes(
+			capture(["/usr/bin/tar", "-tvf", tarPath]),
+			archiveEntries.length,
 		);
 		run(["/usr/bin/tar", "-xf", tarPath, "-C", stagingDirectory]);
 		assertSafeBundlePath(payloadBundle, stagingDirectory);

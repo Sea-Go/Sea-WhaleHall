@@ -6,6 +6,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +15,7 @@ import {
 	MACOS_USAGE_DESCRIPTIONS,
 	normalizeDesignatedRequirement,
 	prepareMacWrapper,
+	validateLocalWrapperArchiveEntryTypes,
 	validateLocalWrapperArchiveEntries,
 	validateLocalDesignatedRequirementContinuity,
 	validateObserverEntitlements,
@@ -315,6 +317,92 @@ describe("local wrapper archive entry validation", () => {
 			validateLocalWrapperArchiveEntries("\n\r\n", bundleName),
 		).toThrow("archive is empty");
 	});
+
+	test("accepts only regular files and directories before extraction", () => {
+		const verboseListing = [
+			"drwxr-xr-x  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/",
+			"-rw-r--r--  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/Contents/Info.plist",
+		].join("\n");
+		expect(
+			validateLocalWrapperArchiveEntryTypes(verboseListing, 2),
+		).toBeUndefined();
+	});
+
+	test.each([
+		"lrwxr-xr-x  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/link -> /tmp",
+		"hrw-r--r--  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/hard link to target",
+		"prw-r--r--  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/pipe",
+		"crw-r--r--  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/device",
+		"brw-r--r--  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/device",
+		"srw-r--r--  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/socket",
+	])("rejects a link or special archive entry: %s", (entry) => {
+		expect(() => validateLocalWrapperArchiveEntryTypes(entry, 1)).toThrow(
+			"link or special entry",
+		);
+	});
+
+	test("fails closed when verbose type coverage is incomplete", () => {
+		expect(() =>
+			validateLocalWrapperArchiveEntryTypes(
+				"-rw-r--r--  0 edy wheel 0 Aug 1 12:00 WhaleHall-canary.app/Contents/Info.plist",
+				2,
+			),
+		).toThrow("types could not be verified");
+		for (const invalidCount of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+			expect(() =>
+				validateLocalWrapperArchiveEntryTypes("-rw-r--r-- file", invalidCount),
+			).toThrow("positive local Canary archive entry count");
+		}
+	});
+
+	test.skipIf(process.platform !== "darwin")(
+		"rejects a real symlink archive before extraction",
+		() => {
+			const directory = mkdtempSync(join(tmpdir(), "whalehall-archive-type-"));
+			temporaryDirectories.push(directory);
+			const bundle = join(directory, bundleName);
+			mkdirSync(join(bundle, "Contents"), { recursive: true });
+			writeFileSync(join(bundle, "Contents", "Info.plist"), "safe");
+			symlinkSync("/private/tmp", join(bundle, "Contents", "escape"));
+			const archive = join(directory, "payload.tar");
+			const create = Bun.spawnSync(
+				[
+					"/usr/bin/tar",
+					"-cf",
+					archive,
+					"-C",
+					directory,
+					bundleName,
+				],
+				{
+					env: { ...process.env, COPYFILE_DISABLE: "1" },
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
+			expect(create.exitCode).toBe(0);
+			const paths = Bun.spawnSync(["/usr/bin/tar", "-tf", archive], {
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const verbose = Bun.spawnSync(["/usr/bin/tar", "-tvf", archive], {
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			expect(paths.exitCode).toBe(0);
+			expect(verbose.exitCode).toBe(0);
+			const entries = validateLocalWrapperArchiveEntries(
+				new TextDecoder().decode(paths.stdout),
+				bundleName,
+			);
+			expect(() =>
+				validateLocalWrapperArchiveEntryTypes(
+					new TextDecoder().decode(verbose.stdout),
+					entries.length,
+				),
+			).toThrow("link or special entry");
+		},
+	);
 });
 
 describe("Observer entitlement validation", () => {
