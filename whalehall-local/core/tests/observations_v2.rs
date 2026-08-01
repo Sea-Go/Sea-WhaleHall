@@ -16,7 +16,8 @@ use whalehall_local_protocol::{
     GoalContext, ObservationIntervalV2, ObservationSensorV2, ObservationSourceV2,
     ObservationSubjectV2, RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2,
     SemanticCommitParams, SemanticContentStateV2, SemanticCountClassV2, SemanticQueryParams,
-    VaultOpenBatchParams, VaultSealBatchParams, VaultSealRecord, semantic_event_kinds,
+    VaultDeleteBatchParams, VaultOpenBatchParams, VaultSealBatchParams, VaultSealRecord,
+    semantic_event_kinds,
 };
 
 const SECRET: &str = "绝不能出现在SQLite明文里的浏览器正文";
@@ -1182,4 +1183,70 @@ fn process_inventory_is_ignored_vault_is_idempotent_and_exact_retention_expires_
         )
         .expect("count semantic encrypted payloads");
     assert_eq!(semantic_payloads, 0);
+}
+
+#[test]
+fn exact_vault_deletion_keeps_high_frequency_mutable_storage_bounded() {
+    let directory = tempfile::tempdir().expect("create test directory");
+    let journal = memory_journal(&directory, Duration::from_secs(7 * 24 * 60 * 60));
+    let namespace = "timeline.collector.v2";
+    let snapshot_body = "x".repeat(64 * 1024);
+    let mut previous_record_id: Option<String> = None;
+
+    for revision in 0..96 {
+        let record_id = format!("collector-candidate-{revision}");
+        journal
+            .seal_vault_batch(&VaultSealBatchParams {
+                namespace: namespace.to_owned(),
+                records: vec![VaultSealRecord {
+                    record_id: record_id.clone(),
+                    schema_version: "timeline-collector.v2".to_owned(),
+                    content: json!({
+                        "revision": revision,
+                        "snapshot": snapshot_body,
+                    }),
+                    expires_at_ms: None,
+                }],
+            })
+            .expect("seal collector candidate");
+        if let Some(previous) = previous_record_id.replace(record_id) {
+            let deleted = journal
+                .delete_vault_batch(&VaultDeleteBatchParams {
+                    namespace: namespace.to_owned(),
+                    record_ids: vec![previous.clone()],
+                })
+                .expect("delete retired collector candidate");
+            assert_eq!(deleted.records[0].record_id, previous);
+            assert!(deleted.records[0].deleted);
+        }
+    }
+
+    let missing = journal
+        .delete_vault_batch(&VaultDeleteBatchParams {
+            namespace: namespace.to_owned(),
+            record_ids: vec!["collector-candidate-missing".to_owned()],
+        })
+        .expect("repeat an already absent deletion");
+    assert!(!missing.records[0].deleted);
+
+    let connection = Connection::open(journal.database_path()).expect("inspect bounded vault");
+    let retained: (i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(p.ciphertext)), 0)
+             FROM vault_records v
+             JOIN encrypted_payloads p ON p.content_ref = v.content_ref
+             WHERE v.namespace = ?1",
+            [namespace],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count retained collector payloads");
+    assert_eq!(retained.0, 1);
+    assert!(retained.1 < 70 * 1024);
+    let page_size: i64 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .expect("read page size");
+    let page_count: i64 = connection
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .expect("read page count");
+    assert!(page_size * page_count < 4 * 1024 * 1024);
 }

@@ -546,6 +546,26 @@ pub struct VaultOpenBatchResult {
     pub records: Vec<VaultOpenResult>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VaultDeleteBatchParams {
+    pub namespace: String,
+    pub record_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultDeleteResult {
+    pub record_id: String,
+    pub deleted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultDeleteBatchResult {
+    pub records: Vec<VaultDeleteResult>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultKeyAvailability {

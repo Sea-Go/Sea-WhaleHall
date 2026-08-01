@@ -9,6 +9,7 @@ import {
 	DeterministicEvidenceRenderer,
 	DeterministicTimelineHypothesisGenerator,
 	InMemoryTimelineV2Repository,
+	TIMELINE_RAW_RETENTION_MS,
 	TimelineV2Collector,
 	TimelineV2JobRunner,
 	TimelineV2Processor,
@@ -161,6 +162,50 @@ describe("Timeline v2 sanitized five-minute replay", () => {
 			jitter: () => 0,
 		});
 		expect(await runner.runUntilIdle()).toBe(2);
+		expect(
+			await repository.listCommittedWindowIds({
+				endedAtOrAfterMs: null,
+				availableAtMs: clock.nowMs(),
+				order: "oldest_first",
+				limit: 10_001,
+			}),
+		).toEqual([firstWindowId!, secondWindow!.windowId]);
+		expect(
+			await repository.listCommittedWindowIds({
+				endedAtOrAfterMs: secondWindow!.endedAtMs,
+				availableAtMs: clock.nowMs(),
+				order: "oldest_first",
+				limit: 1,
+			}),
+		).toEqual([secondWindow!.windowId]);
+		await expect(
+			repository.listCommittedWindowIds({
+				endedAtOrAfterMs: null,
+				availableAtMs: clock.nowMs(),
+				order: "oldest_first",
+				limit: 10_002,
+			}),
+		).rejects.toThrow("between 1 and 10001");
+		expect(
+			await repository.listCommittedWindowIds({
+				endedAtOrAfterMs: null,
+				availableAtMs:
+					firstWindowId === null
+						? clock.nowMs()
+						: (await repository.getWindow(firstWindowId))!.endedAtMs +
+							TIMELINE_RAW_RETENTION_MS,
+				order: "oldest_first",
+				limit: 10_001,
+			}),
+		).toEqual([secondWindow!.windowId]);
+		expect(
+			await repository.listCommittedWindowIds({
+				endedAtOrAfterMs: null,
+				availableAtMs: clock.nowMs(),
+				order: "newest_first",
+				limit: 1,
+			}),
+		).toEqual([secondWindow!.windowId]);
 
 		const first = await repository.getTimelineResult(firstWindowId!);
 		const second = await repository.getTimelineResult(

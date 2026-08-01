@@ -35,6 +35,7 @@ export type LocalMethod =
 	| "audit.queryFiveMinutes"
 	| "vault.sealBatch"
 	| "vault.openBatch"
+	| "vault.deleteBatch"
 	| "vault.status"
 	| "vault.migrateLegacyKey";
 
@@ -289,6 +290,20 @@ export type LocalVaultOpenBatchResult = {
 	records: LocalVaultOpenResultRecord[];
 };
 
+export type LocalVaultDeleteBatch = {
+	namespace: string;
+	recordIds: string[];
+};
+
+export type LocalVaultDeleteResultRecord = {
+	recordId: string;
+	deleted: boolean;
+};
+
+export type LocalVaultDeleteBatchResult = {
+	records: LocalVaultDeleteResultRecord[];
+};
+
 export type LocalVaultKeyAvailability =
 	| "available"
 	| "migration_required"
@@ -482,6 +497,17 @@ export function isLocalVaultOpenResultRecord(
 		isNonNegativeSafeInteger(value.createdAtMs) &&
 		(value.expiresAtMs === null ||
 			isNonNegativeSafeInteger(value.expiresAtMs))
+	);
+}
+
+export function isLocalVaultDeleteResultRecord(
+	value: unknown,
+): value is LocalVaultDeleteResultRecord {
+	return (
+		isRecord(value) &&
+		hasExactKeys(value, ["recordId", "deleted"]) &&
+		isProtocolIdentifier(value.recordId, 256) &&
+		typeof value.deleted === "boolean"
 	);
 }
 

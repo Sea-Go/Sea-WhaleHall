@@ -20,9 +20,10 @@ use whalehall_local_protocol::{
     RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2, RawObservationV2,
     SEMANTIC_EVENT_SCHEMA_VERSION, SEMANTIC_PROJECTOR_VERSION, SEMANTIC_TAXONOMY_VERSION,
     SemanticCommitParams, SemanticCommitResult, SemanticContentStateV2, SemanticCountClassV2,
-    SemanticEventV2, SemanticQueryParams, SemanticQueryResult, VaultOpenBatchParams,
-    VaultOpenBatchResult, VaultOpenResult, VaultSealBatchParams, VaultSealBatchResult,
-    VaultSealResult, semantic_event_kinds,
+    SemanticEventV2, SemanticQueryParams, SemanticQueryResult, VaultDeleteBatchParams,
+    VaultDeleteBatchResult, VaultDeleteResult, VaultOpenBatchParams, VaultOpenBatchResult,
+    VaultOpenResult, VaultSealBatchParams, VaultSealBatchResult, VaultSealResult,
+    semantic_event_kinds,
 };
 use zeroize::Zeroizing;
 
@@ -1649,6 +1650,51 @@ impl ObservationJournal {
             });
         }
         Ok(VaultOpenBatchResult { records: results })
+    }
+
+    pub fn delete_vault_batch(
+        &self,
+        params: &VaultDeleteBatchParams,
+    ) -> Result<VaultDeleteBatchResult, ObservationJournalError> {
+        validate_vault_delete(params)?;
+        let _write_guard = self
+            .inner
+            .write_guard
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut connection = connect(&self.inner.database_path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut results = Vec::with_capacity(params.record_ids.len());
+        for record_id in &params.record_ids {
+            let content_ref = transaction
+                .query_row(
+                    "SELECT content_ref FROM vault_records
+                     WHERE namespace = ?1 AND record_id = ?2",
+                    params![params.namespace, record_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let deleted = if let Some(content_ref) = content_ref {
+                transaction.execute(
+                    "DELETE FROM vault_records
+                     WHERE namespace = ?1 AND record_id = ?2 AND content_ref = ?3",
+                    params![params.namespace, record_id, content_ref],
+                )?;
+                transaction.execute(
+                    "DELETE FROM encrypted_payloads WHERE content_ref = ?1",
+                    [content_ref],
+                )?;
+                true
+            } else {
+                false
+            };
+            results.push(VaultDeleteResult {
+                record_id: record_id.clone(),
+                deleted,
+            });
+        }
+        transaction.commit()?;
+        Ok(VaultDeleteBatchResult { records: results })
     }
 
     pub fn cleanup(
@@ -3779,6 +3825,25 @@ fn validate_vault_open(params: &VaultOpenBatchParams) -> Result<(), ObservationJ
         if !refs.insert(content_ref) {
             return Err(ObservationJournalError::Configuration(
                 "vault.openBatch contentRefs must be unique".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_vault_delete(params: &VaultDeleteBatchParams) -> Result<(), ObservationJournalError> {
+    validate_ascii_identifier("vault namespace", &params.namespace, 128)?;
+    if params.record_ids.is_empty() || params.record_ids.len() > MAX_VAULT_BATCH_RECORDS {
+        return Err(ObservationJournalError::Configuration(format!(
+            "vault.deleteBatch requires 1 to {MAX_VAULT_BATCH_RECORDS} recordIds"
+        )));
+    }
+    let mut ids = HashSet::new();
+    for record_id in &params.record_ids {
+        validate_ascii_identifier("vault recordId", record_id, 256)?;
+        if !ids.insert(record_id) {
+            return Err(ObservationJournalError::Configuration(
+                "vault.deleteBatch recordId values must be unique".to_owned(),
             ));
         }
     }

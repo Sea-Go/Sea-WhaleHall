@@ -25,6 +25,11 @@ export type TimelineVaultOpenRequest = {
 	aad: Record<string, string | number | null>;
 };
 
+export type TimelineVaultDeleteRequest = {
+	purpose: TimelineVaultPurpose;
+	recordIds: string[];
+};
+
 /**
  * Rust owns Keychain access, AES-256-GCM, nonce generation, and key versions.
  * The TypeScript timeline layer receives only an opaque sealed payload and can
@@ -33,6 +38,7 @@ export type TimelineVaultOpenRequest = {
 export interface TimelineVault {
 	seal(request: TimelineVaultSealRequest): Promise<string>;
 	open(request: TimelineVaultOpenRequest): Promise<string>;
+	deleteRecords(request: TimelineVaultDeleteRequest): Promise<void>;
 }
 
 export class TimelineVaultUnavailableError extends Error {
@@ -52,6 +58,10 @@ export class UnavailableTimelineVault implements TimelineVault {
 	}
 
 	async open(_request: TimelineVaultOpenRequest): Promise<string> {
+		throw new TimelineVaultUnavailableError();
+	}
+
+	async deleteRecords(_request: TimelineVaultDeleteRequest): Promise<void> {
 		throw new TimelineVaultUnavailableError();
 	}
 }

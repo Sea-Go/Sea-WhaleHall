@@ -6,6 +6,7 @@ import {
 	MAX_JSONL_LINE_BYTES,
 	isDesktopEvent,
 	isLocalAuditFiveMinutesResult,
+	isLocalVaultDeleteResultRecord,
 	isLocalVaultOpenResultRecord,
 	isLocalVaultKeyStatus,
 	isLocalVaultLegacyMigrationResult,
@@ -39,6 +40,8 @@ import {
 	type LocalToolDescriptor,
 	type LocalToolEvent,
 	type LocalToolListResult,
+	type LocalVaultDeleteBatch,
+	type LocalVaultDeleteBatchResult,
 	type LocalVaultOpenBatch,
 	type LocalVaultOpenBatchResult,
 	type LocalVaultKeyStatus,
@@ -121,6 +124,7 @@ export interface LocalToolProcess {
 	): Promise<LocalAuditFiveMinutesResult>;
 	sealVaultBatch(batch: LocalVaultSealBatch): Promise<LocalVaultSealBatchResult>;
 	openVaultBatch(batch: LocalVaultOpenBatch): Promise<LocalVaultOpenBatchResult>;
+	deleteVaultBatch(batch: LocalVaultDeleteBatch): Promise<LocalVaultDeleteBatchResult>;
 	getVaultKeyStatus(): Promise<LocalVaultKeyStatus>;
 	migrateLegacyVaultKey(): Promise<LocalVaultLegacyMigrationResult>;
 	stop(): Promise<void>;
@@ -581,6 +585,32 @@ export class LocalToolClient implements LocalToolProcess {
 			);
 		}
 		return result as LocalVaultOpenBatchResult;
+	}
+
+	async deleteVaultBatch(
+		batch: LocalVaultDeleteBatch,
+	): Promise<LocalVaultDeleteBatchResult> {
+		if (batch.recordIds.length < 1 || batch.recordIds.length > 64) {
+			throw new LocalClientError(
+				"INVALID_ARGUMENTS",
+				"vault.deleteBatch requires 1 to 64 record IDs.",
+			);
+		}
+		const result = await this.request<unknown>("vault.deleteBatch", batch);
+		if (
+			!isRecord(result) ||
+			!Array.isArray(result.records) ||
+			result.records.length !== batch.recordIds.length ||
+			!result.records.every(isLocalVaultDeleteResultRecord) ||
+			!result.records.every(
+				(record, index) => record.recordId === batch.recordIds[index],
+			)
+		) {
+			throw this.protocolFailure(
+				"vault.deleteBatch returned an invalid result.",
+			);
+		}
+		return result as LocalVaultDeleteBatchResult;
 	}
 
 	async getVaultKeyStatus(): Promise<LocalVaultKeyStatus> {

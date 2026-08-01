@@ -637,6 +637,58 @@ describe("LocalToolClient", () => {
 		await client.stop();
 	});
 
+	test("deletes exact vault records through the bounded internal batch", async () => {
+		const requests: Array<{ method: string; params: unknown }> = [];
+		const child = new FakeChild((line, process) => {
+			const request = JSON.parse(line) as {
+				id: string;
+				method: string;
+				params: { namespace: string; recordIds: string[] };
+			};
+			requests.push({ method: request.method, params: request.params });
+			process.respond({
+				id: request.id,
+				ok: true,
+				result: {
+					records: request.params.recordIds.map((recordId) => ({
+						recordId,
+						deleted: recordId === "collector-r1",
+					})),
+				},
+			});
+		});
+		const client = new LocalToolClient("fake", { spawn: () => child });
+		await client.start();
+
+		await expect(
+			client.deleteVaultBatch({
+				namespace: "timeline.collector.v2",
+				recordIds: ["collector-r1", "collector-r2"],
+			}),
+		).resolves.toEqual({
+			records: [
+				{ recordId: "collector-r1", deleted: true },
+				{ recordId: "collector-r2", deleted: false },
+			],
+		});
+		expect(requests).toEqual([
+			{
+				method: "vault.deleteBatch",
+				params: {
+					namespace: "timeline.collector.v2",
+					recordIds: ["collector-r1", "collector-r2"],
+				},
+			},
+		]);
+		await expect(
+			client.deleteVaultBatch({
+				namespace: "timeline.collector.v2",
+				recordIds: [],
+			}),
+		).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
+		await client.stop();
+	});
+
 	test("times out a tool call and sends a best-effort cancellation", async () => {
 		const methods: string[] = [];
 		const child = new FakeChild((line) => {

@@ -10,6 +10,17 @@ import {
 	type TimelineWindowV2,
 } from "./types";
 
+export const TIMELINE_RAW_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+export type CommittedTimelineWindowListOptions = {
+	/** Inclusive product scope bound; null means every still-open raw window. */
+	endedAtOrAfterMs: number | null;
+	/** Availability is evaluated at this immutable operation timestamp. */
+	availableAtMs: number;
+	order: "oldest_first" | "newest_first";
+	limit: number;
+};
+
 export class TimelineCollectorRevisionConflictError extends Error {
 	constructor() {
 		super("Timeline collector state changed concurrently.");
@@ -84,6 +95,9 @@ export interface TimelineV2Repository {
 	): Promise<TimelineSealResult>;
 	getWindow(windowId: string): Promise<TimelineWindowV2 | null>;
 	getJob(windowId: string): Promise<TimelineJobV2 | null>;
+	listCommittedWindowIds(
+		options: CommittedTimelineWindowListOptions,
+	): Promise<string[]>;
 	claimNextWindow(
 		nowMs: number,
 		leaseDurationMs: number,
@@ -197,6 +211,32 @@ export class InMemoryTimelineV2Repository implements TimelineV2Repository {
 
 	async getJob(windowId: string): Promise<TimelineJobV2 | null> {
 		return clone(this.jobs.get(windowId) ?? null);
+	}
+
+	async listCommittedWindowIds(
+		options: CommittedTimelineWindowListOptions,
+	): Promise<string[]> {
+		assertCommittedWindowListOptions(options);
+		const rawCutoffMs =
+			options.availableAtMs - TIMELINE_RAW_RETENTION_MS;
+		return [...this.windows.values()]
+			.filter((window) => {
+				const job = this.jobs.get(window.windowId);
+				return (
+					job?.state === "COMMITTED" &&
+					window.endedAtMs > rawCutoffMs &&
+					(options.endedAtOrAfterMs === null ||
+						window.endedAtMs >= options.endedAtOrAfterMs)
+				);
+			})
+			.sort((left, right) => {
+				const oldestFirst =
+					left.endedAtMs - right.endedAtMs ||
+					compareOpaqueIds(left.windowId, right.windowId);
+				return options.order === "oldest_first" ? oldestFirst : -oldestFirst;
+			})
+			.slice(0, options.limit)
+			.map((window) => window.windowId);
 	}
 
 	async claimNextWindow(
@@ -575,6 +615,29 @@ function boundedLimit(value: number, minimum: number, maximum: number): number {
 		throw new Error(`Expected an integer between ${minimum} and ${maximum}.`);
 	}
 	return value;
+}
+
+function assertCommittedWindowListOptions(
+	options: CommittedTimelineWindowListOptions,
+): void {
+	if (
+		options.endedAtOrAfterMs !== null &&
+		(!Number.isSafeInteger(options.endedAtOrAfterMs) ||
+			options.endedAtOrAfterMs < 0)
+	) {
+		throw new Error("endedAtOrAfterMs must be null or a non-negative safe integer.");
+	}
+	if (!Number.isSafeInteger(options.availableAtMs) || options.availableAtMs < 0) {
+		throw new Error("availableAtMs must be a non-negative safe integer.");
+	}
+	if (options.order !== "oldest_first" && options.order !== "newest_first") {
+		throw new Error("order must be oldest_first or newest_first.");
+	}
+	boundedLimit(options.limit, 1, 10_001);
+}
+
+function compareOpaqueIds(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function assertPositiveDuration(value: number, field: string): void {

@@ -21,6 +21,8 @@ import type {
 	LocalToolCancelResult,
 	LocalToolDescriptor,
 	LocalToolEvent,
+	LocalVaultDeleteBatch,
+	LocalVaultDeleteBatchResult,
 	LocalVaultOpenBatch,
 	LocalVaultOpenBatchResult,
 	LocalVaultKeyStatus,
@@ -248,6 +250,13 @@ export class AgentRuntime {
 	): Promise<LocalVaultOpenBatchResult> {
 		await this.ensureStarted();
 		return this.local.openVaultBatch(batch);
+	}
+
+	async deleteVaultBatch(
+		batch: LocalVaultDeleteBatch,
+	): Promise<LocalVaultDeleteBatchResult> {
+		await this.ensureStarted();
+		return this.local.deleteVaultBatch(batch);
 	}
 
 	async getVaultKeyStatus(): Promise<LocalVaultKeyStatus> {

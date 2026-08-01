@@ -42,9 +42,9 @@ use whalehall_local_protocol::{
     EventQueryParams, MAX_JSONL_LINE_BYTES, MonitoringConfigureParams, OutboundMessage, Request,
     Response, RuntimeHealth, SemanticCommitParams, SemanticEventFrame, SemanticEventFrameKind,
     SemanticQueryParams, ToolCallParams, ToolCallResult, ToolCancelParams, ToolCancelResult,
-    ToolListResult, VaultKeyAvailability, VaultKeyStatusResult, VaultKeyStorageMode,
-    VaultMigrateLegacyKeyParams, VaultMigrateLegacyKeyResult, VaultOpenBatchParams,
-    VaultSealBatchParams, error_codes,
+    ToolListResult, VaultDeleteBatchParams, VaultKeyAvailability, VaultKeyStatusResult,
+    VaultKeyStorageMode, VaultMigrateLegacyKeyParams, VaultMigrateLegacyKeyResult,
+    VaultOpenBatchParams, VaultSealBatchParams, error_codes,
 };
 
 use observer::{ObserverSupervisor, ObserverSupervisorConfig};
@@ -1177,6 +1177,24 @@ fn dispatch_request(
                 }
             };
             let response = match observation_journal.open_vault_batch(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => observation_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "vault.deleteBatch" => {
+            let params: VaultDeleteBatchParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid vault.deleteBatch parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match observation_journal.delete_vault_batch(&params) {
                 Ok(result) => Response::success(request.id, result),
                 Err(error) => observation_error_response(request.id, error),
             };

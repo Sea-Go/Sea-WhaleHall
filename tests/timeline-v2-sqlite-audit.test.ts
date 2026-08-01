@@ -10,14 +10,17 @@ import {
 	DeterministicEvidenceRenderer,
 	DeterministicTimelineHypothesisGenerator,
 	SqliteTimelineV2Repository,
+	TIMELINE_RAW_RETENTION_MS,
 	TimelineFiveMinuteAuditExporter,
 	TimelineV2Collector,
 	TimelineV2JobRunner,
 	TimelineV2Processor,
 	type RawFiveMinuteAuditSource,
 	type SemanticEventV2,
+	type TimelineCollectorSnapshotV2,
 	type TimelineV2Repository,
 	type TimelineVault,
+	type TimelineVaultDeleteRequest,
 	type TimelineVaultOpenRequest,
 	type TimelineVaultSealRequest,
 } from "../src/agent/timeline-v2";
@@ -32,6 +35,8 @@ afterEach(() => {
 
 class MemoryVault implements TimelineVault {
 	readonly seals: TimelineVaultSealRequest[] = [];
+	readonly deletes: TimelineVaultDeleteRequest[] = [];
+	private nextRef = 1;
 	private readonly byId = new Map<
 		string,
 		{ ref: string; request: TimelineVaultSealRequest }
@@ -43,12 +48,18 @@ class MemoryVault implements TimelineVault {
 		const key = `${request.purpose}:${request.recordId}`;
 		const existing = this.byId.get(key);
 		if (existing) {
-			if (existing.request.plaintext !== request.plaintext) {
+			if (
+				existing.request.plaintext !== request.plaintext ||
+				existing.request.schemaVersion !== request.schemaVersion ||
+				existing.request.expiresAtMs !== request.expiresAtMs ||
+				JSON.stringify(existing.request.aad) !== JSON.stringify(request.aad)
+			) {
 				throw new Error("vault record id reused with different content");
 			}
 			return existing.ref;
 		}
-		const ref = `vaultref_${this.byId.size + 1}`;
+		const ref = `vaultref_${this.nextRef}`;
+		this.nextRef += 1;
 		const copy = structuredClone(request);
 		this.byId.set(key, { ref, request: copy });
 		this.byRef.set(ref, copy);
@@ -68,10 +79,39 @@ class MemoryVault implements TimelineVault {
 		}
 		return sealed.plaintext;
 	}
+
+	async deleteRecords(request: TimelineVaultDeleteRequest): Promise<void> {
+		this.deletes.push(structuredClone(request));
+		for (const recordId of request.recordIds) {
+			const key = `${request.purpose}:${recordId}`;
+			const existing = this.byId.get(key);
+			if (!existing) continue;
+			this.byId.delete(key);
+			this.byRef.delete(existing.ref);
+		}
+	}
+
+	retainedRecordCount(purpose: TimelineVaultDeleteRequest["purpose"]): number {
+		return [...this.byId.values()].filter(
+			(entry) => entry.request.purpose === purpose,
+		).length;
+	}
+
+	retainedPlaintextBytes(purpose: TimelineVaultDeleteRequest["purpose"]): number {
+		return [...this.byId.values()]
+			.filter((entry) => entry.request.purpose === purpose)
+			.reduce(
+				(total, entry) => total + new TextEncoder().encode(entry.request.plaintext).length,
+				0,
+			);
+	}
 }
 
 class Clock implements ReflectionClock {
-	constructor(private readonly value = 400_000) {}
+	constructor(private value = 400_000) {}
+	set(value: number): void {
+		this.value = value;
+	}
 	nowMs(): number {
 		return this.value;
 	}
@@ -294,8 +334,48 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 			attempt: 1,
 			leaseExpiresAtMs: null,
 		});
+			expect(
+				await repository.listCommittedWindowIds({
+					endedAtOrAfterMs: 100_010,
+					availableAtMs: clock.nowMs(),
+					order: "oldest_first",
+					limit: 10_001,
+			}),
+		).toEqual([windowId]);
+		expect(
+				await repository.listCommittedWindowIds({
+					endedAtOrAfterMs: 100_011,
+					availableAtMs: clock.nowMs(),
+					order: "oldest_first",
+					limit: 10_001,
+				}),
+			).toEqual([]);
+			expect(
+				await repository.listCommittedWindowIds({
+					endedAtOrAfterMs: null,
+					availableAtMs:
+						100_010 + TIMELINE_RAW_RETENTION_MS - 1,
+					order: "newest_first",
+					limit: 1,
+				}),
+			).toEqual([windowId]);
+			expect(
+				await repository.listCommittedWindowIds({
+					endedAtOrAfterMs: null,
+					availableAtMs: 100_010 + TIMELINE_RAW_RETENTION_MS,
+					order: "newest_first",
+					limit: 1,
+				}),
+			).toEqual([]);
 		const result = await repository.getTimelineResult(windowId);
 		expect(result?.summary.renderedText).toContain("秘密文本 ABC-123");
+		expect(
+			await repository.completeWindow(result!, clock.nowMs()),
+		).toMatchObject({
+			state: "COMMITTED",
+			attempt: 1,
+		});
+		clock.set(clock.nowMs() + 60_000);
 		expect(
 			await repository.completeWindow(result!, clock.nowMs()),
 		).toMatchObject({
@@ -345,14 +425,16 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 			vault.seals.some(
 				(seal) =>
 					seal.purpose === "timeline.window.v2" &&
-					seal.expiresAtMs === clock.nowMs() + 7 * 24 * 60 * 60 * 1000,
+					seal.expiresAtMs ===
+						100_010 + 7 * 24 * 60 * 60 * 1000,
 			),
 		).toBeTrue();
 		expect(
 			vault.seals.some(
 				(seal) =>
 					seal.purpose === "timeline.summary.v2" &&
-					seal.expiresAtMs === clock.nowMs() + 30 * 24 * 60 * 60 * 1000,
+					seal.expiresAtMs ===
+						100_010 + 30 * 24 * 60 * 60 * 1000,
 			),
 		).toBeTrue();
 		repository.close();
@@ -493,7 +575,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 					)
 					.get() as { version: number }
 			).version,
-		).toBe(2);
+		).toBe(3);
 		expect(
 			(
 				verified

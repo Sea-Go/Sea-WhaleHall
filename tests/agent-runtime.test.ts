@@ -25,6 +25,8 @@ import type {
 	LocalToolEvent,
 	LocalVaultOpenBatch,
 	LocalVaultOpenBatchResult,
+	LocalVaultDeleteBatch,
+	LocalVaultDeleteBatchResult,
 	LocalVaultKeyStatus,
 	LocalVaultLegacyMigrationResult,
 	LocalVaultSealBatch,
@@ -204,6 +206,14 @@ class FakeLocalProcess implements LocalToolProcess {
 		_batch: LocalVaultOpenBatch,
 	): Promise<LocalVaultOpenBatchResult> {
 		return { records: [] };
+	}
+
+	async deleteVaultBatch(
+		batch: LocalVaultDeleteBatch,
+	): Promise<LocalVaultDeleteBatchResult> {
+		return {
+			records: batch.recordIds.map((recordId) => ({ recordId, deleted: true })),
+		};
 	}
 
 	async getVaultKeyStatus(): Promise<LocalVaultKeyStatus> {

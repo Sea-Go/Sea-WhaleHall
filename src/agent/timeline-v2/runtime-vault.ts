@@ -1,4 +1,6 @@
 import type {
+	LocalVaultDeleteBatch,
+	LocalVaultDeleteBatchResult,
 	LocalVaultOpenBatch,
 	LocalVaultOpenBatchResult,
 	LocalVaultSealBatch,
@@ -7,6 +9,7 @@ import type {
 import { canonicalJson } from "../reflection/hash";
 import type {
 	TimelineVault,
+	TimelineVaultDeleteRequest,
 	TimelineVaultOpenRequest,
 	TimelineVaultSealRequest,
 } from "./vault";
@@ -19,6 +22,9 @@ export interface RuntimeVaultTransport {
 	openVaultBatch(
 		batch: LocalVaultOpenBatch,
 	): Promise<LocalVaultOpenBatchResult>;
+	deleteVaultBatch(
+		batch: LocalVaultDeleteBatch,
+	): Promise<LocalVaultDeleteBatchResult>;
 }
 
 type SealedTimelineEnvelope = {
@@ -88,6 +94,24 @@ export class RuntimeTimelineVault implements TimelineVault {
 			);
 		}
 		return JSON.stringify(record.content.payload);
+	}
+
+	async deleteRecords(request: TimelineVaultDeleteRequest): Promise<void> {
+		if (request.recordIds.length === 0) return;
+		const result = await this.runtime.deleteVaultBatch({
+			namespace: request.purpose,
+			recordIds: request.recordIds,
+		});
+		if (
+			result.records.length !== request.recordIds.length ||
+			!result.records.every(
+				(record, index) => record.recordId === request.recordIds[index],
+			)
+		) {
+			throw new TimelineVaultUnavailableError(
+				"Rust vault delete result did not match its request.",
+			);
+		}
 	}
 }
 

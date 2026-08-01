@@ -1,10 +1,13 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
+import { canonicalJson } from "../reflection/hash";
 import {
+	TIMELINE_RAW_RETENTION_MS,
 	TimelineCollectorRevisionConflictError,
 	type AgentInputQuery,
 	type AgentInputQueryResult,
+	type CommittedTimelineWindowListOptions,
 	type PersistTimelineResult,
 	type TimelineAuditRangeResult,
 	type TimelineCursorAuthority,
@@ -37,15 +40,38 @@ import {
 	type TimelineVaultPurpose,
 } from "./vault";
 
-const SQLITE_SCHEMA_VERSION = 2;
-const RAW_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const SQLITE_SCHEMA_VERSION = 3;
+const RAW_RETENTION_MS = TIMELINE_RAW_RETENTION_MS;
 const DERIVED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const COLLECTOR_VAULT_GC_BATCH_LIMIT = 64;
+const COLLECTOR_VAULT_PREPARATION_LEASE_MS = 30_000;
+const COLLECTOR_VAULT_DELETE_LEASE_MS = 30_000;
+const COLLECTOR_VAULT_PREPARATION_WAIT_ATTEMPTS = 100;
+const COLLECTOR_VAULT_PREPARATION_WAIT_MS = 2;
 
 type CollectorRow = {
 	collector_id: string;
 	revision: number;
 	updated_at_ms: number;
 	sealed_payload: string;
+	vault_record_id: string;
+};
+
+type CollectorVaultGcRow = {
+	collector_id: string;
+	revision: number;
+	record_id: string;
+	enqueued_at_ms: number;
+	state: "PREPARING" | "RETIRED" | "DELETING";
+	owner_token: string;
+	lease_expires_at_ms: number;
+};
+
+type CollectorVaultGcRangeRow = {
+	collector_id: string;
+	next_revision: number;
+	end_revision_exclusive: number;
+	enqueued_at_ms: number;
 };
 
 type WindowRow = {
@@ -116,6 +142,7 @@ type OutboxRow = {
 
 export class SqliteTimelineV2Repository implements TimelineV2Repository {
 	private readonly database: Database;
+	private readonly vaultGcOwnerToken = crypto.randomUUID();
 	private lastCleanupAtMs = 0;
 
 	constructor(
@@ -142,6 +169,8 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 	async loadCollector(
 		collectorId: string,
 	): Promise<TimelineCollectorSnapshotV2 | null> {
+		this.retireExpiredCollectorVaultPreparations();
+		await this.tryDrainCollectorVaultGarbage();
 		const row = this.collectorRow(collectorId);
 		if (!row) return null;
 		if (row.updated_at_ms <= this.nowMs() - RAW_RETENTION_MS) {
@@ -155,7 +184,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 			this.vault,
 			openRequest(
 				"timeline.collector.v2",
-				collectorVaultRecordId(row.collector_id, row.revision),
+				row.vault_record_id,
 				TIMELINE_COLLECTOR_SCHEMA_VERSION,
 				row.sealed_payload,
 				{ collectorId: row.collector_id, revision: row.revision },
@@ -167,6 +196,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 		snapshot: TimelineCollectorSnapshotV2,
 		expectedRevision: number | null,
 	): Promise<TimelineCollectorSnapshotV2> {
+		await this.drainCollectorVaultGarbage();
 		const expiredResetRow =
 			expectedRevision === null
 				? this.collectorRow(snapshot.collectorId)
@@ -184,24 +214,42 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 		if (!resetsExpiredCollector) {
 			assertNextRevision(snapshot.revision, expectedRevision);
 		}
-		const sealed = await sealTimelineJson(
-			this.vault,
-			sealRequest(
-				"timeline.collector.v2",
-				collectorVaultRecordId(
-					persistedSnapshot.collectorId,
-					persistedSnapshot.revision,
-				),
-				TIMELINE_COLLECTOR_SCHEMA_VERSION,
-				{
-					collectorId: persistedSnapshot.collectorId,
-					revision: persistedSnapshot.revision,
-				},
-				this.nowMs() + RAW_RETENTION_MS,
-			),
+		const candidateRecordId = await collectorVaultRecordIdForSnapshot(
 			persistedSnapshot,
 		);
+		const preparationToken = await this.prepareCollectorVaultRecord(
+			persistedSnapshot,
+			candidateRecordId,
+		);
+		let sealed: string;
+		try {
+			sealed = await sealTimelineJson(
+				this.vault,
+				sealRequest(
+					"timeline.collector.v2",
+					candidateRecordId,
+					TIMELINE_COLLECTOR_SCHEMA_VERSION,
+					{
+						collectorId: persistedSnapshot.collectorId,
+						revision: persistedSnapshot.revision,
+					},
+					persistedSnapshot.updatedAtMs + RAW_RETENTION_MS,
+				),
+				persistedSnapshot,
+			);
+		} catch (error) {
+			this.retirePreparedCollectorVaultRecord(
+				candidateRecordId,
+				preparationToken,
+			);
+			await this.tryDrainCollectorVaultGarbage();
+			throw error;
+		}
 		const transaction = this.database.transaction(() => {
+			this.assertCollectorVaultPreparationOwned(
+				candidateRecordId,
+				preparationToken,
+			);
 			const current = this.collectorRow(persistedSnapshot.collectorId);
 			if (
 				current &&
@@ -212,15 +260,22 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 				this.database
 					.query(
 						`UPDATE timeline_collectors
-						 SET revision = ?, sealed_payload = ?, updated_at_ms = ?
+						 SET revision = ?, sealed_payload = ?, updated_at_ms = ?,
+						     vault_record_id = ?
 						 WHERE collector_id = ?`,
 					)
 					.run(
 						persistedSnapshot.revision,
 						sealed,
 						persistedSnapshot.updatedAtMs,
+						candidateRecordId,
 						persistedSnapshot.collectorId,
 					);
+				this.activateCollectorVaultRecord(
+					candidateRecordId,
+					preparationToken,
+				);
+				this.enqueueCollectorVaultRecord(expiredResetRow!);
 				return;
 			}
 			assertExpectedRevision(current?.revision ?? null, expectedRevision);
@@ -228,35 +283,58 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 				const result = this.database
 					.query(
 						`UPDATE timeline_collectors
-						 SET revision = ?, sealed_payload = ?, updated_at_ms = ?
+						 SET revision = ?, sealed_payload = ?, updated_at_ms = ?,
+						     vault_record_id = ?
 						 WHERE collector_id = ? AND revision = ?`,
 					)
 					.run(
-					 snapshot.revision,
-					 sealed,
-					 snapshot.updatedAtMs,
-					 snapshot.collectorId,
+						persistedSnapshot.revision,
+						sealed,
+						persistedSnapshot.updatedAtMs,
+						candidateRecordId,
+						persistedSnapshot.collectorId,
 						expectedRevision,
 					);
 				if (result.changes !== 1) {
 					throw new TimelineCollectorRevisionConflictError();
 				}
+				this.activateCollectorVaultRecord(
+					candidateRecordId,
+					preparationToken,
+				);
+				this.enqueueCollectorVaultRecord(current);
 			} else {
 				this.database
 					.query(
 						`INSERT INTO timeline_collectors
-						 (collector_id, revision, updated_at_ms, sealed_payload)
-						 VALUES (?, ?, ?, ?)`,
+						 (collector_id, revision, updated_at_ms, sealed_payload,
+						  vault_record_id)
+						 VALUES (?, ?, ?, ?, ?)`,
 					)
 					.run(
-						snapshot.collectorId,
-						snapshot.revision,
-						snapshot.updatedAtMs,
+						persistedSnapshot.collectorId,
+						persistedSnapshot.revision,
+						persistedSnapshot.updatedAtMs,
 						sealed,
+						candidateRecordId,
 					);
+				this.activateCollectorVaultRecord(
+					candidateRecordId,
+					preparationToken,
+				);
 			}
 		});
-		transaction.immediate();
+		try {
+			transaction.immediate();
+		} catch (error) {
+			this.retirePreparedCollectorVaultRecord(
+				candidateRecordId,
+				preparationToken,
+			);
+			await this.tryDrainCollectorVaultGarbage();
+			throw error;
+		}
+		await this.tryDrainCollectorVaultGarbage();
 		return structuredClone(persistedSnapshot);
 	}
 
@@ -266,38 +344,56 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 		expectedRevision: number,
 	): Promise<TimelineSealResult> {
 		this.cleanupExpiredIndexRowsIfDue(this.nowMs());
+		await this.drainCollectorVaultGarbage();
 		assertNextRevision(nextSnapshot.revision, expectedRevision);
-		const [sealedWindow, sealedSnapshot] = await Promise.all([
-			sealTimelineJson(
-				this.vault,
-				sealRequest(
-					"timeline.window.v2",
-					window.windowId,
-					TIMELINE_WINDOW_SCHEMA_VERSION,
-					windowAad(window),
-					this.nowMs() + RAW_RETENTION_MS,
-				),
-				window,
-			),
-			sealTimelineJson(
-				this.vault,
-				sealRequest(
-					"timeline.collector.v2",
-					collectorVaultRecordId(
-						nextSnapshot.collectorId,
-						nextSnapshot.revision,
+		const candidateRecordId = await collectorVaultRecordIdForSnapshot(nextSnapshot);
+		const preparationToken = await this.prepareCollectorVaultRecord(
+			nextSnapshot,
+			candidateRecordId,
+		);
+		let sealedWindow: string;
+		let sealedSnapshot: string;
+		try {
+			[sealedWindow, sealedSnapshot] = await Promise.all([
+				sealTimelineJson(
+					this.vault,
+					sealRequest(
+						"timeline.window.v2",
+						window.windowId,
+						TIMELINE_WINDOW_SCHEMA_VERSION,
+						windowAad(window),
+						window.endedAtMs + RAW_RETENTION_MS,
 					),
-					TIMELINE_COLLECTOR_SCHEMA_VERSION,
-					{
-						collectorId: nextSnapshot.collectorId,
-						revision: nextSnapshot.revision,
-					},
-					this.nowMs() + RAW_RETENTION_MS,
+					window,
 				),
-				nextSnapshot,
-			),
-		]);
+				sealTimelineJson(
+					this.vault,
+					sealRequest(
+						"timeline.collector.v2",
+						candidateRecordId,
+						TIMELINE_COLLECTOR_SCHEMA_VERSION,
+						{
+							collectorId: nextSnapshot.collectorId,
+							revision: nextSnapshot.revision,
+						},
+						nextSnapshot.updatedAtMs + RAW_RETENTION_MS,
+					),
+					nextSnapshot,
+				),
+			]);
+		} catch (error) {
+			this.retirePreparedCollectorVaultRecord(
+				candidateRecordId,
+				preparationToken,
+			);
+			await this.tryDrainCollectorVaultGarbage();
+			throw error;
+		}
 		const transaction = this.database.transaction(() => {
+			this.assertCollectorVaultPreparationOwned(
+				candidateRecordId,
+				preparationToken,
+			);
 			const existingWindow = this.windowRow(window.windowId);
 			const existingJob = this.jobRow(window.windowId);
 			if (existingWindow || existingJob) {
@@ -308,6 +404,17 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 				) {
 					throw new Error(`Timeline window collision for ${window.windowId}.`);
 				}
+				const activeCollector = this.collectorRow(nextSnapshot.collectorId);
+				if (
+					activeCollector?.revision !== nextSnapshot.revision ||
+					activeCollector.vault_record_id !== candidateRecordId
+				) {
+					throw new Error("Idempotent seal lost its collector revision.");
+				}
+				this.activateCollectorVaultRecord(
+					candidateRecordId,
+					preparationToken,
+				);
 				return { existingWindow, existingJob };
 			}
 			const collector = this.collectorRow(nextSnapshot.collectorId);
@@ -342,22 +449,40 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 			const updated = this.database
 				.query(
 					`UPDATE timeline_collectors
-					 SET revision = ?, updated_at_ms = ?, sealed_payload = ?
+					 SET revision = ?, updated_at_ms = ?, sealed_payload = ?,
+					     vault_record_id = ?
 					 WHERE collector_id = ? AND revision = ?`,
 				)
 				.run(
 					nextSnapshot.revision,
 					nextSnapshot.updatedAtMs,
 					sealedSnapshot,
+					candidateRecordId,
 					nextSnapshot.collectorId,
 					expectedRevision,
 				);
 			if (updated.changes !== 1) {
 				throw new TimelineCollectorRevisionConflictError();
 			}
+			this.activateCollectorVaultRecord(
+				candidateRecordId,
+				preparationToken,
+			);
+			this.enqueueCollectorVaultRecord(collector);
 			return { existingWindow: null, existingJob: null };
 		});
-		const result = transaction.immediate();
+		let result: ReturnType<typeof transaction.immediate>;
+		try {
+			result = transaction.immediate();
+		} catch (error) {
+			this.retirePreparedCollectorVaultRecord(
+				candidateRecordId,
+				preparationToken,
+			);
+			await this.tryDrainCollectorVaultGarbage();
+			throw error;
+		}
+		await this.tryDrainCollectorVaultGarbage();
 		if (result.existingWindow && result.existingJob) {
 			const [storedWindow, snapshot] = await Promise.all([
 				this.openWindowRow(result.existingWindow),
@@ -387,6 +512,36 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 	async getJob(windowId: string): Promise<TimelineJobV2 | null> {
 		const row = this.jobRow(windowId);
 		return row ? jobFromRow(row) : null;
+	}
+
+	async listCommittedWindowIds(
+		options: CommittedTimelineWindowListOptions,
+	): Promise<string[]> {
+		assertCommittedWindowListOptions(options);
+		const rawCutoffMs = options.availableAtMs - RAW_RETENTION_MS;
+		const orderBy =
+			options.order === "oldest_first"
+				? "w.ended_at_ms ASC, w.window_id ASC"
+				: "w.ended_at_ms DESC, w.window_id DESC";
+		return (
+			this.database
+				.query(
+					`SELECT w.window_id
+					 FROM timeline_windows w
+					 JOIN timeline_jobs j ON j.window_id = w.window_id
+					 WHERE j.state = 'COMMITTED'
+					   AND w.ended_at_ms > ?
+					   AND (? IS NULL OR w.ended_at_ms >= ?)
+					 ORDER BY ${orderBy}
+					 LIMIT ?`,
+				)
+				.all(
+					rawCutoffMs,
+					options.endedAtOrAfterMs,
+					options.endedAtOrAfterMs,
+					options.limit,
+				) as Array<{ window_id: string }>
+		).map((row) => row.window_id);
 	}
 
 	async claimNextWindow(
@@ -456,7 +611,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 									windowId: result.windowId,
 									startedAtMs: fact.startedAtMs,
 								},
-								this.nowMs() + DERIVED_RETENTION_MS,
+								window.ended_at_ms + DERIVED_RETENTION_MS,
 							),
 							fact,
 						),
@@ -476,7 +631,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 									episodeId: episode.episodeId,
 									revision: episode.revision,
 								},
-								this.nowMs() + DERIVED_RETENTION_MS,
+								window.ended_at_ms + DERIVED_RETENTION_MS,
 							),
 							episode,
 						),
@@ -493,7 +648,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 							windowId: result.windowId,
 							revision: result.summary.revision,
 						},
-						this.nowMs() + DERIVED_RETENTION_MS,
+						window.ended_at_ms + DERIVED_RETENTION_MS,
 					),
 					result.summary,
 				),
@@ -508,7 +663,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 							windowId: result.windowId,
 							payloadHash: result.agentInput.payloadHash,
 						},
-						this.nowMs() + DERIVED_RETENTION_MS,
+						window.ended_at_ms + DERIVED_RETENTION_MS,
 					),
 					result.agentInput,
 				),
@@ -986,6 +1141,296 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 		};
 	}
 
+	private async prepareCollectorVaultRecord(
+		snapshot: Pick<TimelineCollectorSnapshotV2, "collectorId" | "revision">,
+		recordId: string,
+	): Promise<string> {
+		const ownerToken = crypto.randomUUID();
+		for (
+			let attempt = 0;
+			attempt < COLLECTOR_VAULT_PREPARATION_WAIT_ATTEMPTS;
+			attempt += 1
+		) {
+			const nowMs = this.nowMs();
+			const transaction = this.database.transaction(() => {
+				this.releaseExpiredActiveCollectorVaultPreparations(nowMs);
+				this.retireExpiredCollectorVaultPreparations(nowMs);
+				const inserted = this.database
+					.query(
+						`INSERT INTO timeline_collector_vault_gc (
+						 collector_id, revision, record_id, enqueued_at_ms, state,
+						 owner_token, lease_expires_at_ms
+						 ) VALUES (?, ?, ?, ?, 'PREPARING', ?, ?)
+						 ON CONFLICT(record_id) DO NOTHING`,
+					)
+					.run(
+						snapshot.collectorId,
+						snapshot.revision,
+						recordId,
+						nowMs,
+						ownerToken,
+						nowMs + COLLECTOR_VAULT_PREPARATION_LEASE_MS,
+					);
+				if (inserted.changes === 1) return "owned" as const;
+				const row = this.collectorVaultGcRow(recordId);
+				if (row?.state === "PREPARING" && row.owner_token === ownerToken) {
+					return "owned" as const;
+				}
+				return row?.state === "RETIRED" ||
+					(row?.state === "DELETING" && row.lease_expires_at_ms <= nowMs)
+					? ("drain" as const)
+					: ("wait" as const);
+			});
+			const outcome = transaction.immediate();
+			if (outcome === "owned") return ownerToken;
+			if (outcome === "drain") {
+				await this.tryDrainCollectorVaultGarbage();
+			}
+			await waitForCollectorVaultPreparation();
+		}
+		throw new TimelineCollectorRevisionConflictError();
+	}
+
+	private assertCollectorVaultPreparationOwned(
+		recordId: string,
+		ownerToken: string,
+	): void {
+		const row = this.collectorVaultGcRow(recordId);
+		if (row?.state !== "PREPARING" || row.owner_token !== ownerToken) {
+			throw new TimelineCollectorRevisionConflictError();
+		}
+	}
+
+	private activateCollectorVaultRecord(
+		recordId: string,
+		ownerToken: string,
+	): void {
+		const deleted = this.database
+			.query(
+				`DELETE FROM timeline_collector_vault_gc
+				 WHERE record_id = ? AND state = 'PREPARING' AND owner_token = ?`,
+			)
+			.run(recordId, ownerToken);
+		if (deleted.changes !== 1) {
+			throw new TimelineCollectorRevisionConflictError();
+		}
+	}
+
+	private retirePreparedCollectorVaultRecord(
+		recordId: string,
+		ownerToken: string,
+	): void {
+		const nowMs = this.nowMs();
+		this.database
+			.query(
+				`UPDATE timeline_collector_vault_gc
+				 SET state = 'RETIRED', enqueued_at_ms = ?, lease_expires_at_ms = ?
+				 WHERE record_id = ? AND state = 'PREPARING' AND owner_token = ?`,
+			)
+			.run(nowMs, nowMs, recordId, ownerToken);
+	}
+
+	private retireExpiredCollectorVaultPreparations(
+		nowMs = this.nowMs(),
+	): void {
+		this.database
+			.query(
+				`UPDATE timeline_collector_vault_gc
+				 SET state = 'RETIRED', enqueued_at_ms = ?, owner_token = ?,
+				     lease_expires_at_ms = ?
+				 WHERE state = 'PREPARING' AND lease_expires_at_ms <= ?
+				   AND NOT EXISTS (
+					SELECT 1 FROM timeline_collectors c
+					 WHERE c.vault_record_id = timeline_collector_vault_gc.record_id
+				   )`,
+			)
+			.run(nowMs, this.vaultGcOwnerToken, nowMs, nowMs);
+	}
+
+	private releaseExpiredActiveCollectorVaultPreparations(nowMs: number): void {
+		this.database
+			.query(
+				`DELETE FROM timeline_collector_vault_gc
+				 WHERE state = 'PREPARING' AND lease_expires_at_ms <= ?
+				   AND EXISTS (
+					SELECT 1 FROM timeline_collectors c
+					 WHERE c.vault_record_id = timeline_collector_vault_gc.record_id
+				   )`,
+			)
+			.run(nowMs);
+	}
+
+	private enqueueCollectorVaultRecord(row: CollectorRow): void {
+		const nowMs = this.nowMs();
+		this.database
+			.query(
+				`INSERT INTO timeline_collector_vault_gc (
+				 collector_id, revision, record_id, enqueued_at_ms, state,
+				 owner_token, lease_expires_at_ms
+				 ) VALUES (?, ?, ?, ?, 'RETIRED', ?, ?)
+				 ON CONFLICT(record_id) DO UPDATE SET
+				 enqueued_at_ms = excluded.enqueued_at_ms,
+				 state = 'RETIRED',
+				 owner_token = excluded.owner_token,
+				 lease_expires_at_ms = excluded.lease_expires_at_ms
+				 WHERE timeline_collector_vault_gc.state != 'DELETING'`,
+			)
+			.run(
+				row.collector_id,
+				row.revision,
+				row.vault_record_id,
+				nowMs,
+				this.vaultGcOwnerToken,
+				nowMs,
+			);
+	}
+
+	private async tryDrainCollectorVaultGarbage(): Promise<void> {
+		try {
+			await this.drainCollectorVaultGarbage();
+		} catch {
+			// The durable queue is intentional backpressure. Recovery can still open
+			// the active collector, while the next mutation must drain it first.
+		}
+	}
+
+	private async drainCollectorVaultGarbage(): Promise<void> {
+		for (;;) {
+			const nowMs = this.nowMs();
+			const deleteOwnerToken = crypto.randomUUID();
+			const claim = this.database.transaction(() => {
+				this.releaseExpiredActiveCollectorVaultPreparations(nowMs);
+				this.retireExpiredCollectorVaultPreparations(nowMs);
+				this.database.exec(`
+					DELETE FROM timeline_collector_vault_gc
+					 WHERE state = 'RETIRED' AND EXISTS (
+						SELECT 1 FROM timeline_collectors c
+						 WHERE c.vault_record_id = timeline_collector_vault_gc.record_id
+					 );
+				`);
+				const candidates = this.database
+					.query(
+						`SELECT g.* FROM timeline_collector_vault_gc g
+						 WHERE (g.state = 'RETIRED'
+						        OR (g.state = 'DELETING' AND g.lease_expires_at_ms <= ?))
+						   AND NOT EXISTS (
+							SELECT 1 FROM timeline_collectors c
+							 WHERE c.vault_record_id = g.record_id
+						 )
+						 ORDER BY g.enqueued_at_ms, g.collector_id, g.revision
+						 LIMIT ?`,
+					)
+					.all(nowMs, COLLECTOR_VAULT_GC_BATCH_LIMIT) as CollectorVaultGcRow[];
+				const claimed: CollectorVaultGcRow[] = [];
+				for (const row of candidates) {
+					const updated = this.database
+						.query(
+							`UPDATE timeline_collector_vault_gc
+							 SET state = 'DELETING', owner_token = ?,
+							     lease_expires_at_ms = ?
+							 WHERE record_id = ?
+							   AND (state = 'RETIRED'
+							        OR (state = 'DELETING' AND lease_expires_at_ms <= ?))
+							   AND NOT EXISTS (
+								SELECT 1 FROM timeline_collectors c
+								 WHERE c.vault_record_id = timeline_collector_vault_gc.record_id
+							   )`,
+						)
+						.run(
+							deleteOwnerToken,
+							nowMs + COLLECTOR_VAULT_DELETE_LEASE_MS,
+							row.record_id,
+							nowMs,
+						);
+					if (updated.changes === 1) claimed.push(row);
+				}
+				return claimed;
+			});
+			const rows = claim.immediate();
+			if (rows.length > 0) {
+				await this.vault.deleteRecords({
+					purpose: "timeline.collector.v2",
+					recordIds: rows.map((row) => row.record_id),
+				});
+				const transaction = this.database.transaction(() => {
+					for (const row of rows) {
+						this.database
+							.query(
+								`DELETE FROM timeline_collector_vault_gc
+								 WHERE record_id = ? AND state = 'DELETING'
+								   AND owner_token = ?
+								   AND NOT EXISTS (
+									SELECT 1 FROM timeline_collectors c
+									 WHERE c.vault_record_id = ?
+								   )`,
+							)
+							.run(
+								row.record_id,
+								deleteOwnerToken,
+								row.record_id,
+							);
+					}
+				});
+				transaction.immediate();
+				continue;
+			}
+			const range = this.database
+				.query(
+					`SELECT * FROM timeline_collector_vault_gc_ranges
+					 ORDER BY enqueued_at_ms, collector_id
+					 LIMIT 1`,
+				)
+				.get() as CollectorVaultGcRangeRow | null;
+			if (!range) return;
+			const endRevision = Math.min(
+				range.end_revision_exclusive,
+				range.next_revision + COLLECTOR_VAULT_GC_BATCH_LIMIT,
+			);
+			const recordIds = Array.from(
+				{ length: endRevision - range.next_revision },
+				(_, offset) =>
+					legacyCollectorVaultRecordId(
+						range.collector_id,
+						range.next_revision + offset,
+					),
+			);
+			await this.vault.deleteRecords({
+				purpose: "timeline.collector.v2",
+				recordIds,
+			});
+			const rangeTransaction = this.database.transaction(() => {
+				if (endRevision >= range.end_revision_exclusive) {
+					this.database
+						.query(
+							`DELETE FROM timeline_collector_vault_gc_ranges
+							 WHERE collector_id = ? AND next_revision = ?
+							   AND end_revision_exclusive = ?`,
+						)
+						.run(
+							range.collector_id,
+							range.next_revision,
+							range.end_revision_exclusive,
+						);
+					return;
+				}
+				this.database
+					.query(
+						`UPDATE timeline_collector_vault_gc_ranges
+						 SET next_revision = ?
+						 WHERE collector_id = ? AND next_revision = ?
+						   AND end_revision_exclusive = ?`,
+					)
+					.run(
+						endRevision,
+						range.collector_id,
+						range.next_revision,
+						range.end_revision_exclusive,
+					);
+			});
+			rangeTransaction.immediate();
+		}
+	}
+
 	private configure(): void {
 		this.database.exec(`
 			PRAGMA journal_mode = WAL;
@@ -1048,7 +1493,31 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 				 collector_id TEXT PRIMARY KEY,
 				 revision INTEGER NOT NULL CHECK (revision >= 0),
 				 updated_at_ms INTEGER NOT NULL,
-				 sealed_payload TEXT NOT NULL
+				 sealed_payload TEXT NOT NULL,
+				 vault_record_id TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS timeline_collector_vault_gc (
+				 record_id TEXT PRIMARY KEY,
+				 collector_id TEXT NOT NULL,
+				 revision INTEGER NOT NULL CHECK (revision >= 0),
+				 enqueued_at_ms INTEGER NOT NULL,
+				 state TEXT NOT NULL CHECK (
+					state IN ('PREPARING', 'RETIRED', 'DELETING')
+				 ),
+				 owner_token TEXT NOT NULL,
+				 lease_expires_at_ms INTEGER NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS timeline_collector_vault_gc_queue
+				 ON timeline_collector_vault_gc(
+					state, lease_expires_at_ms, enqueued_at_ms, record_id
+				 );
+				CREATE TABLE IF NOT EXISTS timeline_collector_vault_gc_ranges (
+				 collector_id TEXT PRIMARY KEY,
+				 next_revision INTEGER NOT NULL CHECK (next_revision >= 0),
+				 end_revision_exclusive INTEGER NOT NULL CHECK (
+					end_revision_exclusive >= next_revision
+				 ),
+				 enqueued_at_ms INTEGER NOT NULL
 				);
 				CREATE TABLE IF NOT EXISTS timeline_windows (
 				 window_id TEXT PRIMARY KEY,
@@ -1139,11 +1608,90 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 			if (
 				row !== null &&
 				row.version !== 1 &&
+				row.version !== 2 &&
 				row.version !== SQLITE_SCHEMA_VERSION
 			) {
 				throw new Error(
-					`Unsupported timeline SQLite schema ${row.version}; expected 1 or ${SQLITE_SCHEMA_VERSION}.`,
+					`Unsupported timeline SQLite schema ${row.version}; expected 1, 2, or ${SQLITE_SCHEMA_VERSION}.`,
 				);
+			}
+			const collectorVaultGcSql = this.database
+				.query(
+					`SELECT sql FROM sqlite_master
+					 WHERE type = 'table' AND name = 'timeline_collector_vault_gc'`,
+				)
+				.get() as { sql: string } | null;
+			const collectorVaultGcColumns = this.database
+				.query("PRAGMA table_info(timeline_collector_vault_gc)")
+				.all() as Array<{ name: string }>;
+			if (
+				!collectorVaultGcColumns.some(
+					(column) => column.name === "lease_expires_at_ms",
+				) ||
+				!collectorVaultGcSql?.sql.includes("'DELETING'")
+			) {
+				this.database.exec(`
+					DROP INDEX IF EXISTS timeline_collector_vault_gc_queue;
+					ALTER TABLE timeline_collector_vault_gc
+					 RENAME TO timeline_collector_vault_gc_legacy;
+					CREATE TABLE timeline_collector_vault_gc (
+					 record_id TEXT PRIMARY KEY,
+					 collector_id TEXT NOT NULL,
+					 revision INTEGER NOT NULL CHECK (revision >= 0),
+					 enqueued_at_ms INTEGER NOT NULL,
+					 state TEXT NOT NULL CHECK (
+						state IN ('PREPARING', 'RETIRED', 'DELETING')
+					 ),
+					 owner_token TEXT NOT NULL,
+					 lease_expires_at_ms INTEGER NOT NULL
+					);
+					INSERT INTO timeline_collector_vault_gc (
+					 collector_id, revision, record_id, enqueued_at_ms, state,
+					 owner_token, lease_expires_at_ms
+					 )
+					 SELECT collector_id, revision, record_id, enqueued_at_ms,
+					        CASE state
+					         WHEN 'PREPARING' THEN 'PREPARING'
+					         ELSE 'RETIRED'
+					        END,
+					        owner_token, 0
+					 FROM timeline_collector_vault_gc_legacy;
+					DROP TABLE timeline_collector_vault_gc_legacy;
+					CREATE INDEX timeline_collector_vault_gc_queue
+					 ON timeline_collector_vault_gc(
+						state, lease_expires_at_ms, enqueued_at_ms, record_id
+					 );
+				`);
+			}
+			const collectorColumns = this.database
+				.query("PRAGMA table_info(timeline_collectors)")
+				.all() as Array<{ name: string }>;
+			if (
+				!collectorColumns.some(
+					(column) => column.name === "vault_record_id",
+				)
+			) {
+				this.database.exec(
+					"ALTER TABLE timeline_collectors ADD COLUMN vault_record_id TEXT NOT NULL DEFAULT ''",
+				);
+			}
+			this.database.exec(`
+				UPDATE timeline_collectors
+				 SET vault_record_id = collector_id || '.r' || CAST(revision AS TEXT)
+				 WHERE vault_record_id = '';
+			`);
+			if (row !== null && row.version < SQLITE_SCHEMA_VERSION) {
+				this.database
+					.query(
+						`INSERT INTO timeline_collector_vault_gc_ranges (
+						 collector_id, next_revision, end_revision_exclusive,
+						 enqueued_at_ms
+						 )
+						 SELECT collector_id, 0, revision, ?
+						 FROM timeline_collectors WHERE revision > 0
+						 ON CONFLICT(collector_id) DO NOTHING`,
+					)
+					.run(this.nowMs());
 			}
 			const outboxColumns = this.database
 				.query("PRAGMA table_info(agent_input_outbox)")
@@ -1163,7 +1711,7 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 						"INSERT INTO timeline_schema(singleton, version) VALUES (1, ?)",
 					)
 					.run(SQLITE_SCHEMA_VERSION);
-			} else if (row.version === 1) {
+			} else if (row.version !== SQLITE_SCHEMA_VERSION) {
 				this.database
 					.query(
 						"UPDATE timeline_schema SET version = ? WHERE singleton = 1",
@@ -1178,6 +1726,14 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 		return this.database
 			.query("SELECT * FROM timeline_collectors WHERE collector_id = ?")
 			.get(collectorId) as CollectorRow | null;
+	}
+
+	private collectorVaultGcRow(recordId: string): CollectorVaultGcRow | null {
+		return this.database
+			.query(
+				"SELECT * FROM timeline_collector_vault_gc WHERE record_id = ?",
+			)
+			.get(recordId) as CollectorVaultGcRow | null;
 	}
 
 	private windowRow(windowId: string): WindowRow | null {
@@ -1422,7 +1978,20 @@ function windowAad(
 	};
 }
 
-function collectorVaultRecordId(
+async function collectorVaultRecordIdForSnapshot(
+	snapshot: TimelineCollectorSnapshotV2,
+): Promise<string> {
+	const digest = await crypto.subtle.digest(
+		"SHA-256",
+		new TextEncoder().encode(canonicalJson(snapshot)),
+	);
+	const hash = [...new Uint8Array(digest)]
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
+	return `timeline_collector_${hash}`;
+}
+
+function legacyCollectorVaultRecordId(
 	collectorId: string,
 	revision: number,
 ): string {
@@ -1528,12 +2097,37 @@ function assertPositiveSafeInteger(value: number, field: string): void {
 	}
 }
 
+function assertCommittedWindowListOptions(
+	options: CommittedTimelineWindowListOptions,
+): void {
+	if (
+		options.endedAtOrAfterMs !== null &&
+		(!Number.isSafeInteger(options.endedAtOrAfterMs) ||
+			options.endedAtOrAfterMs < 0)
+	) {
+		throw new Error("endedAtOrAfterMs must be null or a non-negative safe integer.");
+	}
+	if (!Number.isSafeInteger(options.availableAtMs) || options.availableAtMs < 0) {
+		throw new Error("availableAtMs must be a non-negative safe integer.");
+	}
+	if (options.order !== "oldest_first" && options.order !== "newest_first") {
+		throw new Error("order must be oldest_first or newest_first.");
+	}
+	boundedInteger(options.limit, 1, 10_001, "limit");
+}
+
 function hardenPath(path: string, mode: number): void {
 	try {
 		chmodSync(path, mode);
 	} catch {
 		// POSIX mode hardening is unavailable on some test and Windows filesystems.
 	}
+}
+
+async function waitForCollectorVaultPreparation(): Promise<void> {
+	await new Promise<void>((resolve) => {
+		globalThis.setTimeout(resolve, COLLECTOR_VAULT_PREPARATION_WAIT_MS);
+	});
 }
 
 async function opaqueLeaseTokenHash(value: string): Promise<string> {
