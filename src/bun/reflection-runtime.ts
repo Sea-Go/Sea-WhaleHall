@@ -4,6 +4,7 @@ import { OllamaJsonClient } from "../agent/model/ollama-json-client";
 import {
 	WHALEHALL_TEACHER_MODEL_LOCK,
 	verifyOllamaModelLock,
+	type OllamaModelLock,
 } from "../agent/model/ollama-model-lock";
 import {
 	DesktopReflectionService,
@@ -12,6 +13,7 @@ import {
 	SqliteReflectionRepository,
 	loadOrCreateReflectionIdentity,
 	type ActiveGoalContextV1,
+	type EventWindowV1,
 } from "../agent/reflection";
 import {
 	ReflectionFeedbackSink,
@@ -28,8 +30,14 @@ export type WhaleHallReflectionRuntime = {
 export type CreateWhaleHallReflectionRuntimeOptions = {
 	agent: AgentRuntime;
 	dataDirectory: string;
+	/**
+	 * User-configured local Teacher address. The reviewed model lock still
+	 * verifies its exact model metadata before any content request.
+	 */
+	teacherBaseUrl?: string;
 	environment?: Readonly<Record<string, string | undefined>>;
 	onError?: (error: unknown) => void;
+	onWindowSealed?: (window: EventWindowV1) => void | Promise<void>;
 	onFeedback?: (code: ActiveReflectionFeedbackCode) => void | Promise<void>;
 	canPresentFeedback?: () => boolean;
 };
@@ -46,16 +54,21 @@ export async function createWhaleHallReflectionRuntime(
 	const repository = new SqliteReflectionRepository(
 		join(options.dataDirectory, "reflections.sqlite3"),
 	);
+	const teacherLock: OllamaModelLock = {
+		...WHALEHALL_TEACHER_MODEL_LOCK,
+		baseUrl:
+			options.teacherBaseUrl ?? WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
+	};
 
 	let teacherVerified = false;
 	let fallback: OllamaJsonClient | undefined;
 	try {
-		await verifyOllamaModelLock();
+		await verifyOllamaModelLock(teacherLock);
 		teacherVerified = true;
 		fallback = new OllamaJsonClient({
-			baseUrl: WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
-			model: WHALEHALL_TEACHER_MODEL_LOCK.model,
-			contextLength: WHALEHALL_TEACHER_MODEL_LOCK.numCtx,
+			baseUrl: teacherLock.baseUrl,
+			model: teacherLock.model,
+			contextLength: teacherLock.numCtx,
 			keepAlive: "30m",
 		});
 	} catch (error) {
@@ -76,8 +89,8 @@ export async function createWhaleHallReflectionRuntime(
 			primary,
 			fallback,
 			fallbackModelVersion: teacherVerified
-				? `${WHALEHALL_TEACHER_MODEL_LOCK.model}@${WHALEHALL_TEACHER_MODEL_LOCK.digest.slice(0, 12)}`
-				: WHALEHALL_TEACHER_MODEL_LOCK.model,
+				? `${teacherLock.model}@${teacherLock.digest.slice(0, 12)}`
+				: teacherLock.model,
 		});
 		const service = new DesktopReflectionService({
 			transport: options.agent,
@@ -88,6 +101,7 @@ export async function createWhaleHallReflectionRuntime(
 			// launches. Clear any recovered collector goal before native sensors
 			// start so early events cannot be attributed to a stale account goal.
 			startupGoal: null,
+			onWindowSealed: options.onWindowSealed,
 			sinks: options.onFeedback
 				? [
 						new ReflectionFeedbackSink({

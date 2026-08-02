@@ -9,6 +9,8 @@ native/**/target/
 
 .DS_Store
 *.log
+/*.private.json
+/config.yaml
 __pycache__/
 *.py[cod]
 .pytest_cache/

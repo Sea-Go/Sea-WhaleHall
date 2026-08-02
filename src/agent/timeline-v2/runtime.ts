@@ -8,6 +8,7 @@ import {
 import {
 	WHALEHALL_TEACHER_MODEL_LOCK,
 	verifyOllamaModelLock,
+	type OllamaModelLock,
 } from "../model/ollama-model-lock";
 import { loadOrCreateReflectionIdentity } from "../reflection/identity";
 import type { ActiveGoalContextV1 } from "../reflection/types";
@@ -152,6 +153,11 @@ export type CreateTimelineV2RuntimeOptions = {
 	initialGoal?: ActiveGoalContextV1 | null;
 	onError?: (error: unknown) => void;
 	verifyTeacher?: boolean;
+	/**
+	 * User-configured local Teacher address. It is still constrained by the
+	 * reviewed Qwen lock and the Ollama loopback-only verifier.
+	 */
+	teacherBaseUrl?: string;
 	/** Shared only by the metadata lock check and local inference client. */
 	teacherFetch?: FetchLike;
 	/**
@@ -189,6 +195,11 @@ export async function createTimelineV2Runtime(
 		join(options.dataDirectory, "timeline-v2.sqlite3"),
 		vault,
 	);
+	const teacherLock: OllamaModelLock = {
+		...WHALEHALL_TEACHER_MODEL_LOCK,
+		baseUrl:
+			options.teacherBaseUrl ?? WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
+	};
 	let modelLockVerified = false;
 	let inferenceReady = false;
 	const diagnostics: TimelineInferenceDiagnosticV2[] = [];
@@ -297,14 +308,14 @@ export async function createTimelineV2Runtime(
 	}
 	if (options.verifyTeacher !== false) {
 		try {
-			await verifyOllamaModelLock(WHALEHALL_TEACHER_MODEL_LOCK, {
+			await verifyOllamaModelLock(teacherLock, {
 				fetch: options.teacherFetch,
 			});
 			modelLockVerified = true;
 			const client = new OllamaJsonClient({
-				baseUrl: WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
-				model: WHALEHALL_TEACHER_MODEL_LOCK.model,
-				contextLength: WHALEHALL_TEACHER_MODEL_LOCK.numCtx,
+				baseUrl: teacherLock.baseUrl,
+				model: teacherLock.model,
+				contextLength: teacherLock.numCtx,
 				keepAlive: "30m",
 				fetch: options.teacherFetch,
 			});

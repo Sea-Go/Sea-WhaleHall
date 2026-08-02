@@ -531,6 +531,44 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 
 ## 模型运行配置
 
+版本化的安全默认模板保存在 `config.template.yaml`；构建时它被命名为
+`config.yaml` 打包，首次启动再复制为 app user-data 根目录中可编辑的
+`config.yaml`。仓库不会追踪该用户副本，应用以后也不会覆盖已有副本。
+
+除 `activityEventWorker` 外，配置只接受 loopback 地址。`teacherOllama.baseUrl` 同时供
+Reflection 和 Timeline v2 的 reviewed Qwen Teacher lock 使用；即使地址有效，version、model、
+digest、parameter size 和 quantization 仍须完全匹配。`reflectionModernBert.endpoint` 只是遗留
+Reflection primary 的本机地址设置，默认并无服务或训练后的 Student。Timeline ModernBERT 的三项
+全部为空时保持 cold-start；三项非空时还要求同 origin、绝对本机 manifest 路径和完整 artifact pin。
+无效、部分、远端、symlink 或超大配置都回退到本机默认值，且不覆盖用户原文件。请求地址不再继承
+旧的 Timeline endpoint 环境变量。认证 token 仍仅从
+`WHALEHALL_TIMELINE_MODERNBERT_TOKEN` 环境变量注入，禁止写入 YAML、manifest 或日志。
+
+`activityEventWorker` 是唯一的受审核云端例外：endpoint 被客户端代码固定校验，不能改为
+任意公网、内网或 loopback URL。它启用且 Bun 主进程具有非空
+`WHALEHALL_ACTIVITY_WORKER_TOKEN` 时，投递器只接收 Reflection collector 已经封闭的
+`EventWindowV1`，绝不按单条 `DesktopEventV1` 或 EventJournal cursor 调用云端。封窗规则保持
+Reflection 原语义：64 条有效语义事件、第一条有效事件后的 5 分钟，或目标切换、AFK/锁屏/睡眠等
+存在状态边界提前封闭一个非空窗口；进程扫描、心跳、工具和反思自身事件不计入 64 条。
+
+每个封闭窗口只产生一次请求，完整且未裁剪的 `EventWindowV1`（包含原始 `events` 数组、目标快照、
+时间范围和封窗原因）直接放在 `raw_event` 并请求 Qwen 1.7B。`context.response_contract` 只锚定
+request ID、window ID、唯一稳定的 window source anchor、完整 source cursor 清单、封窗原因和时间范围，
+不替换或裁剪原始窗口。小模型只需回传 window anchor（也可回传窗口内任一 eventId 或 cursor），不能引用
+窗口外事件。若 1.7B 仍生成无法映射的子事件 ID，客户端会将该输出项的来源安全归一化为本次 window
+anchor；分类、证据和分数保持不变，且不会形成窗口外引用。
+
+云端响应必须是 `activity-event-analysis-response.v1`：事件列表仅保留在 Bun 主进程及 owner-only
+`activity-window-worker.sqlite3` 收据/出站库，`score` 才进入本地累加器。窗口先写入本地出站库，
+成功响应和分数在同一 SQLite 事务中落收据；因此重启、重复封窗通知或“远端已响应但进程尚未落库”的
+情况都不会重复加分。首次启用时会在 Reflection 启动前建立本地 cutover，先前已经封闭的窗口不会被
+补传；之后若进程恰好在封窗与通知之间崩溃，下一次启动会从 Reflection 的窗口索引补入尚未处理的窗口。
+累计值达到
+`scoreThreshold` 后只持久化 `agentTriggerPending`，由本地下一步 Agent 执行器显式 claim 后才扣除
+一个阈值并保留超额分数；模型和投递器都不会自行调用未定义的 Agent。网络、超时或服务端暂不可用
+时窗口停留在出站库并按退避重试，不会阻塞 Reflection 的 native cursor。token 从不交给 Rust
+传感器、YAML、SQLite 收据、日志或 renderer。
+
 本机 Qwen lock：
 
 | 配置 | 值 |
@@ -569,12 +607,10 @@ runtime/manifest 或日志。独立 v2 server 的标准入口从同名
 已有 SSH 控制路径转发到本机 loopback；这仍然需要显式 opt-in 与完整的
 预期 artifact manifest。
 
-当前 Bun composition 只接受
-`WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT`、
-`WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT` 和指向本机绝对路径普通
-文件的 `WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST` 三项同时存在；
-缺项、相对路径、symlink、坏 manifest 或非 loopback endpoint 都明确保持
-cold-start。Bun 不接通通用 classifier 的远端 allowlist/insecure 选项。
+当前 Bun composition 从 user-data `config.yaml` 的
+`request.timelineModernBert.endpoint`、`manifestEndpoint` 和 `pinnedManifest` 同时读取三项；
+缺项、相对路径、symlink、坏 manifest 或非 loopback endpoint 都明确保持 cold-start。Bun 不接通
+通用 classifier 的远端 allowlist/insecure 选项。
 
 截至 2026-07-30 的只读基线核对中，独立 `WhaleHall-Training` 工作区可从
 `episode_training_v2.py` 导出 v2 `runtime.json` 和模型/tokenizer 文件；

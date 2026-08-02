@@ -84,9 +84,11 @@ export default {
 		},
 		copy: {
 			"dist/views": "views",
+			"config.template.yaml": "config.yaml",
 			...nativeCopies,
 		},
 		watch: [
+			"config.template.yaml",
 			"src/views",
 			"src/agent",
 			"whalehall-local/protocol/src",

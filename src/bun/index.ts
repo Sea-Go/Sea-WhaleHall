@@ -10,6 +10,14 @@ import {
 } from "electrobun/bun";
 import { AgentRuntime } from "../agent/agent-runtime";
 import {
+	ActivityEventWorkerClient,
+} from "../agent/activity-event-worker";
+import {
+	ActivityWindowDeliveryService,
+	ActivityWindowDeliveryStore,
+	activityWindowWorkerDiagnostic,
+} from "../agent/activity-window-worker";
+import {
 	LocalClientError,
 	LocalToolClient,
 } from "../agent/local-tool-client";
@@ -32,6 +40,11 @@ import {
 	nativeRuntimeSecurityEnvironment,
 	parseNativeRuntimeChannel,
 } from "./native-runtime-security";
+import {
+	activityEventWorkerConfigurationFromConfiguration,
+	loadOrCreateClientConfiguration,
+	timelineModernBertEnvironmentFromConfiguration,
+} from "./client-config";
 import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import { BackgroundAppLifecycle } from "./app-lifecycle";
 import {
@@ -62,6 +75,15 @@ const runtimeChannel = parseNativeRuntimeChannel(
 const nativeBinary = process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local";
 const nativePath = join(PATHS.RESOURCES_FOLDER, "app", "native", nativeBinary);
 const localDataPath = join(Utils.paths.userData, "local");
+const clientConfiguration = loadOrCreateClientConfiguration({
+	userDataDirectory: Utils.paths.userData,
+	bundledTemplatePath: join(PATHS.RESOURCES_FOLDER, "app", "config.yaml"),
+});
+if (clientConfiguration.status === "invalid") {
+	console.warn(
+		"WhaleHall client config.yaml is invalid; safe defaults remain active.",
+	);
+}
 const runtimeIdentity = loadOrCreateReflectionIdentity(
 	join(localDataPath, "reflection-identity.v1.json"),
 );
@@ -72,10 +94,28 @@ const localRuntimeEnvironment: Record<string, string> = {
 	...nativeRuntimeSecurityEnvironment(runtimeChannel),
 };
 const timelineModernBertConfiguration =
-	loadTimelineModernBertConfiguration(process.env);
+	loadTimelineModernBertConfiguration(
+		timelineModernBertEnvironmentFromConfiguration(
+			clientConfiguration.configuration,
+			process.env,
+		),
+	);
 if (timelineModernBertConfiguration.code === "invalid_config") {
 	console.warn(
 		"WhaleHall Timeline v2 ModernBERT configuration is incomplete or invalid; deterministic cold-start remains active.",
+	);
+}
+const activityEventWorkerConfiguration =
+	activityEventWorkerConfigurationFromConfiguration(
+		clientConfiguration.configuration,
+		process.env,
+	);
+if (
+	clientConfiguration.configuration.request.activityEventWorker.enabled &&
+	activityEventWorkerConfiguration === null
+) {
+	console.warn(
+		"WhaleHall cloud activity analysis is configured but inactive because its dedicated token is unavailable.",
 	);
 }
 
@@ -99,6 +139,8 @@ let shutdownPromise: Promise<void> | null = null;
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
+let activityWindowDelivery: ActivityWindowDeliveryService | null = null;
+let activityWindowDeliveryStore: ActivityWindowDeliveryStore | null = null;
 const STARTUP_RETRY_DELAYS_MS = [
 	1_000,
 	5_000,
@@ -120,6 +162,8 @@ const timelineLifecycle = new TimelineRuntimeLifecycle<TimelineV2Runtime>({
 			dataDirectory: localDataPath,
 			initialGoal: reflection.service.getActiveGoalContext(),
 			rawAuditSource,
+			teacherBaseUrl:
+				clientConfiguration.configuration.request.teacherOllama.baseUrl,
 			modernBert: timelineModernBertConfiguration.modernBert,
 		});
 	},
@@ -586,6 +630,7 @@ function shutdown(): Promise<void> {
 		// start. Waiting here prevents a late candidate from restarting the
 		// native sensor process after shutdown has already stopped it.
 		await startupPromise;
+		await stopActivityWindowDelivery();
 		await timelineLifecycle.close();
 		await reflectionRuntime?.close();
 		reflectionRuntime = null;
@@ -622,18 +667,28 @@ startupPromise = (async () => {
 			candidate = await createWhaleHallReflectionRuntime({
 				agent,
 				dataDirectory: localDataPath,
-				environment: {
+				teacherBaseUrl:
+					clientConfiguration.configuration.request.teacherOllama.baseUrl,
+					environment: {
 					...process.env,
-					// v2 phase one is local-only. Ignore remote ModernBERT
+					// Address configuration is local-only. Ignore remote ModernBERT
 					// overrides even when the parent shell exports them.
-					WHALEHALL_MODERNBERT_ENDPOINT: undefined,
+					WHALEHALL_MODERNBERT_ENDPOINT:
+						clientConfiguration.configuration.request.reflectionModernBert
+							.endpoint,
 					WHALEHALL_MODERNBERT_ALLOWED_ORIGINS: undefined,
+				},
+				onWindowSealed: (window) => {
+					const delivery = activityWindowDelivery;
+					if (delivery === null || shutdownPromise !== null) return;
+					return delivery.enqueueWindow(window);
 				},
 			});
 			if (shutdownPromise) {
 				await candidate.close();
 				return;
 			}
+			await startActivityWindowDelivery(candidate.repository);
 			await candidate.service.start();
 			if (shutdownPromise) {
 				await candidate.close();
@@ -670,6 +725,7 @@ startupPromise = (async () => {
 			);
 			return;
 		} catch (error) {
+			await stopActivityWindowDelivery();
 			if (candidate) {
 				await candidate.close().catch((closeError) => {
 					console.error(
@@ -727,6 +783,80 @@ function waitForStartupRetry(delayMs: number): Promise<void> {
 			finish();
 		};
 	});
+}
+
+async function startActivityWindowDelivery(
+	source: WhaleHallReflectionRuntime["repository"],
+): Promise<void> {
+	if (
+		activityEventWorkerConfiguration === null ||
+		activityWindowDelivery !== null ||
+		shutdownPromise !== null
+	) {
+		return;
+	}
+	const store = new ActivityWindowDeliveryStore(
+		join(localDataPath, "activity-window-worker.sqlite3"),
+	);
+	const delivery = new ActivityWindowDeliveryService({
+		source,
+		analyzer: new ActivityEventWorkerClient({
+			endpoint: activityEventWorkerConfiguration.endpoint,
+			authorizationToken: activityEventWorkerConfiguration.authorizationToken,
+		}),
+		store,
+		scoreThreshold: activityEventWorkerConfiguration.scoreThreshold,
+		onAgentTriggerRequired: () => {
+			// This is intentionally a local decision boundary. The project does
+			// not yet define a concrete next-Agent executor, so the durable
+			// pending state is retained until that executor claims it.
+			console.info(
+				"WhaleHall activity score reached its local Agent trigger threshold.",
+			);
+		},
+		onError: (error) => {
+			const diagnostic = activityWindowWorkerDiagnostic(error);
+			console.warn(
+				"WhaleHall activity window delivery retry:",
+				diagnostic.code,
+				diagnostic.httpStatus ?? "",
+				diagnostic.requestBytes === null
+					? ""
+					: `request_bytes=${diagnostic.requestBytes}`,
+				diagnostic.responseServer === null
+					? ""
+					: `server=${diagnostic.responseServer}`,
+				diagnostic.triggerReason === null
+					? ""
+					: `trigger_reason=${diagnostic.triggerReason}`,
+				diagnostic.eventCount === null
+					? ""
+					: `event_count=${diagnostic.eventCount}`,
+				diagnostic.validationStage === null
+					? ""
+					: `validation_stage=${diagnostic.validationStage}`,
+			);
+		},
+	});
+	activityWindowDeliveryStore = store;
+	activityWindowDelivery = delivery;
+	try {
+		await delivery.start();
+	} catch (error) {
+		activityWindowDelivery = null;
+		activityWindowDeliveryStore = null;
+		store.close();
+		throw error;
+	}
+}
+
+async function stopActivityWindowDelivery(): Promise<void> {
+	const delivery = activityWindowDelivery;
+	const store = activityWindowDeliveryStore;
+	activityWindowDelivery = null;
+	activityWindowDeliveryStore = null;
+	await delivery?.stop();
+	store?.close();
 }
 
 function createRawFiveMinuteAuditSource(
