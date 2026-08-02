@@ -15,15 +15,20 @@ use directories::ProjectDirs;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
+use whalehall_local_protocol::{DesktopEventSensitivity, desktop_event_kinds};
+
+use crate::events::{DesktopEventDraft, EventJournal, EventJournalError};
+use crate::observations::{ObservationJournal, ObservationJournalError};
 
 pub const DEFAULT_PRESENCE_POLL_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_AFK_THRESHOLD_MS: u64 = 5 * 60 * 1_000;
 pub const DEFAULT_SUSPEND_GAP_THRESHOLD_MS: u64 = 15_000;
-const PRESENCE_SCHEMA_VERSION: i64 = 1;
+const PRESENCE_SCHEMA_VERSION: i64 = 3;
 const MAX_QUERY_LIMIT: usize = 1_000;
 
 #[derive(Debug, Error)]
@@ -36,6 +41,10 @@ pub enum PresenceError {
     Sqlite(#[from] rusqlite::Error),
     #[error("presence sensor collection error: {0}")]
     Collection(String),
+    #[error("presence event publication failed: {0}")]
+    EventJournal(#[from] EventJournalError),
+    #[error("presence semantic publication failed: {0}")]
+    ObservationJournal(#[from] ObservationJournalError),
 }
 
 #[derive(Clone, Debug)]
@@ -257,7 +266,28 @@ impl PresenceService {
         config: PresenceConfig,
         provider: Arc<dyn PresenceProvider>,
     ) -> Result<Self, PresenceError> {
+        Self::start_with_event_journal(config, provider, None)
+    }
+
+    pub fn start_with_event_journal(
+        config: PresenceConfig,
+        provider: Arc<dyn PresenceProvider>,
+        event_journal: Option<EventJournal>,
+    ) -> Result<Self, PresenceError> {
+        Self::start_with_journals(config, provider, event_journal, None)
+    }
+
+    pub fn start_with_journals(
+        config: PresenceConfig,
+        provider: Arc<dyn PresenceProvider>,
+        event_journal: Option<EventJournal>,
+        observation_journal: Option<ObservationJournal>,
+    ) -> Result<Self, PresenceError> {
         let store = PresenceStore::open(&config.database_path)?;
+        store.enable_pending_targets(PublicationTargets {
+            desktop: event_journal.is_some(),
+            observation: observation_journal.is_some(),
+        })?;
         let persisted = store.load_state()?.unwrap_or_default();
         let status = PresenceStatus {
             state: PresenceSensorState::Starting,
@@ -296,7 +326,13 @@ impl PresenceService {
             cancellation: CancellationToken::new(),
             task: Mutex::new(None),
         });
-        let task = tokio::spawn(run_presence_monitor(inner.clone(), provider, tracker));
+        let task = tokio::spawn(run_presence_monitor(
+            inner.clone(),
+            provider,
+            tracker,
+            event_journal,
+            observation_journal,
+        ));
         *inner.task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
         Ok(Self { inner })
     }
@@ -338,6 +374,8 @@ async fn run_presence_monitor(
     inner: Arc<PresenceInner>,
     provider: Arc<dyn PresenceProvider>,
     mut tracker: PresenceTracker,
+    event_journal: Option<EventJournal>,
+    observation_journal: Option<ObservationJournal>,
 ) {
     let mut ticker = interval(inner.config.poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -351,6 +389,11 @@ async fn run_presence_monitor(
                 break;
             }
             _ = ticker.tick() => {
+                let pending_publication_error = flush_configured_presence_outbox(
+                    &inner.store,
+                    event_journal.as_ref(),
+                    observation_journal.as_ref(),
+                );
                 let observed_at_ms = now_ms();
                 let observation = tokio::task::spawn_blocking({
                     let provider = provider.clone();
@@ -364,29 +407,200 @@ async fn run_presence_monitor(
 
                 match observation {
                     Ok(observation) => {
-                        let events = tracker.apply(
+                        let mut candidate = tracker.clone();
+                        let events = candidate.apply(
                             &inner.config,
                             &observation,
                             observed_at_ms,
                         );
-                        if let Err(error) = inner.store.record_sample(
-                            &tracker.persisted,
+                        if let Err(error) = inner.store.record_sample_for_targets(
+                            &candidate.persisted,
                             &events,
                             observed_at_ms,
+                            PublicationTargets {
+                                desktop: event_journal.is_some(),
+                                observation: observation_journal.is_some(),
+                            },
                         ) {
                             update_error_status(&inner, error.to_string());
                             continue;
                         }
+                        tracker = candidate;
+                        let publication_error = flush_configured_presence_outbox(
+                            &inner.store,
+                            event_journal.as_ref(),
+                            observation_journal.as_ref(),
+                        );
                         update_observation_status(
                             &inner,
                             &tracker.persisted,
                             observation,
                         );
+                        if let Some(error) = publication_error {
+                            update_error_status(&inner, error.to_string());
+                        }
                     }
-                    Err(error) => update_error_status(&inner, error.to_string()),
+                    Err(error) => {
+                        let error = pending_publication_error
+                            .map(|publication_error| {
+                                format!("{error}; pending presence event retry failed: {publication_error}")
+                            })
+                            .unwrap_or_else(|| error.to_string());
+                        update_error_status(&inner, error);
+                    }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+fn publish_presence_events(
+    event_journal: &EventJournal,
+    events: &[PendingPresenceEvent],
+    observed_at_ms: i64,
+) -> Result<(), PresenceError> {
+    for event in events {
+        event_journal.append(presence_event_draft(event, observed_at_ms))?;
+    }
+    Ok(())
+}
+
+fn presence_event_draft(event: &PendingPresenceEvent, observed_at_ms: i64) -> DesktopEventDraft {
+    let kind = match event.event_type {
+        PresenceEventKind::AfkStarted => desktop_event_kinds::PRESENCE_AFK_STARTED,
+        PresenceEventKind::AfkEnded => desktop_event_kinds::PRESENCE_AFK_ENDED,
+        PresenceEventKind::ScreenLocked => desktop_event_kinds::PRESENCE_LOCKED,
+        PresenceEventKind::ScreenUnlocked => desktop_event_kinds::PRESENCE_UNLOCKED,
+        PresenceEventKind::SleepStarted => desktop_event_kinds::PRESENCE_SLEEP,
+        PresenceEventKind::WokeUp => desktop_event_kinds::PRESENCE_WAKE,
+    };
+    let payload = match event.event_type {
+        PresenceEventKind::AfkStarted | PresenceEventKind::AfkEnded => {
+            json!({ "idleForMs": event.idle_for_ms.unwrap_or_default() })
+        }
+        PresenceEventKind::ScreenLocked
+        | PresenceEventKind::ScreenUnlocked
+        | PresenceEventKind::SleepStarted
+        | PresenceEventKind::WokeUp => json!({}),
+    };
+    let journal_occurred_at_ms = match event.event_type {
+        PresenceEventKind::SleepStarted | PresenceEventKind::WokeUp => observed_at_ms,
+        _ => event.occurred_at_ms,
+    };
+    DesktopEventDraft {
+        kind: kind.to_owned(),
+        source: "presence.sensor".to_owned(),
+        occurred_at_ms: journal_occurred_at_ms,
+        observed_at_ms: journal_occurred_at_ms,
+        goal_version: None,
+        sensitivity: DesktopEventSensitivity::Metadata,
+        payload,
+        deduplication_key: format!(
+            "presence:{}:{}",
+            event.event_type.as_database_value(),
+            event.occurred_at_ms,
+        ),
+    }
+}
+
+fn legacy_presence_event_draft(
+    event: &PendingPresenceEvent,
+    observed_at_ms: i64,
+) -> DesktopEventDraft {
+    let mut draft = presence_event_draft(event, observed_at_ms);
+    draft.occurred_at_ms = event.occurred_at_ms;
+    draft.observed_at_ms = observed_at_ms.max(event.occurred_at_ms);
+    draft
+}
+
+fn append_presence_outbox_record(
+    event_journal: &EventJournal,
+    record: &PresenceEventOutboxRecord,
+) -> Result<(), PresenceError> {
+    match event_journal.append(presence_event_draft(&record.event, record.observed_at_ms)) {
+        Ok(_) => Ok(()),
+        Err(EventJournalError::IdempotencyConflict { .. }) => {
+            event_journal.append(legacy_presence_event_draft(
+                &record.event,
+                record.observed_at_ms,
+            ))?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+fn flush_presence_event_outbox(
+    store: &PresenceStore,
+    event_journal: &EventJournal,
+) -> Result<(), PresenceError> {
+    flush_presence_event_outbox_for_targets(store, Some(event_journal), None)
+}
+
+fn flush_configured_presence_outbox(
+    store: &PresenceStore,
+    event_journal: Option<&EventJournal>,
+    observation_journal: Option<&ObservationJournal>,
+) -> Option<PresenceError> {
+    if event_journal.is_none() && observation_journal.is_none() {
+        return None;
+    }
+    flush_presence_event_outbox_for_targets(store, event_journal, observation_journal).err()
+}
+
+fn flush_presence_event_outbox_for_targets(
+    store: &PresenceStore,
+    event_journal: Option<&EventJournal>,
+    observation_journal: Option<&ObservationJournal>,
+) -> Result<(), PresenceError> {
+    for record in store.pending_desktop_events(100)? {
+        let mut desktop_published = record.desktop_published;
+        let mut observation_published = record.observation_published;
+        if record.publish_desktop && !desktop_published {
+            let event_journal = event_journal.ok_or_else(|| {
+                PresenceError::Configuration(
+                    "presence desktop outbox target is unavailable".to_owned(),
+                )
+            })?;
+            append_presence_outbox_record(event_journal, &record)?;
+            store.mark_desktop_event_published(record.id)?;
+            desktop_published = true;
+        }
+        if record.publish_observation && !observation_published {
+            let observation_journal = observation_journal.ok_or_else(|| {
+                PresenceError::Configuration(
+                    "presence observation outbox target is unavailable".to_owned(),
+                )
+            })?;
+            observation_journal.append_presence_change(
+                &record.deduplication_key,
+                semantic_presence_state(record.event.event_type),
+                record.event.occurred_at_ms,
+                record.observed_at_ms,
+                record.event.idle_for_ms,
+            )?;
+            store.mark_observation_event_published(record.id)?;
+            observation_published = true;
+        }
+        if (!record.publish_desktop || desktop_published)
+            && (!record.publish_observation || observation_published)
+        {
+            store.delete_desktop_event(record.id)?;
+        }
+    }
+    Ok(())
+}
+
+fn semantic_presence_state(event_type: PresenceEventKind) -> &'static str {
+    match event_type {
+        PresenceEventKind::AfkStarted => "afk_started",
+        PresenceEventKind::AfkEnded => "afk_ended",
+        PresenceEventKind::ScreenLocked => "locked",
+        PresenceEventKind::ScreenUnlocked => "unlocked",
+        PresenceEventKind::SleepStarted => "sleep",
+        PresenceEventKind::WokeUp => "wake",
     }
 }
 
@@ -455,6 +669,7 @@ struct PersistedPresenceState {
 struct PendingPresenceEvent {
     event_type: PresenceEventKind,
     occurred_at_ms: i64,
+    idle_for_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -480,10 +695,12 @@ impl PresenceTracker {
                 events.push(PendingPresenceEvent {
                     event_type: PresenceEventKind::SleepStarted,
                     occurred_at_ms: sleep_at_ms,
+                    idle_for_ms: None,
                 });
                 events.push(PendingPresenceEvent {
                     event_type: PresenceEventKind::WokeUp,
                     occurred_at_ms: observed_at_ms,
+                    idle_for_ms: None,
                 });
                 self.persisted.last_sleep_at_ms = Some(sleep_at_ms);
                 self.persisted.last_wake_at_ms = Some(observed_at_ms);
@@ -510,6 +727,11 @@ impl PresenceTracker {
                 events.push(PendingPresenceEvent {
                     event_type,
                     occurred_at_ms,
+                    idle_for_ms: Some(if now_afk {
+                        duration_ms_u64(config.afk_threshold)
+                    } else {
+                        self.persisted.idle_duration_ms.unwrap_or_default()
+                    }),
                 });
                 self.persisted.is_afk = now_afk;
                 self.persisted.afk_since_ms = now_afk.then_some(occurred_at_ms);
@@ -529,6 +751,7 @@ impl PresenceTracker {
                         PresenceEventKind::ScreenUnlocked
                     },
                     occurred_at_ms: observed_at_ms,
+                    idle_for_ms: None,
                 });
             }
             self.persisted.is_locked = Some(locked);
@@ -542,6 +765,24 @@ impl PresenceTracker {
 #[derive(Clone, Debug)]
 struct PresenceStore {
     path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct PresenceEventOutboxRecord {
+    id: i64,
+    deduplication_key: String,
+    event: PendingPresenceEvent,
+    observed_at_ms: i64,
+    publish_desktop: bool,
+    publish_observation: bool,
+    desktop_published: bool,
+    observation_published: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PublicationTargets {
+    desktop: bool,
+    observation: bool,
 }
 
 impl PresenceStore {
@@ -562,11 +803,31 @@ impl PresenceStore {
         &self.path
     }
 
+    #[cfg(test)]
     fn record_sample(
         &self,
         state: &PersistedPresenceState,
         events: &[PendingPresenceEvent],
         observed_at_ms: i64,
+        enqueue_desktop_events: bool,
+    ) -> Result<(), PresenceError> {
+        self.record_sample_for_targets(
+            state,
+            events,
+            observed_at_ms,
+            PublicationTargets {
+                desktop: enqueue_desktop_events,
+                observation: false,
+            },
+        )
+    }
+
+    fn record_sample_for_targets(
+        &self,
+        state: &PersistedPresenceState,
+        events: &[PendingPresenceEvent],
+        observed_at_ms: i64,
+        targets: PublicationTargets,
     ) -> Result<(), PresenceError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -580,6 +841,36 @@ impl PresenceStore {
                     observed_at_ms
                 ],
             )?;
+            if targets.desktop || targets.observation {
+                transaction.execute(
+                    "INSERT INTO presence_event_outbox (
+                        event_type, occurred_at_ms, observed_at_ms, idle_for_ms,
+                        deduplication_key, publish_desktop, publish_observation
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(deduplication_key) DO UPDATE SET
+                        publish_desktop = MAX(
+                            publish_desktop, excluded.publish_desktop
+                        ),
+                        publish_observation = MAX(
+                            publish_observation, excluded.publish_observation
+                        )",
+                    params![
+                        event.event_type.as_database_value(),
+                        event.occurred_at_ms,
+                        observed_at_ms,
+                        event
+                            .idle_for_ms
+                            .map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+                        format!(
+                            "presence:{}:{}",
+                            event.event_type.as_database_value(),
+                            event.occurred_at_ms,
+                        ),
+                        targets.desktop,
+                        targets.observation,
+                    ],
+                )?;
+            }
         }
         transaction.execute(
             "INSERT INTO presence_state (
@@ -609,6 +900,81 @@ impl PresenceStore {
             ],
         )?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    fn enable_pending_targets(&self, targets: PublicationTargets) -> Result<(), PresenceError> {
+        if !targets.desktop && !targets.observation {
+            return Ok(());
+        }
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE presence_event_outbox
+             SET publish_desktop = MAX(publish_desktop, ?1),
+                 publish_observation = MAX(publish_observation, ?2)",
+            params![targets.desktop, targets.observation],
+        )?;
+        Ok(())
+    }
+
+    fn pending_desktop_events(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PresenceEventOutboxRecord>, PresenceError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT id, event_type, occurred_at_ms, observed_at_ms, idle_for_ms,
+                    deduplication_key,
+                    publish_desktop, publish_observation, desktop_published,
+                    observation_published
+             FROM presence_event_outbox ORDER BY id LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok(PresenceEventOutboxRecord {
+                id: row.get(0)?,
+                deduplication_key: row.get(5)?,
+                event: PendingPresenceEvent {
+                    event_type: PresenceEventKind::from_database_value(&row.get::<_, String>(1)?)?,
+                    occurred_at_ms: row.get(2)?,
+                    idle_for_ms: row
+                        .get::<_, Option<i64>>(4)?
+                        .map(|value| u64::try_from(value).unwrap_or_default()),
+                },
+                observed_at_ms: row.get(3)?,
+                publish_desktop: row.get(6)?,
+                publish_observation: row.get(7)?,
+                desktop_published: row.get(8)?,
+                observation_published: row.get(9)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn mark_desktop_event_published(&self, id: i64) -> Result<(), PresenceError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE presence_event_outbox
+             SET desktop_published = 1
+             WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    fn mark_observation_event_published(&self, id: i64) -> Result<(), PresenceError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE presence_event_outbox
+             SET observation_published = 1
+             WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    fn delete_desktop_event(&self, id: i64) -> Result<(), PresenceError> {
+        let connection = self.connect()?;
+        connection.execute("DELETE FROM presence_event_outbox WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -729,8 +1095,43 @@ impl PresenceStore {
                 ON presence_events(occurred_at_ms DESC);
              CREATE INDEX IF NOT EXISTS idx_presence_events_type_occurred
                 ON presence_events(event_type, occurred_at_ms DESC);
-             PRAGMA user_version = 1;",
+             CREATE TABLE IF NOT EXISTS presence_event_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN (
+                        'afk_started', 'afk_ended', 'screen_locked',
+                        'screen_unlocked', 'sleep_started', 'woke_up'
+                    )
+                ),
+                occurred_at_ms INTEGER NOT NULL,
+                observed_at_ms INTEGER NOT NULL,
+                idle_for_ms INTEGER,
+                deduplication_key TEXT NOT NULL UNIQUE,
+                publish_desktop INTEGER NOT NULL DEFAULT 1,
+                publish_observation INTEGER NOT NULL DEFAULT 0,
+                desktop_published INTEGER NOT NULL DEFAULT 0,
+                observation_published INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE INDEX IF NOT EXISTS presence_event_outbox_order
+                ON presence_event_outbox(id);",
         )?;
+        ensure_outbox_column(&connection, "publish_desktop", "INTEGER NOT NULL DEFAULT 1")?;
+        ensure_outbox_column(
+            &connection,
+            "publish_observation",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_outbox_column(
+            &connection,
+            "desktop_published",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_outbox_column(
+            &connection,
+            "observation_published",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        connection.pragma_update(None, "user_version", PRESENCE_SCHEMA_VERSION)?;
         Ok(())
     }
 
@@ -744,6 +1145,23 @@ impl PresenceStore {
         )?;
         Ok(connection)
     }
+}
+
+fn ensure_outbox_column(
+    connection: &Connection,
+    name: &str,
+    definition: &str,
+) -> Result<(), PresenceError> {
+    let mut statement = connection.prepare("PRAGMA table_info(presence_event_outbox)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == name) {
+        connection.execute_batch(&format!(
+            "ALTER TABLE presence_event_outbox ADD COLUMN {name} {definition};"
+        ))?;
+    }
+    Ok(())
 }
 
 fn duration_from_environment(
@@ -1103,8 +1521,12 @@ mod tests {
     use std::collections::VecDeque;
 
     use tempfile::TempDir;
+    use whalehall_local_protocol::{
+        EventQueryParams, SemanticCountClassV2, SemanticQueryParams, semantic_event_kinds,
+    };
 
     use super::*;
+    use crate::observations::{MemoryObservationKeyProvider, ObservationJournalConfig};
 
     fn config(directory: &TempDir) -> PresenceConfig {
         PresenceConfig {
@@ -1136,7 +1558,7 @@ mod tests {
         );
         assert!(first.is_empty());
         store
-            .record_sample(&tracker.persisted, &first, 10_000)
+            .record_sample(&tracker.persisted, &first, 10_000, false)
             .expect("persist first observation");
 
         let afk = tracker.apply(
@@ -1151,8 +1573,9 @@ mod tests {
         assert_eq!(afk.len(), 1);
         assert_eq!(afk[0].event_type, PresenceEventKind::AfkStarted);
         assert_eq!(afk[0].occurred_at_ms, 14_000);
+        assert_eq!(afk[0].idle_for_ms, Some(5_000));
         store
-            .record_sample(&tracker.persisted, &afk, 15_000)
+            .record_sample(&tracker.persisted, &afk, 15_000, false)
             .expect("persist AFK transition");
 
         let returned_and_locked = tracker.apply(
@@ -1171,8 +1594,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![PresenceEventKind::AfkEnded, PresenceEventKind::ScreenLocked]
         );
+        assert_eq!(returned_and_locked[0].idle_for_ms, Some(6_000));
+        assert_eq!(returned_and_locked[1].idle_for_ms, None);
         store
-            .record_sample(&tracker.persisted, &returned_and_locked, 16_000)
+            .record_sample(&tracker.persisted, &returned_and_locked, 16_000, false)
             .expect("persist return and lock transitions");
 
         let woke_and_unlocked = tracker.apply(
@@ -1196,7 +1621,7 @@ mod tests {
             ]
         );
         store
-            .record_sample(&tracker.persisted, &woke_and_unlocked, 50_000)
+            .record_sample(&tracker.persisted, &woke_and_unlocked, 50_000, false)
             .expect("persist sleep and unlock transitions");
 
         let events = store
@@ -1216,6 +1641,295 @@ mod tests {
     }
 
     #[test]
+    fn publishes_presence_boundaries_to_the_desktop_event_journal() {
+        let directory = tempfile::tempdir().expect("create presence event directory");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let pending = [
+            PendingPresenceEvent {
+                event_type: PresenceEventKind::AfkStarted,
+                occurred_at_ms: 10_000,
+                idle_for_ms: Some(300_000),
+            },
+            PendingPresenceEvent {
+                event_type: PresenceEventKind::ScreenLocked,
+                occurred_at_ms: 11_000,
+                idle_for_ms: None,
+            },
+            PendingPresenceEvent {
+                event_type: PresenceEventKind::WokeUp,
+                occurred_at_ms: 12_000,
+                idle_for_ms: None,
+            },
+        ];
+        publish_presence_events(&journal, &pending, 12_500).unwrap();
+
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind, desktop_event_kinds::PRESENCE_AFK_STARTED);
+        assert_eq!(events[0].payload, json!({ "idleForMs": 300_000 }));
+        assert_eq!(events[1].kind, desktop_event_kinds::PRESENCE_LOCKED);
+        assert_eq!(events[1].payload, json!({}));
+        assert_eq!(events[2].kind, desktop_event_kinds::PRESENCE_WAKE);
+        assert_eq!(events[2].payload, json!({}));
+        assert!(
+            events
+                .iter()
+                .all(|event| event.payload.get("eventType").is_none())
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.contributes_to_reflection_count())
+        );
+    }
+
+    #[test]
+    fn presence_outbox_retries_one_failed_append_exactly_once() {
+        let directory = tempfile::tempdir().expect("create presence retry directory");
+        let store =
+            PresenceStore::open(directory.path().join("presence.sqlite3")).expect("open store");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let event = PendingPresenceEvent {
+            event_type: PresenceEventKind::ScreenLocked,
+            occurred_at_ms: 10_000,
+            idle_for_ms: None,
+        };
+        store
+            .record_sample(
+                &PersistedPresenceState {
+                    observed_at_ms: Some(10_000),
+                    is_locked: Some(true),
+                    ..PersistedPresenceState::default()
+                },
+                std::slice::from_ref(&event),
+                10_000,
+                true,
+            )
+            .expect("persist state and outbox");
+
+        journal.fail_next_appends_for_test(1);
+        assert!(flush_presence_event_outbox(&store, &journal).is_err());
+        assert_eq!(store.pending_desktop_events(100).unwrap().len(), 1);
+        flush_presence_event_outbox(&store, &journal).unwrap();
+        flush_presence_event_outbox(&store, &journal).unwrap();
+
+        assert!(store.pending_desktop_events(100).unwrap().is_empty());
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, desktop_event_kinds::PRESENCE_LOCKED);
+    }
+
+    #[test]
+    fn presence_outbox_durably_completes_both_legacy_and_v2_sinks() {
+        let directory = tempfile::tempdir().expect("create dual presence directory");
+        let store =
+            PresenceStore::open(directory.path().join("presence.sqlite3")).expect("open store");
+        let event_journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let observation_journal =
+            ObservationJournal::open_with_config(ObservationJournalConfig::new(
+                directory.path().join("observations.sqlite3"),
+                Arc::new(MemoryObservationKeyProvider::new([7; 32])),
+            ))
+            .expect("open observation journal");
+        observation_journal
+            .reconcile_current_goal_version(Some(7))
+            .expect("set current goal version");
+        let event = PendingPresenceEvent {
+            event_type: PresenceEventKind::ScreenLocked,
+            occurred_at_ms: 10_000,
+            idle_for_ms: None,
+        };
+        store
+            .record_sample_for_targets(
+                &PersistedPresenceState {
+                    observed_at_ms: Some(10_100),
+                    is_locked: Some(true),
+                    ..PersistedPresenceState::default()
+                },
+                std::slice::from_ref(&event),
+                10_100,
+                PublicationTargets {
+                    desktop: true,
+                    observation: true,
+                },
+            )
+            .expect("persist dual-sink outbox");
+
+        // The first attempt commits the legacy side and leaves the row pending
+        // because the v2 sink is unavailable. A later attempt resumes from the
+        // per-sink publication marker instead of duplicating the legacy event.
+        assert!(
+            flush_presence_event_outbox_for_targets(&store, Some(&event_journal), None,).is_err()
+        );
+        assert_eq!(store.pending_desktop_events(100).unwrap().len(), 1);
+        flush_presence_event_outbox_for_targets(
+            &store,
+            Some(&event_journal),
+            Some(&observation_journal),
+        )
+        .expect("complete v2 sink");
+        flush_presence_event_outbox_for_targets(
+            &store,
+            Some(&event_journal),
+            Some(&observation_journal),
+        )
+        .expect("idempotent empty replay");
+        assert!(store.pending_desktop_events(100).unwrap().is_empty());
+
+        let legacy = event_journal
+            .query(&EventQueryParams::default())
+            .expect("query legacy events")
+            .events;
+        assert_eq!(legacy.len(), 1);
+        let semantic = observation_journal
+            .query_semantic(&SemanticQueryParams::default())
+            .expect("query semantic events")
+            .events;
+        assert_eq!(semantic.len(), 1);
+        assert_eq!(semantic[0].kind, semantic_event_kinds::PRESENCE_CHANGED);
+        assert_eq!(semantic[0].payload["state"], "locked");
+        assert_eq!(semantic[0].goal_version, Some(7));
+        assert_eq!(semantic[0].count_class, SemanticCountClassV2::Boundary);
+    }
+
+    #[test]
+    fn delayed_sleep_boundary_uses_detection_time_in_global_journal() {
+        let draft = presence_event_draft(
+            &PendingPresenceEvent {
+                event_type: PresenceEventKind::SleepStarted,
+                occurred_at_ms: 10_000,
+                idle_for_ms: None,
+            },
+            50_000,
+        );
+        assert_eq!(draft.occurred_at_ms, 50_000);
+        assert_eq!(draft.observed_at_ms, 50_000);
+        assert_eq!(draft.deduplication_key, "presence:sleep_started:10000");
+    }
+
+    #[test]
+    fn upgraded_replay_accepts_legacy_sleep_event_and_continues_outbox() {
+        let directory = tempfile::tempdir().expect("create presence upgrade directory");
+        let store =
+            PresenceStore::open(directory.path().join("presence.sqlite3")).expect("open store");
+        let journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let sleep = PendingPresenceEvent {
+            event_type: PresenceEventKind::SleepStarted,
+            occurred_at_ms: 10_000,
+            idle_for_ms: None,
+        };
+        let later = PendingPresenceEvent {
+            event_type: PresenceEventKind::ScreenLocked,
+            occurred_at_ms: 40_000,
+            idle_for_ms: None,
+        };
+        store
+            .record_sample(
+                &PersistedPresenceState {
+                    observed_at_ms: Some(50_000),
+                    is_locked: Some(true),
+                    last_sleep_at_ms: Some(10_000),
+                    ..PersistedPresenceState::default()
+                },
+                &[sleep, later],
+                50_000,
+                true,
+            )
+            .expect("persist state and outbox");
+
+        let pending = store.pending_desktop_events(100).unwrap();
+        assert_eq!(pending.len(), 2);
+        let legacy_append = journal
+            .append(legacy_presence_event_draft(
+                &pending[0].event,
+                pending[0].observed_at_ms,
+            ))
+            .expect("legacy version appends sleep before crashing");
+        assert!(legacy_append.inserted);
+
+        flush_presence_event_outbox(&store, &journal).expect("replay upgraded outbox");
+
+        assert!(store.pending_desktop_events(100).unwrap().is_empty());
+        let events = journal.query(&EventQueryParams::default()).unwrap().events;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, desktop_event_kinds::PRESENCE_SLEEP);
+        assert_eq!(events[0].occurred_at_ms, 10_000);
+        assert_eq!(events[0].observed_at_ms, 50_000);
+        assert_eq!(events[1].kind, desktop_event_kinds::PRESENCE_LOCKED);
+    }
+
+    #[test]
+    fn upgraded_replay_accepts_legacy_afk_events_and_continues_outbox() {
+        for (index, event_type) in [PresenceEventKind::AfkStarted, PresenceEventKind::AfkEnded]
+            .into_iter()
+            .enumerate()
+        {
+            let directory = tempfile::tempdir().expect("create AFK upgrade directory");
+            let store =
+                PresenceStore::open(directory.path().join("presence.sqlite3")).expect("open store");
+            let journal =
+                EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+            let afk = PendingPresenceEvent {
+                event_type,
+                occurred_at_ms: 10_000 + i64::try_from(index).unwrap(),
+                idle_for_ms: Some(300_000),
+            };
+            let later = PendingPresenceEvent {
+                event_type: PresenceEventKind::ScreenLocked,
+                occurred_at_ms: 40_000,
+                idle_for_ms: None,
+            };
+            store
+                .record_sample(
+                    &PersistedPresenceState {
+                        observed_at_ms: Some(50_000),
+                        is_locked: Some(true),
+                        ..PersistedPresenceState::default()
+                    },
+                    &[afk, later],
+                    50_000,
+                    true,
+                )
+                .expect("persist AFK state and outbox");
+
+            let pending = store.pending_desktop_events(100).unwrap();
+            assert_eq!(pending.len(), 2);
+            journal
+                .append(legacy_presence_event_draft(
+                    &pending[0].event,
+                    pending[0].observed_at_ms,
+                ))
+                .expect("legacy version appends AFK before crashing");
+
+            flush_presence_event_outbox(&store, &journal).expect("replay upgraded AFK outbox");
+
+            assert!(store.pending_desktop_events(100).unwrap().is_empty());
+            let events = journal.query(&EventQueryParams::default()).unwrap().events;
+            assert_eq!(events.len(), 2);
+            assert_eq!(
+                events[0].kind,
+                match event_type {
+                    PresenceEventKind::AfkStarted => {
+                        desktop_event_kinds::PRESENCE_AFK_STARTED
+                    }
+                    PresenceEventKind::AfkEnded => desktop_event_kinds::PRESENCE_AFK_ENDED,
+                    _ => unreachable!(),
+                }
+            );
+            assert_eq!(
+                events[0].occurred_at_ms,
+                10_000 + i64::try_from(index).unwrap()
+            );
+            assert_eq!(events[0].observed_at_ms, 50_000);
+            assert_eq!(events[1].kind, desktop_event_kinds::PRESENCE_LOCKED);
+        }
+    }
+
+    #[test]
     fn filters_events_and_rejects_invalid_ranges() {
         let directory = tempfile::tempdir().expect("create presence test directory");
         let store = PresenceStore::open(directory.path().join("presence.sqlite3"))
@@ -1231,13 +1945,16 @@ mod tests {
                     PendingPresenceEvent {
                         event_type: PresenceEventKind::ScreenLocked,
                         occurred_at_ms: 10,
+                        idle_for_ms: None,
                     },
                     PendingPresenceEvent {
                         event_type: PresenceEventKind::ScreenUnlocked,
                         occurred_at_ms: 20,
+                        idle_for_ms: None,
                     },
                 ],
                 20,
+                false,
             )
             .expect("record events");
         let events = store

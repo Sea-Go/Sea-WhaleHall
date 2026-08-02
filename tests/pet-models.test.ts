@@ -1,8 +1,27 @@
 import { describe, expect, test } from 'bun:test';
 import { modelLocalToCanvas } from '../src/views/pet/CanvasPetRenderer';
-import type { PetFrame, PetModel } from '../src/views/pet/core/types';
+import type { PetFrame, PetModel, PetTone } from '../src/views/pet/core/types';
+import { WHALE_THEME } from '../src/views/pet/models/whale';
 import { CAT_MODEL, getPetModel, PET_MODELS, WHALE_MODEL } from '../src/views/pet/models/registry';
+import { paletteForTone } from '../src/views/pet/models/shared';
 import { canvasPointToLocal } from '../src/views/pet/pet-math';
+
+const PET_TONES: readonly PetTone[] = [
+  'neutral',
+  'happy',
+  'busy',
+  'error',
+  'angry',
+  'sleepy',
+  'love',
+  'shy',
+  'proud',
+  'confused',
+  'afraid',
+  'focused',
+  'sick',
+  'celebration',
+];
 
 function frame(overrides: Partial<PetFrame['pose']> = {}): PetFrame {
   return {
@@ -95,6 +114,21 @@ describe('replaceable desktop-pet models', () => {
   test('both models consume the same semantic frame without mutating it', () => {
     expectModelContract(WHALE_MODEL);
     expectModelContract(CAT_MODEL);
+  });
+
+  test('whale uses the sleeping body palette for every semantic tone', () => {
+    const sleepingPalette = paletteForTone(WHALE_THEME, 'sleepy');
+    expect(sleepingPalette).toEqual({
+      primary: '#b3d8ec',
+      secondary: '#6a9bd1',
+      dark: '#3d6fa3',
+      light: '#edf7ff',
+      outline: '#063347',
+      accent: '#ff8fab',
+    });
+    for (const tone of PET_TONES) {
+      expect(paletteForTone(WHALE_THEME, tone)).toEqual(sleepingPalette);
+    }
   });
 
   test('whale exposes face, head, body, tail and limb hit zones', () => {

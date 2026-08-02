@@ -10,6 +10,7 @@
 		"build:views": "vite build && bun run scripts/stage-view-assets.ts",
 		"build:native": "bun run scripts/build-native.ts",
 		"build:canary": "electrobun build --env=canary",
+		"setup:macos-signing": "bun run scripts/setup-macos-signing.ts",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"test:sensors:ci": "bun test tests/native-integration.test.ts",
@@ -18,9 +19,14 @@
 		"check": "bun run typecheck && bun run check:rust && bun test"
 	},
 	"dependencies": {
+		"@fullcalendar/react": "7.0.2",
+		"@fullcalendar/rrule": "7.0.2",
 		"electrobun": "1.18.1",
+		"lucide-react": "1.27.0",
 		"react": "19.2.7",
-		"react-dom": "19.2.7"
+		"react-dom": "19.2.7",
+		"rrule": "2.8.1",
+		"temporal-polyfill": "1.0.2"
 	},
 	"devDependencies": {
 		"@types/bun": "1.3.8",

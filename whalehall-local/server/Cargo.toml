@@ -13,7 +13,10 @@ name = "whalehall-local"
 path = "src/main.rs"
 
 [dependencies]
+libc.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 whalehall-local-core.workspace = true
 whalehall-local-protocol.workspace = true

@@ -5,8 +5,14 @@ artifacts/
 .native/
 whalehall-local/target/
 native/**/target/
+/training/
 
 .DS_Store
 *.log
+/*.private.json
+/config.yaml
+__pycache__/
+*.py[cod]
+.pytest_cache/
 .idea/
 .vscode/

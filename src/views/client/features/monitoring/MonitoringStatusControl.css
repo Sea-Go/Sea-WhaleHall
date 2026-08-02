@@ -1,0 +1,117 @@
+.monitoring-control {
+	display: grid;
+	gap: var(--space-2);
+	margin: auto var(--space-1) var(--space-4);
+	padding: var(--space-3);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-lg);
+	color: var(--color-text-secondary);
+	background: var(--color-sidebar-card);
+}
+
+.monitoring-control header,
+.monitoring-control--loading {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-2);
+}
+
+.monitoring-control header > div,
+.monitoring-control--loading > div {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+}
+
+.monitoring-control strong {
+	color: var(--color-text-primary);
+	font-size: var(--font-size-xs);
+	font-weight: var(--font-weight-semibold);
+}
+
+.monitoring-control span,
+.monitoring-control__error {
+	margin: 0;
+	color: var(--color-text-subtle);
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+.monitoring-control--running header > svg {
+	color: var(--color-success);
+}
+
+.monitoring-control--paused header > svg,
+.monitoring-control--limited header > svg,
+.monitoring-control--error > svg {
+	color: var(--color-warning);
+}
+
+.monitoring-control__pulse {
+	width: 8px;
+	height: 8px;
+	margin-top: 4px;
+	border-radius: var(--radius-full);
+	background: var(--color-accent);
+	animation: monitoring-pulse 1.4s var(--ease-standard) infinite;
+}
+
+.monitoring-control__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-1);
+}
+
+.monitoring-control button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--space-1);
+	min-height: 30px;
+	padding: 0 var(--space-2);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-md);
+	color: var(--color-text-secondary);
+	background: var(--color-surface);
+	font: inherit;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.monitoring-control button:hover:not(:disabled) {
+	border-color: var(--color-border-strong);
+	color: var(--color-text-primary);
+	background: var(--color-surface-hover);
+}
+
+.monitoring-control button:active:not(:disabled) {
+	background: var(--color-surface-pressed);
+}
+
+.monitoring-control button:disabled {
+	color: var(--color-text-disabled);
+	cursor: not-allowed;
+	opacity: 0.7;
+}
+
+.monitoring-control__error {
+	color: var(--color-error);
+}
+
+@keyframes monitoring-pulse {
+	0%,
+	100% {
+		opacity: 0.45;
+		transform: scale(0.82);
+	}
+	50% {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monitoring-control__pulse {
+		animation: none;
+	}
+}

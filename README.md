@@ -15,7 +15,13 @@ flowchart TB
     Pet["Transparent Canvas pet window"] -->|"Typed RPC"| Bun
     Bun --> Agent["TypeScript AgentRuntime"]
     Agent --> LocalClient["LocalToolClient"]
+    Agent --> Reflection["64条 / 5分钟 Timeline v2 runtime"]
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
+    Server --> EventJournal["EventJournal · SQLite WAL"]
+    EventJournal -->|"desktop.event push + cursor replay"| Reflection
+    Reflection --> Classifier["deterministic cold-start / verified ModernBERT classification"]
+    Reflection --> Qwen["Local qwen3:4b · cited hypothesis text only"]
+    Reflection --> ReflectionJournal["TimelineJournal · SQLite WAL"]
     Server --> Core["Local Tool core"]
     Core --> Tools["system.info · device.environment · accessibility.* · activity.* · applications.* · presence.* · browser.*"]
     Core --> Accessibility["Foreground accessibility-tree sensor"]
@@ -30,13 +36,13 @@ flowchart TB
   end
 ```
 
-The TypeScript Agent is deliberately small: it exposes a stable orchestration boundary and forwards typed Local Tool calls. Tool registration, validation, execution, progress, cancellation, and concurrency control live in Rust. The browser contexts never communicate directly.
+The TypeScript Agent exposes a stable orchestration boundary, forwards typed Local Tool calls, and owns deterministic reflection windowing/model orchestration. Tool registration, native sensing, event journaling, validation, execution, progress, cancellation, and concurrency control live in Rust. The browser contexts never communicate directly.
 
 ## Development areas / 开发区域
 
 | Area | Location | Responsibility |
 | --- | --- | --- |
-| Client frontend | [`src/views/client`](src/views/client) | Local Tool catalog, invocation, progress/cancellation, runtime status, and pet visibility |
+| Client frontend | [`src/views/client`](src/views/client) | Authentication gate, planning, calendar, reports, settings, and client-side service adapters |
 | Pet frontend | [`src/views/pet`](src/views/pet) | Transparent Canvas companion, interaction, and replaceable `PetRenderer` interface |
 | TypeScript Agent | [`src/agent`](src/agent) | Thin Agent facade, Local Tool process client, and handwritten protocol mirror |
 | Electrobun main process | [`src/bun/index.ts`](src/bun/index.ts) | Window creation, Typed RPC routing, lifecycle, and Agent composition |
@@ -44,6 +50,15 @@ The TypeScript Agent is deliberately small: it exposes a stable orchestration bo
 | Rust Local protocol | [`whalehall-local/protocol`](whalehall-local/protocol) | JSONL requests, responses, tool descriptors, events, and errors |
 | Rust Local core | [`whalehall-local/core`](whalehall-local/core) | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence |
 | Rust Local server | [`whalehall-local/server`](whalehall-local/server) | Concurrent stdin/stdout JSONL server and packaged executable |
+
+Project contribution and frontend implementation rules:
+
+- [`AGENTS.md`](AGENTS.md) — repository boundaries, required reading, validation, and visual acceptance;
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — environment, commands, branches, commits, and pull requests;
+- [`docs/frontend/UI_REFERENCES.md`](docs/frontend/UI_REFERENCES.md) — permitted UI reference principles and brand limits;
+- [`docs/frontend/FRONTEND_STANDARD.md`](docs/frontend/FRONTEND_STANDARD.md) — feature-first React architecture and Definition of Done;
+- [`docs/frontend/CALENDAR_STANDARD.md`](docs/frontend/CALENDAR_STANDARD.md) — calendar domain, adapter, interaction, timezone, and QA rules.
+- [`docs/REFLECTION_SYSTEM.md`](docs/REFLECTION_SYSTEM.md) — behavior events, 64/5-minute windows, persistence, model locks, privacy, and training/runtime operations.
 
 Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. LLM providers, task planning, and conversation orchestration belong under `src/agent/`.
 
@@ -101,6 +116,56 @@ Start Electrobun with bundled views and its rebuild watcher:
 bun run dev
 ```
 
+On macOS, install one fixed current-user development signing identity before
+granting monitoring permissions to a local build:
+
+```bash
+# Read-only status; never opens or changes Keychain.
+bun run setup:macos-signing
+
+# Explicit one-time setup. If macOS asks about private-key access, choose
+# "Always Allow"; the command verifies the choice with a second signature.
+bun run setup:macos-signing -- --create
+```
+
+Normal development and canary builds automatically use the one valid identity
+named exactly `WhaleHall Local Development`. The fixed certificate gives the
+native monitoring components a stable designated requirement, so one macOS
+monitoring authorization can be reused across rebuilds. Local encrypted content
+is opened only by the signed, versioned Vault Broker that WhaleHall installs
+once in its shared owner-only application data directory; dev and canary reuse
+that same installed version. The current immutable generation is v2
+(`whalehall-vault-broker-v2`, broker identity/service/protocol v2) and includes
+a Mach-O `LC_UUID`. The invalid no-UUID v1 artifact is never executed,
+overwritten, or republished as v2: v2 uses a new bundle/install basename,
+directory, signing identifier, Keychain service, and wire magic. Ordinary
+application rebuilds neither replace that Broker nor change the Keychain
+partition bound to it. An existing
+pre-Broker local key requires one explicit migration from the monitoring UI.
+The old item is retained, the new item is verified before use, and conflicts
+fail closed. If the local identity or Broker is absent, development builds
+remain available but are explicitly metadata-only; sensitive observation
+content and the content vault stay unavailable.
+
+Running the mutating setup command again for an existing valid identity does not
+replace it. It only performs two temporary signatures to verify that
+`/usr/bin/codesign` has persistent access. This check does not authorize the
+content vault. Normal rebuilds do not change the Vault Broker or its Keychain
+ACL and therefore do not repeat the vault migration prompt.
+
+The classic login-Keychain fallback and owner-only install directory used by
+local dev/canary builds are convenience isolation, not a hostile same-account
+security boundary. Before WhaleHall's first v2 install/item creation, another
+process already running as the same macOS UID can squat those per-user
+namespaces; local builds fail closed on the conflicts they can identify, but
+cannot generally prove the namespace was not pre-created. Production does not
+use this fallback: a Developer ID-signed build uses the Data Protection
+Keychain with the signed application access group.
+
+The local identity is never accepted for a stable or explicitly signed release.
+Those builds require a valid `Developer ID Application` identity, a matching
+`WHALEHALL_APPLE_TEAM_ID`, hardened runtime, and notarization.
+
 The pre-build hook compiles `whalehall-local-server` in release mode and stages `whalehall-local(.exe)` under `.native/` for the current native platform.
 
 ## Desktop pet / 桌宠
@@ -144,6 +209,9 @@ Requests:
 {"id":"list-1","method":"tool.list","params":{}}
 {"id":"call-1","method":"tool.call","params":{"name":"system.info","arguments":{}}}
 {"id":"cancel-1","method":"tool.cancel","params":{"callId":"call-1"}}
+{"id":"events-1","method":"event.query","params":{"consumerId":"whalehall.reflection.v1","limit":256}}
+{"id":"commit-1","method":"event.commit","params":{"consumerId":"whalehall.reflection.v1","cursor":"ec1_0000000000000001"}}
+{"id":"goal-1","method":"event.goal.change","params":{"previous":null,"next":{"goalId":"goal-1","planId":null,"version":1,"text":"Ship WhaleHall reflection","activatedAtMs":1700000000000},"occurredAtMs":1700000000000,"deduplicationKey":"goal-change:goal-1:1"}}
 ```
 
 Responses:
@@ -151,7 +219,19 @@ Responses:
 ```json
 {"id":"call-1","ok":true,"result":{"callId":"call-1","output":{"os":"macos"}}}
 {"id":"call-1","ok":false,"error":{"code":"CANCELLED","message":"Local tool call was cancelled."}}
+{"id":"goal-1","ok":true,"result":{"event":{"schemaVersion":"desktop-event.v1","eventId":"de1_example","cursor":"ec1_0000000000000002","deviceId":"device_example","sessionId":"session_example","kind":"goal.contextChanged","source":"planning.controller","occurredAtMs":1700000000000,"observedAtMs":1700000000000,"goalVersion":null,"sensitivity":"content","payload":{"previous":null,"next":{"goalId":"goal-1","planId":null,"version":1,"text":"Ship WhaleHall reflection","activatedAtMs":1700000000000}}},"inserted":true}}
 ```
+
+`event.goal.change` is the only protocol write that can append a caller-supplied
+semantic boundary; the server does not expose a general event append method.
+Rust validates and bounds both goal contexts, writes the content-sensitive
+boundary atomically, and returns the durable event/cursor. Replaying the same
+stable deduplication key returns that event with `inserted:false`.
+
+EventJournal applies its 30-day retention cleanup once at server startup and
+then daily. Cleanup is consumer-aware and never deletes beyond the slowest
+persisted named-consumer cursor; cleanup errors are warnings and do not stop the
+local server.
 
 The `tool.call` request ID is also its `callId`. Rust can emit events before the final response:
 
@@ -159,6 +239,7 @@ The `tool.call` request ID is also its `callId`. Rust can emit events before the
 {"event":"tool.started","callId":"call-1","data":{"name":"demo.wait"}}
 {"event":"tool.progress","callId":"call-1","data":{"progress":50,"message":"Waiting"}}
 {"event":"tool.cancelled","callId":"call-1","data":{"name":"demo.wait"}}
+{"event":"desktop.event","data":{"schemaVersion":"desktop-event.v1","eventId":"de1_example","cursor":"ec1_0000000000000001","deviceId":"device_example","sessionId":"session_example","kind":"application.foregroundChanged","source":"activity.sensor","occurredAtMs":1000,"observedAtMs":1001,"goalVersion":null,"sensitivity":"metadata","payload":{"appId":"com.example.Editor","appName":"Editor"}}}
 ```
 
 Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requiredPermissions`, and `supportsCancellation`. Rust and TypeScript maintain handwritten protocol types and validate them against the same checked-in fixtures.
@@ -176,10 +257,12 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 - `applications.status`, `applications.installed`, and `applications.processes` expose the resident installed-application and process inventory stored in `applications.sqlite3`.
 - `presence.status` returns last input, idle/AFK, nullable lock state, sleep/wake state, and platform capability warnings.
 - `presence.events` queries AFK, lock/unlock, and sleep/wake events from `presence.sqlite3`. Both presence Tools require `presence.read`.
+- `input.status` reports whether the explicitly enabled five-second key/click/scroll/movement aggregator is running, degraded, or revoked; it never returns key values, pointer coordinates, or raw input samples.
 - `browser.status` and `browser.tabs` expose current tab title, URL, domain, nullable audio state, and session boundaries.
 - `browser.history`, `browser.searches`, and `browser.downloads` query the local `browser.sqlite3` import. All browser Tools require the high-impact `browser.read` permission.
+- `editor.status` reports explicit VS Code bridge enablement, spool health, quarantine state, open edit bursts, and durable outbox backlog without returning document content. It requires `editor.metadata`.
 
-The initial scaffold does not call a model API or control a browser. Application usage stays local and is not exposed through a network port.
+Timeline v2 classifies with the explicit `deterministic-cold-start.v2` implementation by default. Its ModernBERT episode adapter is an opt-in trust boundary: it accepts loopback endpoints, or an exact allowlisted HTTPS origin, and sends facts only after a caller-pinned v2 artifact manifest matches field-for-field. The pinned loopback `qwen3:4b` is a separate cited-hypothesis text generator; it never receives or supplies ModernBERT class probabilities. Serving code or an endpoint address alone is never treated as proof that a trained, calibrated artifact is ready. WhaleHall still does not control a browser.
 
 ## Foreground application usage and SQLite
 

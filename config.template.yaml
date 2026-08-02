@@ -1,0 +1,10 @@
+schemaVersion: whalehall-client-config.v1
+request:
+  teacherOllama:
+    baseUrl: "http://127.0.0.1:11434"
+  reflectionModernBert:
+    endpoint: "http://127.0.0.1:8765/v1/reflections:infer"
+  timelineModernBert:
+    endpoint: ""
+    manifestEndpoint: ""
+    pinnedManifest: ""
