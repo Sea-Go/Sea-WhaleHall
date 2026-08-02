@@ -19,6 +19,7 @@ import {
 	localDesignatedRequirement,
 	readMacCodeSigningIdentities,
 	resolveMacSigningPlan,
+	type MacSigningKind,
 } from "./macos-signing-identity";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -48,6 +49,12 @@ export const MACOS_CREDENTIAL_HELPER_EXECUTABLE =
 export const MACOS_VAULT_BROKER_IDENTIFIER =
 	"com.seago.whalehall.vault-broker.v2";
 export const MACOS_VAULT_BROKER_EXECUTABLE = "whalehall-vault-broker-v2";
+
+export function shouldMaterializeMacUpdateArchive(
+	signingKind: MacSigningKind,
+): boolean {
+	return signingKind !== "developer-id";
+}
 
 interface PrepareMacWrapperOptions {
 	bundlePath: string;
@@ -331,8 +338,10 @@ export function prepareMacWrapperFromEnvironment(
 		buildEnvironment,
 		identities: readMacCodeSigningIdentities(),
 	});
-	if (signing.kind === "local") {
-		if (!signing.identity) {
+	if (shouldMaterializeMacUpdateArchive(signing.kind)) {
+		const localIdentity =
+			signing.kind === "local" ? signing.identity : undefined;
+		if (signing.kind === "local" && !localIdentity) {
 			throw new Error("The local signing identity is unavailable.");
 		}
 		const architecture =
@@ -341,11 +350,11 @@ export function prepareMacWrapperFromEnvironment(
 		if (architecture !== "arm64" && architecture !== "x64") {
 			throw new Error(`Unsupported macOS architecture: ${architecture}.`);
 		}
-		materializeLocalSignedWrapper({
+		materializeNonDeveloperSignedWrapper({
 			bundlePath,
 			buildDirectory,
 			appIdentifier,
-			localIdentity: signing.identity,
+			localIdentity,
 			architecture,
 		});
 		return;
@@ -363,13 +372,15 @@ export function prepareMacWrapperFromEnvironment(
 
 /**
  * Electrobun signs its archived inner app only when a Developer ID is
- * configured. A local certificate therefore cannot safely ship the default
- * self-extracting wrapper: first launch replaces that signed wrapper with an
- * unsigned inner app and changes the TCC identity. For local Canary builds we
- * expand the locally-produced archive during postWrap, sign that immutable
- * flat app, and atomically install it in place of the extractor.
+ * configured. A non-Developer-ID build therefore cannot safely ship the
+ * default self-extracting wrapper: its full update archive contains an
+ * unsigned outer app (or the resource envelope inherited from the launcher),
+ * while a local-certificate first launch would also change the TCC identity.
+ * Expand the locally-produced archive during postWrap, sign the immutable
+ * flat app, rebuild the full archive, and atomically install the same app in
+ * place of the extractor.
  */
-function materializeLocalSignedWrapper({
+function materializeNonDeveloperSignedWrapper({
 	bundlePath,
 	buildDirectory,
 	appIdentifier,
@@ -379,7 +390,7 @@ function materializeLocalSignedWrapper({
 	bundlePath: string;
 	buildDirectory: string;
 	appIdentifier: string;
-	localIdentity: string;
+	localIdentity?: string;
 	architecture: "arm64" | "x64";
 }): void {
 	assertSafeBundlePath(bundlePath, buildDirectory);
@@ -429,7 +440,7 @@ function materializeLocalSignedWrapper({
 	if (readdirSync(buildDirectory).some((name) => name.endsWith(".patch"))) {
 		rmSync(stagingDirectory, { force: true, recursive: true });
 		throw new Error(
-			"Local-certificate Canary builds cannot publish delta patches; use the signed full archive.",
+			"Non-Developer-ID Canary builds cannot publish delta patches; use the signed full archive.",
 		);
 	}
 	const updateArchive = updateArchives[0];
@@ -478,10 +489,9 @@ function materializeLocalSignedWrapper({
 			bundlePath: payloadBundle,
 			appIdentifier,
 			requireTeamIdentifier: false,
-			localSigningStagedNativeDirectory: join(
-				projectRoot,
-				`.native/macos-${architecture}`,
-			),
+			localSigningStagedNativeDirectory: localIdentity
+				? join(projectRoot, `.native/macos-${architecture}`)
+				: undefined,
 			stagedVaultBrokerDirectory: join(
 				projectRoot,
 				`.native/macos-${architecture}`,
@@ -683,7 +693,7 @@ export function verifyMacWrapperFromEnvironment(
 			signing.kind === "local"
 				? join(projectRoot, `.native/macos-${architecture}`)
 				: undefined,
-		rejectDeltaPatches: signing.kind === "local",
+		rejectDeltaPatches: shouldMaterializeMacUpdateArchive(signing.kind),
 	});
 }
 

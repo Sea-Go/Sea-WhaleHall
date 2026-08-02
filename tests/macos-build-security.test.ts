@@ -22,6 +22,7 @@ import {
 	assertRequiredMacNativeComponents,
 	normalizeDesignatedRequirement,
 	prepareMacWrapper,
+	shouldMaterializeMacUpdateArchive,
 	validateLocalWrapperArchiveEntryTypes,
 	validateLocalWrapperArchiveEntries,
 	validateLocalDesignatedRequirementContinuity,
@@ -159,6 +160,12 @@ describe("macOS signing identity selection", () => {
 				identities: [],
 			}),
 		).toEqual({ kind: "ad-hoc", releaseRequired: false });
+	});
+
+	test("materializes every non-Developer-ID update archive before publishing", () => {
+		expect(shouldMaterializeMacUpdateArchive("ad-hoc")).toBe(true);
+		expect(shouldMaterializeMacUpdateArchive("local")).toBe(true);
+		expect(shouldMaterializeMacUpdateArchive("developer-id")).toBe(false);
 	});
 });
 
