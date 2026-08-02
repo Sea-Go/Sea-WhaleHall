@@ -7,6 +7,7 @@ import {
 	ReflectionCollector,
 	type ActiveGoalContextV1,
 	type DesktopEventForKind,
+	type EventWindowV1,
 	type ReflectionClock,
 	type ReflectionTimerHandle,
 	WebCryptoReflectionHasher,
@@ -207,6 +208,7 @@ function createCollector(options: {
 	initialGoal?: ActiveGoalContextV1 | null;
 	threshold?: number;
 	onCountReady?: (reachedAtMs: number) => void;
+	onWindowSealed?: (window: EventWindowV1) => void | Promise<void>;
 }) {
 	const repository = options.repository ?? new InMemoryReflectionRepository();
 	const clock = options.clock ?? new FakeClock();
@@ -220,13 +222,19 @@ function createCollector(options: {
 		initialGoal: options.initialGoal,
 		semanticEventThreshold: options.threshold,
 		onCountReady: options.onCountReady,
+		onWindowSealed: options.onWindowSealed,
 	});
 	return { collector, repository, clock };
 }
 
 describe("ReflectionCollector count and deadline triggers", () => {
 	test("the 63rd finalized semantic event does not seal and the 64th seals once", async () => {
-		const { collector, repository, clock } = createCollector({});
+		const sealedWindows: EventWindowV1[] = [];
+		const { collector, repository, clock } = createCollector({
+			onWindowSealed: (window) => {
+				sealedWindows.push(window);
+			},
+		});
 		await collector.recover();
 		for (let index = 1; index <= 63; index += 1) {
 			expect(await collector.ingest(foregroundEvent(index, 0))).toBeNull();
@@ -246,6 +254,15 @@ describe("ReflectionCollector count and deadline triggers", () => {
 		expect(collector.getState()).toBe("ACTIVE_EMPTY");
 		expect(clock.timerCount).toBe(0);
 		expect((await repository.getQueueStats()).pendingJobs).toBe(1);
+		expect(sealedWindows).toHaveLength(1);
+		expect(sealedWindows[0]).toMatchObject({
+			windowId: window?.windowId,
+			eventCount: 64,
+			events: expect.arrayContaining([
+				expect.objectContaining({ eventId: "event-1" }),
+				expect.objectContaining({ eventId: "event-64" }),
+			]),
+		});
 	});
 
 	test("299999ms does not seal and exactly 300000ms seals by max_wait", async () => {

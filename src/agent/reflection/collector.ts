@@ -75,6 +75,12 @@ export type ReflectionCollectorOptions = {
 	 * authorization/boundary > count priority without delaying standalone use.
 	 */
 	onCountReady?: (reachedAtMs: number) => void;
+	/**
+	 * Observes an immutable window only after the collector has atomically
+	 * persisted it. Consumers must treat this as an outbox notification and
+	 * keep any failure isolated from EventJournal materialization.
+	 */
+	onWindowSealed?: (window: EventWindowV1) => void | Promise<void>;
 };
 
 /**
@@ -92,6 +98,7 @@ export class ReflectionCollector {
 	private readonly onBackgroundError: (error: unknown) => void;
 	private readonly onDeadlineReady: ((deadlineAtMs: number) => void) | null;
 	private readonly onCountReady: ((reachedAtMs: number) => void) | null;
+	private readonly onWindowSealed: ((window: EventWindowV1) => void | Promise<void>) | null;
 	private readonly collectorId: string;
 	private readonly deviceId: string;
 	private readonly sessionId: string;
@@ -113,6 +120,7 @@ export class ReflectionCollector {
 		this.onBackgroundError = options.onBackgroundError ?? (() => {});
 		this.onDeadlineReady = options.onDeadlineReady ?? null;
 		this.onCountReady = options.onCountReady ?? null;
+		this.onWindowSealed = options.onWindowSealed ?? null;
 		this.collectorId = options.collectorId;
 		this.deviceId = options.deviceId;
 		this.sessionId = options.sessionId;
@@ -592,6 +600,16 @@ export class ReflectionCollector {
 		const result = await this.repository.sealWindow(window, nextSnapshot, current.revision);
 		this.snapshot = result.snapshot;
 		this.runtimeState = "ACTIVE_EMPTY";
+		if (result.inserted && this.onWindowSealed !== null) {
+			try {
+				await this.onWindowSealed(structuredClone(result.window));
+			} catch (error) {
+				// A downstream outbox must never reopen a sealed collector window or
+				// block the durable Reflection cursor. Its own recovery scan repairs
+				// a notification lost between the two SQLite databases.
+				this.onBackgroundError(error);
+			}
+		}
 		return result.window;
 	}
 

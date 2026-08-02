@@ -95,6 +95,12 @@ export type DesktopReflectionServiceOptions = {
 	 * starts. `undefined` preserves recovered goal state.
 	 */
 	startupGoal?: Omit<ActiveGoalContextV1, "version"> | null;
+	/**
+	 * Called after a reflection window is atomically sealed. This is an
+	 * observation hook only: errors are contained by the collector so a cloud
+	 * delivery outage cannot stall EventJournal cursor progress.
+	 */
+	onWindowSealed?: (window: EventWindowV1) => void | Promise<void>;
 	onError?: (error: unknown) => void;
 };
 
@@ -180,6 +186,7 @@ export class DesktopReflectionService {
 			onBackgroundError: this.onError,
 			onDeadlineReady: (deadlineAtMs) => this.coordinateDeadline(deadlineAtMs),
 			onCountReady: (reachedAtMs) => this.coordinateCount(reachedAtMs),
+			onWindowSealed: options.onWindowSealed,
 		});
 		const committer = new TelemetryReflectionCommitter(
 			options.sinks ?? [],

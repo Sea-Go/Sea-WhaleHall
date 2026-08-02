@@ -228,6 +228,20 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 		return row ? parseJson<EventWindowV1>(row.window_json) : null;
 	}
 
+	/**
+	 * Immutable sealed-window index for local downstream outboxes. The caller
+	 * receives full copies; it cannot mutate Reflection's persisted record.
+	 */
+	async listWindows(): Promise<EventWindowV1[]> {
+		const rows = this.database
+			.query(
+				`SELECT window_json FROM reflection_windows
+				 ORDER BY created_at_ms, window_id`,
+			)
+			.all() as Array<{ window_json: string }>;
+		return rows.map((row) => parseJson<EventWindowV1>(row.window_json));
+	}
+
 	async getJob(windowId: string): Promise<ReflectionJobV1 | null> {
 		const row = this.jobRow(windowId);
 		return row ? jobFromRow(row) : null;
