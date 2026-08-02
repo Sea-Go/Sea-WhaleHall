@@ -217,10 +217,25 @@ export function vaultBrokerCodesignCommand({
 			"--timestamp=none",
 		);
 	} else {
-		command.push("--timestamp=none");
+		// Even metadata-only builds need a stable explicit DR. Without one,
+		// codesign synthesizes an ad-hoc cdhash requirement, which is unsuitable
+		// for reproducibility and can be emitted as a commented diagnostic on
+		// newer macOS runners.
+		command.push(
+			"--requirements",
+			`=designated => identifier "${vaultBrokerIdentifier}"`,
+			"--timestamp=none",
+		);
 	}
 	command.push(executable);
 	return command;
+}
+
+export function codesignDesignatedRequirementCommand(
+	executable: string,
+	codesign = "/usr/bin/codesign",
+): string[] {
+	return [codesign, "--display", "--requirements", "-", executable];
 }
 
 export function parseCodeDirectoryHash(output: string): string {
@@ -370,8 +385,8 @@ export function buildVaultBroker(arch: TargetArch): string {
 				"--verbose=4",
 				second,
 			]),
-			firstSignedRequirement: capture(["codesign", "-dr", "-", first]),
-			secondSignedRequirement: capture(["codesign", "-dr", "-", second]),
+			firstSignedRequirement: capture(codesignDesignatedRequirementCommand(first)),
+			secondSignedRequirement: capture(codesignDesignatedRequirementCommand(second)),
 		});
 		mkdirSync(dirname(destination), { recursive: true });
 		copyFileSync(first, destination);

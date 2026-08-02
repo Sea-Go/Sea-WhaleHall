@@ -66,6 +66,22 @@ describe("Vault Broker build contract", () => {
 		expect(guard).not.toContain("kSecGuestAttributePid");
 	});
 
+	test("uses unambiguous codesign display arguments in the macOS runtime", () => {
+		const broker = readFileSync(
+			resolve(import.meta.dir, "../whalehall-local/core/src/vault_broker.rs"),
+			"utf8",
+		);
+		const observations = readFileSync(
+			resolve(import.meta.dir, "../whalehall-local/core/src/observations.rs"),
+			"utf8",
+		);
+		expect(broker).toContain('.arg("--display")');
+		expect(broker).toContain('.arg("--requirements")');
+		expect(broker).not.toContain('.arg("-dr")');
+		expect(observations).toContain('.arg("--display")');
+		expect(observations).not.toContain('.arg("-dv")');
+	});
+
 	test("passes escaped requirements to clang as single argv elements", () => {
 		const command = vaultBrokerCompileCommand({
 			arch: "arm64",
@@ -185,6 +201,15 @@ describe("Vault Broker build contract", () => {
 		expect(command).toContain('-DWHALEHALL_CORE_REQUIREMENT="false"');
 		expect(command).toContain('-DWHALEHALL_OUTER_REQUIREMENT="false"');
 		expect(command).toContain("-DWHALEHALL_VAULT_ENABLED=0");
+		const signingCommand = vaultBrokerCodesignCommand({
+			executable: "/tmp/broker",
+			signing: { kind: "ad-hoc", releaseRequired: false },
+		});
+		expect(signingCommand).toContain("--requirements");
+		expect(signingCommand).toContain(
+			`=designated => identifier "${vaultBrokerIdentifier}"`,
+		);
+		expect(signingCommand).toContain("--timestamp=none");
 	});
 
 	test("rejects nondeterministic compilation and changed signed CDHashes", () => {

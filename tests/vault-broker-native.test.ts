@@ -9,7 +9,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { cStringLiteral } from "../scripts/build-native";
+import {
+	cStringLiteral,
+	codesignDesignatedRequirementCommand,
+} from "../scripts/build-native";
 import { normalizeDesignatedRequirement } from "../scripts/macos-build-security";
 
 const projectRoot = resolve(import.meta.dir, "..");
@@ -48,10 +51,8 @@ function withTemporaryDirectory(runTest: (directory: string) => void): void {
 }
 
 function readAdHocDesignatedRequirement(path: string): string {
-	// codesign prefixes ad-hoc requirement output with "# ", while production
-	// Developer ID/local-certificate output is consumed without that marker.
 	return normalizeDesignatedRequirement(
-		run(["/usr/bin/codesign", "-dr", "-", path]).replace(/^# /gmu, ""),
+		run(codesignDesignatedRequirementCommand(path, "/usr/bin/codesign")),
 	);
 }
 

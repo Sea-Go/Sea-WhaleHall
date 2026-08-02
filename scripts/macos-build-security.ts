@@ -907,6 +907,9 @@ export function normalizeDesignatedRequirement(output: string): string {
 	const requirementLines = output
 		.split(/\r?\n/u)
 		.map((line) => line.trim())
+		.map((line) =>
+			line.startsWith(`# ${marker}`) ? line.slice(2) : line,
+		)
 		.filter((line) => line.startsWith(marker));
 	if (requirementLines.length !== 1) {
 		throw new Error("codesign did not return a designated requirement.");

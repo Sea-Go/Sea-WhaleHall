@@ -11,7 +11,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { credentialHelperCodesignCommand } from "../scripts/build-native";
+import {
+	codesignDesignatedRequirementCommand,
+	credentialHelperCodesignCommand,
+} from "../scripts/build-native";
 import {
 	MACOS_CREDENTIAL_HELPER_EXECUTABLE,
 	MACOS_CREDENTIAL_HELPER_IDENTIFIER,
@@ -163,6 +166,24 @@ describe("local designated requirement continuity", () => {
 	const requirement =
 		'designated => identifier "com.seago.whalehall.local" '
 		+ `and certificate leaf = H"${"A".repeat(40)}"`;
+
+	test("uses portable codesign arguments to display a designated requirement", () => {
+		expect(
+			codesignDesignatedRequirementCommand("/tmp/whalehall-local"),
+		).toEqual([
+			"/usr/bin/codesign",
+			"--display",
+			"--requirements",
+			"-",
+			"/tmp/whalehall-local",
+		]);
+	});
+
+	test("accepts the exact comment prefix used for an ad-hoc designated requirement", () => {
+		expect(normalizeDesignatedRequirement(`# ${requirement}`)).toBe(
+			normalizeDesignatedRequirement(requirement),
+		);
+	});
 
 	test("accepts an unchanged certificate-anchored requirement", () => {
 		expect(

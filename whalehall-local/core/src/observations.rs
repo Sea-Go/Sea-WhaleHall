@@ -320,7 +320,7 @@ fn current_mac_signing_identity() -> MacSigningIdentity {
         return MacSigningIdentity::Unsupported;
     };
     let Ok(output) = std::process::Command::new("/usr/bin/codesign")
-        .arg("-dv")
+        .arg("--display")
         .arg("--verbose=4")
         .arg(executable)
         .output()
