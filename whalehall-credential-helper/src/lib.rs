@@ -94,6 +94,7 @@ impl CredentialTarget {
         }
     }
 
+    #[cfg(target_os = "windows")]
     fn user_label(&self) -> &str {
         match self {
             Self::AccountKey { account_id, .. } => account_id,
