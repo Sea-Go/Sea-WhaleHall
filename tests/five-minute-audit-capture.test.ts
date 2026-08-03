@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	mkdtempSync,
 	readFileSync,
+	readdirSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -476,7 +477,14 @@ describe("file audit capture store", () => {
 			await store.save(capture);
 
 			expect(await store.load()).toEqual(capture);
-			expect(statSync(path).mode & 0o777).toBe(0o600);
+			const metadata = statSync(path);
+			expect(metadata.isFile()).toBeTrue();
+			if (process.platform !== "win32") {
+				expect(metadata.mode & 0o777).toBe(0o600);
+			}
+			expect(readdirSync(directory)).toEqual([
+				"audit-capture-session.v1.json",
+			]);
 			const text = readFileSync(path, "utf8");
 			expect(text).not.toContain("raw");
 			expect(text).not.toContain("text");

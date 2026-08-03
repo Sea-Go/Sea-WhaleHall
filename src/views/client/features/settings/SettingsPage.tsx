@@ -19,6 +19,10 @@ import {
 	type KeyboardEvent,
 	type ReactNode,
 } from "react";
+import {
+	hasAllAgentReadPermissions,
+	hasAnyAgentReadPermission,
+} from "../../../../shared/agent-permissions";
 import type { AuthUser } from "../auth/public";
 import {
 	MonitoringExclusionsControl,
@@ -34,6 +38,10 @@ import { ConfirmationDialog } from "../../shared/ui/ConfirmationDialog";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { PageHeader } from "../../shared/ui/PageHeader";
 import type { PreferencesController } from "./PreferencesController";
+import type {
+	AgentPermissionsController,
+	AgentPermissionsState,
+} from "./AgentPermissionsController";
 import {
 	APPEARANCE_THEME_IDS,
 	APPEARANCE_THEME_LABELS,
@@ -70,6 +78,7 @@ export interface SettingsPageProps {
 	controller: PreferencesController;
 	monitoringController: MonitoringController;
 	auditExportService: AuditExportService;
+	agentPermissionsController?: AgentPermissionsController;
 	category: SettingsCategory;
 	onCategoryChange: (category: SettingsCategory) => void;
 	onLogout: () => void;
@@ -81,6 +90,7 @@ export function SettingsPage({
 	controller,
 	monitoringController,
 	auditExportService,
+	agentPermissionsController,
 	category,
 	onCategoryChange,
 	onLogout,
@@ -213,6 +223,9 @@ export function SettingsPage({
 										controller.update(section, value)
 									}
 									onLogout={onLogout}
+									agentPermissionsController={
+										agentPermissionsController
+									}
 								/>
 							</div>
 							<footer className="settings-savebar">
@@ -309,6 +322,7 @@ function SettingsStatus({
 interface SettingsPanelProps {
 	category: SettingsCategory;
 	user: AuthUser;
+	agentPermissionsController?: AgentPermissionsController;
 	values: PreferenceValues;
 	disabled: boolean;
 	monitoringController: MonitoringController;
@@ -350,7 +364,7 @@ function AccountSettings({
 		<SettingsSection
 			eyebrow="账号"
 			title="你的 WhaleHall"
-			description="当前体验环境只保存 UI 会话，不在渲染进程中保存 refresh token。"
+			description="当前体验环境使用固定本地测试账户，正式远端账户认证将在后续接入。"
 		>
 			<div className="settings-account-card">
 				<span aria-hidden="true">{user.initials}</span>
@@ -364,7 +378,7 @@ function AccountSettings({
 			</div>
 			<SettingRow
 				title="退出当前账号"
-				description="退出后会立即清理受保护的 UI 会话并返回登录门禁。"
+				description="退出后会立即清理本地测试会话并返回登录门禁。"
 				control={
 					<Button variant="danger" onClick={onLogout}>
 						退出登录
@@ -686,12 +700,192 @@ function CalendarSettings({
 	);
 }
 
+function AgentReadPermissionsSetting({
+	controller,
+	disabled,
+}: {
+	controller?: AgentPermissionsController;
+	disabled: boolean;
+}) {
+	if (!controller) {
+		return (
+			<div className="settings-agent-permissions">
+				<AgentPermissionRow
+					checked={false}
+					disabled
+					onChange={() => {}}
+				/>
+				<div
+					className="settings-agent-permissions__status"
+					role="status"
+				>
+					桌面授权服务尚未连接，当前保持未授权。
+				</div>
+				<AgentPermissionDisclosure />
+			</div>
+		);
+	}
+	return (
+		<ConnectedAgentReadPermissionsSetting
+			controller={controller}
+			disabled={disabled}
+		/>
+	);
+}
+
+function ConnectedAgentReadPermissionsSetting({
+	controller,
+	disabled,
+}: {
+	controller: AgentPermissionsController;
+	disabled: boolean;
+}) {
+	const state = useSyncExternalStore(
+		controller.subscribe,
+		controller.getSnapshot,
+		controller.getServerSnapshot,
+	);
+	useEffect(() => {
+		if (state.status === "idle") void controller.load();
+	}, [controller, state.status]);
+
+	const snapshot = "snapshot" in state ? state.snapshot : null;
+	const enabled = snapshot ? hasAllAgentReadPermissions(snapshot) : false;
+	const partial = snapshot
+		? hasAnyAgentReadPermission(snapshot) && !enabled
+		: false;
+	const busy =
+		state.status === "idle" ||
+		state.status === "loading" ||
+		state.status === "saving";
+
+	return (
+		<div
+			className="settings-agent-permissions"
+			aria-busy={busy}
+		>
+			<AgentPermissionRow
+				checked={enabled}
+				disabled={
+					disabled ||
+					busy ||
+					(state.status === "error" && state.stage === "load")
+				}
+				onChange={(checked) => void controller.setEnabled(checked)}
+			/>
+			<AgentPermissionsStatus
+				state={state}
+				enabled={enabled}
+				partial={partial}
+				onRetry={() => void controller.retry()}
+			/>
+			<AgentPermissionDisclosure />
+		</div>
+	);
+}
+
+function AgentPermissionRow({
+	checked,
+	disabled,
+	onChange,
+}: {
+	checked: boolean;
+	disabled: boolean;
+	onChange: (checked: boolean) => void;
+}) {
+	return (
+		<SettingRow
+			title="启用本地 Agent"
+			description="统一授权本地 Agent 读取日历和当前计划；可随时关闭并立即撤销两项读取授权。"
+			control={
+				<SwitchControl
+					label="允许本地 Agent 读取日历和计划"
+					checked={checked}
+					disabled={disabled}
+					onChange={onChange}
+				/>
+			}
+		/>
+	);
+}
+
+function AgentPermissionsStatus({
+	state,
+	enabled,
+	partial,
+	onRetry,
+}: {
+	state: AgentPermissionsState;
+	enabled: boolean;
+	partial: boolean;
+	onRetry: () => void;
+}) {
+	if (state.status === "idle" || state.status === "loading") {
+		return (
+			<div className="settings-agent-permissions__status" role="status">
+				正在读取本机 Agent 授权…
+			</div>
+		);
+	}
+	if (state.status === "saving") {
+		return (
+			<div className="settings-agent-permissions__status" role="status">
+				{state.requestedEnabled ? "正在启用读取授权…" : "正在撤销读取授权…"}
+			</div>
+		);
+	}
+	if (state.status === "success") {
+		return (
+			<div
+				className="settings-agent-permissions__status settings-agent-permissions__status--success"
+				role="status"
+			>
+				{state.message}
+			</div>
+		);
+	}
+	if (state.status === "error") {
+		return (
+			<div
+				className="settings-agent-permissions__status settings-agent-permissions__status--error"
+				role="alert"
+			>
+				<span>{state.message}</span>
+				<Button size="small" variant="ghost" onClick={onRetry}>
+					重试
+				</Button>
+			</div>
+		);
+	}
+	return (
+		<div className="settings-agent-permissions__status" role="status">
+			{partial
+				? "检测到不完整的旧授权；总开关保持关闭，请重新启用或撤销。"
+				: enabled
+					? "已授权读取本地日历和当前计划。"
+					: "当前未授权，Agent 不会读取日历或计划。"}
+		</div>
+	);
+}
+
+function AgentPermissionDisclosure() {
+	return (
+		<div className="settings-agent-permissions__disclosure">
+			<ShieldCheck size={16} aria-hidden="true" />
+			<span>
+				启用后，本地 Agent 会读取完整规划窗口内的日历和当前计划，在本机组装上下文后发送给模型；远端只负责转发模型请求与回答。
+			</span>
+		</div>
+	);
+}
+
 function PrivacySettings({
 	values,
 	disabled,
 	onUpdate,
 	monitoringController,
 	auditExportService,
+	agentPermissionsController,
 }: SettingsPanelProps) {
 	const section = values.privacy;
 	return (
@@ -703,6 +897,10 @@ function PrivacySettings({
 			<AuditExportControl service={auditExportService} />
 			<MonitoringPermissionsControl controller={monitoringController} />
 			<MonitoringExclusionsControl controller={monitoringController} />
+			<AgentReadPermissionsSetting
+				controller={agentPermissionsController}
+				disabled={disabled}
+			/>
 			<SettingRow
 				title="使用活动汇总生成洞察"
 				description="只使用本地聚合时长，不把窗口内容发送到桌宠。"

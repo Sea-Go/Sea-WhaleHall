@@ -1,5 +1,5 @@
-import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
@@ -8,7 +8,6 @@ import {
 	readdirSync,
 	realpathSync,
 	rmSync,
-	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,11 +15,9 @@ import { join, resolve } from "node:path";
 import type { LocalMessage } from "../src/agent/local-protocol";
 
 const projectRoot = resolve(import.meta.dir, "..");
-const sensorDirectory = resolve(
-	projectRoot,
-	"whalehall-local/core/src/sensors",
-);
+const sensorDirectory = resolve(projectRoot, "whalehall-local/core/src/sensors");
 const nativeResponseTimeoutMs = 15_000;
+const nativeStartupTimeoutMs = 30_000;
 
 type SensorCiProbe = {
 	sourceFile: string;
@@ -41,16 +38,8 @@ type SensorCiContext = {
 const sensorCiContext: SensorCiContext = {
 	dataDirectory: "",
 	vscodeBridgeRoot: "",
-	displayMode: expectation("WHALEHALL_CI_DISPLAY_MODE", [
-		"auto",
-		"degraded",
-		"required",
-	]),
-	foregroundMode: expectation("WHALEHALL_CI_FOREGROUND_MODE", [
-		"auto",
-		"degraded",
-		"required",
-	]),
+	displayMode: expectation("WHALEHALL_CI_DISPLAY_MODE", ["auto", "degraded", "required"]),
+	foregroundMode: expectation("WHALEHALL_CI_FOREGROUND_MODE", ["auto", "degraded", "required"]),
 	presenceMode: expectation("WHALEHALL_CI_PRESENCE_MODE", [
 		"auto",
 		"complete",
@@ -118,10 +107,7 @@ const sensorCiProbes: SensorCiProbe[] = [
 			expect(status.lastError).toBeNull();
 			expect(output).toMatchObject({
 				databasePath: join(context.dataDirectory, "accessibility.sqlite3"),
-				bridgePath: join(
-					context.dataDirectory,
-					"accessibility-current-tree.json",
-				),
+				bridgePath: join(context.dataDirectory, "accessibility-current-tree.json"),
 				pollIntervalMs: 50,
 				bridgeMaxAgeMs: 60000,
 				maxNodes: 300,
@@ -279,9 +265,7 @@ const sensorCiProbes: SensorCiProbe[] = [
 				warnings: Array<{ component: string; message: string }>;
 			};
 			const resolutions =
-				snapshot.screens
-					.map((screen) => `${screen.widthPx}x${screen.heightPx}`)
-					.join(",") || "none";
+				snapshot.screens.map((screen) => `${screen.widthPx}x${screen.heightPx}`).join(",") || "none";
 			console.info(
 				[
 					`[sensor-ci] device os=${snapshot.operatingSystem.name} ${snapshot.operatingSystem.version}`,
@@ -306,9 +290,7 @@ const sensorCiProbes: SensorCiProbe[] = [
 				expect(snapshot.screenCount > 0).toBe(true);
 			}
 			if (snapshot.screenCount === 0) {
-				expect(
-					snapshot.warnings.some((warning) => warning.component === "screens"),
-				).toBe(true);
+				expect(snapshot.warnings.some((warning) => warning.component === "screens")).toBe(true);
 			}
 			if (context.displayMode === "degraded") {
 				expect(snapshot.screenCount).toBe(0);
@@ -406,11 +388,7 @@ const sensorCiProbes: SensorCiProbe[] = [
 			expect(status).toMatchObject({
 				state: "running",
 				enabled: true,
-				databasePath: join(
-					context.dataDirectory,
-					"editor-bridge",
-					"editor.sqlite3",
-				),
+				databasePath: join(context.dataDirectory, "editor-bridge", "editor.sqlite3"),
 				pollIntervalMs: 250,
 				pendingSegments: 0,
 				rejectedSegments: 0,
@@ -419,10 +397,13 @@ const sensorCiProbes: SensorCiProbe[] = [
 				warnings: [],
 				lastError: null,
 			});
-			expectSameDirectory(status.bridgeRoot, context.vscodeBridgeRoot);
-			expectSameDirectory(
-				status.spoolDirectory,
-				join(context.vscodeBridgeRoot, ".whalehall-vscode-spool-v1"),
+			expect(normalizeCanonicalWindowsPath(status.bridgeRoot)).toBe(
+				normalizeCanonicalWindowsPath(context.vscodeBridgeRoot),
+			);
+			expect(normalizeCanonicalWindowsPath(status.spoolDirectory)).toBe(
+				normalizeCanonicalWindowsPath(
+					resolve(context.vscodeBridgeRoot, ".whalehall-vscode-spool-v1"),
+				),
 			);
 			expect(typeof status.lastImportedAtMs).toBe("number");
 			expect(typeof status.lastPublishedAtMs).toBe("number");
@@ -500,21 +481,14 @@ const sensorCiProbes: SensorCiProbe[] = [
 
 test("every public Rust sensor has exactly one native CI probe", () => {
 	const sensorFiles = readdirSync(sensorDirectory, { withFileTypes: true })
-		.filter(
-			(entry) =>
-				entry.isFile() && entry.name.endsWith(".rs") && entry.name !== "mod.rs",
-		)
+		.filter((entry) => entry.isFile() && entry.name.endsWith(".rs") && entry.name !== "mod.rs")
 		.map((entry) => entry.name)
 		.sort();
 	const coveredFiles = sensorCiProbes.map((probe) => probe.sourceFile).sort();
 
 	expect(coveredFiles).toEqual(sensorFiles);
-	expect(new Set(sensorCiProbes.map((probe) => probe.callId)).size).toBe(
-		sensorCiProbes.length,
-	);
-	expect(new Set(sensorCiProbes.map((probe) => probe.toolName)).size).toBe(
-		sensorCiProbes.length,
-	);
+	expect(new Set(sensorCiProbes.map((probe) => probe.callId)).size).toBe(sensorCiProbes.length);
+	expect(new Set(sensorCiProbes.map((probe) => probe.toolName)).size).toBe(sensorCiProbes.length);
 });
 
 test("whalehall-local lists, calls, streams, and cancels tools over JSONL", async () => {
@@ -531,17 +505,14 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		],
 		{ cwd: projectRoot, stdout: "pipe", stderr: "pipe" },
 	);
-	if (build.exitCode !== 0)
-		throw new Error(new TextDecoder().decode(build.stderr));
+	if (build.exitCode !== 0) throw new Error(new TextDecoder().decode(build.stderr));
 
 	const binary = resolve(
 		projectRoot,
 		"whalehall-local/target/debug",
 		process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local",
 	);
-	const dataDirectory = mkdtempSync(
-		join(tmpdir(), "whalehall-activity-integration-"),
-	);
+	const dataDirectory = mkdtempSync(join(tmpdir(), "whalehall-activity-integration-"));
 	const browserProfileRoot = createBrowserFixture(dataDirectory);
 	createAccessibilityFixture(dataDirectory);
 	const vscodeBridgeRoot = createVscodeBridgeFixtureRoot(dataDirectory);
@@ -581,9 +552,10 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	const serverReady = deferred();
+	const serverDatabasesInitialized = deferred();
+	const runtimeReady = deferred();
 	const stderrComplete = collectServerStderr(child.stderr, (line) => {
-		if (line.startsWith("editor bridge database:")) serverReady.resolve();
+		if (line.startsWith("editor bridge database:")) serverDatabasesInitialized.resolve();
 	});
 	const messages: LocalMessage[] = [];
 	const queryCallIds = [
@@ -598,9 +570,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		"browser-downloads",
 		"accessibility-tree",
 	];
-	const queryCompleted = new Map(
-		queryCallIds.map((callId) => [callId, deferred()] as const),
-	);
+	const queryCompleted = new Map(queryCallIds.map((callId) => [callId, deferred()] as const));
 	const progressObserved = deferred();
 	const progressCompleted = deferred();
 	const waitStarted = deferred();
@@ -613,6 +583,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	const outputComplete = collectMessages(child.stdout, messages, (message) => {
 		if ("id" in message && typeof message.id === "string") {
 			sensorCompleted.get(message.id)?.resolve();
+			if (message.id === "health") runtimeReady.resolve();
 		}
 		if (
 			"event" in message &&
@@ -641,16 +612,42 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		) {
 			waitCancelled.resolve();
 		}
-		if ("id" in message && message.id === "progress")
-			progressCompleted.resolve();
+		if ("id" in message && message.id === "progress") progressCompleted.resolve();
 		if ("id" in message && message.id === "wait") waitCompleted.resolve();
 		if ("id" in message && message.id === "cancel") cancelCompleted.resolve();
 		if ("id" in message && typeof message.id === "string") {
 			queryCompleted.get(message.id)?.resolve();
 		}
 	});
-	await withTimeout(serverReady.promise, "native server startup", 30_000);
+	await withNativeRuntimeStartup(
+		serverDatabasesInitialized.promise,
+		"native database initialization",
+		child.exited,
+		outputComplete,
+		nativeStartupTimeoutMs,
+	);
 	publishVscodeEditFixture(vscodeBridgeRoot);
+	// Database-path diagnostics are emitted before serve_session initializes the
+	// retention tasks, Observer supervisor, stdout writer, and stdin request
+	// loop. Use the protocol itself as the authoritative readiness boundary so
+	// a slow Windows image cannot turn startup work into a sensor response
+	// timeout.
+	child.stdin.write('{"id":"health","method":"runtime.health","params":{}}\n');
+	await child.stdin.flush();
+	await withNativeRuntimeStartup(
+		runtimeReady.promise,
+		"native runtime health response",
+		child.exited,
+		outputComplete,
+		nativeStartupTimeoutMs,
+	);
+	expect(messages.find((message) => "id" in message && message.id === "health")).toMatchObject({
+		ok: true,
+		result: {
+			service: "whalehall-local",
+			status: "ok",
+		},
+	});
 	child.stdin.write('{"id":"list","method":"tool.list","params":{}}\n');
 	child.stdin.write(
 		'{"id":"system","method":"tool.call","params":{"name":"system.info","arguments":{}}}\n',
@@ -671,10 +668,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 					})}\n`,
 				);
 				await child.stdin.flush();
-				await withTimeout(
-					readinessCompleted.promise,
-					`${probe.toolName} readiness response`,
-				);
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
 				readinessOutput = successfulToolOutput(messages, readinessCallId);
 				if (accessibilitySensorReady(readinessOutput)) {
 					readinessReached = true;
@@ -688,10 +682,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 				);
 			}
 		}
-		if (
-			probe.sourceFile === "activity.rs" &&
-			context.foregroundMode !== "auto"
-		) {
+		if (probe.sourceFile === "activity.rs" && context.foregroundMode !== "auto") {
 			let readinessOutput: unknown;
 			let readinessReached = false;
 			for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -706,10 +697,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 					})}\n`,
 				);
 				await child.stdin.flush();
-				await withTimeout(
-					readinessCompleted.promise,
-					`${probe.toolName} readiness response`,
-				);
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
 				readinessOutput = successfulToolOutput(messages, readinessCallId);
 				if (activityCapabilityReady(readinessOutput, context.foregroundMode)) {
 					readinessReached = true;
@@ -738,10 +726,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 					})}\n`,
 				);
 				await child.stdin.flush();
-				await withTimeout(
-					readinessCompleted.promise,
-					`${probe.toolName} readiness response`,
-				);
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
 				readinessOutput = successfulToolOutput(messages, readinessCallId);
 				if (applicationInventoryReady(readinessOutput)) {
 					readinessReached = true;
@@ -770,10 +755,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 					})}\n`,
 				);
 				await child.stdin.flush();
-				await withTimeout(
-					readinessCompleted.promise,
-					`${probe.toolName} readiness response`,
-				);
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
 				readinessOutput = successfulToolOutput(messages, readinessCallId);
 				if (browserSensorReady(readinessOutput)) {
 					readinessReached = true;
@@ -802,10 +784,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 					})}\n`,
 				);
 				await child.stdin.flush();
-				await withTimeout(
-					readinessCompleted.promise,
-					`${probe.toolName} readiness response`,
-				);
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
 				readinessOutput = successfulToolOutput(messages, readinessCallId);
 				if (presenceCapabilityReady(readinessOutput, context.presenceMode)) {
 					readinessReached = true;
@@ -834,10 +813,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 					})}\n`,
 				);
 				await child.stdin.flush();
-				await withTimeout(
-					readinessCompleted.promise,
-					`${probe.toolName} readiness response`,
-				);
+				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
 				readinessOutput = successfulToolOutput(messages, readinessCallId);
 				if (editorSensorReady(readinessOutput)) {
 					readinessReached = true;
@@ -859,11 +835,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 			})}\n`,
 		);
 		await child.stdin.flush();
-		const completion = sensorCompleted.get(probe.callId);
-		if (!completion) {
-			throw new Error(`Missing completion handler for ${probe.toolName}.`);
-		}
-		await withTimeout(completion.promise, `${probe.toolName} response`, 15_000);
+		await withTimeout(sensorCompleted.get(probe.callId)!.promise, `${probe.toolName} response`, 15_000);
 	}
 	child.stdin.write(
 		'{"id":"activity-sessions","method":"tool.call","params":{"name":"activity.sessions","arguments":{"limit":10}}}\n',
@@ -897,9 +869,9 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	);
 	await child.stdin.flush();
 	await withTimeout(
-		Promise.all(
-			Array.from(queryCompleted.values(), (completed) => completed.promise),
-		).then(() => undefined),
+		Promise.all(Array.from(queryCompleted.values(), (completed) => completed.promise)).then(
+			() => undefined,
+		),
 		"sensor query responses",
 	);
 	child.stdin.write(
@@ -958,9 +930,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		probe.verify(toolOutput(messages, probe.callId), context);
 	}
 	expect(
-		messages.find(
-			(message) => "id" in message && message.id === "activity-sessions",
-		),
+		messages.find((message) => "id" in message && message.id === "activity-sessions"),
 	).toMatchObject({
 		ok: true,
 		result: {
@@ -969,9 +939,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		},
 	});
 	expect(
-		messages.find(
-			(message) => "id" in message && message.id === "activity-cleanup",
-		),
+		messages.find((message) => "id" in message && message.id === "activity-cleanup"),
 	).toMatchObject({
 		ok: true,
 		result: {
@@ -986,11 +954,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	});
 	const installedOutput = toolOutput(messages, "installed-applications") as {
 		count: number;
-		applications: Array<{
-			name: string;
-			executablePath: string;
-			source: string;
-		}>;
+		applications: Array<{ name: string; executablePath: string; source: string }>;
 	};
 	expect(installedOutput.count).toBe(installedOutput.applications.length);
 	for (const application of installedOutput.applications) {
@@ -1020,16 +984,13 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		`[sensor-ci] process query count=${processOutput.count} serverPid=${systemOutput.pid} serverFound=${localServerProcess !== undefined}`,
 	);
 	expect(localServerProcess).toBeDefined();
-	if (!localServerProcess) {
-		throw new Error("Native process inventory omitted the WhaleHall server.");
-	}
-	expect(localServerProcess.name.length > 0).toBe(true);
-	expect(localServerProcess.executablePath.length > 0).toBe(true);
-	expect(typeof localServerProcess.startedAtMs).toBe("number");
-	expect(localServerProcess.exitedAt).toBeNull();
-	expect(typeof localServerProcess.cpuUsagePercent).toBe("number");
-	expect(typeof localServerProcess.memoryBytes).toBe("number");
-	expect(localServerProcess.isRunning).toBe(true);
+	expect(localServerProcess!.name.length > 0).toBe(true);
+	expect(localServerProcess!.executablePath.length > 0).toBe(true);
+	expect(typeof localServerProcess!.startedAtMs).toBe("number");
+	expect(localServerProcess!.exitedAt).toBeNull();
+	expect(typeof localServerProcess!.cpuUsagePercent).toBe("number");
+	expect(typeof localServerProcess!.memoryBytes).toBe("number");
+	expect(localServerProcess!.isRunning).toBe(true);
 	const presenceEventsOutput = toolOutput(messages, "presence-events") as {
 		count: number;
 		events: Array<{
@@ -1094,11 +1055,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	});
 	const accessibilityOutput = toolOutput(messages, "accessibility-tree") as {
 		count: number;
-		snapshot: {
-			applicationName: string;
-			windowTitle: string;
-			nodeCount: number;
-		};
+		snapshot: { applicationName: string; windowTitle: string; nodeCount: number };
 		nodes: Array<{
 			nodeId: string;
 			role: string;
@@ -1116,67 +1073,45 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		windowTitle: "Accessibility Fixture",
 		nodeCount: 7,
 	});
-	expect(
-		accessibilityOutput.nodes.find((node) => node.role === "button"),
-	).toMatchObject({
+	expect(accessibilityOutput.nodes.find((node) => node.role === "button")).toMatchObject({
 		name: "Save",
 	});
-	expect(
-		accessibilityOutput.nodes.find((node) => node.role === "menu"),
-	).toMatchObject({
+	expect(accessibilityOutput.nodes.find((node) => node.role === "menu")).toMatchObject({
 		name: "File",
 	});
-	expect(
-		accessibilityOutput.nodes.find((node) => node.nodeId === "title-input"),
-	).toMatchObject({
+	expect(accessibilityOutput.nodes.find((node) => node.nodeId === "title-input")).toMatchObject({
 		role: "textBox",
 		name: "Title",
 		value: "WhaleHall sensor draft",
 		focused: true,
 	});
-	expect(
-		accessibilityOutput.nodes.find((node) => node.nodeId === "selected-item"),
-	).toMatchObject({
+	expect(accessibilityOutput.nodes.find((node) => node.nodeId === "selected-item")).toMatchObject({
 		name: "Second item",
 		selected: true,
 	});
-	expect(
-		accessibilityOutput.nodes.find((node) => node.role === "document"),
-	).toMatchObject({
+	expect(accessibilityOutput.nodes.find((node) => node.role === "document")).toMatchObject({
 		documentText: "A bounded excerpt from the current document.",
 	});
-	expect(
-		accessibilityOutput.nodes.find((node) => node.protected),
-	).toMatchObject({
+	expect(accessibilityOutput.nodes.find((node) => node.protected)).toMatchObject({
 		role: "passwordText",
 		value: null,
 		documentText: null,
 	});
-	expect(
-		messages.some(
-			(message) => "event" in message && message.event === "tool.started",
-		),
-	).toBe(true);
-	expect(
-		messages.some(
-			(message) => "event" in message && message.event === "tool.progress",
-		),
-	).toBe(true);
+	expect(messages.some((message) => "event" in message && message.event === "tool.started")).toBe(
+		true,
+	);
+	expect(messages.some((message) => "event" in message && message.event === "tool.progress")).toBe(
+		true,
+	);
 	expect(toolOutput(messages, "progress")).toMatchObject({ waitedMs: 500 });
 	expect(
-		messages.some(
-			(message) => "event" in message && message.event === "tool.cancelled",
-		),
+		messages.some((message) => "event" in message && message.event === "tool.cancelled"),
 	).toBe(true);
-	expect(
-		messages.find((message) => "id" in message && message.id === "cancel"),
-	).toMatchObject({
+	expect(messages.find((message) => "id" in message && message.id === "cancel")).toMatchObject({
 		ok: true,
 		result: { callId: "wait", cancelled: true },
 	});
-	expect(
-		messages.find((message) => "id" in message && message.id === "wait"),
-	).toMatchObject({
+	expect(messages.find((message) => "id" in message && message.id === "wait")).toMatchObject({
 		ok: false,
 		error: { code: "CANCELLED" },
 	});
@@ -1219,10 +1154,7 @@ function deferred() {
 	return { promise, resolve };
 }
 
-function expectation<const T extends string>(
-	name: string,
-	allowed: readonly T[],
-): T {
+function expectation<const T extends string>(name: string, allowed: readonly T[]): T {
 	const value = process.env[name] ?? allowed[0];
 	if (!allowed.includes(value as T)) {
 		throw new Error(`${name} must be one of: ${allowed.join(", ")}`);
@@ -1231,20 +1163,13 @@ function expectation<const T extends string>(
 }
 
 function toolOutput(messages: LocalMessage[], callId: string): unknown {
-	const response = messages.find(
-		(message) => "id" in message && message.id === callId,
-	);
+	const response = messages.find((message) => "id" in message && message.id === callId);
 	expect(response).toMatchObject({ ok: true, result: { callId } });
 	return successfulToolOutput(messages, callId);
 }
 
-function successfulToolOutput(
-	messages: LocalMessage[],
-	callId: string,
-): unknown {
-	const response = messages.find(
-		(message) => "id" in message && message.id === callId,
-	);
+function successfulToolOutput(messages: LocalMessage[], callId: string): unknown {
+	const response = messages.find((message) => "id" in message && message.id === callId);
 	if (!response || !("ok" in response) || !response.ok) {
 		throw new Error(`Missing successful sensor response for ${callId}`);
 	}
@@ -1295,11 +1220,7 @@ function browserSensorReady(output: unknown): boolean {
 		downloadCount: number;
 		lastTabScanAtMs: number | null;
 		lastHistoryScanAtMs: number | null;
-		capabilities: {
-			currentTabs: boolean;
-			history: boolean;
-			downloads: boolean;
-		};
+		capabilities: { currentTabs: boolean; history: boolean; downloads: boolean };
 	};
 	return (
 		status.state === "running" &&
@@ -1401,12 +1322,10 @@ function createBrowserFixture(dataDirectory: string): string {
 	const chromiumEpochOffsetMicroseconds = 11_644_473_600_000_000;
 	const visitTime = chromiumEpochOffsetMicroseconds + Date.now() * 1000;
 	database
-		.query("INSERT INTO urls VALUES (1, ?, ?, 3, ?)")
-		.run(
-			"https://search.example/?q=whalehall+sensor",
-			"WhaleHall Search",
-			visitTime,
-		);
+		.query(
+			"INSERT INTO urls VALUES (1, ?, ?, 3, ?)",
+		)
+		.run("https://search.example/?q=whalehall+sensor", "WhaleHall Search", visitTime);
 	database
 		.query("INSERT INTO downloads VALUES (7, '', '', ?, ?, ?, 1024, 1024, 1)")
 		.run(
@@ -1443,18 +1362,6 @@ function createVscodeBridgeFixtureRoot(dataDirectory: string): string {
 	const spool = join(configuredRoot, ".whalehall-vscode-spool-v1");
 	mkdirSync(spool, { recursive: true });
 	return realpathSync(configuredRoot);
-}
-
-function expectSameDirectory(actual: string | null, expected: string): void {
-	expect(actual).toEqual(expect.any(String));
-	if (actual === null) {
-		return;
-	}
-	const actualMetadata = statSync(actual);
-	const expectedMetadata = statSync(expected);
-	expect(actualMetadata.isDirectory()).toBe(true);
-	expect(actualMetadata.dev).toBe(expectedMetadata.dev);
-	expect(actualMetadata.ino).toBe(expectedMetadata.ino);
 }
 
 function publishVscodeEditFixture(root: string): void {
@@ -1626,6 +1533,40 @@ async function withTimeout(
 			throw new Error(`Timed out waiting for ${label}`);
 		}),
 	]);
+}
+
+async function withNativeRuntimeStartup(
+	ready: Promise<void>,
+	label: string,
+	exited: Promise<number>,
+	outputComplete: Promise<void>,
+	timeoutMs: number,
+): Promise<void> {
+	await Promise.race([
+		ready,
+		exited.then((exitCode) => {
+			throw new Error(`Native runtime exited with code ${exitCode} while waiting for ${label}`);
+		}),
+		outputComplete.then(
+			() => {
+				throw new Error(`Native runtime closed stdout while waiting for ${label}`);
+			},
+			(error) => {
+				throw new Error(`Native runtime stdout failed while waiting for ${label}: ${String(error)}`);
+			},
+		),
+		Bun.sleep(timeoutMs).then(() => {
+			throw new Error(`Timed out waiting for ${label}`);
+		}),
+	]);
+}
+
+function normalizeCanonicalWindowsPath(value: string | null): string | null {
+	if (value === null) return null;
+	const withoutDevicePrefix = process.platform === "win32" && value.startsWith("\\\\?\\")
+		? value.slice(4)
+		: value;
+	return realpathSync.native(resolve(withoutDevicePrefix));
 }
 
 async function collectMessages(

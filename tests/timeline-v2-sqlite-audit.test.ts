@@ -27,11 +27,34 @@ import {
 
 const temporaryDirectories: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
+	if (process.platform === "win32") Bun.gc(true);
 	for (const directory of temporaryDirectories.splice(0)) {
-		rmSync(directory, { recursive: true, force: true });
+		await removeTemporaryDirectory(directory);
 	}
 });
+
+async function removeTemporaryDirectory(directory: string): Promise<void> {
+	const maxRetries = process.platform === "win32" ? 20 : 0;
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			rmSync(directory, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			if (!isWindowsBusyError(error) || attempt >= maxRetries) throw error;
+			Bun.gc(true);
+			await Bun.sleep(25);
+		}
+	}
+}
+
+function isWindowsBusyError(error: unknown): error is NodeJS.ErrnoException {
+	return (
+		process.platform === "win32" &&
+		error instanceof Error &&
+		(error as NodeJS.ErrnoException).code === "EBUSY"
+	);
+}
 
 class MemoryVault implements TimelineVault {
 	readonly seals: TimelineVaultSealRequest[] = [];

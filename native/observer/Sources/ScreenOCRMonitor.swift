@@ -1,9 +1,6 @@
 import AppKit
 import CoreGraphics
 import Foundation
-// macOS 15's ScreenCaptureKit SDK exposes SCShareableContent as non-Sendable.
-// This monitor is MainActor-isolated, so retain that isolation while importing
-// the older framework concurrency annotations compatibly under Swift 6.
 @preconcurrency import ScreenCaptureKit
 import Vision
 

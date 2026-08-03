@@ -6,6 +6,10 @@ export {
 	CalendarPage,
 	type CalendarPageProps,
 } from "./CalendarPage";
+export {
+	CalendarController,
+	type CalendarControllerState,
+} from "./CalendarController";
 export type {
 	CalendarBatchMutationResult,
 	CalendarConflict,

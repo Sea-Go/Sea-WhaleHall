@@ -12,19 +12,27 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	codesignDesignatedRequirementCommand,
+	credentialHelperCodesignCommand,
+} from "../scripts/build-native";
+import {
+	MACOS_CREDENTIAL_HELPER_EXECUTABLE,
+	MACOS_CREDENTIAL_HELPER_IDENTIFIER,
 	MACOS_USAGE_DESCRIPTIONS,
+	assertRequiredMacNativeComponents,
 	normalizeDesignatedRequirement,
 	prepareMacWrapper,
-	requiresMaterializedCanaryPayload,
-	validateLocalDesignatedRequirementContinuity,
-	validateLocalWrapperArchiveEntries,
+	shouldMaterializeMacUpdateArchive,
 	validateLocalWrapperArchiveEntryTypes,
+	validateLocalWrapperArchiveEntries,
+	validateLocalDesignatedRequirementContinuity,
 	validateObserverEntitlements,
+	validateSignedComponentDetails,
 	verifyMacWrapper,
 } from "../scripts/macos-build-security";
 import {
-	localDesignatedRequirement,
 	MACOS_LOCAL_SIGNING_COMMON_NAME,
+	localDesignatedRequirement,
 	parseCodeSigningIdentities,
 	parseUserLoginKeychainPath,
 	resolveMacSigningPlan,
@@ -44,20 +52,24 @@ describe("macOS signing identity selection", () => {
 	const localFingerprint = "A".repeat(40);
 	const developerFingerprint = "B".repeat(40);
 	const identities = parseCodeSigningIdentities(
-		`  1) ${localFingerprint} "${MACOS_LOCAL_SIGNING_COMMON_NAME}"\n` +
-			`  2) ${developerFingerprint} ` +
-			'"Developer ID Application: WhaleHall (ABCDE12345)"\n' +
-			"     2 valid identities found\n",
+		`  1) ${localFingerprint} "${MACOS_LOCAL_SIGNING_COMMON_NAME}"\n`
+			+ `  2) ${developerFingerprint} `
+			+ '"Developer ID Application: WhaleHall (ABCDE12345)"\n'
+		+ "     2 valid identities found\n",
 	);
 
 	test("requires two independent signatures to prove persistent Keychain access", () => {
-		expect(localSigningAccessVerificationTargets(localFingerprint)).toEqual([
+		expect(
+			localSigningAccessVerificationTargets(localFingerprint),
+		).toEqual([
 			{
-				identifier: "com.seago.whalehall.local-signing-check.primary",
+				identifier:
+					"com.seago.whalehall.local-signing-check.primary",
 				fileName: "signing-check-primary",
 			},
 			{
-				identifier: "com.seago.whalehall.local-signing-check.persistence",
+				identifier:
+					"com.seago.whalehall.local-signing-check.persistence",
 				fileName: "signing-check-persistence",
 			},
 		]);
@@ -87,8 +99,8 @@ describe("macOS signing identity selection", () => {
 	test("selects only the current-user login keychain and binds the leaf hash", () => {
 		expect(
 			parseUserLoginKeychainPath(
-				'    "/Users/example/Library/Keychains/login.keychain-db"\n' +
-					'    "/Users/example/Library/Keychains/other.keychain-db"\n',
+				'    "/Users/example/Library/Keychains/login.keychain-db"\n'
+					+ '    "/Users/example/Library/Keychains/other.keychain-db"\n',
 			),
 		).toBe("/Users/example/Library/Keychains/login.keychain-db");
 		expect(
@@ -97,8 +109,8 @@ describe("macOS signing identity selection", () => {
 				localFingerprint.toLowerCase(),
 			),
 		).toBe(
-			'=designated => identifier "com.seago.whalehall.observer" ' +
-				`and certificate leaf = H"${localFingerprint}"`,
+			'=designated => identifier "com.seago.whalehall.observer" '
+				+ `and certificate leaf = H"${localFingerprint}"`,
 		);
 	});
 
@@ -150,21 +162,35 @@ describe("macOS signing identity selection", () => {
 		).toEqual({ kind: "ad-hoc", releaseRequired: false });
 	});
 
-	test("materializes every non-Developer-ID Canary payload before packaging", () => {
-		expect(requiresMaterializedCanaryPayload("local", "dev")).toBe(true);
-		expect(requiresMaterializedCanaryPayload("local", "canary")).toBe(true);
-		expect(requiresMaterializedCanaryPayload("ad-hoc", "dev")).toBe(false);
-		expect(requiresMaterializedCanaryPayload("ad-hoc", "canary")).toBe(true);
-		expect(requiresMaterializedCanaryPayload("developer-id", "canary")).toBe(
-			false,
-		);
+	test("materializes every non-Developer-ID update archive before publishing", () => {
+		expect(shouldMaterializeMacUpdateArchive("ad-hoc")).toBe(true);
+		expect(shouldMaterializeMacUpdateArchive("local")).toBe(true);
+		expect(shouldMaterializeMacUpdateArchive("developer-id")).toBe(false);
 	});
 });
 
 describe("local designated requirement continuity", () => {
 	const requirement =
-		'designated => identifier "com.seago.whalehall.local" ' +
-		`and certificate leaf = H"${"A".repeat(40)}"`;
+		'designated => identifier "com.seago.whalehall.local" '
+		+ `and certificate leaf = H"${"A".repeat(40)}"`;
+
+	test("uses portable codesign arguments to display a designated requirement", () => {
+		expect(
+			codesignDesignatedRequirementCommand("/tmp/whalehall-local"),
+		).toEqual([
+			"/usr/bin/codesign",
+			"--display",
+			"--requirements",
+			"-",
+			"/tmp/whalehall-local",
+		]);
+	});
+
+	test("accepts the exact comment prefix used for an ad-hoc designated requirement", () => {
+		expect(normalizeDesignatedRequirement(`# ${requirement}`)).toBe(
+			normalizeDesignatedRequirement(requirement),
+		);
+	});
 
 	test("accepts an unchanged certificate-anchored requirement", () => {
 		expect(
@@ -179,8 +205,10 @@ describe("local designated requirement continuity", () => {
 	test("ignores codesign diagnostics regardless of stdout/stderr order", () => {
 		expect(
 			validateLocalDesignatedRequirementContinuity({
-				stagedOutput: `${requirement}\nExecutable=/tmp/staged/whalehall-local\n`,
-				packagedOutput: `Executable=/tmp/package/whalehall-local\n${requirement}\n`,
+				stagedOutput:
+					`${requirement}\nExecutable=/tmp/staged/whalehall-local\n`,
+				packagedOutput:
+					`Executable=/tmp/package/whalehall-local\n${requirement}\n`,
 				expectedIdentifier: "com.seago.whalehall.local",
 			}),
 		).toBe(normalizeDesignatedRequirement(requirement));
@@ -204,11 +232,11 @@ describe("local designated requirement continuity", () => {
 		expect(() =>
 			validateLocalDesignatedRequirementContinuity({
 				stagedOutput:
-					'designated => identifier "com.seago.whalehall.local" ' +
-					'and cdhash H"1234"',
+					'designated => identifier "com.seago.whalehall.local" '
+					+ 'and cdhash H"1234"',
 				packagedOutput:
-					'designated => identifier "com.seago.whalehall.local" ' +
-					'and cdhash H"1234"',
+					'designated => identifier "com.seago.whalehall.local" '
+					+ 'and cdhash H"1234"',
 				expectedIdentifier: "com.seago.whalehall.local",
 			}),
 		).toThrow("ad-hoc cdhash");
@@ -228,10 +256,146 @@ describe("local designated requirement continuity", () => {
 		expect(() =>
 			validateLocalDesignatedRequirementContinuity({
 				stagedOutput: requirement,
-				packagedOutput: requirement.replace("A".repeat(40), "B".repeat(40)),
+				packagedOutput: requirement.replace(
+					"A".repeat(40),
+					"B".repeat(40),
+				),
 				expectedIdentifier: "com.seago.whalehall.local",
 			}),
 		).toThrow("differs from the staged");
+	});
+});
+
+describe("macOS credential helper signing contract", () => {
+	const fingerprint = "A".repeat(40);
+
+	test("uses one fixed identifier for local and Developer ID signing plans", () => {
+		const local = credentialHelperCodesignCommand({
+			executable: "/tmp/whalehall-credential-helper",
+			signing: {
+				kind: "local",
+				identity: fingerprint,
+				releaseRequired: false,
+			},
+		});
+		expect(local).toContain("--identifier");
+		expect(local).toContain(MACOS_CREDENTIAL_HELPER_IDENTIFIER);
+		expect(local).toContain(
+			`=designated => identifier "${MACOS_CREDENTIAL_HELPER_IDENTIFIER}" `
+				+ `and certificate leaf = H"${fingerprint}"`,
+		);
+		expect(local).toContain("runtime");
+		expect(local).toContain("--timestamp=none");
+
+		const developer = credentialHelperCodesignCommand({
+			executable: "/tmp/whalehall-credential-helper",
+			signing: {
+				kind: "developer-id",
+				identity: "B".repeat(40),
+				teamIdentifier: "ABCDE12345",
+				releaseRequired: true,
+			},
+		});
+		expect(developer).toContain(MACOS_CREDENTIAL_HELPER_IDENTIFIER);
+		expect(developer).toContain("runtime");
+		expect(developer).toContain("--timestamp");
+		expect(developer.join(" ")).toContain(
+			'certificate leaf[subject.OU] = "ABCDE12345"',
+		);
+
+		const adHoc = credentialHelperCodesignCommand({
+			executable: "/tmp/whalehall-credential-helper",
+			signing: { kind: "ad-hoc", releaseRequired: false },
+		});
+		expect(adHoc).toContain(MACOS_CREDENTIAL_HELPER_IDENTIFIER);
+		expect(adHoc).toContain("--timestamp=none");
+	});
+
+	test("fails closed when a required signing identity is incomplete", () => {
+		expect(() =>
+			credentialHelperCodesignCommand({
+				executable: "/tmp/whalehall-credential-helper",
+				signing: {
+					kind: "developer-id",
+					teamIdentifier: "ABCDE12345",
+					releaseRequired: true,
+				},
+			}),
+		).toThrow("signing is incomplete");
+		expect(() =>
+			credentialHelperCodesignCommand({
+				executable: "/tmp/whalehall-credential-helper",
+				signing: { kind: "local", releaseRequired: false },
+			}),
+		).toThrow("identity is unavailable");
+	});
+
+	test("rejects a package that omits the credential helper", () => {
+		const nativeDirectory = mkdtempSync(
+			join(tmpdir(), "whalehall-native-contract-"),
+		);
+		temporaryDirectories.push(nativeDirectory);
+		writeFileSync(join(nativeDirectory, "whalehall-local"), "local");
+		mkdirSync(join(nativeDirectory, "WhaleHall Observer.app"));
+		writeFileSync(
+			join(nativeDirectory, "whalehall-vault-broker-v2"),
+			"broker",
+		);
+
+		expect(() =>
+			assertRequiredMacNativeComponents(nativeDirectory),
+		).toThrow(MACOS_CREDENTIAL_HELPER_EXECUTABLE);
+		const helperPath = join(
+			nativeDirectory,
+			MACOS_CREDENTIAL_HELPER_EXECUTABLE,
+		);
+		mkdirSync(helperPath);
+		expect(() =>
+			assertRequiredMacNativeComponents(nativeDirectory),
+		).toThrow("unsafe type");
+		rmSync(helperPath, { recursive: true });
+		writeFileSync(helperPath, "helper");
+		expect(() =>
+			assertRequiredMacNativeComponents(nativeDirectory),
+		).not.toThrow();
+	});
+
+	test("rejects credential helper identifier and Team ID mismatches", () => {
+		const canonical =
+			`Executable=/tmp/${MACOS_CREDENTIAL_HELPER_EXECUTABLE}\n`
+			+ `Identifier=${MACOS_CREDENTIAL_HELPER_IDENTIFIER}\n`
+			+ "TeamIdentifier=ABCDE12345\n";
+		expect(() =>
+			validateSignedComponentDetails({
+				details: canonical,
+				expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				expectedTeamIdentifier: "ABCDE12345",
+			}),
+		).not.toThrow();
+		expect(() =>
+			validateSignedComponentDetails({
+				details: canonical.replace(
+					MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+					"com.seago.whalehall.rewritten",
+				),
+				expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				expectedTeamIdentifier: "ABCDE12345",
+			}),
+		).toThrow("canonical identifier");
+		expect(() =>
+			validateSignedComponentDetails({
+				details: canonical.replace("ABCDE12345", "ZYXWV98765"),
+				expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				expectedTeamIdentifier: "ABCDE12345",
+			}),
+		).toThrow("does not share the wrapper TeamIdentifier");
+		expect(() =>
+			validateSignedComponentDetails({
+				details: canonical.replace("TeamIdentifier=ABCDE12345\n", ""),
+				expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				expectedTeamIdentifier: "ABCDE12345",
+			}),
+		).toThrow("does not share the wrapper TeamIdentifier");
 	});
 });
 
@@ -368,7 +532,14 @@ describe("local wrapper archive entry validation", () => {
 			symlinkSync("/private/tmp", join(bundle, "Contents", "escape"));
 			const archive = join(directory, "payload.tar");
 			const create = Bun.spawnSync(
-				["/usr/bin/tar", "-cf", archive, "-C", directory, bundleName],
+				[
+					"/usr/bin/tar",
+					"-cf",
+					archive,
+					"-C",
+					directory,
+					bundleName,
+				],
 				{
 					env: { ...process.env, COPYFILE_DISABLE: "1" },
 					stdout: "pipe",
@@ -405,9 +576,7 @@ describe("Observer entitlement validation", () => {
 		"<key>com.apple.security.automation.apple-events</key><true/>";
 
 	test("accepts the non-sandboxed automation entitlement", () => {
-		expect(
-			validateObserverEntitlements(`<dict>${automation}</dict>`),
-		).toBeUndefined();
+		expect(validateObserverEntitlements(`<dict>${automation}</dict>`)).toBeUndefined();
 	});
 
 	test("rejects App Sandbox and missing automation access", () => {
@@ -443,10 +612,26 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		copyFileSync("/usr/bin/true", localServerPath);
 		chmodSync(localServerPath, 0o755);
 		signAdHoc(localServerPath, "com.seago.whalehall.local");
-		const vaultBrokerPath = join(nativeDirectory, "whalehall-vault-broker-v2");
+		const credentialHelperPath = join(
+			nativeDirectory,
+			MACOS_CREDENTIAL_HELPER_EXECUTABLE,
+		);
+		copyFileSync("/usr/bin/true", credentialHelperPath);
+		chmodSync(credentialHelperPath, 0o755);
+		signAdHoc(
+			credentialHelperPath,
+			MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+		);
+		const vaultBrokerPath = join(
+			nativeDirectory,
+			"whalehall-vault-broker-v2",
+		);
 		copyFileSync("/usr/bin/true", vaultBrokerPath);
 		chmodSync(vaultBrokerPath, 0o755);
-		signAdHoc(vaultBrokerPath, "com.seago.whalehall.vault-broker.v2");
+		signAdHoc(
+			vaultBrokerPath,
+			"com.seago.whalehall.vault-broker.v2",
+		);
 
 		const observerPath = join(nativeDirectory, "WhaleHall Observer.app");
 		const observerContents = join(observerPath, "Contents");
@@ -456,15 +641,18 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 			"/usr/bin/true",
 			join(observerExecutableDirectory, "whalehall-observer"),
 		);
-		chmodSync(join(observerExecutableDirectory, "whalehall-observer"), 0o755);
+		chmodSync(
+			join(observerExecutableDirectory, "whalehall-observer"),
+			0o755,
+		);
 		writeFileSync(
 			join(observerContents, "Info.plist"),
-			`<?xml version="1.0" encoding="UTF-8"?>\n` +
-				`<plist version="1.0"><dict>\n` +
-				`<key>CFBundleExecutable</key><string>whalehall-observer</string>\n` +
-				`<key>CFBundleIdentifier</key><string>com.seago.whalehall.observer</string>\n` +
-				`<key>CFBundlePackageType</key><string>APPL</string>\n` +
-				`</dict></plist>\n`,
+			`<?xml version="1.0" encoding="UTF-8"?>\n`
+				+ `<plist version="1.0"><dict>\n`
+				+ `<key>CFBundleExecutable</key><string>whalehall-observer</string>\n`
+				+ `<key>CFBundleIdentifier</key><string>com.seago.whalehall.observer</string>\n`
+				+ `<key>CFBundlePackageType</key><string>APPL</string>\n`
+				+ `</dict></plist>\n`,
 		);
 		const observerEntitlements = join(
 			buildDirectory,
@@ -472,10 +660,10 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		);
 		writeFileSync(
 			observerEntitlements,
-			`<?xml version="1.0" encoding="UTF-8"?>\n` +
-				`<plist version="1.0"><dict>\n` +
-				`<key>com.apple.security.automation.apple-events</key><true/>\n` +
-				`</dict></plist>\n`,
+			`<?xml version="1.0" encoding="UTF-8"?>\n`
+				+ `<plist version="1.0"><dict>\n`
+				+ `<key>com.apple.security.automation.apple-events</key><true/>\n`
+				+ `</dict></plist>\n`,
 		);
 		signAdHoc(
 			observerPath,
@@ -484,12 +672,12 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		);
 		writeFileSync(
 			join(contents, "Info.plist"),
-			`<?xml version="1.0" encoding="UTF-8"?>\n` +
-				`<plist version="1.0"><dict>\n` +
-				`<key>CFBundleExecutable</key><string>launcher</string>\n` +
-				`<key>CFBundleIdentifier</key><string>com.seago.whalehall</string>\n` +
-				`<key>CFBundlePackageType</key><string>APPL</string>\n` +
-				`</dict></plist>\n`,
+			`<?xml version="1.0" encoding="UTF-8"?>\n`
+				+ `<plist version="1.0"><dict>\n`
+				+ `<key>CFBundleExecutable</key><string>launcher</string>\n`
+				+ `<key>CFBundleIdentifier</key><string>com.seago.whalehall</string>\n`
+				+ `<key>CFBundlePackageType</key><string>APPL</string>\n`
+				+ `</dict></plist>\n`,
 		);
 
 		prepareMacWrapper({
@@ -505,7 +693,9 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		});
 
 		const plist = readFileSync(join(contents, "Info.plist"), "utf8");
-		for (const [key, description] of Object.entries(MACOS_USAGE_DESCRIPTIONS)) {
+		for (const [key, description] of Object.entries(
+			MACOS_USAGE_DESCRIPTIONS,
+		)) {
 			expect(plist).toContain(`<key>${key}</key>`);
 			expect(plist).toContain(description);
 		}
@@ -526,61 +716,6 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		).toThrow("inside its build directory");
 	});
 
-	test("keeps an ad-hoc signed archive payload verifiable after extraction", () => {
-		const buildDirectory = mkdtempSync(join(tmpdir(), "whalehall-archive-"));
-		temporaryDirectories.push(buildDirectory);
-		const bundleName = "WhaleHall-canary.app";
-		const bundlePath = join(buildDirectory, bundleName);
-		const contents = join(bundlePath, "Contents");
-		const executableDirectory = join(contents, "MacOS");
-		mkdirSync(executableDirectory, { recursive: true });
-		copyFileSync("/usr/bin/true", join(executableDirectory, "launcher"));
-		chmodSync(join(executableDirectory, "launcher"), 0o755);
-		writeFileSync(
-			join(contents, "Info.plist"),
-			`<?xml version="1.0" encoding="UTF-8"?>\n` +
-				`<plist version="1.0"><dict>\n` +
-				`<key>CFBundleExecutable</key><string>launcher</string>\n` +
-				`<key>CFBundleIdentifier</key><string>com.seago.whalehall</string>\n` +
-				`<key>CFBundlePackageType</key><string>APPL</string>\n` +
-				`</dict></plist>\n`,
-		);
-		prepareMacWrapper({
-			bundlePath,
-			buildDirectory,
-			appIdentifier: "com.seago.whalehall",
-			electrobunWillSign: false,
-		});
-
-		const archive = join(buildDirectory, "payload.tar");
-		const create = Bun.spawnSync([
-			"/usr/bin/env",
-			"COPYFILE_DISABLE=1",
-			"/usr/bin/tar",
-			"-cf",
-			archive,
-			"-C",
-			buildDirectory,
-			bundleName,
-		]);
-		expect(create.exitCode).toBe(0);
-		const extractionDirectory = join(buildDirectory, "extracted");
-		mkdirSync(extractionDirectory);
-		const extract = Bun.spawnSync([
-			"/usr/bin/tar",
-			"-xf",
-			archive,
-			"-C",
-			extractionDirectory,
-		]);
-		expect(extract.exitCode).toBe(0);
-		verifyMacWrapper({
-			bundlePath: join(extractionDirectory, bundleName),
-			appIdentifier: "com.seago.whalehall",
-			requireTeamIdentifier: false,
-		});
-	});
-
 	test("fails closed when local-signing verification cannot find packaged native artifacts", () => {
 		const buildDirectory = mkdtempSync(join(tmpdir(), "whalehall-local-gate-"));
 		temporaryDirectories.push(buildDirectory);
@@ -592,12 +727,12 @@ describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
 		chmodSync(join(executableDirectory, "launcher"), 0o755);
 		writeFileSync(
 			join(contents, "Info.plist"),
-			`<?xml version="1.0" encoding="UTF-8"?>\n` +
-				`<plist version="1.0"><dict>\n` +
-				`<key>CFBundleExecutable</key><string>launcher</string>\n` +
-				`<key>CFBundleIdentifier</key><string>com.seago.whalehall</string>\n` +
-				`<key>CFBundlePackageType</key><string>APPL</string>\n` +
-				`</dict></plist>\n`,
+			`<?xml version="1.0" encoding="UTF-8"?>\n`
+				+ `<plist version="1.0"><dict>\n`
+				+ `<key>CFBundleExecutable</key><string>launcher</string>\n`
+				+ `<key>CFBundleIdentifier</key><string>com.seago.whalehall</string>\n`
+				+ `<key>CFBundlePackageType</key><string>APPL</string>\n`
+				+ `</dict></plist>\n`,
 		);
 		prepareMacWrapper({
 			bundlePath,
@@ -636,7 +771,10 @@ function signAdHoc(
 	];
 	if (entitlements) command.push("--entitlements", entitlements);
 	command.push(path);
-	const result = Bun.spawnSync(command, { stdout: "pipe", stderr: "pipe" });
+	const result = Bun.spawnSync(
+		command,
+		{ stdout: "pipe", stderr: "pipe" },
+	);
 	if (result.exitCode !== 0) {
 		throw new Error(result.stderr.toString());
 	}

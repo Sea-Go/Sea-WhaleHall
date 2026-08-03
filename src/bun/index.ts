@@ -10,14 +10,6 @@ import {
 } from "electrobun/bun";
 import { AgentRuntime } from "../agent/agent-runtime";
 import {
-	ActivityEventWorkerClient,
-} from "../agent/activity-event-worker";
-import {
-	ActivityWindowDeliveryService,
-	ActivityWindowDeliveryStore,
-	activityWindowWorkerDiagnostic,
-} from "../agent/activity-window-worker";
-import {
 	LocalClientError,
 	LocalToolClient,
 } from "../agent/local-tool-client";
@@ -30,6 +22,26 @@ import {
 	type RawFiveMinuteAuditSource,
 } from "../agent/timeline-v2/audit";
 import { loadOrCreateReflectionIdentity } from "../agent/reflection";
+import { AGENT_HOST_PROTOCOL_VERSION } from "../agent/mastra-host/protocol";
+import { AgentRunCoordinator } from "./agent-run-coordinator";
+import { AgentToolPolicy } from "./agent-tool-policy";
+import { AccountScopedActiveGoalStore } from "./account-scoped-active-goal";
+import { runAccountSessionCleanup } from "./account-session-cleanup";
+import { CalendarRepository } from "./calendar-repository";
+import { CredentialHelperClient } from "./credential-helper-client";
+import { EncryptedAgentRepository } from "./encrypted-agent-repository";
+import { AgentPermissionRevisionConflictError } from "./encrypted-agent-repository";
+import { loadOrCreateInstallationId } from "./installation-id";
+import {
+	LocalTestAuthError,
+	LocalTestAuthSessionManager,
+} from "./local-test-auth-session";
+import { WhaleHallAgentToolExecutor } from "./local-agent-tool-executor";
+import { LocalAgentHostServices } from "./mastra-host-services";
+import { MastraSidecarClient } from "./mastra-sidecar-client";
+import { ModelRelayTransport } from "./model-relay-transport";
+import { PlanningAuthorityService } from "./planning-authority-service";
+import { SidecarModelRelayBridge } from "./sidecar-model-relay-bridge";
 import {
 	createWhaleHallReflectionRuntime,
 	setRuntimeGoal,
@@ -41,7 +53,6 @@ import {
 	parseNativeRuntimeChannel,
 } from "./native-runtime-security";
 import {
-	activityEventWorkerConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
 	timelineModernBertEnvironmentFromConfiguration,
 } from "./client-config";
@@ -66,7 +77,13 @@ import type {
 	LocalToolEvent,
 	LocalVaultLegacyMigrationResult,
 } from "../agent/local-protocol";
-import type { ClientRPC, PetRPC } from "../shared/contracts";
+import type {
+	AuthRpcResult,
+	AgentReadPermissionsRpcResult,
+	AgentReadPermissionsSnapshot,
+	ClientRPC,
+	PetRPC,
+} from "../shared/contracts";
 
 const HMR_ORIGIN = "http://127.0.0.1:5173";
 const runtimeChannel = parseNativeRuntimeChannel(
@@ -74,6 +91,23 @@ const runtimeChannel = parseNativeRuntimeChannel(
 );
 const nativeBinary = process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local";
 const nativePath = join(PATHS.RESOURCES_FOLDER, "app", "native", nativeBinary);
+const credentialHelperBinary = process.platform === "win32"
+	? "whalehall-credential-helper.exe"
+	: "whalehall-credential-helper";
+const credentialHelperPath = join(
+	PATHS.RESOURCES_FOLDER,
+	"app",
+	"native",
+	credentialHelperBinary,
+);
+const nodeBinary = process.platform === "win32" ? "node.exe" : "node";
+const nodePath = join(PATHS.RESOURCES_FOLDER, "app", "node", nodeBinary);
+const sidecarEntryPath = join(
+	PATHS.RESOURCES_FOLDER,
+	"app",
+	"agent",
+	"whalehall-agent-host.mjs",
+);
 const localDataPath = join(Utils.paths.userData, "local");
 const clientConfiguration = loadOrCreateClientConfiguration({
 	userDataDirectory: Utils.paths.userData,
@@ -105,19 +139,141 @@ if (timelineModernBertConfiguration.code === "invalid_config") {
 		"WhaleHall Timeline v2 ModernBERT configuration is incomplete or invalid; deterministic cold-start remains active.",
 	);
 }
-const activityEventWorkerConfiguration =
-	activityEventWorkerConfigurationFromConfiguration(
-		clientConfiguration.configuration,
-		process.env,
-	);
-if (
-	clientConfiguration.configuration.request.activityEventWorker.enabled &&
-	activityEventWorkerConfiguration === null
-) {
-	console.warn(
-		"WhaleHall cloud activity analysis is configured but inactive because its dedicated token is unavailable.",
-	);
-}
+const agentDataPath = join(Utils.paths.userData, "agent");
+const installationId = await loadOrCreateInstallationId(agentDataPath);
+const credentialStore = new CredentialHelperClient(credentialHelperPath, {
+	installationId,
+});
+const agentRepository = new EncryptedAgentRepository({
+	databasePath: join(agentDataPath, "whalehall-agent.sqlite3"),
+	installationId,
+	keyStore: credentialStore,
+});
+const calendarRepository = new CalendarRepository(agentRepository, {
+	timeZone: () => Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
+});
+const configuredModelId = process.env.WHALEHALL_MODEL_ID?.trim() || "gpt-4.1-mini";
+let activeGoalStore!: AccountScopedActiveGoalStore;
+let coordinator!: AgentRunCoordinator;
+let hostServices!: LocalAgentHostServices;
+let relayBridge!: SidecarModelRelayBridge;
+
+const authSession = new LocalTestAuthSessionManager({
+	onSessionInvalidated: () => {
+		try {
+			relayBridge?.abortAll();
+		} catch {
+			// Logout remains fail-closed even if an already-failing relay cannot abort.
+		}
+		activeGoalStore?.invalidateSynchronously();
+	},
+	onBeforeSessionClear: async (accountId) => {
+		const cleanupTasks: Array<() => unknown | Promise<unknown>> = [
+			() => activeGoalStore.clearForAccountTransition(),
+		];
+		if (accountId && coordinator) {
+			cleanupTasks.push(() => coordinator.cancelAllForAccount(accountId));
+		}
+		await runAccountSessionCleanup(cleanupTasks);
+	},
+});
+activeGoalStore = new AccountScopedActiveGoalStore({
+	currentSession: () => authSession.captureCurrentSession(),
+	writeRuntimeGoal: async (goal) => {
+		const runtime = reflectionRuntime;
+		if (!runtime) {
+			if (goal === null) return null;
+			throw new Error("Reflection runtime is not ready.");
+		}
+		const normalized = await setRuntimeGoal(runtime, goal);
+		return normalized
+			? { schemaVersion: "active-goal.v1", ...normalized }
+			: null;
+	},
+});
+const planningAuthority = new PlanningAuthorityService({
+	currentSession: () => authSession.captureCurrentSession(),
+	isCurrentSession: (identity) => authSession.isCurrentSession(identity),
+	repository: agentRepository,
+	calendar: calendarRepository,
+	currentActiveGoal: (accountId) => activeGoalStore.getForAccount(accountId),
+	applyActiveGoal: async (goal) => {
+		const normalized = await activeGoalStore.setForCurrentSession(goal);
+		if (!normalized) throw new Error("Active goal synchronization returned no goal.");
+		return normalized;
+	},
+});
+const modelRelay = new ModelRelayTransport(authSession);
+const sidecar = new MastraSidecarClient({
+	nodePath,
+	entryPath: sidecarEntryPath,
+	initialize: {
+		protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+		client: { name: "whalehall-desktop", version: "0.1.0" },
+		model: {
+			provider: "whalehall-relay",
+			modelId: configuredModelId,
+			supportsStructuredOutputs: true,
+		},
+	},
+	onHostCall: async (call) => {
+		if (call.method === "model/relay.open") {
+			const ownerRunId = call.params.ownerRunId;
+			if (typeof ownerRunId !== "string" || call.params.runId !== ownerRunId) {
+				throw new Error("Model relay call is not bound to its owning Agent run.");
+			}
+			const params = { ...call.params };
+			delete params.ownerRunId;
+			return coordinator.runBoundHostCall(ownerRunId, () =>
+				relayBridge.open(call.requestId, params));
+		}
+		if (call.method === "model/relay.abort") {
+			const ownerRunId = call.params.ownerRunId;
+			if (typeof ownerRunId !== "string" || call.params.runId !== ownerRunId) {
+				throw new Error("Model relay abort is not bound to its owning Agent run.");
+			}
+			const params = { ...call.params };
+			delete params.ownerRunId;
+			return coordinator.runBoundHostCall(ownerRunId, async () =>
+				relayBridge.abort(params));
+		}
+		return hostServices.handle(call.method, call.params);
+	},
+	onRunEvent: (event) => coordinator.acceptSidecarEvent(event),
+	onInterrupted: (runIds, reason) => {
+		relayBridge.abortAll();
+		void coordinator.interruptRuns(runIds, reason);
+	},
+});
+relayBridge = new SidecarModelRelayBridge({
+	transport: modelRelay,
+	modelId: configuredModelId,
+	send: (event) => sidecar.sendRelayEvent(event),
+});
+const agentToolPolicy = new AgentToolPolicy(agentRepository);
+const agentToolExecutor = new WhaleHallAgentToolExecutor({
+	calendar: calendarRepository,
+	repository: agentRepository,
+	activeGoal: (accountId) => activeGoalStore.getForAccount(accountId),
+});
+coordinator = new AgentRunCoordinator({
+	sessionIdentity: () => authSession.captureCurrentSession(),
+	repository: agentRepository,
+	sidecar,
+	abortModelRelay: (runId) => relayBridge.abortRun(runId),
+	toolPolicy: agentToolPolicy,
+	toolExecutor: agentToolExecutor,
+	onEvent: (event) => clientRPC.send.agentRunEvent(event),
+});
+hostServices = new LocalAgentHostServices({
+	runBound: (ownerRunId, operation) =>
+		coordinator.runBoundHostCall(ownerRunId, operation),
+	repository: agentRepository,
+	calendar: calendarRepository,
+	toolPolicy: agentToolPolicy,
+	memory: coordinator,
+	tools: coordinator,
+});
 
 const agent = new AgentRuntime(
 	new LocalToolClient(nativePath, {
@@ -139,8 +295,6 @@ let shutdownPromise: Promise<void> | null = null;
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
-let activityWindowDelivery: ActivityWindowDeliveryService | null = null;
-let activityWindowDeliveryStore: ActivityWindowDeliveryStore | null = null;
 const STARTUP_RETRY_DELAYS_MS = [
 	1_000,
 	5_000,
@@ -281,6 +435,70 @@ function sendToolEvent(event: LocalToolEvent): void {
 	petStateArbiter.showToolEvent(event);
 }
 
+function requireAuthenticatedAccount(): string {
+	const accountId = authSession.accountId;
+	if (!accountId) throw new LocalTestAuthError("expired", "测试会话已失效。", 401);
+	return accountId;
+}
+
+async function authRpc<T>(operation: () => Promise<T>): Promise<AuthRpcResult<T>> {
+	try {
+		return { kind: "success", data: await operation() };
+	} catch (error) {
+		if (error instanceof LocalTestAuthError) {
+			return {
+				kind: "error",
+				failure: error.kind,
+				message: error.message,
+			};
+		}
+		const secureStorageFailure =
+			error instanceof Error &&
+			(error.name === "CredentialHelperError" || error.name === "EncryptedAgentRepositoryError");
+		return {
+			kind: "error",
+			failure: secureStorageFailure ? "service-unavailable" : "unexpected",
+			message: secureStorageFailure
+				? "系统安全凭据存储不可用，WhaleHall 已阻止登录以保护本地数据。"
+				: "登录服务暂时不可用，请稍后重试。",
+		};
+	}
+}
+
+async function agentPermissionsRpc(
+	operation: () => Promise<AgentReadPermissionsSnapshot>,
+): Promise<AgentReadPermissionsRpcResult<AgentReadPermissionsSnapshot>> {
+	try {
+		return { kind: "success", data: await operation() };
+	} catch (error) {
+		if (error instanceof AgentPermissionRevisionConflictError) {
+			return {
+				kind: "error",
+				failure: "version-conflict",
+				message: "Agent 授权已发生变化，请刷新后重试。",
+				currentRevision: error.actualRevision,
+			};
+		}
+		const unavailable =
+				error instanceof LocalTestAuthError ||
+			(error instanceof Error &&
+				(error.name === "CredentialHelperError" ||
+					error.name === "EncryptedAgentRepositoryError"));
+		return {
+			kind: "error",
+			failure: unavailable ? "service-unavailable" : "unexpected",
+			message: unavailable
+				? "本机 Agent 授权服务暂不可用。"
+				: "Agent 授权没有更改，请稍后重试。",
+		};
+	}
+}
+
+function hasExactKeys(value: object, expected: readonly string[]): boolean {
+	const keys = Object.keys(value).sort();
+	return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+}
+
 const clientRPC = BrowserView.defineRPC<ClientRPC>({
 	// A user-initiated legacy Keychain migration may wait on one native
 	// authorization sheet. Normal monitoring/status requests keep their much
@@ -288,6 +506,77 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 	maxRequestTime: 130_000,
 	handlers: {
 		requests: {
+			getAgentReadPermissions: (input) => agentPermissionsRpc(async () => {
+				if (!hasExactKeys(input, [])) throw new Error("Invalid Agent permission request.");
+				return agentRepository.getAgentReadPermissions(requireAuthenticatedAccount());
+			}),
+			setAgentReadPermissions: (input) => agentPermissionsRpc(async () => {
+				if (!hasExactKeys(input, ["enabled", "expectedRevision"])) {
+					throw new Error("Invalid Agent permission request.");
+				}
+				return agentRepository.setAgentReadPermissions(
+					requireAuthenticatedAccount(),
+					input.enabled,
+					input.expectedRevision,
+				);
+			}),
+			restoreAuthSession: () => authRpc(async () => {
+				const session = await authSession.restoreSession();
+				if (!session) return null;
+				const identity = authSession.captureCurrentSession();
+				if (!identity || identity.sessionId !== session.id) {
+					throw new LocalTestAuthError("expired", "测试会话已被新的会话操作取代。", 401);
+				}
+				try {
+					await agentRepository.ensureAccount(session.user.id);
+				} catch (error) {
+					await authSession.clearSessionIfCurrent(identity).catch(() => undefined);
+					throw error;
+				}
+				if (!authSession.isCurrentSession(identity)) {
+					throw new LocalTestAuthError("expired", "测试会话已在恢复期间失效。", 401);
+				}
+				return session;
+			}),
+			signIn: (input) => authRpc(async () => {
+				if (
+					!hasExactKeys(input, ["email", "password"]) ||
+					typeof input.email !== "string" ||
+					typeof input.password !== "string" ||
+					input.email.length > 320 ||
+					input.password.length > 1_024
+				) {
+					throw new LocalTestAuthError("invalid-credentials", "体验账号格式无效。", 400);
+				}
+				const session = await authSession.signInTestAccount(input);
+				const identity = authSession.captureCurrentSession();
+				if (!identity || identity.sessionId !== session.id) {
+					throw new LocalTestAuthError("expired", "测试会话已被新的会话操作取代。", 401);
+				}
+				try {
+					await agentRepository.ensureAccount(session.user.id);
+				} catch (error) {
+					await authSession.clearSessionIfCurrent(identity).catch(() => undefined);
+					throw error;
+				}
+				if (!authSession.isCurrentSession(identity)) {
+					throw new LocalTestAuthError("expired", "测试会话已在登录期间失效。", 401);
+				}
+				return session;
+			}),
+			signOut: () => authRpc(async () => {
+				await authSession.signOut();
+			}),
+			loadCalendar: () => calendarRepository.load(requireAuthenticatedAccount()),
+			mutateCalendar: (mutation) =>
+				calendarRepository.mutate(requireAuthenticatedAccount(), mutation),
+			mutateCalendarBatch: ({ batchId, mutations, expectedRevision }) =>
+				calendarRepository.mutateBatch(
+					requireAuthenticatedAccount(),
+					batchId,
+					mutations,
+					expectedRevision,
+				),
 			getLocalStatus: () => agent.getLocalStatus(),
 			getMonitoringStatus: async () => {
 				try {
@@ -460,10 +749,8 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 				return { accepted: true };
 			},
 			setActiveGoalContext: async ({ goal }) => {
-				const runtime = reflectionRuntime;
-				if (!runtime) throw new Error("Reflection runtime is not ready.");
-				const normalized = await setRuntimeGoal(
-					runtime,
+				requireAuthenticatedAccount();
+				const normalized = await activeGoalStore.setForCurrentSession(
 					goal
 						? {
 								goalId: goal.goalId,
@@ -475,14 +762,25 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 				);
 				await timelineLifecycle.current?.service.pullNow();
 				return {
-					goal: normalized
-						? {
-								schemaVersion: "active-goal.v1" as const,
-								...normalized,
-							}
-						: null,
+					goal: normalized,
 				};
 			},
+			startConversationTurn: (input) => coordinator.startConversationTurn(input),
+			startTaskPlanningRun: (input) => coordinator.startTaskPlanningRun(input),
+			submitPlanningClarification: (input) =>
+				coordinator.submitPlanningClarification(input),
+			decideAgentToolApproval: (input) =>
+				coordinator.decideAgentToolApproval(input),
+			cancelAgentRun: (input) => coordinator.cancelAgentRun(input),
+			getAgentRunSnapshot: ({ runId }) => coordinator.getAgentRunSnapshot(runId),
+			listRestorableAgentRuns: (input) => coordinator.listRestorableAgentRuns(input),
+			getActiveConversation: () => coordinator.getActiveConversation(),
+			loadPlanningAuthority: (input) => {
+				if (!hasExactKeys(input, [])) throw new Error("Invalid planning authority request.");
+				return planningAuthority.load();
+			},
+			savePlanningDraft: (input) => planningAuthority.saveDraft(input),
+			commitPlanningDraft: (input) => planningAuthority.commitDraft(input),
 		},
 		messages: {},
 	},
@@ -626,15 +924,17 @@ function shutdown(): Promise<void> {
 	shutdownPromise = (async () => {
 		cancelStartupRetryWait?.();
 		auditCaptureCoordinator.dispose();
+		relayBridge.abortAll();
+		await sidecar.stop();
 		// Startup owns both the initial native start and any reflection-service
 		// start. Waiting here prevents a late candidate from restarting the
 		// native sensor process after shutdown has already stopped it.
 		await startupPromise;
-		await stopActivityWindowDelivery();
 		await timelineLifecycle.close();
 		await reflectionRuntime?.close();
 		reflectionRuntime = null;
 		await agent.stop();
+		agentRepository.close();
 		petStateArbiter.dispose();
 		petWindowController.dispose();
 		try {
@@ -678,17 +978,11 @@ startupPromise = (async () => {
 							.endpoint,
 					WHALEHALL_MODERNBERT_ALLOWED_ORIGINS: undefined,
 				},
-				onWindowSealed: (window) => {
-					const delivery = activityWindowDelivery;
-					if (delivery === null || shutdownPromise !== null) return;
-					return delivery.enqueueWindow(window);
-				},
 			});
 			if (shutdownPromise) {
 				await candidate.close();
 				return;
 			}
-			await startActivityWindowDelivery(candidate.repository);
 			await candidate.service.start();
 			if (shutdownPromise) {
 				await candidate.close();
@@ -696,6 +990,9 @@ startupPromise = (async () => {
 			}
 			reflectionRuntime = candidate;
 			candidate = null;
+			if (authSession.accountId) {
+				await planningAuthority.load();
+			}
 			let timeline: TimelineV2Runtime;
 			try {
 				timeline = await timelineLifecycle.ensureStarted();
@@ -725,7 +1022,6 @@ startupPromise = (async () => {
 			);
 			return;
 		} catch (error) {
-			await stopActivityWindowDelivery();
 			if (candidate) {
 				await candidate.close().catch((closeError) => {
 					console.error(
@@ -783,80 +1079,6 @@ function waitForStartupRetry(delayMs: number): Promise<void> {
 			finish();
 		};
 	});
-}
-
-async function startActivityWindowDelivery(
-	source: WhaleHallReflectionRuntime["repository"],
-): Promise<void> {
-	if (
-		activityEventWorkerConfiguration === null ||
-		activityWindowDelivery !== null ||
-		shutdownPromise !== null
-	) {
-		return;
-	}
-	const store = new ActivityWindowDeliveryStore(
-		join(localDataPath, "activity-window-worker.sqlite3"),
-	);
-	const delivery = new ActivityWindowDeliveryService({
-		source,
-		analyzer: new ActivityEventWorkerClient({
-			endpoint: activityEventWorkerConfiguration.endpoint,
-			authorizationToken: activityEventWorkerConfiguration.authorizationToken,
-		}),
-		store,
-		scoreThreshold: activityEventWorkerConfiguration.scoreThreshold,
-		onAgentTriggerRequired: () => {
-			// This is intentionally a local decision boundary. The project does
-			// not yet define a concrete next-Agent executor, so the durable
-			// pending state is retained until that executor claims it.
-			console.info(
-				"WhaleHall activity score reached its local Agent trigger threshold.",
-			);
-		},
-		onError: (error) => {
-			const diagnostic = activityWindowWorkerDiagnostic(error);
-			console.warn(
-				"WhaleHall activity window delivery retry:",
-				diagnostic.code,
-				diagnostic.httpStatus ?? "",
-				diagnostic.requestBytes === null
-					? ""
-					: `request_bytes=${diagnostic.requestBytes}`,
-				diagnostic.responseServer === null
-					? ""
-					: `server=${diagnostic.responseServer}`,
-				diagnostic.triggerReason === null
-					? ""
-					: `trigger_reason=${diagnostic.triggerReason}`,
-				diagnostic.eventCount === null
-					? ""
-					: `event_count=${diagnostic.eventCount}`,
-				diagnostic.validationStage === null
-					? ""
-					: `validation_stage=${diagnostic.validationStage}`,
-			);
-		},
-	});
-	activityWindowDeliveryStore = store;
-	activityWindowDelivery = delivery;
-	try {
-		await delivery.start();
-	} catch (error) {
-		activityWindowDelivery = null;
-		activityWindowDeliveryStore = null;
-		store.close();
-		throw error;
-	}
-}
-
-async function stopActivityWindowDelivery(): Promise<void> {
-	const delivery = activityWindowDelivery;
-	const store = activityWindowDeliveryStore;
-	activityWindowDelivery = null;
-	activityWindowDeliveryStore = null;
-	await delivery?.stop();
-	store?.close();
 }
 
 function createRawFiveMinuteAuditSource(

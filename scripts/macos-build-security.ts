@@ -1,25 +1,25 @@
-import { createHash } from "node:crypto";
 import {
 	copyFileSync,
 	existsSync,
 	lstatSync,
-	mkdirSync,
 	mkdtempSync,
-	readdirSync,
+	mkdirSync,
 	readFileSync,
+	readdirSync,
 	realpathSync,
 	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
 	localDesignatedRequirement,
-	type MacSigningKind,
 	readMacCodeSigningIdentities,
 	resolveMacSigningPlan,
+	type MacSigningKind,
 } from "./macos-signing-identity";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -42,9 +42,19 @@ export const MACOS_USAGE_DESCRIPTIONS = {
 
 const MACOS_LOCAL_SERVER_IDENTIFIER = "com.seago.whalehall.local";
 const MACOS_OBSERVER_IDENTIFIER = "com.seago.whalehall.observer";
+export const MACOS_CREDENTIAL_HELPER_IDENTIFIER =
+	"com.seago.whalehall.credential-helper";
+export const MACOS_CREDENTIAL_HELPER_EXECUTABLE =
+	"whalehall-credential-helper";
 export const MACOS_VAULT_BROKER_IDENTIFIER =
 	"com.seago.whalehall.vault-broker.v2";
 export const MACOS_VAULT_BROKER_EXECUTABLE = "whalehall-vault-broker-v2";
+
+export function shouldMaterializeMacUpdateArchive(
+	signingKind: MacSigningKind,
+): boolean {
+	return signingKind !== "developer-id";
+}
 
 interface PrepareMacWrapperOptions {
 	bundlePath: string;
@@ -61,16 +71,6 @@ interface VerifyMacWrapperOptions {
 	requireTeamIdentifier: boolean;
 	localSigningStagedNativeDirectory?: string;
 	stagedVaultBrokerDirectory?: string;
-}
-
-export function requiresMaterializedCanaryPayload(
-	signingKind: MacSigningKind,
-	buildEnvironment: string,
-): boolean {
-	return (
-		signingKind === "local" ||
-		(signingKind === "ad-hoc" && buildEnvironment !== "dev")
-	);
 }
 
 export function prepareMacWrapper({
@@ -92,7 +92,9 @@ export function prepareMacWrapper({
 			`Wrapper identifier mismatch: expected ${appIdentifier}, received ${actualIdentifier}.`,
 		);
 	}
-	for (const [key, description] of Object.entries(MACOS_USAGE_DESCRIPTIONS)) {
+	for (const [key, description] of Object.entries(
+		MACOS_USAGE_DESCRIPTIONS,
+	)) {
 		setPlistString(infoPlist, key, description);
 	}
 
@@ -125,13 +127,19 @@ export function prepareMacWrapper({
 	}
 	command.push(bundlePath);
 	run(command);
-	run(["/usr/bin/codesign", "--verify", "--deep", "--strict", bundlePath]);
+	run([
+		"/usr/bin/codesign",
+		"--verify",
+		"--deep",
+		"--strict",
+		bundlePath,
+	]);
 	if (identity === "-") {
 		console.warn(
-			"[macos-build-security] Canary wrapper uses a per-build ad-hoc TCC identity. " +
-				"This build is metadata-only; run " +
-				"`bun run setup:macos-signing -- --create` explicitly before " +
-				"collecting real content.",
+			"[macos-build-security] Canary wrapper uses a per-build ad-hoc TCC identity. "
+				+ "This build is metadata-only; run "
+				+ "`bun run setup:macos-signing -- --create` explicitly before "
+				+ "collecting real content.",
 		);
 	}
 }
@@ -144,7 +152,13 @@ export function verifyMacWrapper({
 	stagedVaultBrokerDirectory,
 }: VerifyMacWrapperOptions): void {
 	const infoPlist = join(bundlePath, "Contents", "Info.plist");
-	run(["/usr/bin/codesign", "--verify", "--deep", "--strict", bundlePath]);
+	run([
+		"/usr/bin/codesign",
+		"--verify",
+		"--deep",
+		"--strict",
+		bundlePath,
+	]);
 	const details = capture([
 		"/usr/bin/codesign",
 		"--display",
@@ -161,9 +175,7 @@ export function verifyMacWrapper({
 		(!/TeamIdentifier=[A-Z0-9]{10}(?:\n|$)/.test(details) ||
 			details.includes("TeamIdentifier=not set"))
 	) {
-		throw new Error(
-			"Signed release wrapper is missing a valid TeamIdentifier.",
-		);
+		throw new Error("Signed release wrapper is missing a valid TeamIdentifier.");
 	}
 	const outerTeamIdentifier =
 		details.match(/TeamIdentifier=([A-Z0-9]{10})(?:\n|$)/)?.[1] ?? null;
@@ -197,20 +209,16 @@ export function verifyMacWrapper({
 			stagedVaultBrokerDirectory !== undefined,
 		(nativeDirectory) => {
 			const localServerPath = join(nativeDirectory, "whalehall-local");
+			const credentialHelperPath = join(
+				nativeDirectory,
+				MACOS_CREDENTIAL_HELPER_EXECUTABLE,
+			);
 			const observerPath = join(nativeDirectory, "WhaleHall Observer.app");
 			const vaultBrokerPath = join(
 				nativeDirectory,
 				MACOS_VAULT_BROKER_EXECUTABLE,
 			);
-			if (
-				!existsSync(localServerPath) ||
-				!existsSync(observerPath) ||
-				!existsSync(vaultBrokerPath)
-			) {
-				throw new Error(
-					"Signed wrapper is missing a native monitoring component.",
-				);
-			}
+			assertRequiredMacNativeComponents(nativeDirectory);
 			verifySignedComponent(
 				localServerPath,
 				MACOS_LOCAL_SERVER_IDENTIFIER,
@@ -229,10 +237,17 @@ export function verifyMacWrapper({
 					"keychain-access-groups",
 				]) {
 					if (!localEntitlements.includes(requiredValue)) {
-						throw new Error(`Signed local server is missing ${requiredValue}.`);
+						throw new Error(
+							`Signed local server is missing ${requiredValue}.`,
+						);
 					}
 				}
 			}
+			verifySignedComponent(
+				credentialHelperPath,
+				MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				outerTeamIdentifier,
+			);
 			verifySignedComponent(
 				observerPath,
 				MACOS_OBSERVER_IDENTIFIER,
@@ -268,6 +283,14 @@ export function verifyMacWrapper({
 					),
 					packagedPath: localServerPath,
 					expectedIdentifier: MACOS_LOCAL_SERVER_IDENTIFIER,
+				});
+				verifyLocalSigningContinuity({
+					stagedPath: join(
+						localSigningStagedNativeDirectory,
+						MACOS_CREDENTIAL_HELPER_EXECUTABLE,
+					),
+					packagedPath: credentialHelperPath,
+					expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
 				});
 				verifyLocalSigningContinuity({
 					stagedPath: join(
@@ -315,8 +338,10 @@ export function prepareMacWrapperFromEnvironment(
 		buildEnvironment,
 		identities: readMacCodeSigningIdentities(),
 	});
-	if (requiresMaterializedCanaryPayload(signing.kind, buildEnvironment)) {
-		if (signing.kind === "local" && !signing.identity) {
+	if (shouldMaterializeMacUpdateArchive(signing.kind)) {
+		const localIdentity =
+			signing.kind === "local" ? signing.identity : undefined;
+		if (signing.kind === "local" && !localIdentity) {
 			throw new Error("The local signing identity is unavailable.");
 		}
 		const architecture =
@@ -325,11 +350,11 @@ export function prepareMacWrapperFromEnvironment(
 		if (architecture !== "arm64" && architecture !== "x64") {
 			throw new Error(`Unsupported macOS architecture: ${architecture}.`);
 		}
-		materializeSignedCanaryWrapper({
+		materializeNonDeveloperSignedWrapper({
 			bundlePath,
 			buildDirectory,
 			appIdentifier,
-			localIdentity: signing.kind === "local" ? signing.identity : undefined,
+			localIdentity,
 			architecture,
 		});
 		return;
@@ -347,13 +372,15 @@ export function prepareMacWrapperFromEnvironment(
 
 /**
  * Electrobun signs its archived inner app only when a Developer ID is
- * configured. A local or ad-hoc Canary would otherwise install an unsigned
- * inner app after its self-extracting wrapper, changing the app identity and
- * leaving the update archive unverifiable. Expand the locally-produced
- * archive during postWrap, sign that immutable flat app, and atomically
- * install it in place of the extractor. Ad-hoc builds remain metadata-only.
+ * configured. A non-Developer-ID build therefore cannot safely ship the
+ * default self-extracting wrapper: its full update archive contains an
+ * unsigned outer app (or the resource envelope inherited from the launcher),
+ * while a local-certificate first launch would also change the TCC identity.
+ * Expand the locally-produced archive during postWrap, sign the immutable
+ * flat app, rebuild the full archive, and atomically install the same app in
+ * place of the extractor.
  */
-function materializeSignedCanaryWrapper({
+function materializeNonDeveloperSignedWrapper({
 	bundlePath,
 	buildDirectory,
 	appIdentifier,
@@ -373,15 +400,13 @@ function materializeSignedCanaryWrapper({
 		.map((name) => join(resourcesDirectory, name));
 	if (archives.length !== 1 || archives[0] === undefined) {
 		throw new Error(
-			"The non-Developer-ID Canary wrapper must contain exactly one application archive.",
+			"The local Canary wrapper must contain exactly one application archive.",
 		);
 	}
 	const archive = archives[0];
 	const archiveStats = lstatSync(archive);
 	if (!archiveStats.isFile() || archiveStats.isSymbolicLink()) {
-		throw new Error(
-			"The non-Developer-ID Canary application archive is not a regular file.",
-		);
+		throw new Error("The local Canary application archive is not a regular file.");
 	}
 
 	const zigZstd = join(
@@ -409,7 +434,7 @@ function materializeSignedCanaryWrapper({
 	if (updateArchives.length !== 1 || updateArchives[0] === undefined) {
 		rmSync(stagingDirectory, { force: true, recursive: true });
 		throw new Error(
-			"The non-Developer-ID Canary build must contain exactly one full update archive.",
+			"The local Canary build must contain exactly one full update archive.",
 		);
 	}
 	if (readdirSync(buildDirectory).some((name) => name.endsWith(".patch"))) {
@@ -435,41 +460,24 @@ function materializeSignedCanaryWrapper({
 			capture(["/usr/bin/tar", "-tvf", tarPath]),
 			archiveEntries.length,
 		);
-		run(["/usr/bin/tar", "-xf", tarPath, "-C", stagingDirectory]);
+		run([
+			"/usr/bin/tar",
+			"-xf",
+			tarPath,
+			"-C",
+			stagingDirectory,
+		]);
 		assertSafeBundlePath(payloadBundle, stagingDirectory);
 		assertArchiveTreeContainsNoLinks(payloadBundle);
-		for (const requiredPath of [
+		assertRequiredMacNativeComponents(
 			join(
 				payloadBundle,
 				"Contents",
 				"Resources",
 				"app",
 				"native",
-				"whalehall-local",
 			),
-			join(
-				payloadBundle,
-				"Contents",
-				"Resources",
-				"app",
-				"native",
-				"WhaleHall Observer.app",
-			),
-			join(
-				payloadBundle,
-				"Contents",
-				"Resources",
-				"app",
-				"native",
-				MACOS_VAULT_BROKER_EXECUTABLE,
-			),
-		]) {
-			if (!existsSync(requiredPath)) {
-				throw new Error(
-					"The archived non-Developer-ID Canary is missing a native monitoring component.",
-				);
-			}
-		}
+		);
 		prepareMacWrapper({
 			bundlePath: payloadBundle,
 			buildDirectory: stagingDirectory,
@@ -546,7 +554,9 @@ export function validateLocalWrapperArchiveEntries(
 	) {
 		throw new Error("A safe local Canary bundle name is required.");
 	}
-	const entries = listing.split(/\r?\n/u).filter((entry) => entry.length > 0);
+	const entries = listing
+		.split(/\r?\n/u)
+		.filter((entry) => entry.length > 0);
 	if (entries.length === 0) {
 		throw new Error("The local Canary application archive is empty.");
 	}
@@ -558,8 +568,7 @@ export function validateLocalWrapperArchiveEntries(
 			entry.startsWith("/") ||
 			components[0] !== expectedBundleName ||
 			components.some(
-				(component) =>
-					component === "" || component === "." || component === "..",
+				(component) => component === "" || component === "." || component === "..",
 			)
 		) {
 			throw new Error(
@@ -569,7 +578,8 @@ export function validateLocalWrapperArchiveEntries(
 	}
 	if (
 		!entries.some(
-			(entry) => entry === `${expectedBundleName}/Contents/Info.plist`,
+			(entry) =>
+				entry === `${expectedBundleName}/Contents/Info.plist`,
 		)
 	) {
 		throw new Error(
@@ -683,7 +693,7 @@ export function verifyMacWrapperFromEnvironment(
 			signing.kind === "local"
 				? join(projectRoot, `.native/macos-${architecture}`)
 				: undefined,
-		rejectDeltaPatches: signing.kind === "local",
+		rejectDeltaPatches: shouldMaterializeMacUpdateArchive(signing.kind),
 	});
 }
 
@@ -788,28 +798,32 @@ export function validateLocalDesignatedRequirementContinuity({
 	] as const) {
 		if (/\bcdhash\b/iu.test(requirement)) {
 			throw new Error(
-				`The ${location} ${expectedIdentifier} component has an ad-hoc ` +
-					"cdhash designated requirement.",
+				`The ${location} ${expectedIdentifier} component has an ad-hoc `
+					+ "cdhash designated requirement.",
 			);
 		}
 		const identifier = requirement.match(/\bidentifier\s+"([^"]+)"/u)?.[1];
 		if (identifier !== expectedIdentifier) {
 			throw new Error(
-				`The ${location} component designated requirement rewrote ` +
-					`identifier ${expectedIdentifier}.`,
+				`The ${location} component designated requirement rewrote `
+					+ `identifier ${expectedIdentifier}.`,
 			);
 		}
-		if (!/\bcertificate\s+leaf\s*=\s*H"[A-F0-9]{40}"/iu.test(requirement)) {
+		if (
+			!/\bcertificate\s+leaf\s*=\s*H"[A-F0-9]{40}"/iu.test(
+				requirement,
+			)
+		) {
 			throw new Error(
-				`The ${location} ${expectedIdentifier} component does not have ` +
-					"an explicit leaf-certificate designated requirement.",
+				`The ${location} ${expectedIdentifier} component does not have `
+					+ "an explicit leaf-certificate designated requirement.",
 			);
 		}
 	}
 	if (staged !== packaged) {
 		throw new Error(
-			`Packaged ${expectedIdentifier} designated requirement differs ` +
-				"from the staged local signature.",
+			`Packaged ${expectedIdentifier} designated requirement differs `
+				+ "from the staged local signature.",
 		);
 	}
 	return packaged;
@@ -903,6 +917,9 @@ export function normalizeDesignatedRequirement(output: string): string {
 	const requirementLines = output
 		.split(/\r?\n/u)
 		.map((line) => line.trim())
+		.map((line) =>
+			line.startsWith(`# ${marker}`) ? line.slice(2) : line,
+		)
 		.filter((line) => line.startsWith(marker));
 	if (requirementLines.length !== 1) {
 		throw new Error("codesign did not return a designated requirement.");
@@ -1009,13 +1026,78 @@ function writeOuterEntitlements(buildDirectory: string): string {
 		.join("\n");
 	writeFileSync(
 		path,
-		`<?xml version="1.0" encoding="UTF-8"?>\n` +
-			`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" ` +
-			`"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n` +
-			`<plist version="1.0">\n<dict>\n${entries}\n</dict>\n</plist>\n`,
+		`<?xml version="1.0" encoding="UTF-8"?>\n`
+			+ `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" `
+			+ `"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n`
+			+ `<plist version="1.0">\n<dict>\n${entries}\n</dict>\n</plist>\n`,
 		{ mode: 0o600 },
 	);
 	return path;
+}
+
+export function assertRequiredMacNativeComponents(
+	nativeDirectory: string,
+): void {
+	for (const component of [
+		{ name: "whalehall-local", kind: "file" },
+		{ name: MACOS_CREDENTIAL_HELPER_EXECUTABLE, kind: "file" },
+		{ name: "WhaleHall Observer.app", kind: "directory" },
+		{ name: MACOS_VAULT_BROKER_EXECUTABLE, kind: "file" },
+	] as const) {
+		const path = join(nativeDirectory, component.name);
+		let stats: ReturnType<typeof lstatSync>;
+		try {
+			stats = lstatSync(path);
+		} catch {
+			throw new Error(
+				`Signed wrapper is missing required native component ${component.name}.`,
+			);
+		}
+		if (
+			stats.isSymbolicLink() ||
+			(component.kind === "file" && !stats.isFile()) ||
+			(component.kind === "directory" && !stats.isDirectory())
+		) {
+			throw new Error(
+				`Signed wrapper native component ${component.name} has an unsafe type.`,
+			);
+		}
+	}
+}
+
+export function validateSignedComponentDetails({
+	details,
+	expectedIdentifier,
+	expectedTeamIdentifier,
+}: {
+	details: string;
+	expectedIdentifier: string;
+	expectedTeamIdentifier: string | null;
+}): void {
+	const identifiers = details
+		.split(/\r?\n/u)
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith("Identifier="))
+		.map((line) => line.slice("Identifier=".length));
+	if (identifiers.length !== 1 || identifiers[0] !== expectedIdentifier) {
+		throw new Error(
+			`Signed component does not use the canonical identifier ${expectedIdentifier}.`,
+		);
+	}
+	if (expectedTeamIdentifier === null) return;
+	const teamIdentifiers = details
+		.split(/\r?\n/u)
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith("TeamIdentifier="))
+		.map((line) => line.slice("TeamIdentifier=".length));
+	if (
+		teamIdentifiers.length !== 1 ||
+		teamIdentifiers[0] !== expectedTeamIdentifier
+	) {
+		throw new Error(
+			`Signed component ${expectedIdentifier} does not share the wrapper TeamIdentifier.`,
+		);
+	}
 }
 
 function verifySignedComponent(
@@ -1030,19 +1112,11 @@ function verifySignedComponent(
 		"--verbose=4",
 		path,
 	]);
-	if (!details.includes(`Identifier=${expectedIdentifier}`)) {
-		throw new Error(
-			`Signed component does not use the canonical identifier ${expectedIdentifier}.`,
-		);
-	}
-	if (
-		expectedTeamIdentifier !== null &&
-		!details.includes(`TeamIdentifier=${expectedTeamIdentifier}`)
-	) {
-		throw new Error(
-			`Signed component ${expectedIdentifier} does not share the wrapper TeamIdentifier.`,
-		);
-	}
+	validateSignedComponentDetails({
+		details,
+		expectedIdentifier,
+		expectedTeamIdentifier,
+	});
 	return details;
 }
 
@@ -1075,9 +1149,7 @@ function withPackagedNativeDirectory(
 	}
 	const archive = archives[0];
 	if (archive === undefined) {
-		throw new Error(
-			"Signed wrapper application archive could not be resolved.",
-		);
+		throw new Error("Signed wrapper application archive could not be resolved.");
 	}
 	const extractionDirectory = mkdtempSync(
 		join(tmpdir(), "whalehall-native-verify-"),
@@ -1120,9 +1192,7 @@ function assertSafeBundlePath(
 		!resolvedBundle.startsWith(`${resolvedBuild}/`) ||
 		basename(resolvedBundle).endsWith(".app") === false
 	) {
-		throw new Error(
-			"Electrobun wrapper path must be one app inside its build directory.",
-		);
+		throw new Error("Electrobun wrapper path must be one app inside its build directory.");
 	}
 	const existingBuild = realpathSync(resolvedBuild);
 	const existingBundleParent = realpathSync(dirname(resolvedBundle));

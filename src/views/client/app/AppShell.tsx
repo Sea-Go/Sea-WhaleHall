@@ -4,6 +4,7 @@ import {
 	ChartNoAxesCombined,
 	ChevronUp,
 	LogOut,
+	MessageCircle,
 	Palette,
 	Settings,
 	ShieldCheck,
@@ -16,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AuthUser } from "../features/auth/public";
 import {
 	CalendarPage,
+	CalendarController,
 	type CalendarService,
 } from "../features/calendar/public";
 import {
@@ -27,6 +29,11 @@ import {
 	type ReportController,
 } from "../features/reports/public";
 import type { PetPresentationBridge } from "../features/pet-bridge/public";
+import {
+	ConversationPage,
+	type ConversationPageActions,
+	type ConversationPageState,
+} from "../features/conversation/public";
 import type { AuditExportService } from "../features/audit-export/public";
 import {
 	MonitoringStatusControl,
@@ -34,6 +41,7 @@ import {
 } from "../features/monitoring/public";
 import {
 	SettingsPage,
+	type AgentPermissionsController,
 	type PreferencesController,
 	type PreferencesSnapshot,
 	type SettingsCategory,
@@ -49,6 +57,7 @@ type MenuAction = "account" | "appearance" | "pet" | "privacy" | "logout";
 const navigationItems = [
 	{ id: "planning", label: PAGE_LABELS.planning, icon: Target, disabled: false },
 	{ id: "calendar", label: PAGE_LABELS.calendar, icon: CalendarDays, disabled: false },
+	{ id: "conversation", label: PAGE_LABELS.conversation, icon: MessageCircle, disabled: false },
 	{ id: "reports", label: PAGE_LABELS.reports, icon: ChartNoAxesCombined, disabled: false },
 ] as const satisfies ReadonlyArray<{
 	id: PageId;
@@ -72,12 +81,16 @@ export interface AppShellProps {
 	user: AuthUser;
 	onLogout: () => void;
 	calendarService: CalendarService;
+	calendarController?: CalendarController;
 	planningController: PlanningController;
 	reportController: ReportController;
 	preferencesController: PreferencesController;
+	agentPermissionsController?: AgentPermissionsController;
 	petBridge: PetPresentationBridge;
 	monitoringController: MonitoringController;
 	auditExportService: AuditExportService;
+	conversationState: ConversationPageState;
+	conversationActions?: ConversationPageActions;
 	initialPage?: PageId;
 	enableQaControls?: boolean;
 }
@@ -86,12 +99,16 @@ export function AppShell({
 	user,
 	onLogout,
 	calendarService,
+	calendarController,
 	planningController,
 	reportController,
 	preferencesController,
+	agentPermissionsController,
 	petBridge,
 	monitoringController,
 	auditExportService,
+	conversationState,
+	conversationActions,
 	initialPage = "calendar",
 	enableQaControls = false,
 }: AppShellProps) {
@@ -108,6 +125,10 @@ export function AppShell({
 	const planningPetCoordinator = useMemo(
 		() => new PlanningPetCoordinator(planningController, petBridge),
 		[petBridge, planningController],
+	);
+	const resolvedCalendarController = useMemo(
+		() => calendarController ?? new CalendarController(calendarService),
+		[calendarController, calendarService],
 	);
 
 	useEffect(() => {
@@ -374,8 +395,15 @@ export function AppShell({
 					<CalendarPage
 						onNotify={showNotice}
 						service={calendarService}
+						controller={resolvedCalendarController}
 						initialScenario={null}
 						showScenarioControl={enableQaControls}
+					/>
+				) : null}
+				{activePage === "conversation" ? (
+					<ConversationPage
+						state={conversationState}
+						actions={conversationActions}
 					/>
 				) : null}
 				{activePage === "reports" ? (
@@ -387,6 +415,7 @@ export function AppShell({
 						controller={preferencesController}
 						monitoringController={monitoringController}
 						auditExportService={auditExportService}
+						agentPermissionsController={agentPermissionsController}
 						category={settingsCategory}
 						onCategoryChange={setSettingsCategory}
 						onLogout={() => setLogoutDialogOpen(true)}
@@ -405,7 +434,7 @@ export function AppShell({
 			{logoutDialogOpen ? (
 				<ConfirmationDialog
 					title="退出当前账号？"
-					description="WhaleHall 会立即清理当前受保护的 UI 会话并返回登录页。本机计划、日程和偏好不会被删除。"
+					description="WhaleHall 会立即清理当前本地测试会话并返回登录页。本机计划、日程和偏好不会被删除。"
 					confirmLabel="退出登录"
 					onCancel={() => setLogoutDialogOpen(false)}
 					onConfirm={() => {

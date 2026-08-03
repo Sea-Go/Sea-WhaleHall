@@ -5,6 +5,7 @@ artifacts/
 /coverage/
 .native/
 whalehall-local/target/
+whalehall-credential-helper/target/
 native/**/target/
 /training/
 

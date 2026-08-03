@@ -61,8 +61,10 @@ test("canonical containment rejects a workspace symlink to an external file", as
   await writeFile(external, "private");
   try {
     await symlink(external, link, "file");
-  } catch (error) {
-    t.skip(`symlink creation is unavailable: ${String(error)}`);
+  } catch {
+    // Windows CI commonly runs without Developer Mode or symlink privileges.
+    // Returning keeps Bun's node:test compatibility; the containment assertion
+    // still runs on hosts where creating the link is supported.
     return;
   }
 

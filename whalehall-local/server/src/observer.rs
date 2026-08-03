@@ -2502,6 +2502,9 @@ fn sync_monitoring_settings_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 fn sync_monitoring_settings_directory(_path: &Path) -> io::Result<()> {
+    // Windows does not support opening a directory with std::fs::File, so the
+    // Unix durability barrier cannot be expressed through this API. The
+    // temporary file itself is still synced before the atomic rename.
     Ok(())
 }
 

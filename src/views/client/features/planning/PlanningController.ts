@@ -18,14 +18,22 @@ import {
 } from "../../../../shared/goal-context";
 import type {
 	PlanApplyResult,
+	PlanningAuthorityGateway,
 	PlanningCalendarGateway,
+	PlanningGenerationResult,
 	PlanningGenerationService,
 } from "./planning-service";
+import type {
+	TaskPlanningAnswer,
+	TaskPlanningQuestion,
+} from "../../../../shared/task-planning";
+import type { PlanningAuthoritySnapshot } from "../../../../shared/planning-authority";
 
 export type PlanningWizardStep =
 	| "describe"
 	| "type"
 	| "constraints"
+	| "clarify"
 	| "generate"
 	| "structure"
 	| "schedule"
@@ -48,12 +56,26 @@ export type PlanningState =
 			revision: number;
 	  }
 	| {
+			status: "clarifying";
+			step: "clarify";
+			input: PlanInput;
+			sessionId: string;
+			questions: readonly TaskPlanningQuestion[];
+			availability: readonly import("./domain").PlanningBusyWindow[];
+			revision: number;
+	  }
+	| {
 			status: "generation-error";
 			step: "generate";
 			input: PlanInput;
 			message: string;
 			revision: number;
-	  }
+		  }
+	| {
+			status: "restore-error";
+			step: "generate";
+			message: string;
+		  }
 	| {
 			status: "empty-draft";
 			step: "schedule";
@@ -81,7 +103,8 @@ export type PlanningState =
 			planTitle: string;
 			committedCount: number;
 			warnings: readonly PlanningConflict[];
-	  }
+			effectWarning: string | null;
+		  }
 	| {
 			status: "partial-failure";
 			step: "confirm";
@@ -122,6 +145,10 @@ export class PlanningController {
 	private goalVersion = 0;
 	private activeGoal: ActiveGoalContextV1 | null = null;
 	private applyPromise: Promise<PlanApplyResult | null> | null = null;
+	private authorityRevision: number | null = null;
+	private draftMutationRevision = 0;
+	private draftSaveTail: Promise<void> = Promise.resolve();
+	private latestDraftSave: Promise<boolean> = Promise.resolve(true);
 
 	constructor(
 		private readonly generator: PlanningGenerationService,
@@ -130,6 +157,7 @@ export class PlanningController {
 		private readonly timeZone: () => string,
 		private readonly createId: () => string = () => crypto.randomUUID(),
 		private readonly nowMs: () => number = () => Date.now(),
+		private readonly authority?: PlanningAuthorityGateway,
 	) {}
 
 	getSnapshot = (): PlanningState => this.state;
@@ -158,6 +186,91 @@ export class PlanningController {
 			input: emptyPlanInput(),
 			issues: [],
 		});
+	}
+
+	async restore(): Promise<void> {
+		if (this.state.status !== "initial") return;
+		const initialOperation = this.operationSequence;
+		if (this.authority) {
+			try {
+				const saved = await this.authority.load();
+				if (this.operationSequence !== initialOperation || this.state.status !== "initial") return;
+				if (saved) {
+					this.restoreAuthority(saved);
+					return;
+				}
+			} catch (reason) {
+				if (this.operationSequence !== initialOperation || this.state.status !== "initial") return;
+				this.setState({
+					status: "restore-error",
+					step: "generate",
+					message: serviceMessage(reason, "本地计划草案暂时无法恢复，请重试。"),
+				});
+				return;
+			}
+		}
+		if (!this.generator.findRestorable || !this.generator.restore) return;
+		let sequence: number | null = null;
+		let recoveryInput: PlanInput | null = null;
+		let recoveryRevision = 0;
+		try {
+			const restorable = await this.generator.findRestorable();
+			if (!restorable || this.state.status !== "initial") return;
+			sequence = ++this.operationSequence;
+			const revision = ++this.generationRevision;
+			const input = restorable.input;
+			recoveryInput = input;
+			recoveryRevision = revision;
+			this.setState({
+				status: "generating",
+				step: "generate",
+				input,
+				completedStatuses: [],
+				activeStatus: "understood",
+				revision,
+			});
+			const availability = await this.calendar.loadAvailability({
+				startDate: this.today(),
+				endDateExclusive: this.addDay(input.deadline),
+				timeZone: this.timeZone(),
+			});
+			if (sequence !== this.operationSequence) return;
+			const result = await this.generator.restore(restorable, availability, {
+				today: this.today(),
+				timeZone: this.timeZone(),
+				revision,
+				isCancelled: () => sequence !== this.operationSequence,
+				onStatus: (status) => {
+					if (sequence !== this.operationSequence) return;
+					const index = generationStatuses.indexOf(status);
+					this.setState({
+						status: "generating",
+						step: "generate",
+						input,
+						completedStatuses: generationStatuses.slice(0, index),
+						activeStatus: status,
+						revision,
+					});
+				},
+			});
+			if (sequence !== this.operationSequence) return;
+			await this.applyGenerationResult(input, availability, result, revision, sequence);
+		} catch (reason) {
+			if (sequence === null || sequence !== this.operationSequence || !recoveryInput) return;
+			this.setState({
+				status: "generation-error",
+				step: "generate",
+				input: recoveryInput,
+				message: reason instanceof Error ? reason.message : "未能恢复计划生成。",
+				revision: recoveryRevision,
+			});
+		}
+	}
+
+	async retryRestore(): Promise<void> {
+		if (this.state.status !== "restore-error") return;
+		this.setState({ status: "initial" });
+		await this.restore();
 	}
 
 	updateInput(patch: Partial<PlanInput>): void {
@@ -280,28 +393,7 @@ export class PlanningController {
 				},
 			});
 			if (sequence !== this.operationSequence) return;
-			const draft = this.refreshConflicts(generated);
-			if (draft.proposals.length === 0) {
-				this.setState({
-					status: "empty-draft",
-					step: "schedule",
-					input: source,
-					message: "当前约束下没有可安排的时间。",
-					suggestions:
-						draft.suggestions.length > 0
-							? draft.suggestions
-							: ["延后截止日期", "缩小目标范围", "增加每周可投入时间"],
-					revision,
-				});
-				return;
-			}
-			this.setState({
-				status: "review",
-				step: "structure",
-				input: source,
-				draft,
-				message: null,
-			});
+			await this.applyGenerationResult(source, availability, generated, revision, sequence);
 		} catch (reason) {
 			if (sequence !== this.operationSequence) return;
 			this.setState({
@@ -321,6 +413,34 @@ export class PlanningController {
 		return this.generate();
 	}
 
+	async submitClarificationAnswers(answers: readonly TaskPlanningAnswer[]): Promise<void> {
+		if (this.state.status !== "clarifying") return;
+		const { input, sessionId, availability, revision } = this.state;
+		const sequence = ++this.operationSequence;
+		this.setState({
+			status: "generating", step: "generate", input,
+			completedStatuses: [], activeStatus: "understood", revision,
+		});
+		try {
+			const result = await this.generator.continueAfterClarification(
+				input, sessionId, answers, availability,
+				{
+					today: this.today(), timeZone: this.timeZone(), revision,
+					isCancelled: () => sequence !== this.operationSequence,
+					onStatus: (status) => {
+						if (sequence !== this.operationSequence) return;
+						const index = generationStatuses.indexOf(status);
+						this.setState({ status: "generating", step: "generate", input, completedStatuses: generationStatuses.slice(0, index), activeStatus: status, revision });
+					},
+				},
+			);
+			if (sequence !== this.operationSequence) return;
+			await this.applyGenerationResult(input, availability, result, revision, sequence);
+		} catch (reason) {
+			if (sequence !== this.operationSequence) return;
+			this.setState({ status: "generation-error", step: "generate", input, message: reason instanceof Error ? reason.message : "计划生成失败，请稍后重试。", revision });
+		}
+	}
 	editConstraints(): void {
 		const input = this.inputFromState();
 		if (!input || this.state.status === "applying") return;
@@ -362,7 +482,9 @@ export class PlanningController {
 			item.id === proposalId ? { ...item, ...patch, version: item.version + 1 } : item,
 		);
 		const draft = this.refreshConflicts({ ...this.state.draft, proposals });
-		this.setState({ ...this.state, draft, message: "草案已更新，尚未写入日历。" });
+		const input = this.state.input;
+		this.setState({ ...this.state, draft, message: this.authority ? "正在安全保存本地草案…" : "草案已更新，尚未写入日历。" });
+		this.queueDraftSave(input, draft);
 	}
 
 	deleteProposal(proposalId: string): void {
@@ -376,8 +498,11 @@ export class PlanningController {
 		this.setState({
 			...this.state,
 			draft,
-			message: "已从草案移除，正式日历没有变化。",
+			message: this.authority
+				? "已从草案移除，正在安全保存…"
+				: "已从草案移除，正式日历没有变化。",
 		});
+		this.queueDraftSave(this.state.input, draft);
 	}
 
 	async apply(): Promise<PlanApplyResult | null> {
@@ -401,16 +526,10 @@ export class PlanningController {
 			});
 			return null;
 		}
+		this.setState({ ...this.state, draft });
 		const applyId = this.createId();
 		const input = this.state.input;
-		this.setState({
-			status: "applying",
-			step: "confirm",
-			input,
-			draft,
-			applyId,
-		});
-		const request = this.performApply(input, draft, applyId);
+		const request = this.prepareAndPerformApply(input, draft, applyId);
 		this.applyPromise = request;
 		void request.finally(() => {
 			if (this.applyPromise === request) this.applyPromise = null;
@@ -421,20 +540,14 @@ export class PlanningController {
 	retryApply(): Promise<PlanApplyResult | null> {
 		if (this.state.status !== "partial-failure") return Promise.resolve(null);
 		if (this.applyPromise) return this.applyPromise;
-		const applyId = this.createId();
 		const { input, draft, result } = this.state;
-		this.setState({
-			status: "applying",
-			step: "confirm",
-			input,
-			draft,
-			applyId,
-		});
-		const request = this.performApply(
+		const applyId = this.authority ? result.applyId : this.createId();
+		const request = this.prepareAndPerformApply(
 			input,
 			draft,
 			applyId,
 			result.committedCount,
+			true,
 		);
 		this.applyPromise = request;
 		void request.finally(() => {
@@ -456,6 +569,7 @@ export class PlanningController {
 
 	cancel(): void {
 		if (this.state.status === "applying") return;
+		void this.generator.cancel?.();
 		this.operationSequence += 1;
 		this.applyPromise = null;
 		this.setState({
@@ -470,6 +584,55 @@ export class PlanningController {
 		this.setState({ status: "initial" });
 	}
 
+	private async prepareAndPerformApply(
+		input: PlanInput,
+		draft: GeneratedPlanDraft,
+		applyId: string,
+		previouslyCommittedCount = 0,
+		authorityRetry = false,
+	): Promise<PlanApplyResult | null> {
+		if (this.authority && !authorityRetry) {
+			let saved = await this.latestDraftSave;
+			if (!saved) {
+				const mutationRevision = ++this.draftMutationRevision;
+				saved = await this.scheduleDraftSave(input, draft, mutationRevision);
+			}
+			if (!saved) {
+				if (this.state.status === "review") {
+					this.setState({
+						...this.state,
+						message: "本地草案保存失败，已阻止写入日历。请检查本地存储后重试。",
+					});
+				}
+				return null;
+			}
+			if (
+				this.state.status !== "review" ||
+				this.state.step !== "confirm" ||
+				this.state.draft !== draft
+			) {
+				return null;
+			}
+		}
+		if (this.authority && authorityRetry) {
+			if (
+				this.state.status !== "partial-failure" ||
+				this.state.result.applyId !== applyId ||
+				this.state.draft !== draft
+			) {
+				return null;
+			}
+		}
+		this.setState({
+			status: "applying",
+			step: "confirm",
+			input,
+			draft,
+			applyId,
+		});
+		return this.performApply(input, draft, applyId, previouslyCommittedCount);
+	}
+
 	private async performApply(
 		input: PlanInput,
 		draft: GeneratedPlanDraft,
@@ -477,6 +640,38 @@ export class PlanningController {
 		previouslyCommittedCount = 0,
 	): Promise<PlanApplyResult> {
 		try {
+			if (this.authority) {
+				if (this.authorityRevision === null || draft.plan.calendarRevision === undefined) {
+					throw new Error("本地计划版本缺失，无法安全确认。请重新生成计划。");
+				}
+				const committed = await this.authority.commitDraft(
+					applyId,
+					this.authorityRevision,
+					draft.plan.calendarRevision,
+				);
+				this.authorityRevision = committed.snapshot.revision;
+				this.activeGoal = cloneActiveGoalContext(committed.snapshot.activeGoal);
+				this.goalVersion = this.activeGoal?.version ?? this.goalVersion;
+				const commit = committed.snapshot.commit;
+				if (!commit) throw new Error("本地计划提交记录不完整。");
+				const result: PlanApplyResult = {
+					ok: true,
+					kind: "success",
+					applyId,
+					committedCount: commit.committedCount,
+					warnings: commit.warnings,
+				};
+				this.setState({
+					status: "success",
+					planTitle: committed.snapshot.confirmedPlan?.title ?? draft.plan.title,
+					committedCount: result.committedCount,
+					warnings: result.warnings,
+					effectWarning: committed.effectsApplied
+						? null
+						: commit.effect.lastError ?? "日历已写入，目标与本地事件日志将在恢复后继续同步。",
+				});
+				return result;
+			}
 			const attempt = await this.calendar.applyPlan(
 				draft.plan,
 				draft.proposals,
@@ -502,6 +697,7 @@ export class PlanningController {
 					planTitle: draft.plan.title,
 					committedCount: result.committedCount,
 					warnings: result.warnings,
+					effectWarning: null,
 				});
 				return result;
 			}
@@ -543,7 +739,7 @@ export class PlanningController {
 				result,
 			});
 			return result;
-		} catch {
+		} catch (reason) {
 			const result: Extract<
 				PlanApplyResult,
 				{ kind: "partial" | "failure" }
@@ -563,7 +759,10 @@ export class PlanningController {
 							applyId,
 							committedCount: 0,
 							failedProposalIds: draft.proposals.map((item) => item.id),
-							message: "写入失败，没有任何草案进入正式日历。请重试。",
+							message: this.authority
+								? `${serviceMessage(reason, "未能确认本地提交结果。")} 草案与提交状态已保留；重试不会重复创建日程。`
+								: "写入失败，没有任何草案进入正式日历。请重试。",
+							calendarState: this.authority ? "unknown" : "unchanged",
 						};
 			this.setState({
 				status: "partial-failure",
@@ -587,6 +786,140 @@ export class PlanningController {
 		};
 	}
 
+	private async applyGenerationResult(
+		input: PlanInput,
+		availability: readonly import("./domain").PlanningBusyWindow[],
+		result: PlanningGenerationResult,
+		revision: number,
+		operationSequence: number,
+	): Promise<void> {
+		if (
+			operationSequence !== this.operationSequence ||
+			revision !== this.generationRevision
+		) return;
+		if (result.kind === "clarification") {
+			this.setState({ status: "clarifying", step: "clarify", input, sessionId: result.sessionId, questions: result.questions, availability, revision });
+			return;
+		}
+		const draft = this.refreshConflicts(result.draft);
+		if (this.authority) {
+			const mutationRevision = ++this.draftMutationRevision;
+			const saved = await this.scheduleDraftSave(input, draft, mutationRevision);
+			if (
+				operationSequence !== this.operationSequence ||
+				revision !== this.generationRevision
+			) return;
+			if (!saved) {
+				this.setState({
+					status: "generation-error",
+					step: "generate",
+					input,
+					message: "计划已经生成，但无法安全保存到本机；草案未开放编辑，也没有写入日历。请重试。",
+					revision,
+				});
+				return;
+			}
+		}
+		if (draft.proposals.length === 0) {
+			this.setState({ status: "empty-draft", step: "schedule", input, message: "当前约束下没有可安排的时间。", suggestions: draft.suggestions.length > 0 ? draft.suggestions : ["延后截止日期", "缩小目标范围", "增加每周可投入时间"], revision });
+			return;
+		}
+		this.setState({ status: "review", step: "structure", input, draft, message: null });
+	}
+
+	private queueDraftSave(input: PlanInput, draft: GeneratedPlanDraft): void {
+		if (!this.authority) return;
+		const mutationRevision = ++this.draftMutationRevision;
+		void this.scheduleDraftSave(input, draft, mutationRevision);
+	}
+
+	private scheduleDraftSave(
+		input: PlanInput,
+		draft: GeneratedPlanDraft,
+		mutationRevision: number,
+	): Promise<boolean> {
+		const operation = this.draftSaveTail.then(() =>
+			this.persistDraft(input, draft, mutationRevision),
+		);
+		this.latestDraftSave = operation;
+		this.draftSaveTail = operation.then(
+			() => undefined,
+			() => undefined,
+		);
+		return operation;
+	}
+
+	private async persistDraft(
+		input: PlanInput,
+		draft: GeneratedPlanDraft,
+		mutationRevision: number,
+	): Promise<boolean> {
+		if (!this.authority) return true;
+		try {
+			const saved = await this.authority.saveDraft(
+				input,
+				draft,
+				this.authorityRevision,
+			);
+			this.authorityRevision = saved.revision;
+			this.activeGoal = cloneActiveGoalContext(saved.activeGoal);
+			this.goalVersion = this.activeGoal?.version ?? this.goalVersion;
+			if (mutationRevision === this.draftMutationRevision && this.state.status === "review") {
+				this.setState({
+					...this.state,
+					message: "草案已安全保存在本机，正式日历尚未改变。",
+				});
+			}
+			return true;
+		} catch (reason) {
+			if (mutationRevision === this.draftMutationRevision && this.state.status === "review") {
+				this.setState({
+					...this.state,
+					message: `${serviceMessage(reason, "本地草案保存失败。")} 已阻止确认写入，请重试保存。`,
+				});
+			}
+			return false;
+		}
+	}
+
+	private restoreAuthority(snapshot: PlanningAuthoritySnapshot): void {
+		this.authorityRevision = snapshot.revision;
+		this.activeGoal = cloneActiveGoalContext(snapshot.activeGoal);
+		this.goalVersion = this.activeGoal?.version ?? this.goalVersion;
+		const input: PlanInput = structuredClone(snapshot.input);
+		const draft = cloneGeneratedDraft(snapshot.draft);
+		if (snapshot.status === "draft") {
+			if (draft.proposals.length === 0) {
+				this.setState({
+					status: "empty-draft",
+					step: "schedule",
+					input,
+					message: "已恢复本机保存的计划草案，但当前没有可安排的时间。",
+					suggestions: draft.suggestions,
+					revision: snapshot.revision,
+				});
+				return;
+			}
+			this.setState({
+				status: "review",
+				step: "structure",
+				input,
+				draft,
+				message: "已恢复本机安全保存的计划草案。",
+			});
+			return;
+		}
+		const commit = snapshot.commit;
+		this.setState({
+			status: "success",
+			planTitle: snapshot.confirmedPlan?.title ?? draft.plan.title,
+			committedCount: commit?.committedCount ?? 0,
+			warnings: commit?.warnings ?? [],
+			effectWarning: commit?.effect.status === "pending"
+				? commit.effect.lastError ?? "日历已写入，目标与本地事件日志将在恢复后继续同步。"
+				: null,
+		});
+	}
 	private validate(input = this.inputFromState()): readonly PlanInputIssue[] {
 		if (!input) return [];
 		return validatePlanInput(input, this.today());
@@ -596,6 +929,7 @@ export class PlanningController {
 		if (
 			this.state.status === "drafting" ||
 			this.state.status === "generating" ||
+			this.state.status === "clarifying" ||
 			this.state.status === "generation-error" ||
 			this.state.status === "empty-draft" ||
 			this.state.status === "review" ||
@@ -649,4 +983,17 @@ export class PlanningController {
 	private notify(): void {
 		for (const listener of this.listeners) listener();
 	}
+}
+
+function serviceMessage(reason: unknown, fallback: string): string {
+	if (!(reason instanceof Error)) return fallback;
+	const message = reason.message.trim();
+	if (
+		message.length < 1 ||
+		message.length > 300 ||
+		/[A-Za-z]:[\\/]|file:|https?:\/\//u.test(message)
+	) {
+		return fallback;
+	}
+	return message;
 }

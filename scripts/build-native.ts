@@ -1,30 +1,33 @@
-import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	copyFileSync,
-	mkdirSync,
 	mkdtempSync,
-	readdirSync,
+	mkdirSync,
 	readFileSync,
+	readdirSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	normalizeDesignatedRequirement,
-	validateObserverEntitlements,
-} from "./macos-build-security";
-import {
-	localDesignatedRequirement,
 	type MacSigningPlan,
+	localDesignatedRequirement,
 	readMacCodeSigningIdentities,
 	resolveMacSigningPlan,
 } from "./macos-signing-identity";
+import {
+	MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+	normalizeDesignatedRequirement,
+	validateObserverEntitlements,
+	validateSignedComponentDetails,
+} from "./macos-build-security";
 
 export const vaultBrokerExecutableName = "whalehall-vault-broker-v2";
-export const vaultBrokerIdentifier = "com.seago.whalehall.vault-broker.v2";
+export const vaultBrokerIdentifier =
+	"com.seago.whalehall.vault-broker.v2";
 
 const outerAppIdentifier = "com.seago.whalehall";
 
@@ -33,7 +36,11 @@ export type TargetArch = "arm64" | "x64";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const vaultBrokerRoot = resolve(projectRoot, "native/vault-broker");
-const manifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
+const localToolManifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
+const credentialHelperManifestPath = resolve(
+	projectRoot,
+	"whalehall-credential-helper/Cargo.toml",
+);
 const observerRoot = resolve(projectRoot, "native/observer");
 const observerBundleName = "WhaleHall Observer.app";
 const observerExecutableName = "whalehall-observer";
@@ -68,9 +75,7 @@ function run(command: string[], cwd: string = projectRoot): void {
 		stderr: "inherit",
 	});
 	if (result.exitCode !== 0) {
-		throw new Error(
-			`Command failed (${result.exitCode}): ${command.join(" ")}`,
-		);
+		throw new Error(`Command failed (${result.exitCode}): ${command.join(" ")}`);
 	}
 }
 
@@ -81,9 +86,7 @@ function capture(command: string[]): string {
 		stderr: "pipe",
 	});
 	if (result.exitCode !== 0) {
-		throw new Error(
-			`Command failed (${result.exitCode}): ${command.join(" ")}`,
-		);
+		throw new Error(`Command failed (${result.exitCode}): ${command.join(" ")}`);
 	}
 	return `${new TextDecoder().decode(result.stdout)}${new TextDecoder().decode(
 		result.stderr,
@@ -92,9 +95,7 @@ function capture(command: string[]): string {
 
 export function cStringLiteral(value: string): string {
 	if (/[^\x20-\x7E]/u.test(value)) {
-		throw new Error(
-			"Vault Broker requirements must contain printable ASCII only.",
-		);
+		throw new Error("Vault Broker requirements must contain printable ASCII only.");
 	}
 	return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
@@ -110,9 +111,7 @@ export function vaultBrokerPeerRequirements(signing: MacSigningPlan): {
 		}
 		const leaf = signing.identity.toUpperCase();
 		if (!/^[A-F0-9]{40}$/u.test(leaf)) {
-			throw new Error(
-				"Local Vault Broker signing requires a SHA-1 fingerprint.",
-			);
+			throw new Error("Local Vault Broker signing requires a SHA-1 fingerprint.");
 		}
 		return {
 			core: `identifier "${localServerIdentifier}" and certificate leaf = H"${leaf}"`,
@@ -124,7 +123,8 @@ export function vaultBrokerPeerRequirements(signing: MacSigningPlan): {
 		if (!signing.teamIdentifier) {
 			throw new Error("Developer ID Vault Broker Team ID is unavailable.");
 		}
-		const teamClause = `anchor apple generic and certificate leaf[subject.OU] = "${signing.teamIdentifier}"`;
+		const teamClause =
+			`anchor apple generic and certificate leaf[subject.OU] = "${signing.teamIdentifier}"`;
 		return {
 			core: `identifier "${localServerIdentifier}" and ${teamClause}`,
 			outer: `identifier "${outerAppIdentifier}" and ${teamClause}`,
@@ -199,8 +199,8 @@ export function vaultBrokerCodesignCommand({
 		}
 		command.push(
 			"--requirements",
-			`=designated => identifier "${vaultBrokerIdentifier}" and anchor apple generic ` +
-				`and certificate leaf[subject.OU] = "${signing.teamIdentifier}"`,
+			`=designated => identifier "${vaultBrokerIdentifier}" and anchor apple generic `
+				+ `and certificate leaf[subject.OU] = "${signing.teamIdentifier}"`,
 			"--options",
 			"runtime",
 			"--timestamp",
@@ -217,6 +217,10 @@ export function vaultBrokerCodesignCommand({
 			"--timestamp=none",
 		);
 	} else {
+		// Even metadata-only builds need a stable explicit DR. Without one,
+		// codesign synthesizes an ad-hoc cdhash requirement, which is unsuitable
+		// for reproducibility and can be emitted as a commented diagnostic on
+		// newer macOS runners.
 		command.push(
 			"--requirements",
 			`=designated => identifier "${vaultBrokerIdentifier}"`,
@@ -225,6 +229,13 @@ export function vaultBrokerCodesignCommand({
 	}
 	command.push(executable);
 	return command;
+}
+
+export function codesignDesignatedRequirementCommand(
+	executable: string,
+	codesign = "/usr/bin/codesign",
+): string[] {
+	return [codesign, "--display", "--requirements", "-", executable];
 }
 
 export function parseCodeDirectoryHash(output: string): string {
@@ -240,12 +251,14 @@ export function parseCodeDirectoryHash(output: string): string {
 }
 
 export function parseMachOUuid(output: string): string {
-	const uuids = [
-		...output.matchAll(/\buuid\s+([A-Fa-f0-9-]{36})(?:\s|$)/gu),
-	].map((match) => match[1]?.toUpperCase() ?? "");
+	const uuids = [...output.matchAll(/\buuid\s+([A-Fa-f0-9-]{36})(?:\s|$)/gu)].map(
+		(match) => match[1]?.toUpperCase() ?? "",
+	);
 	if (
 		uuids.length !== 1 ||
-		!/^[A-F0-9]{8}(?:-[A-F0-9]{4}){3}-[A-F0-9]{12}$/u.test(uuids[0] ?? "") ||
+		!/^[A-F0-9]{8}(?:-[A-F0-9]{4}){3}-[A-F0-9]{12}$/u.test(
+			uuids[0] ?? "",
+		) ||
 		uuids[0] === "00000000-0000-0000-0000-000000000000"
 	) {
 		throw new Error("Vault Broker must contain exactly one non-zero LC_UUID.");
@@ -277,16 +290,10 @@ export function validateVaultBrokerReproducibility({
 		!/^[a-fA-F0-9]{64}$/u.test(secondUnsignedHash) ||
 		firstUnsignedHash.toLowerCase() !== secondUnsignedHash.toLowerCase()
 	) {
-		throw new Error(
-			"Vault Broker compilation is not byte-for-byte reproducible.",
-		);
+		throw new Error("Vault Broker compilation is not byte-for-byte reproducible.");
 	}
-	if (
-		parseMachOUuid(firstMachODetails) !== parseMachOUuid(secondMachODetails)
-	) {
-		throw new Error(
-			"Vault Broker reproducibility builds have different LC_UUIDs.",
-		);
+	if (parseMachOUuid(firstMachODetails) !== parseMachOUuid(secondMachODetails)) {
+		throw new Error("Vault Broker reproducibility builds have different LC_UUIDs.");
 	}
 	if (
 		parseCodeDirectoryHash(firstSignedDetails) !==
@@ -294,12 +301,8 @@ export function validateVaultBrokerReproducibility({
 	) {
 		throw new Error("Vault Broker signatures do not have the same CDHash.");
 	}
-	const firstRequirement = normalizeDesignatedRequirement(
-		firstSignedRequirement,
-	);
-	const secondRequirement = normalizeDesignatedRequirement(
-		secondSignedRequirement,
-	);
+	const firstRequirement = normalizeDesignatedRequirement(firstSignedRequirement);
+	const secondRequirement = normalizeDesignatedRequirement(secondSignedRequirement);
 	if (
 		firstRequirement !== secondRequirement ||
 		firstRequirement.match(/\bidentifier\s+"([^"]+)"/u)?.[1] !==
@@ -317,9 +320,7 @@ function fileSha256(path: string): string {
 
 export function buildVaultBroker(arch: TargetArch): string {
 	if (hostOS() !== "macos") {
-		throw new Error(
-			"WhaleHall Vault Broker can only be built on a macOS host.",
-		);
+		throw new Error("WhaleHall Vault Broker can only be built on a macOS host.");
 	}
 	const source = resolve(vaultBrokerRoot, "main.c");
 	const destination = resolve(
@@ -361,9 +362,7 @@ export function buildVaultBroker(arch: TargetArch): string {
 		const firstUnsignedHash = fileSha256(first);
 		const secondUnsignedHash = fileSha256(second);
 		if (firstUnsignedHash !== secondUnsignedHash) {
-			throw new Error(
-				"Vault Broker compilation is not byte-for-byte reproducible.",
-			);
+			throw new Error("Vault Broker compilation is not byte-for-byte reproducible.");
 		}
 		for (const output of [first, second]) {
 			run(vaultBrokerCodesignCommand({ executable: output, signing }));
@@ -386,8 +385,8 @@ export function buildVaultBroker(arch: TargetArch): string {
 				"--verbose=4",
 				second,
 			]),
-			firstSignedRequirement: capture(["codesign", "-dr", "-", first]),
-			secondSignedRequirement: capture(["codesign", "-dr", "-", second]),
+			firstSignedRequirement: capture(codesignDesignatedRequirementCommand(first)),
+			secondSignedRequirement: capture(codesignDesignatedRequirementCommand(second)),
 		});
 		mkdirSync(dirname(destination), { recursive: true });
 		copyFileSync(first, destination);
@@ -411,9 +410,7 @@ export function buildObserverApp(arch: TargetArch): string {
 		.sort()
 		.map((name) => resolve(sourceDirectory, name));
 	if (sources.length === 0) {
-		throw new Error(
-			`No Swift observer sources found under ${sourceDirectory}.`,
-		);
+		throw new Error(`No Swift observer sources found under ${sourceDirectory}.`);
 	}
 
 	const bundle = resolve(
@@ -470,8 +467,7 @@ export function buildObserverApp(arch: TargetArch): string {
 	if (signing.kind === "developer-id") {
 		signingCommand.push("--options", "runtime", "--timestamp");
 	} else if (signing.kind === "local") {
-		if (!signing.identity)
-			throw new Error("Local signing identity is unavailable.");
+		if (!signing.identity) throw new Error("Local signing identity is unavailable.");
 		signingCommand.push(
 			"--requirements",
 			localDesignatedRequirement(observerIdentifier, signing.identity),
@@ -495,9 +491,9 @@ export function buildObserverApp(arch: TargetArch): string {
 	validateObserverEntitlements(signedEntitlements);
 	if (signing.kind === "ad-hoc") {
 		console.warn(
-			"[native] WhaleHall Observer is ad-hoc signed. This metadata-only " +
-				"build cannot reuse real monitoring or content-vault authorization. " +
-				"Run `bun run setup:macos-signing -- --create` explicitly.",
+			"[native] WhaleHall Observer is ad-hoc signed. This metadata-only "
+				+ "build cannot reuse real monitoring or content-vault authorization. "
+				+ "Run `bun run setup:macos-signing -- --create` explicitly.",
 		);
 	}
 
@@ -517,23 +513,22 @@ function signNativeChild(executable: string, arch: TargetArch): void {
 	];
 	if (signing.kind === "developer-id") {
 		const teamIdentifier = signing.teamIdentifier;
-		if (!teamIdentifier)
-			throw new Error("Developer ID Team ID is unavailable.");
+		if (!teamIdentifier) throw new Error("Developer ID Team ID is unavailable.");
 		const entitlements = resolve(
 			projectRoot,
 			`.native/macos-${arch}/WhaleHallLocal.entitlements`,
 		);
 		writeFileSync(
 			entitlements,
-			`<?xml version="1.0" encoding="UTF-8"?>\n` +
-				`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" ` +
-				`"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n` +
-				`<plist version="1.0"><dict>\n` +
-				`<key>com.apple.application-identifier</key>\n` +
-				`<string>${teamIdentifier}.com.seago.whalehall.local</string>\n` +
-				`<key>keychain-access-groups</key><array>\n` +
-				`<string>${teamIdentifier}.com.seago.whalehall.local</string>\n` +
-				`</array></dict></plist>\n`,
+			`<?xml version="1.0" encoding="UTF-8"?>\n`
+				+ `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" `
+				+ `"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n`
+				+ `<plist version="1.0"><dict>\n`
+				+ `<key>com.apple.application-identifier</key>\n`
+				+ `<string>${teamIdentifier}.com.seago.whalehall.local</string>\n`
+				+ `<key>keychain-access-groups</key><array>\n`
+				+ `<string>${teamIdentifier}.com.seago.whalehall.local</string>\n`
+				+ `</array></dict></plist>\n`,
 			{ mode: 0o600 },
 		);
 		command.push(
@@ -544,8 +539,7 @@ function signNativeChild(executable: string, arch: TargetArch): void {
 			"--timestamp",
 		);
 	} else if (signing.kind === "local") {
-		if (!signing.identity)
-			throw new Error("Local signing identity is unavailable.");
+		if (!signing.identity) throw new Error("Local signing identity is unavailable.");
 		command.push(
 			"--requirements",
 			localDesignatedRequirement(localServerIdentifier, signing.identity),
@@ -561,16 +555,87 @@ function signNativeChild(executable: string, arch: TargetArch): void {
 	run(["codesign", "--verify", "--strict", executable]);
 	if (signing.kind === "ad-hoc") {
 		console.warn(
-			"[native] whalehall-local is ad-hoc signed. Sensitive content remains " +
-				"metadata-only until the fixed local identity is explicitly installed.",
+			"[native] whalehall-local is ad-hoc signed. Sensitive content remains "
+				+ "metadata-only until the fixed local identity is explicitly installed.",
+		);
+	}
+}
+
+export function credentialHelperCodesignCommand({
+	executable,
+	signing,
+}: {
+	executable: string;
+	signing: MacSigningPlan;
+}): string[] {
+	const command = [
+		"codesign",
+		"--force",
+		"--sign",
+		signing.identity || "-",
+		"--identifier",
+		MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+	];
+	if (signing.kind === "developer-id") {
+		if (!signing.identity || !signing.teamIdentifier) {
+			throw new Error("Developer ID credential helper signing is incomplete.");
+		}
+		command.push(
+			"--requirements",
+			`=designated => identifier "${MACOS_CREDENTIAL_HELPER_IDENTIFIER}" `
+				+ "and anchor apple generic and certificate leaf[subject.OU] = "
+				+ `"${signing.teamIdentifier}"`,
+			"--options",
+			"runtime",
+			"--timestamp",
+		);
+	} else if (signing.kind === "local") {
+		if (!signing.identity) {
+			throw new Error("Local credential helper signing identity is unavailable.");
+		}
+		command.push(
+			"--requirements",
+			localDesignatedRequirement(
+				MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+				signing.identity,
+			),
+			"--options",
+			"runtime",
+			"--timestamp=none",
+		);
+	} else {
+		command.push("--timestamp=none");
+	}
+	command.push(executable);
+	return command;
+}
+
+function signCredentialHelper(executable: string): void {
+	const signing = macSigningPlan();
+	run(credentialHelperCodesignCommand({ executable, signing }));
+	run(["codesign", "--verify", "--strict", executable]);
+	validateSignedComponentDetails({
+		details: capture([
+			"codesign",
+			"--display",
+			"--verbose=4",
+			executable,
+		]),
+		expectedIdentifier: MACOS_CREDENTIAL_HELPER_IDENTIFIER,
+		expectedTeamIdentifier:
+			signing.kind === "developer-id" ? signing.teamIdentifier ?? null : null,
+	});
+	if (signing.kind === "ad-hoc") {
+		console.warn(
+			"[native] whalehall-credential-helper is ad-hoc signed. This build "
+				+ "cannot provide reusable local signature continuity.",
 		);
 	}
 }
 
 export function buildNative(): string {
 	const os = (process.env.ELECTROBUN_OS as TargetOS | undefined) ?? hostOS();
-	const arch =
-		(process.env.ELECTROBUN_ARCH as TargetArch | undefined) ?? hostArch();
+	const arch = (process.env.ELECTROBUN_ARCH as TargetArch | undefined) ?? hostArch();
 
 	if (os !== hostOS() || arch !== hostArch()) {
 		throw new Error(
@@ -584,17 +649,23 @@ export function buildNative(): string {
 		"--release",
 		"--locked",
 		"--manifest-path",
-		manifestPath,
+		localToolManifestPath,
 		"--package",
 		"whalehall-local-server",
 	]);
+	run([
+		"cargo",
+		"build",
+		"--release",
+		"--locked",
+		"--manifest-path",
+		credentialHelperManifestPath,
+		"--package",
+		"whalehall-credential-helper",
+	]);
 
 	const binaryName = os === "win" ? "whalehall-local.exe" : "whalehall-local";
-	const source = resolve(
-		projectRoot,
-		"whalehall-local/target/release",
-		binaryName,
-	);
+	const source = resolve(projectRoot, "whalehall-local/target/release", binaryName);
 	const destination = resolve(projectRoot, `.native/${os}-${arch}`, binaryName);
 	mkdirSync(dirname(destination), { recursive: true });
 	copyFileSync(source, destination);
@@ -606,6 +677,26 @@ export function buildNative(): string {
 		signNativeChild(destination, arch);
 	}
 	console.log(`[native] ${source} -> ${destination}`);
+
+	const helperBinaryName =
+		os === "win"
+			? "whalehall-credential-helper.exe"
+			: "whalehall-credential-helper";
+	const helperSource = resolve(
+		projectRoot,
+		"whalehall-credential-helper/target/release",
+		helperBinaryName,
+	);
+	const helperDestination = resolve(
+		projectRoot,
+		`.native/${os}-${arch}`,
+		helperBinaryName,
+	);
+	copyFileSync(helperSource, helperDestination);
+	if (os !== "win") chmodSync(helperDestination, 0o755);
+	if (os === "macos") signCredentialHelper(helperDestination);
+	console.log(`[native] ${helperSource} -> ${helperDestination}`);
+
 	if (os === "macos") {
 		buildVaultBroker(arch);
 		buildObserverApp(arch);

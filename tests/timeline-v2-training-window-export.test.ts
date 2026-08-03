@@ -412,6 +412,18 @@ function dependencies(state: TimelineJobV2["state"] = "COMMITTED") {
 	};
 }
 
+function expectPrivatePath(path: string, expectedMode: 0o600 | 0o700): void {
+	const metadata = statSync(path);
+	if (expectedMode === 0o700) {
+		expect(metadata.isDirectory()).toBeTrue();
+	} else {
+		expect(metadata.isFile()).toBeTrue();
+	}
+	if (process.platform !== "win32") {
+		expect(metadata.mode & 0o777).toBe(expectedMode);
+	}
+}
+
 describe("private COMMITTED Timeline training export", () => {
 	test("writes a mode-0600 manifest-bound full-window package", async () => {
 		const root = mkdtempSync(join(tmpdir(), "whalehall-training-export-"));
@@ -436,9 +448,9 @@ describe("private COMMITTED Timeline training export", () => {
 			},
 		});
 
-		expect(statSync(target).mode & 0o777).toBe(0o700);
-		expect(statSync(exported.manifestPath).mode & 0o777).toBe(0o600);
-		expect(statSync(exported.recordsPath).mode & 0o777).toBe(0o600);
+		expectPrivatePath(target, 0o700);
+		expectPrivatePath(exported.manifestPath, 0o600);
+		expectPrivatePath(exported.recordsPath, 0o600);
 		expect(exported.manifest.trainingEligible).toBeTrue();
 		expect(exported.manifest.sourceWindows[0]?.inputHash).toBe(
 			value.window.inputHash,
@@ -476,6 +488,40 @@ describe("private COMMITTED Timeline training export", () => {
 		expect(line).toContain("PRIVATE EDITOR TEXT");
 		expect(line).toContain('"negativeZero":0');
 		expect(line).toContain('"smallExponent":1e-7');
+	});
+
+	test("rejects relative destinations and never overwrites an existing package", async () => {
+		const root = mkdtempSync(join(tmpdir(), "whalehall-training-export-"));
+		temporaryDirectories.push(root);
+		const target = join(root, "package");
+		mkdirSync(target);
+		const sentinel = join(target, "sentinel.txt");
+		writeFileSync(sentinel, "keep");
+		const { value, raw, repository } = dependencies();
+		const exporter = new PrivateTrainingWindowExporter(
+			raw,
+			repository,
+			() => value.window.endedAtMs + 1_000,
+			() => "export-no-overwrite",
+		);
+		const options = {
+			windowIds: [value.window.windowId],
+			participantId: "participant-1",
+			sessionTimezone: "Asia/Shanghai",
+			includeDecryptedContent: true,
+		};
+
+		await expect(
+			exporter.exportToNewDirectory({
+				...options,
+				directory: "relative-package",
+			}),
+		).rejects.toThrow("must be absolute");
+		await expect(
+			exporter.exportToNewDirectory({ ...options, directory: target }),
+		).rejects.toThrow("must not already exist");
+		expect(readFileSync(sentinel, "utf8")).toBe("keep");
+		expect(readdirSync(root)).toEqual(["package"]);
 	});
 
 	test("exports a real two-window continuation as an auditable current-window slice", async () => {

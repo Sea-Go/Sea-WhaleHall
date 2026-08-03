@@ -85,8 +85,30 @@ test("keeps browser Automation outside the required permission action", () => {
 	expect(browserSource).toContain(
 		"static func preflightAutomationAuthorization(",
 	);
-	expect(browserSource).toContain(
-		"WhaleHall's single\n    /// monitoring permission action",
+	const setupCommandStart = runtimeSource.indexOf('case "setupPermissions":');
+	const setupCommandEnd = runtimeSource.indexOf('case "shutdown":');
+	expect(setupCommandStart).toBeGreaterThan(-1);
+	expect(setupCommandEnd).toBeGreaterThan(setupCommandStart);
+	const setupCommand = runtimeSource.slice(setupCommandStart, setupCommandEnd);
+	expect(setupCommand).not.toMatch(/automation/iu);
+	expect(setupCommand).not.toContain("BrowserMetadataReader");
+	const automationPreflightStart = browserSource.indexOf(
+		"nonisolated static func preflightAutomationAuthorization(",
+	);
+	const automationPreflightEnd = browserSource.indexOf(
+		"private func sanitizeURL(",
+	);
+	expect(automationPreflightStart).toBeGreaterThan(-1);
+	expect(automationPreflightEnd).toBeGreaterThan(automationPreflightStart);
+	const automationPreflight = browserSource.slice(
+		automationPreflightStart,
+		automationPreflightEnd,
+	);
+	expect(automationPreflight).toContain(
+		"AEDeterminePermissionToAutomateTarget(",
+	);
+	expect(automationPreflight).toMatch(
+		/AEDeterminePermissionToAutomateTarget\([\s\S]*?false\s*\)/,
 	);
 });
 

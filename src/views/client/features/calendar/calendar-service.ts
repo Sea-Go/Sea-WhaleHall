@@ -12,6 +12,7 @@ export interface CalendarLoadResult {
 	events: readonly CalendarEvent[];
 	timeZone: string;
 	scenario: CalendarScenarioId;
+	revision?: number;
 }
 
 export interface CalendarService {
@@ -20,5 +21,6 @@ export interface CalendarService {
 	mutateBatch(
 		batchId: string,
 		mutations: readonly CalendarMutation[],
+		expectedRevision?: number,
 	): Promise<CalendarBatchMutationResult>;
 }

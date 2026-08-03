@@ -2,7 +2,7 @@
 
 > A whale falls, and myriad creatures flourish.
 
-WhaleHall is an Electrobun desktop application with a React control window, a transparent Canvas desktop companion, a thin TypeScript Agent boundary, and a Rust Local Tool Host connected over newline-delimited JSON.
+WhaleHall is an Electrobun desktop application with a React control window, a transparent Canvas desktop companion, a bundled local Mastra Agent Sidecar, and a Rust Local Tool Host.
 
 The architecture borrows Codex's separation between a thin client layer and a native process without copying the size of the Codex monorepo. In WhaleHall, Rust owns local host capabilities rather than model reasoning.
 
@@ -13,15 +13,23 @@ flowchart TB
   subgraph App["Electrobun application"]
     Client["React client window"] -->|"Typed RPC"| Bun["Electrobun Bun main process"]
     Pet["Transparent Canvas pet window"] -->|"Typed RPC"| Bun
-    Bun --> Agent["TypeScript AgentRuntime"]
+    Bun <-->|"private Content-Length stdio"| Mastra["Bundled Node 22.18 Mastra Sidecar\nconversation, planning, Tool loop"]
+    Mastra -->|"complete OpenAI-compatible request"| Bun
+    Bun -.->|"future bearer + HTTPS\nlocal test account disabled"| Relay["Remote auth + raw model relay"]
+    Relay --> LLM["OpenAI-compatible model"]
+    Bun --> AgentDB["Encrypted Agent SQLite"]
+    Bun --> CredentialHelper["Credential helper\nCredential Manager / Keychain"]
+    Bun --> Agent["TypeScript reflection boundary"]
     Agent --> LocalClient["LocalToolClient"]
-    Agent --> Reflection["64条 / 5分钟 Timeline v2 runtime"]
+    Agent --> Reflection["64-event / 5-minute Timeline v2 runtime"]
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
+    Observer["Signed macOS Observer"] --> Server
     Server --> EventJournal["EventJournal · SQLite WAL"]
     EventJournal -->|"desktop.event push + cursor replay"| Reflection
     Reflection --> Classifier["deterministic cold-start / verified ModernBERT classification"]
     Reflection --> Qwen["Local qwen3:4b · cited hypothesis text only"]
     Reflection --> ReflectionJournal["TimelineJournal · SQLite WAL"]
+    Server --> VaultBroker["Signed versioned Vault Broker\nsensitive observation content"]
     Server --> Core["Local Tool core"]
     Core --> Tools["system.info · device.environment · accessibility.* · activity.* · applications.* · presence.* · browser.*"]
     Core --> Accessibility["Foreground accessibility-tree sensor"]
@@ -36,7 +44,16 @@ flowchart TB
   end
 ```
 
-The TypeScript Agent exposes a stable orchestration boundary, forwards typed Local Tool calls, and owns deterministic reflection windowing/model orchestration. Tool registration, native sensing, event journaling, validation, execution, progress, cancellation, and concurrency control live in Rust. The browser contexts never communicate directly.
+The TypeScript reflection boundary continues to own deterministic Reflection
+and Timeline v2 windowing/model orchestration, while Rust owns Tool
+registration, native sensing, event journaling, validation, execution,
+progress, cancellation, and concurrency control. The local Mastra Sidecar is
+the separate interactive conversation and planning runtime; it does not absorb
+the sensor catalogue or the Reflection pipeline.
+
+Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. The remote service has no conversation, planning, history, Tool, or prompt-injection API: after formal authentication is connected, it will authenticate the bearer subject, inject only the provider credential, store relay records, and forward the already-complete OpenAI-compatible body. Browser contexts never communicate directly, never receive bearer tokens, and never supply account identity.
+
+The current development login is deliberately local-only: the UI pre-fills `demo@whalehall.local`, displays the experience password `whalehall`, and Bun validates those fixed values without network access before binding `user-demo-wang-yiming`. The submitted password is immediately cleared from React state. This test session has no bearer, so model relay requests report unavailable until formal remote authentication is implemented; WhaleHall does not fabricate credentials or fall back to a remote Agent.
 
 ## Development areas / 开发区域
 
@@ -44,9 +61,12 @@ The TypeScript Agent exposes a stable orchestration boundary, forwards typed Loc
 | --- | --- | --- |
 | Client frontend | [`src/views/client`](src/views/client) | Authentication gate, planning, calendar, reports, settings, and client-side service adapters |
 | Pet frontend | [`src/views/pet`](src/views/pet) | Transparent Canvas companion, interaction, and replaceable `PetRenderer` interface |
-| TypeScript Agent | [`src/agent`](src/agent) | Thin Agent facade, Local Tool process client, and handwritten protocol mirror |
-| Electrobun main process | [`src/bun/index.ts`](src/bun/index.ts) | Window creation, Typed RPC routing, lifecycle, and Agent composition |
+| Local Mastra Agent | [`src/agent/mastra-host`](src/agent/mastra-host) | Bundled Node ESM Sidecar, conversation Agent, planning workflow, and private stdio protocol |
+| TypeScript local runtimes | [`src/agent`](src/agent) | Mastra boundary, Local Tool client, Reflection/Timeline v2, and handwritten protocol mirrors |
+| Electrobun main process | [`src/bun`](src/bun) | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition |
 | Shared frontend contracts | [`src/shared`](src/shared) | Electrobun Typed RPC schemas shared with both WebViews |
+| Credential helper | [`whalehall-credential-helper`](whalehall-credential-helper) | One-shot OS vault access without secrets in argv, environment, stderr, or Renderer RPC |
+| Remote model relay | [`services/model-relay`](services/model-relay) | Authentication and byte-preserving OpenAI-compatible forwarding only; never an Agent |
 | Rust Local protocol | [`whalehall-local/protocol`](whalehall-local/protocol) | JSONL requests, responses, tool descriptors, events, and errors |
 | Rust Local core | [`whalehall-local/core`](whalehall-local/core) | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence |
 | Rust Local server | [`whalehall-local/server`](whalehall-local/server) | Concurrent stdin/stdout JSONL server and packaged executable |
@@ -60,7 +80,7 @@ Project contribution and frontend implementation rules:
 - [`docs/frontend/CALENDAR_STANDARD.md`](docs/frontend/CALENDAR_STANDARD.md) — calendar domain, adapter, interaction, timezone, and QA rules.
 - [`docs/REFLECTION_SYSTEM.md`](docs/REFLECTION_SYSTEM.md) — behavior events, 64/5-minute windows, persistence, model locks, privacy, and training/runtime operations.
 
-Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. LLM providers, task planning, and conversation orchestration belong under `src/agent/`.
+Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. The first Agent release exposes only three read Tools and five approval-bound planning/calendar writes; it does not register the sensor, accessibility, browser, activity, or cleanup catalogue.
 
 Generated files stay outside source areas:
 
@@ -68,17 +88,19 @@ Generated files stay outside source areas:
 dist/views/                         Vite output for client and pet pages
 whalehall-local/target/             Cargo build cache and binaries
 .native/<platform>-<architecture>/  Native binary staged before packaging
+.native/<platform>-<architecture>/node[.exe] and whalehall-agent-host.mjs
 build/                              Electrobun application bundles
 artifacts/                          Unsigned canary packages
 ```
 
-At runtime, the pages load independently from `views://client/index.html` and `views://pet/index.html`. The packaged `whalehall-local(.exe)` binary is loaded from `PATHS.RESOURCES_FOLDER/app/native`.
+At runtime, the pages load independently from `views://client/index.html` and `views://pet/index.html`. The packaged Local Tool Host and credential helper load from `app/native`; the pinned Node executable and Mastra bundle load from `app/node` and `app/agent`. The Sidecar uses stdio and opens no listening port.
 
 ## Requirements
 
 - Bun `1.3.14`
 - Rust `1.97.1` with Cargo, rustfmt, and Clippy
 - Electrobun `1.18.1`
+- Bundled Node `22.18.0` for the local Mastra Sidecar (downloaded from the pinned official archive and SHA-256 verified during packaging)
 - macOS 14+, Windows 11+, or Ubuntu 22.04+
 - Platform build tools required by [Electrobun](https://github.com/blackboardsh/electrobun#prerequisites)
 
@@ -166,7 +188,14 @@ The local identity is never accepted for a stable or explicitly signed release.
 Those builds require a valid `Developer ID Application` identity, a matching
 `WHALEHALL_APPLE_TEAM_ID`, hardened runtime, and notarization.
 
-The pre-build hook compiles `whalehall-local-server` in release mode and stages `whalehall-local(.exe)` under `.native/` for the current native platform.
+The pre-build hook builds the React views, compiles `whalehall-local-server` and
+the credential helper, verifies and stages the pinned Node runtime, and bundles
+the local Mastra Sidecar. On macOS it also builds and signs the Observer and
+versioned Vault Broker before the existing post-wrap and post-package security
+checks run. Desktop authentication/model requests require
+`WHALEHALL_RELAY_URL` and `WHALEHALL_MODEL_ID`; provider keys belong only in
+the separately deployed relay process. See
+[`docs/CONVERSATION_AGENT_INTEGRATION.md`](docs/CONVERSATION_AGENT_INTEGRATION.md).
 
 ## Desktop pet / 桌宠
 
@@ -194,6 +223,7 @@ bun run lint:changed
 # Build views or only the native Local Tool Host
 bun run build:views
 bun run build:native
+bun run build:agent-host
 
 # Build an unsigned Electrobun canary artifact for the current host
 bun run build:canary

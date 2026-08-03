@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join, parse, resolve, sep } from "node:path";
 import {
 	ModernBertEpisodeClassifier,
 	type ModernBertRuntimeOptIn,
@@ -50,6 +50,9 @@ export function loadTimelineModernBertConfiguration(
 		if (!isAbsolute(pinnedManifestPath)) {
 			return invalidConfiguration();
 		}
+		if (pathContainsSymbolicLink(pinnedManifestPath)) {
+			return invalidConfiguration();
+		}
 		const stat = lstatSync(pinnedManifestPath);
 		if (
 			stat.isSymbolicLink() ||
@@ -86,6 +89,18 @@ export function loadTimelineModernBertConfiguration(
 	} catch {
 		return invalidConfiguration();
 	}
+}
+
+function pathContainsSymbolicLink(path: string): boolean {
+	const absolutePath = resolve(path);
+	const root = parse(absolutePath).root;
+	let current = root;
+	for (const segment of absolutePath.slice(root.length).split(sep)) {
+		if (segment.length === 0) continue;
+		current = join(current, segment);
+		if (lstatSync(current).isSymbolicLink()) return true;
+	}
+	return false;
 }
 
 function invalidConfiguration(): TimelineModernBertConfiguration {

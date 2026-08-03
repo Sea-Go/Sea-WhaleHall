@@ -4,104 +4,29 @@ import {
 	instantToDateInZone,
 	rangesOverlap,
 } from "./date-time";
+import type {
+	CalendarBatchMutationResult,
+	CalendarConflict,
+	CalendarEvent,
+	CalendarMutation,
+	CalendarMutationResult,
+} from "../../../../shared/calendar";
 
-export type CalendarEventKind =
-	| "plan"
-	| "manual-block"
-	| "external"
-	| "break";
-export type CalendarEventState = "proposed" | "committed";
-
-export interface TimedSchedule {
-	allDay: false;
-	start: string;
-	end: string;
-	timeZone: string;
-}
-
-export interface AllDaySchedule {
-	allDay: true;
-	startDate: string;
-	endDateExclusive: string;
-}
-
-export interface Recurrence {
-	seriesId: string;
-	rrule: string;
-	timeZone: string;
-	exceptionDates: readonly string[];
-}
-
-export interface CalendarEvent {
-	id: string;
-	title: string;
-	kind: CalendarEventKind;
-	state: CalendarEventState;
-	schedule: TimedSchedule | AllDaySchedule;
-	recurrence: Recurrence | null;
-	occurrenceId: string | null;
-	sourcePlanId: string | null;
-	editable: boolean;
-	version: number;
-}
-
-export type CalendarConflictReason =
-	| "overlaps-manual-block"
-	| "overlaps-external-event"
-	| "overlaps-committed-plan"
-	| "outside-available-hours"
-	| "insufficient-duration"
-	| "stale-version"
-	| "recurrence-restriction"
-	| "read-only-event"
-	| "service-unavailable";
-
-export interface CalendarConflict {
-	reason: CalendarConflictReason;
-	severity: "warning" | "error";
-	affectedEventIds: readonly string[];
-	message: string;
-	nextAction: "edit" | "retry" | "inspect" | "keep-proposed";
-}
-
-export type RecurrenceScope = "occurrence" | "following" | "series";
-export type CalendarMutationKind = "create" | "update" | "delete" | "restore";
-
-export interface CalendarMutation {
-	mutationId: string;
-	kind: CalendarMutationKind;
-	eventId: string;
-	expectedVersion: number | null;
-	before: CalendarEvent | null;
-	after: CalendarEvent | null;
-	recurrenceScope: RecurrenceScope | null;
-}
-
-export type CalendarMutationResult =
-	| {
-			ok: true;
-			mutationId: string;
-			event: CalendarEvent | null;
-			warning: CalendarConflict | null;
-	  }
-	| {
-			ok: false;
-			mutationId: string;
-			conflict: CalendarConflict;
-	  };
-
-export type CalendarBatchMutationResult =
-	| {
-			ok: true;
-			batchId: string;
-			events: readonly CalendarEvent[];
-			warnings: readonly CalendarConflict[];
-	  }
-	| {
-			ok: false;
-			batchId: string;
-			conflicts: readonly CalendarConflict[];
-	  };
+export type {
+	AllDaySchedule,
+	CalendarBatchMutationResult,
+	CalendarConflict,
+	CalendarConflictReason,
+	CalendarEvent,
+	CalendarEventKind,
+	CalendarEventState,
+	CalendarMutation,
+	CalendarMutationKind,
+	CalendarMutationResult,
+	Recurrence,
+	RecurrenceScope,
+	TimedSchedule,
+} from "../../../../shared/calendar";
 
 export class CalendarDomainError extends Error {
 	constructor(
