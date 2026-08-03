@@ -2,6 +2,17 @@
 
 <!-- What user or engineering outcome does this pull request deliver? -->
 
+## Change contract
+
+<!-- State the behavior change and mark every non-applicable boundary explicitly. -->
+
+- What changed and why:
+- Typed RPC, Local Tool protocol, public API, or remote-model request impact:
+- Persistence, schema, migration, or recovery impact:
+- Activity data, credentials, privacy, or telemetry impact:
+- Lifecycle, concurrency, cancellation, timeout, or retry impact:
+- Design/issue reference required for cross-cutting contract or data changes:
+
 ## Scope
 
 <!-- List the included areas and explicitly note important out-of-scope work. -->
@@ -69,6 +80,7 @@ Skipped or blocked validation:
 - Main risks:
 - Data/privacy impact:
 - Compatibility impact:
+- Concurrency/lifecycle impact:
 - Rollback plan:
 
 ## Related work

@@ -55,6 +55,9 @@ bun run typecheck
 # All Bun tests
 bun run test
 
+# Report Biome findings in files changed against main
+bun run lint:changed
+
 # Rust workspace tests
 bun run test:rust
 
@@ -80,9 +83,12 @@ bun run test:sensors:ci
 bun run scripts/verify-pet-animations.ts
 ```
 
-There is currently no repository `lint`, `format`, or E2E script. GitHub
-Actions separately validates workflow YAML with actionlint and validates shell
-scripts with `bash -n`. Do not report nonexistent local commands as completed.
+Biome changed-file diagnostics are available through `bun run lint:changed`.
+They are informational in CI while historical violations are retired; they are
+not yet a hard merge gate. There is currently no repository-wide hard
+`lint`/format gate or E2E script. GitHub Actions separately validates workflow
+YAML with actionlint and validates shell scripts with `bash -n` and ShellCheck.
+Do not report nonexistent local commands as completed.
 
 ## Branch names
 
@@ -135,10 +141,10 @@ fix(auth): prevent protected content flash
 docs(client): add frontend contribution standards
 ```
 
-Commitlint, Husky, and lint-staged are not currently installed. The policy is
-enforced through contributor review until the repository adopts a compatible
-front-end lint/format toolchain. Do not add hooks or dependencies in an
-unrelated feature.
+Commitlint, Husky, and lint-staged are not currently installed. Conventional
+Commit policy remains enforced through contributor review; Biome changed-file
+diagnostics are currently informational. Do not add hooks or dependencies in
+an unrelated feature.
 
 ## Pull requests
 
@@ -147,6 +153,7 @@ Keep a pull request focused on one product or engineering outcome. Complete
 
 - a concise summary and explicit scope;
 - affected architecture boundaries;
+- completed change-contract and data/privacy sections;
 - implemented loading/empty/error/offline/conflict states;
 - exact commands run and their results;
 - risk and rollback notes;

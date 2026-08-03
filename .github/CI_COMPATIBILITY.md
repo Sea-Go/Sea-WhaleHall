@@ -4,7 +4,8 @@ WhaleHall validates sensors by capability, not by operating-system name alone. A
 
 ## Blocking hosted gates
 
-`.github/workflows/ci.yml` runs on every push to `main`, pull request, and manual dispatch. Packaging waits for every gate below:
+`.github/workflows/ci.yml` runs on every push to `main`, pull request, merge
+queue group, and manual dispatch. Packaging waits for every gate below:
 
 | Gate | Environments | Contract |
 | --- | --- | --- |
@@ -15,6 +16,25 @@ WhaleHall validates sensors by capability, not by operating-system name alone. A
 | Packaging | macOS 15, Windows Server 2025, Ubuntu 24.04 | Canary packages and unsigned seven-day artifacts, only after all preceding gates pass |
 
 Linux distribution containers intentionally validate headless behavior. They must report unavailable screens, foreground applications, last-input time, and lock state as degraded sensor capabilities rather than failing the process or inventing desktop state.
+
+`Merge gate` is the stable required check for this workflow. It passes only
+when the complete quality suite, hosted sensor matrix, Linux distribution
+matrix, virtual X11 desktop, and all three canary packages have succeeded. The
+same gate runs for both a pull request and the final merge-queue commit.
+
+## Security and coverage gates
+
+`.github/workflows/security.yml` adds Gitleaks, workflow static analysis, and
+dependency review. It never runs fork pull requests on a self-hosted runner or
+uses `pull_request_target`. New high- or critical-severity runtime and
+development dependencies block pull requests and merge-queue groups.
+
+`.github/workflows/coverage.yml` generates separate Bun and Rust LCOV reports
+on GitHub-hosted Ubuntu, uploads short-lived CI artifacts, and sends them to
+Codecov through OIDC. Coverage status remains informational until a measured
+baseline is established; coverage-report generation itself is always blocking.
+CI logs and coverage artifacts must not include raw activity records,
+`config.yaml`, API keys, or user-data exports.
 
 ## Real desktop runners
 
