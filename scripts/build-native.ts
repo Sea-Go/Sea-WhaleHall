@@ -1,27 +1,27 @@
+import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	copyFileSync,
-	mkdtempSync,
 	mkdirSync,
-	readFileSync,
+	mkdtempSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	type MacSigningPlan,
-	localDesignatedRequirement,
-	readMacCodeSigningIdentities,
-	resolveMacSigningPlan,
-} from "./macos-signing-identity";
-import {
 	normalizeDesignatedRequirement,
 	validateObserverEntitlements,
 } from "./macos-build-security";
+import {
+	localDesignatedRequirement,
+	type MacSigningPlan,
+	readMacCodeSigningIdentities,
+	resolveMacSigningPlan,
+} from "./macos-signing-identity";
 
 export const vaultBrokerExecutableName = "whalehall-vault-broker-v2";
 export const vaultBrokerIdentifier = "com.seago.whalehall.vault-broker.v2";

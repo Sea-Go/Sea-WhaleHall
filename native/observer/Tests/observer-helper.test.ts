@@ -160,6 +160,7 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 	expect(inputSource).not.toContain("CGRequestListenEventAccess");
 	expect(ocrSource).toContain("CGPreflightScreenCaptureAccess");
 	expect(ocrSource).not.toContain("CGRequestScreenCaptureAccess");
+	expect(ocrSource).toContain("@preconcurrency import ScreenCaptureKit");
 	expect(inputSource).toContain('onGap("input_monitoring_unavailable")');
 	const inputStart = inputSource.slice(
 		inputSource.indexOf("func start() -> Bool"),
