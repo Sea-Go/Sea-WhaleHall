@@ -9,11 +9,11 @@
 	"files": {
 		"includes": [
 			"**",
-			"!dist/**",
-			"!build/**",
-			"!artifacts/**",
-			"!coverage/**",
-			"!whalehall-local/target/**"
+			"!dist",
+			"!build",
+			"!artifacts",
+			"!coverage",
+			"!whalehall-local/target"
 		]
 	},
 	"formatter": {
@@ -23,7 +23,7 @@
 	"linter": {
 		"enabled": true,
 		"rules": {
-			"recommended": true
+			"preset": "recommended"
 		}
 	},
 	"assist": {

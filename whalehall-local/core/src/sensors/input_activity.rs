@@ -1196,13 +1196,15 @@ mod tests {
             bucket_ended_at_ms: 6_000,
         };
         let value = serde_json::to_value(aggregate).unwrap();
+        let mut field_names = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        field_names.sort_unstable();
         assert_eq!(
-            value
-                .as_object()
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>(),
+            field_names,
             vec![
                 "bucketEndedAtMs",
                 "bucketStartedAtMs",
