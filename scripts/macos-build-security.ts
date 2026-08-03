@@ -1,22 +1,23 @@
+import { createHash } from "node:crypto";
 import {
 	copyFileSync,
 	existsSync,
 	lstatSync,
-	mkdtempSync,
 	mkdirSync,
-	readFileSync,
+	mkdtempSync,
 	readdirSync,
+	readFileSync,
 	realpathSync,
 	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	localDesignatedRequirement,
+	type MacSigningKind,
 	readMacCodeSigningIdentities,
 	resolveMacSigningPlan,
 } from "./macos-signing-identity";
@@ -62,6 +63,16 @@ interface VerifyMacWrapperOptions {
 	stagedVaultBrokerDirectory?: string;
 }
 
+export function requiresMaterializedCanaryPayload(
+	signingKind: MacSigningKind,
+	buildEnvironment: string,
+): boolean {
+	return (
+		signingKind === "local" ||
+		(signingKind === "ad-hoc" && buildEnvironment !== "dev")
+	);
+}
+
 export function prepareMacWrapper({
 	bundlePath,
 	buildDirectory,
@@ -81,9 +92,7 @@ export function prepareMacWrapper({
 			`Wrapper identifier mismatch: expected ${appIdentifier}, received ${actualIdentifier}.`,
 		);
 	}
-	for (const [key, description] of Object.entries(
-		MACOS_USAGE_DESCRIPTIONS,
-	)) {
+	for (const [key, description] of Object.entries(MACOS_USAGE_DESCRIPTIONS)) {
 		setPlistString(infoPlist, key, description);
 	}
 
@@ -116,19 +125,13 @@ export function prepareMacWrapper({
 	}
 	command.push(bundlePath);
 	run(command);
-	run([
-		"/usr/bin/codesign",
-		"--verify",
-		"--deep",
-		"--strict",
-		bundlePath,
-	]);
+	run(["/usr/bin/codesign", "--verify", "--deep", "--strict", bundlePath]);
 	if (identity === "-") {
 		console.warn(
-			"[macos-build-security] Canary wrapper uses a per-build ad-hoc TCC identity. "
-				+ "This build is metadata-only; run "
-				+ "`bun run setup:macos-signing -- --create` explicitly before "
-				+ "collecting real content.",
+			"[macos-build-security] Canary wrapper uses a per-build ad-hoc TCC identity. " +
+				"This build is metadata-only; run " +
+				"`bun run setup:macos-signing -- --create` explicitly before " +
+				"collecting real content.",
 		);
 	}
 }
@@ -141,13 +144,7 @@ export function verifyMacWrapper({
 	stagedVaultBrokerDirectory,
 }: VerifyMacWrapperOptions): void {
 	const infoPlist = join(bundlePath, "Contents", "Info.plist");
-	run([
-		"/usr/bin/codesign",
-		"--verify",
-		"--deep",
-		"--strict",
-		bundlePath,
-	]);
+	run(["/usr/bin/codesign", "--verify", "--deep", "--strict", bundlePath]);
 	const details = capture([
 		"/usr/bin/codesign",
 		"--display",
@@ -164,7 +161,9 @@ export function verifyMacWrapper({
 		(!/TeamIdentifier=[A-Z0-9]{10}(?:\n|$)/.test(details) ||
 			details.includes("TeamIdentifier=not set"))
 	) {
-		throw new Error("Signed release wrapper is missing a valid TeamIdentifier.");
+		throw new Error(
+			"Signed release wrapper is missing a valid TeamIdentifier.",
+		);
 	}
 	const outerTeamIdentifier =
 		details.match(/TeamIdentifier=([A-Z0-9]{10})(?:\n|$)/)?.[1] ?? null;
@@ -230,9 +229,7 @@ export function verifyMacWrapper({
 					"keychain-access-groups",
 				]) {
 					if (!localEntitlements.includes(requiredValue)) {
-						throw new Error(
-							`Signed local server is missing ${requiredValue}.`,
-						);
+						throw new Error(`Signed local server is missing ${requiredValue}.`);
 					}
 				}
 			}
@@ -318,8 +315,8 @@ export function prepareMacWrapperFromEnvironment(
 		buildEnvironment,
 		identities: readMacCodeSigningIdentities(),
 	});
-	if (signing.kind === "local") {
-		if (!signing.identity) {
+	if (requiresMaterializedCanaryPayload(signing.kind, buildEnvironment)) {
+		if (signing.kind === "local" && !signing.identity) {
 			throw new Error("The local signing identity is unavailable.");
 		}
 		const architecture =
@@ -328,11 +325,11 @@ export function prepareMacWrapperFromEnvironment(
 		if (architecture !== "arm64" && architecture !== "x64") {
 			throw new Error(`Unsupported macOS architecture: ${architecture}.`);
 		}
-		materializeLocalSignedWrapper({
+		materializeSignedCanaryWrapper({
 			bundlePath,
 			buildDirectory,
 			appIdentifier,
-			localIdentity: signing.identity,
+			localIdentity: signing.kind === "local" ? signing.identity : undefined,
 			architecture,
 		});
 		return;
@@ -350,13 +347,13 @@ export function prepareMacWrapperFromEnvironment(
 
 /**
  * Electrobun signs its archived inner app only when a Developer ID is
- * configured. A local certificate therefore cannot safely ship the default
- * self-extracting wrapper: first launch replaces that signed wrapper with an
- * unsigned inner app and changes the TCC identity. For local Canary builds we
- * expand the locally-produced archive during postWrap, sign that immutable
- * flat app, and atomically install it in place of the extractor.
+ * configured. A local or ad-hoc Canary would otherwise install an unsigned
+ * inner app after its self-extracting wrapper, changing the app identity and
+ * leaving the update archive unverifiable. Expand the locally-produced
+ * archive during postWrap, sign that immutable flat app, and atomically
+ * install it in place of the extractor. Ad-hoc builds remain metadata-only.
  */
-function materializeLocalSignedWrapper({
+function materializeSignedCanaryWrapper({
 	bundlePath,
 	buildDirectory,
 	appIdentifier,
@@ -366,7 +363,7 @@ function materializeLocalSignedWrapper({
 	bundlePath: string;
 	buildDirectory: string;
 	appIdentifier: string;
-	localIdentity: string;
+	localIdentity?: string;
 	architecture: "arm64" | "x64";
 }): void {
 	assertSafeBundlePath(bundlePath, buildDirectory);
@@ -376,13 +373,15 @@ function materializeLocalSignedWrapper({
 		.map((name) => join(resourcesDirectory, name));
 	if (archives.length !== 1 || archives[0] === undefined) {
 		throw new Error(
-			"The local Canary wrapper must contain exactly one application archive.",
+			"The non-Developer-ID Canary wrapper must contain exactly one application archive.",
 		);
 	}
 	const archive = archives[0];
 	const archiveStats = lstatSync(archive);
 	if (!archiveStats.isFile() || archiveStats.isSymbolicLink()) {
-		throw new Error("The local Canary application archive is not a regular file.");
+		throw new Error(
+			"The non-Developer-ID Canary application archive is not a regular file.",
+		);
 	}
 
 	const zigZstd = join(
@@ -410,13 +409,13 @@ function materializeLocalSignedWrapper({
 	if (updateArchives.length !== 1 || updateArchives[0] === undefined) {
 		rmSync(stagingDirectory, { force: true, recursive: true });
 		throw new Error(
-			"The local Canary build must contain exactly one full update archive.",
+			"The non-Developer-ID Canary build must contain exactly one full update archive.",
 		);
 	}
 	if (readdirSync(buildDirectory).some((name) => name.endsWith(".patch"))) {
 		rmSync(stagingDirectory, { force: true, recursive: true });
 		throw new Error(
-			"Local-certificate Canary builds cannot publish delta patches; use the signed full archive.",
+			"Non-Developer-ID Canary builds cannot publish delta patches; use the signed full archive.",
 		);
 	}
 	const updateArchive = updateArchives[0];
@@ -436,13 +435,7 @@ function materializeLocalSignedWrapper({
 			capture(["/usr/bin/tar", "-tvf", tarPath]),
 			archiveEntries.length,
 		);
-		run([
-			"/usr/bin/tar",
-			"-xf",
-			tarPath,
-			"-C",
-			stagingDirectory,
-		]);
+		run(["/usr/bin/tar", "-xf", tarPath, "-C", stagingDirectory]);
 		assertSafeBundlePath(payloadBundle, stagingDirectory);
 		assertArchiveTreeContainsNoLinks(payloadBundle);
 		for (const requiredPath of [
@@ -473,7 +466,7 @@ function materializeLocalSignedWrapper({
 		]) {
 			if (!existsSync(requiredPath)) {
 				throw new Error(
-					"The archived local Canary is missing a native monitoring component.",
+					"The archived non-Developer-ID Canary is missing a native monitoring component.",
 				);
 			}
 		}
@@ -488,10 +481,9 @@ function materializeLocalSignedWrapper({
 			bundlePath: payloadBundle,
 			appIdentifier,
 			requireTeamIdentifier: false,
-			localSigningStagedNativeDirectory: join(
-				projectRoot,
-				`.native/macos-${architecture}`,
-			),
+			localSigningStagedNativeDirectory: localIdentity
+				? join(projectRoot, `.native/macos-${architecture}`)
+				: undefined,
 			stagedVaultBrokerDirectory: join(
 				projectRoot,
 				`.native/macos-${architecture}`,
@@ -554,9 +546,7 @@ export function validateLocalWrapperArchiveEntries(
 	) {
 		throw new Error("A safe local Canary bundle name is required.");
 	}
-	const entries = listing
-		.split(/\r?\n/u)
-		.filter((entry) => entry.length > 0);
+	const entries = listing.split(/\r?\n/u).filter((entry) => entry.length > 0);
 	if (entries.length === 0) {
 		throw new Error("The local Canary application archive is empty.");
 	}
@@ -568,7 +558,8 @@ export function validateLocalWrapperArchiveEntries(
 			entry.startsWith("/") ||
 			components[0] !== expectedBundleName ||
 			components.some(
-				(component) => component === "" || component === "." || component === "..",
+				(component) =>
+					component === "" || component === "." || component === "..",
 			)
 		) {
 			throw new Error(
@@ -578,8 +569,7 @@ export function validateLocalWrapperArchiveEntries(
 	}
 	if (
 		!entries.some(
-			(entry) =>
-				entry === `${expectedBundleName}/Contents/Info.plist`,
+			(entry) => entry === `${expectedBundleName}/Contents/Info.plist`,
 		)
 	) {
 		throw new Error(
@@ -798,32 +788,28 @@ export function validateLocalDesignatedRequirementContinuity({
 	] as const) {
 		if (/\bcdhash\b/iu.test(requirement)) {
 			throw new Error(
-				`The ${location} ${expectedIdentifier} component has an ad-hoc `
-					+ "cdhash designated requirement.",
+				`The ${location} ${expectedIdentifier} component has an ad-hoc ` +
+					"cdhash designated requirement.",
 			);
 		}
 		const identifier = requirement.match(/\bidentifier\s+"([^"]+)"/u)?.[1];
 		if (identifier !== expectedIdentifier) {
 			throw new Error(
-				`The ${location} component designated requirement rewrote `
-					+ `identifier ${expectedIdentifier}.`,
+				`The ${location} component designated requirement rewrote ` +
+					`identifier ${expectedIdentifier}.`,
 			);
 		}
-		if (
-			!/\bcertificate\s+leaf\s*=\s*H"[A-F0-9]{40}"/iu.test(
-				requirement,
-			)
-		) {
+		if (!/\bcertificate\s+leaf\s*=\s*H"[A-F0-9]{40}"/iu.test(requirement)) {
 			throw new Error(
-				`The ${location} ${expectedIdentifier} component does not have `
-					+ "an explicit leaf-certificate designated requirement.",
+				`The ${location} ${expectedIdentifier} component does not have ` +
+					"an explicit leaf-certificate designated requirement.",
 			);
 		}
 	}
 	if (staged !== packaged) {
 		throw new Error(
-			`Packaged ${expectedIdentifier} designated requirement differs `
-				+ "from the staged local signature.",
+			`Packaged ${expectedIdentifier} designated requirement differs ` +
+				"from the staged local signature.",
 		);
 	}
 	return packaged;
@@ -1023,10 +1009,10 @@ function writeOuterEntitlements(buildDirectory: string): string {
 		.join("\n");
 	writeFileSync(
 		path,
-		`<?xml version="1.0" encoding="UTF-8"?>\n`
-			+ `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" `
-			+ `"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n`
-			+ `<plist version="1.0">\n<dict>\n${entries}\n</dict>\n</plist>\n`,
+		`<?xml version="1.0" encoding="UTF-8"?>\n` +
+			`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" ` +
+			`"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n` +
+			`<plist version="1.0">\n<dict>\n${entries}\n</dict>\n</plist>\n`,
 		{ mode: 0o600 },
 	);
 	return path;
@@ -1089,7 +1075,9 @@ function withPackagedNativeDirectory(
 	}
 	const archive = archives[0];
 	if (archive === undefined) {
-		throw new Error("Signed wrapper application archive could not be resolved.");
+		throw new Error(
+			"Signed wrapper application archive could not be resolved.",
+		);
 	}
 	const extractionDirectory = mkdtempSync(
 		join(tmpdir(), "whalehall-native-verify-"),
@@ -1132,7 +1120,9 @@ function assertSafeBundlePath(
 		!resolvedBundle.startsWith(`${resolvedBuild}/`) ||
 		basename(resolvedBundle).endsWith(".app") === false
 	) {
-		throw new Error("Electrobun wrapper path must be one app inside its build directory.");
+		throw new Error(
+			"Electrobun wrapper path must be one app inside its build directory.",
+		);
 	}
 	const existingBuild = realpathSync(resolvedBuild);
 	const existingBundleParent = realpathSync(dirname(resolvedBundle));

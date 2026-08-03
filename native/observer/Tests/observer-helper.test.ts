@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { buildObserverApp } from "../../../scripts/build-native";
@@ -48,7 +48,10 @@ class FrameReader {
 			const remaining = Math.max(1, deadline - Date.now());
 			const result = await Promise.race([
 				this.reader.read(),
-				Bun.sleep(remaining).then(() => ({ done: true as const, value: undefined })),
+				Bun.sleep(remaining).then(() => ({
+					done: true as const,
+					value: undefined,
+				})),
 			]);
 			if (result.done) break;
 			this.buffered += this.decoder.decode(result.value, { stream: true });
@@ -96,9 +99,7 @@ test("keeps the Accessibility observer outside App Sandbox", () => {
 	expect(entitlements).not.toContain(
 		"com.apple.security.temporary-exception.apple-events",
 	);
-	expect(entitlements).toContain(
-		"com.apple.security.automation.apple-events",
-	);
+	expect(entitlements).toContain("com.apple.security.automation.apple-events");
 });
 
 test("keeps display polling cached and prompt APIs explicit", () => {
@@ -119,9 +120,13 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 	expect(runtimeSource).not.toContain("prompt: Bool");
 	expect(runtimeSource).toContain('errorCode: "prompt_field_forbidden"');
 	expect(runtimeSource.match(/passivePermissionSnapshot\(\)/g)?.length).toBe(4);
-	expect(runtimeSource.match(/CGRequestScreenCaptureAccess\(\)/g)?.length).toBe(1);
+	expect(runtimeSource.match(/CGRequestScreenCaptureAccess\(\)/g)?.length).toBe(
+		1,
+	);
 	expect(runtimeSource).not.toContain("CGRequestListenEventAccess()");
-	expect(runtimeSource.match(/AXIsProcessTrustedWithOptions\(/g)?.length).toBe(1);
+	expect(runtimeSource.match(/AXIsProcessTrustedWithOptions\(/g)?.length).toBe(
+		1,
+	);
 
 	const startMonitoring = runtimeSource.slice(
 		runtimeSource.indexOf("private func startMonitoring()"),
@@ -182,9 +187,7 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 	expect(inputSource).toContain(
 		"self?.sealCompletedBucket(generation: generation)",
 	);
-	expect(inputSource).toContain(
-		"callbackGeneration: generation",
-	);
+	expect(inputSource).toContain("callbackGeneration: generation");
 	const bucketSeal = inputSource.slice(
 		inputSource.indexOf("private func sealCompletedBucket("),
 		inputSource.indexOf("private func inputEventCallback("),
@@ -204,9 +207,7 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 	expect(runtimeSource).toContain(
 		"inputMonitor.owns(generation: bucket.generation)",
 	);
-	expect(ocrSource).toContain(
-		"self.onGap(Self.sanitizedCaptureError(error))",
-	);
+	expect(ocrSource).toContain("self.onGap(Self.sanitizedCaptureError(error))");
 	expect(runtimeSource).toContain("guard updated != previous else");
 	expect(runtimeSource).toContain('reason: "runtime_change"');
 	expect(runtimeSource).toContain(
@@ -219,15 +220,11 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 	expect(inputGapHandler).toContain(
 		"permissionAvailable: hasInputActivityAccess()",
 	);
-	expect(inputGapHandler).toContain(
-		"if disposition == .permissionRevoked {",
-	);
+	expect(inputGapHandler).toContain("if disposition == .permissionRevoked {");
 	expect(inputGapHandler).toContain("scheduleInputMonitorRetry()");
 	expect(
 		inputGapHandler.indexOf("if disposition == .permissionRevoked {"),
-	).toBeLessThan(
-		inputGapHandler.indexOf("markCachedPermissionUnavailable("),
-	);
+	).toBeLessThan(inputGapHandler.indexOf("markCachedPermissionUnavailable("));
 	expect(inputGapHandler).toContain("accessibility: true");
 	expect(inputGapHandler).toContain("inputMonitoring: true");
 	expect(runtimeSource).toContain(
@@ -252,9 +249,7 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 		"let permissionRevoked = !AXIsProcessTrusted()",
 	);
 	expect(foregroundHandler).toContain('"accessibility_target_unavailable"');
-	expect(
-		foregroundHandler.indexOf("if permissionRevoked {"),
-	).toBeLessThan(
+	expect(foregroundHandler.indexOf("if permissionRevoked {")).toBeLessThan(
 		foregroundHandler.indexOf(
 			"markCachedPermissionUnavailable(accessibility: true)",
 		),
@@ -273,7 +268,10 @@ macOSTest(
 				.filter((name) => name.endsWith(".swift") && name !== "Main.swift")
 				.sort()
 				.map((name) => resolve(sourceDirectory, name));
-			const executable = resolve(temporaryDirectory, "accessibility-policy-tests");
+			const executable = resolve(
+				temporaryDirectory,
+				"accessibility-policy-tests",
+			);
 			const architecture = process.arch === "arm64" ? "arm64" : "x86_64";
 			const compile = Bun.spawnSync([
 				"xcrun",
@@ -315,10 +313,7 @@ macOSTest(
 	async () => {
 		const architecture = process.arch === "arm64" ? "arm64" : "x64";
 		const bundle = buildObserverApp(architecture);
-		const executable = resolve(
-			bundle,
-			"Contents/MacOS/whalehall-observer",
-		);
+		const executable = resolve(bundle, "Contents/MacOS/whalehall-observer");
 		const child = Bun.spawn([executable], {
 			stdin: "pipe",
 			stdout: "pipe",
@@ -392,10 +387,9 @@ macOSTest(
 		// A locked/non-interactive macOS session must fail closed with an
 		// explicit coverage gap. An unlocked session reports the foreground
 		// workspace observation. Both are valid privacy-safe startup outcomes.
-		expect([
-			"workspace.foregroundChanged",
-			"coverage.gap",
-		]).toContain(observation?.observation?.kind);
+		expect(["workspace.foregroundChanged", "coverage.gap"]).toContain(
+			observation?.observation?.kind,
+		);
 		expect(observation?.observation?.content).toBeUndefined();
 
 		child.stdin.write(
