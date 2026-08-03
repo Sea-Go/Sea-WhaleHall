@@ -9,7 +9,7 @@ publish = false
 
 [workspace.dependencies]
 active-win-pos-rs = "0.11.0"
-aes-gcm = "0.10.3"
+aes-gcm = "0.11.0"
 async-trait = "0.1"
 battery = "0.7.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
