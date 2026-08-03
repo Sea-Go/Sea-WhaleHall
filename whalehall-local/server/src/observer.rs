@@ -2495,8 +2495,14 @@ fn harden_monitoring_settings_file(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_monitoring_settings_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_monitoring_settings_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn validate_boot_id(value: &str) -> Result<(), ()> {

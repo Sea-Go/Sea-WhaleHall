@@ -6,43 +6,46 @@ const repositoryRoot = join(import.meta.dir, "..");
 const configPath = join(repositoryRoot, "electrobun.config.ts");
 const configUrl = pathToFileURL(configPath).href;
 
-describe.skipIf(process.platform !== "darwin")("stable macOS release build gate", () => {
-	test("terminates config evaluation before Electrobun can fall back to unsigned defaults", async () => {
-		const result = await evaluateConfig("stable", {});
-		expect(result.exitCode).not.toBe(0);
-		expect(result.output).toContain("[whalehall-release-gate]");
-		expect(result.output).toContain("ELECTROBUN_DEVELOPER_ID is required");
-	});
-
-	test("requires the Team ID after a Developer ID is supplied", async () => {
-		const result = await evaluateConfig("stable", {
-			ELECTROBUN_DEVELOPER_ID: "Developer ID Application: Example",
+describe.skipIf(process.platform !== "darwin")(
+	"stable macOS release build gate",
+	() => {
+		test("terminates config evaluation before Electrobun can fall back to unsigned defaults", async () => {
+			const result = await evaluateConfig("stable", {});
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("[whalehall-release-gate]");
+			expect(result.output).toContain("ELECTROBUN_DEVELOPER_ID is required");
 		});
-		expect(result.exitCode).not.toBe(0);
-		expect(result.output).toContain("WHALEHALL_APPLE_TEAM_ID");
-	});
 
-	test("requires notarization after signing identity fields are supplied", async () => {
-		const result = await evaluateConfig("stable", {
-			ELECTROBUN_DEVELOPER_ID: "Developer ID Application: Example",
-			WHALEHALL_APPLE_TEAM_ID: "ABCDE12345",
+		test("requires the Team ID after a Developer ID is supplied", async () => {
+			const result = await evaluateConfig("stable", {
+				ELECTROBUN_DEVELOPER_ID: "Developer ID Application: Example",
+			});
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("WHALEHALL_APPLE_TEAM_ID");
 		});
-		expect(result.exitCode).not.toBe(0);
-		expect(result.output).toContain("WHALEHALL_MACOS_NOTARIZE=true");
-	});
 
-	test("does not impose production signing gates on a canary config", async () => {
-		const result = await evaluateConfig("canary", {});
-		expect(result.exitCode).toBe(0);
-		expect(result.output).not.toContain("[whalehall-release-gate]");
-	});
+		test("requires notarization after signing identity fields are supplied", async () => {
+			const result = await evaluateConfig("stable", {
+				ELECTROBUN_DEVELOPER_ID: "Developer ID Application: Example",
+				WHALEHALL_APPLE_TEAM_ID: "ABCDE12345",
+			});
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("WHALEHALL_MACOS_NOTARIZE=true");
+		});
 
-	test("keeps the macOS runtime alive after the control window closes", async () => {
-		const result = await evaluateConfig("canary", {});
-		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain('"exitOnLastWindowClosed":false');
-	});
-});
+		test("does not impose production signing gates on a canary config", async () => {
+			const result = await evaluateConfig("canary", {});
+			expect(result.exitCode).toBe(0);
+			expect(result.output).not.toContain("[whalehall-release-gate]");
+		});
+
+		test("keeps the macOS runtime alive after the control window closes", async () => {
+			const result = await evaluateConfig("canary", {});
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain('"exitOnLastWindowClosed":false');
+		});
+	},
+);
 
 async function evaluateConfig(
 	channel: "canary" | "stable",
