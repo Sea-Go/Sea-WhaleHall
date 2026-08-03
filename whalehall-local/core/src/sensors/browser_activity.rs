@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use directories::{BaseDirs, ProjectDirs};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use directories::BaseDirs;
+use directories::ProjectDirs;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -2385,9 +2387,11 @@ fn discover_browser_profiles(config: &BrowserActivityConfig) -> Vec<BrowserProfi
         discover_chromium_root(root, "CI Chromium", &mut profiles);
         return profiles;
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let Some(base_dirs) = BaseDirs::new() else {
         return profiles;
     };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let home = base_dirs.home_dir();
     #[cfg(target_os = "macos")]
     {

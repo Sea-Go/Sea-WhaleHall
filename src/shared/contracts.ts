@@ -2,6 +2,33 @@ import type { RPCSchema } from 'electrobun/bun';
 import type { PetActionId } from './pet-actions';
 import type { PetPresentationEvent } from './pet-presentation';
 import type { ActiveGoalContextV1 } from './goal-context';
+import type { AuthCredentials, AuthRpcResult, AuthSession } from './auth';
+import type {
+	AgentReadPermissionsRpcResult,
+	AgentReadPermissionsSnapshot,
+	SetAgentReadPermissionsRequest,
+} from './agent-permissions';
+import type {
+	CalendarBatchMutationResult,
+	CalendarLoadResponse,
+	CalendarMutation,
+	CalendarMutationResult,
+} from './calendar';
+import type {
+	AgentRunAccepted,
+	AgentRunCommandAccepted,
+	AgentRunEventEnvelope,
+	AgentRunRestorableSummary,
+	AgentRunRpcResult,
+	AgentRunSnapshot,
+	CancelAgentRunRequest,
+	DecideAgentToolApprovalRequest,
+	GetAgentRunSnapshotRequest,
+	ListRestorableAgentRunsRequest,
+	StartConversationTurnRequest,
+	StartTaskPlanningRunRequest,
+	SubmitPlanningClarificationRequest,
+} from './agent-runs';
 import type {
 	LocalRuntimeStatus,
 	LocalMonitoringConfigure,
@@ -11,8 +38,35 @@ import type {
 	LocalVaultKeyStatus,
 	LocalVaultLegacyMigrationResult,
 } from '../agent/local-protocol';
+import type {
+	ConversationRpcResult,
+	ConversationRpcSendResult,
+	ConversationRpcThread,
+} from './conversation';
+import type {
+	TaskPlanningAnswer,
+	TaskPlanningInput,
+	TaskPlanningRpcResult,
+	TaskPlanningSession,
+} from './task-planning';
+import type {
+	CommitPlanningDraftRequest,
+	PlanningAuthorityRpcResult,
+	PlanningAuthoritySnapshot,
+	PlanningCommitResult,
+	SavePlanningDraftRequest,
+} from './planning-authority';
 
 export type {
+	AgentReadPermissionsRpcResult,
+	AgentReadPermissionsSnapshot,
+	SetAgentReadPermissionsRequest,
+	AuthRpcResult,
+	AuthSession,
+	CalendarBatchMutationResult,
+	CalendarLoadResponse,
+	CalendarMutation,
+	CalendarMutationResult,
 	LocalRuntimeStatus,
 	LocalMonitoringConfigure,
 	LocalMonitoringPermissionCheckState,
@@ -22,6 +76,43 @@ export type {
 	LocalVaultLegacyMigrationResult,
 	PetPresentationEvent,
 	ActiveGoalContextV1,
+};
+
+export type {
+	AgentRunAccepted,
+	AgentRunCommandAccepted,
+	AgentRunEventEnvelope,
+	AgentRunRestorableSummary,
+	AgentRunRpcResult,
+	AgentRunSnapshot,
+	CancelAgentRunRequest,
+	DecideAgentToolApprovalRequest,
+	GetAgentRunSnapshotRequest,
+	ListRestorableAgentRunsRequest,
+	StartConversationTurnRequest,
+	StartTaskPlanningRunRequest,
+	SubmitPlanningClarificationRequest,
+};
+
+export type {
+	ConversationRpcResult,
+	ConversationRpcSendResult,
+	ConversationRpcThread,
+};
+
+export type {
+	TaskPlanningAnswer,
+	TaskPlanningInput,
+	TaskPlanningRpcResult,
+	TaskPlanningSession,
+};
+
+export type {
+	CommitPlanningDraftRequest,
+	PlanningAuthorityRpcResult,
+	PlanningAuthoritySnapshot,
+	PlanningCommitResult,
+	SavePlanningDraftRequest,
 };
 
 export type PetMood = 'idle' | 'happy' | 'busy' | 'error';
@@ -170,9 +261,25 @@ export type MonitoringPermissionSettingsTarget =
 export type ClientRPC = {
 	bun: RPCSchema<{
 		requests: {
-			getLocalStatus: {
+			getAgentReadPermissions: {
 				params: Record<string, never>;
-				response: LocalRuntimeStatus;
+				response: AgentReadPermissionsRpcResult<AgentReadPermissionsSnapshot>;
+			};
+			setAgentReadPermissions: {
+				params: SetAgentReadPermissionsRequest;
+				response: AgentReadPermissionsRpcResult<AgentReadPermissionsSnapshot>;
+			};
+			restoreAuthSession: {
+				params: Record<string, never>;
+				response: AuthRpcResult<AuthSession | null>;
+			};
+			signIn: {
+				params: AuthCredentials;
+				response: AuthRpcResult<AuthSession>;
+			};
+			signOut: {
+				params: Record<string, never>;
+				response: AuthRpcResult<void>;
 			};
 			getMonitoringStatus: {
 				params: Record<string, never>;
@@ -239,6 +346,26 @@ export type ClientRPC = {
 				params: { captureId: string };
 				response: { capture: FiveMinuteAuditCaptureStatus | null };
 			};
+			loadCalendar: {
+				params: Record<string, never>;
+				response: CalendarLoadResponse;
+			};
+			mutateCalendar: {
+				params: CalendarMutation;
+				response: CalendarMutationResult;
+			};
+			mutateCalendarBatch: {
+				params: {
+					batchId: string;
+					mutations: readonly CalendarMutation[];
+					expectedRevision?: number;
+				};
+				response: CalendarBatchMutationResult;
+			};
+			getLocalStatus: {
+				params: Record<string, never>;
+				response: LocalRuntimeStatus;
+			};
 			setPetVisible: {
 				params: { visible: boolean };
 				response: { visible: boolean };
@@ -251,12 +378,60 @@ export type ClientRPC = {
 				params: { goal: ActiveGoalContextV1 | null };
 				response: { goal: ActiveGoalContextV1 | null };
 			};
+			startConversationTurn: {
+				params: StartConversationTurnRequest;
+				response: AgentRunRpcResult<AgentRunAccepted>;
+			};
+			startTaskPlanningRun: {
+				params: StartTaskPlanningRunRequest;
+				response: AgentRunRpcResult<AgentRunAccepted>;
+			};
+			submitPlanningClarification: {
+				params: SubmitPlanningClarificationRequest;
+				response: AgentRunRpcResult<AgentRunCommandAccepted>;
+			};
+			decideAgentToolApproval: {
+				params: DecideAgentToolApprovalRequest;
+				response: AgentRunRpcResult<AgentRunCommandAccepted>;
+			};
+			cancelAgentRun: {
+				params: CancelAgentRunRequest;
+				response: AgentRunRpcResult<AgentRunCommandAccepted>;
+			};
+			getAgentRunSnapshot: {
+				params: GetAgentRunSnapshotRequest;
+				response: AgentRunRpcResult<AgentRunSnapshot>;
+			};
+			listRestorableAgentRuns: {
+				params: ListRestorableAgentRunsRequest;
+				response: AgentRunRpcResult<{
+					runs: readonly AgentRunRestorableSummary[];
+				}>;
+			};
+			getActiveConversation: {
+				params: Record<string, never>;
+				response: ConversationRpcResult<ConversationRpcThread | null>;
+			};
+			loadPlanningAuthority: {
+				params: Record<string, never>;
+				response: PlanningAuthorityRpcResult<PlanningAuthoritySnapshot | null>;
+			};
+			savePlanningDraft: {
+				params: SavePlanningDraftRequest;
+				response: PlanningAuthorityRpcResult<PlanningAuthoritySnapshot>;
+			};
+			commitPlanningDraft: {
+				params: CommitPlanningDraftRequest;
+				response: PlanningAuthorityRpcResult<PlanningCommitResult>;
+			};
 		};
 		messages: Record<never, never>;
 	}>;
 	webview: RPCSchema<{
 		requests: Record<never, never>;
 		messages: {
+			agentRunEvent: AgentRunEventEnvelope;
+			authSessionExpired: Record<string, never>;
 			localStatusChanged: LocalRuntimeStatus;
 			petVisibilityChanged: { visible: boolean };
 		};

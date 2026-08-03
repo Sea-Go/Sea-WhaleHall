@@ -617,7 +617,8 @@ fn code_satisfies_requirement(
 
 fn designated_requirement(path: &Path) -> Result<String, ObservationKeyError> {
     let output = Command::new("/usr/bin/codesign")
-        .arg("-dr")
+        .arg("--display")
+        .arg("--requirements")
         .arg("-")
         .arg(path)
         .stdin(Stdio::null())
@@ -633,22 +634,25 @@ fn decode_designated_requirement_output(
     stdout: &[u8],
     stderr: &[u8],
 ) -> Result<String, ObservationKeyError> {
-    // `codesign -dr -` has emitted the requirement on both stdout and stderr
-    // across supported macOS/toolchain combinations. Decode both streams
-    // strictly and let the requirement parser locate the authoritative line.
+    // `codesign --display --requirements -` has emitted the requirement on
+    // both stdout and stderr across supported macOS/toolchain combinations.
+    // Decode both streams strictly and let the parser locate the one
+    // authoritative line.
     let stdout = std::str::from_utf8(stdout).map_err(|_| ObservationKeyError::Storage)?;
     let stderr = std::str::from_utf8(stderr).map_err(|_| ObservationKeyError::Storage)?;
     Ok(format!("{stdout}\n{stderr}"))
 }
 
 fn parse_designated_requirement(details: &str) -> Result<(String, String), ObservationKeyError> {
-    let requirement = details
-        .lines()
-        .find_map(|line| {
-            line.split_once("designated =>")
-                .map(|(_, value)| value.trim())
-        })
-        .ok_or(ObservationKeyError::Storage)?;
+    let mut requirements = details.lines().filter_map(|line| {
+        let line = line.trim();
+        let line = line.strip_prefix("# ").unwrap_or(line);
+        line.strip_prefix("designated =>").map(str::trim)
+    });
+    let requirement = requirements.next().ok_or(ObservationKeyError::Storage)?;
+    if requirement.is_empty() || requirements.next().is_some() {
+        return Err(ObservationKeyError::Storage);
+    }
     let identifier_marker = "identifier \"";
     let leaf_marker = "certificate leaf = H\"";
     if requirement.matches(identifier_marker).count() != 1
@@ -880,6 +884,7 @@ mod tests {
     #[test]
     fn requirement_parser_requires_identifier_and_leaf() {
         let details = "Executable=/tmp/core\ndesignated => identifier \"com.seago.whalehall.local\" and certificate leaf = H\"44B4ADA995AAD20E8D095D25887B079A0343FAF8\"\n";
+        let requirement_line = details.lines().nth(1).unwrap();
         assert_eq!(
             parse_designated_requirement(details),
             Ok((
@@ -887,7 +892,13 @@ mod tests {
                 "44b4ada995aad20e8d095d25887b079a0343faf8".to_owned()
             ))
         );
+        assert!(parse_designated_requirement(&format!("# {requirement_line}")).is_ok());
         assert!(parse_designated_requirement("designated => identifier \"x\"").is_err());
+        assert!(parse_designated_requirement(&format!("diagnostic {requirement_line}")).is_err());
+        assert!(
+            parse_designated_requirement(&format!("{requirement_line}\n# {requirement_line}"))
+                .is_err()
+        );
     }
 
     #[test]

@@ -46,7 +46,9 @@ const MAX_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_VAULT_RECORD_BYTES: usize = 512 * 1024;
 const MAX_VAULT_BATCH_BYTES: usize = 768 * 1024;
 const MAX_VAULT_BATCH_RECORDS: usize = 64;
+#[cfg(any(target_os = "macos", test))]
 pub(crate) const KEY_VERSION: &str = "keychain-v1";
+#[cfg(any(target_os = "macos", test))]
 pub(crate) const LEGACY_DEV_KEY_VERSION: &str = "keychain-dev-legacy-v1";
 const FIVE_MINUTES_MS: i64 = 300_000;
 const DEVICE_ID_ENV: &str = "WHALEHALL_DEVICE_ID";
@@ -318,7 +320,7 @@ fn current_mac_signing_identity() -> MacSigningIdentity {
         return MacSigningIdentity::Unsupported;
     };
     let Ok(output) = std::process::Command::new("/usr/bin/codesign")
-        .arg("-dv")
+        .arg("--display")
         .arg("--verbose=4")
         .arg(executable)
         .output()
@@ -486,6 +488,7 @@ fn write_mac_target_key(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn key_from_stored_slice(
     bytes: &[u8],
     version: impl Into<String>,
@@ -501,6 +504,7 @@ fn key_from_stored_slice(
     ))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn verified_migrated_key(
     source: &[u8],
     persisted: &[u8],

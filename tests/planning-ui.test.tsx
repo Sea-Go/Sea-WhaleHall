@@ -50,7 +50,7 @@ describe("planning guided UI", () => {
 		const markup = render();
 		expect(markup).toContain("你想完成什么？");
 		expect(markup).toContain("目标描述");
-		expect(markup).toContain("按 ⌘ Enter 继续");
+		expect(markup).toContain("按 Ctrl/⌘ Enter 继续");
 		expect(markup).not.toContain("每周可投入");
 		expect(markup).not.toContain("优先级");
 	});

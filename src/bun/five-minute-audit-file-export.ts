@@ -264,6 +264,11 @@ async function syncDirectory(
 	directory: string,
 	fileSystem: AuditExportFileSystem,
 ): Promise<void> {
+	// Bun cannot open a Windows directory handle that supports fsync. The
+	// private temporary file is already synced and hard-link publication keeps
+	// the no-overwrite guarantee; POSIX additionally persists the directory
+	// entry before reporting success.
+	if (process.platform === "win32") return;
 	const handle = await fileSystem.open(directory, constants.O_RDONLY);
 	try {
 		await handle.sync();

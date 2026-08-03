@@ -306,7 +306,7 @@ async function isPrivateDirectory(path: string): Promise<boolean> {
 			metadata.isDirectory() &&
 			!metadata.isSymbolicLink() &&
 			(currentUserId === undefined || metadata.uid === currentUserId) &&
-			(metadata.mode & 0o022) === 0
+			(process.platform === "win32" || (metadata.mode & 0o777) === 0o700)
 		);
 	} catch {
 		return false;

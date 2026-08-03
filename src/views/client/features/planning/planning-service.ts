@@ -7,6 +7,14 @@ import type {
 	PlanningConflict,
 	ProposedScheduleItem,
 } from "./domain";
+import type {
+	TaskPlanningAnswer,
+	TaskPlanningQuestion,
+} from "../../../../shared/task-planning";
+import type {
+	PlanningAuthoritySnapshot,
+	PlanningCommitResult,
+} from "../../../../shared/planning-authority";
 
 export interface PlanningAvailabilityRequest {
 	startDate: string;
@@ -22,12 +30,38 @@ export interface PlanningGenerationContext {
 	isCancelled: () => boolean;
 }
 
+export type PlanningGenerationResult =
+	| { kind: "draft"; draft: GeneratedPlanDraft }
+	| {
+			kind: "clarification";
+			sessionId: string;
+			questions: readonly TaskPlanningQuestion[];
+	  };
+
+export interface RestorablePlanningGeneration {
+	runId: string;
+	input: PlanInput;
+}
 export interface PlanningGenerationService {
+	findRestorable?(): Promise<RestorablePlanningGeneration | null>;
+	restore?(
+		run: RestorablePlanningGeneration,
+		availability: readonly PlanningBusyWindow[],
+		context: PlanningGenerationContext,
+	): Promise<PlanningGenerationResult>;
 	generate(
 		input: PlanInput,
 		availability: readonly PlanningBusyWindow[],
 		context: PlanningGenerationContext,
-	): Promise<GeneratedPlanDraft>;
+	): Promise<PlanningGenerationResult>;
+	continueAfterClarification(
+		input: PlanInput,
+		sessionId: string,
+		answers: readonly TaskPlanningAnswer[],
+		availability: readonly PlanningBusyWindow[],
+		context: PlanningGenerationContext,
+	): Promise<PlanningGenerationResult>;
+	cancel?(): Promise<void> | void;
 }
 
 export type PlanApplyResult =
@@ -45,6 +79,7 @@ export type PlanApplyResult =
 			committedCount: number;
 			failedProposalIds: readonly string[];
 			message: string;
+			calendarState?: "changed" | "unknown";
 	  }
 	| {
 			ok: false;
@@ -53,6 +88,7 @@ export type PlanApplyResult =
 			committedCount: 0;
 			failedProposalIds: readonly string[];
 			message: string;
+			calendarState?: "unchanged" | "unknown";
 	  };
 
 export interface PlanningCalendarGateway {
@@ -64,4 +100,19 @@ export interface PlanningCalendarGateway {
 		proposals: readonly ProposedScheduleItem[],
 		applyId: string,
 	): Promise<PlanApplyResult>;
+}
+
+/** Bun-owned encrypted authority used by the real desktop planning flow. */
+export interface PlanningAuthorityGateway {
+	load(): Promise<PlanningAuthoritySnapshot | null>;
+	saveDraft(
+		input: PlanInput,
+		draft: GeneratedPlanDraft,
+		expectedRevision: number | null,
+	): Promise<PlanningAuthoritySnapshot>;
+	commitDraft(
+		commitId: string,
+		expectedRevision: number,
+		expectedCalendarRevision: number,
+	): Promise<PlanningCommitResult>;
 }

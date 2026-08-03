@@ -509,6 +509,11 @@ export class FileAuditCaptureStore implements AuditCaptureStore {
 			}
 			await rename(temporaryPath, this.path);
 			temporaryCreated = false;
+			// Windows does not expose a directory handle that Bun can flush with
+			// FlushFileBuffers. The temporary file itself is synced before the
+			// atomic rename; POSIX additionally syncs the containing directory so
+			// the renamed entry is crash-durable.
+			if (process.platform === "win32") return;
 			const directoryHandle = await open(directory, constants.O_RDONLY);
 			try {
 				await directoryHandle.sync();

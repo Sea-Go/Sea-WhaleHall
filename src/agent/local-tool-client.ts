@@ -93,6 +93,131 @@ export type SpawnLocalProcess = (
 export const STARTUP_GOAL_CHANGE_ENV =
 	"WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
 
+type EnvironmentSource = Readonly<Record<string, string | undefined>>;
+
+// whalehall-local intentionally receives a closed environment. Keep this list
+// aligned with environment reads in whalehall-local/core and
+// whalehall-local/server. New entries require a security review; in
+// particular, model/auth credentials belong in the Bun host and must never be
+// added here.
+const LOCAL_TOOL_ENVIRONMENT_KEYS = [
+	// Platform process discovery, user data discovery, temporary files and
+	// locale. These are needed by the Rust sensors and their native helpers.
+	"PATH",
+	"PATHEXT",
+	"SystemRoot",
+	"WINDIR",
+	"ComSpec",
+	"TEMP",
+	"TMP",
+	"TMPDIR",
+	"HOME",
+	"USERPROFILE",
+	"HOMEDRIVE",
+	"HOMEPATH",
+	"APPDATA",
+	"LOCALAPPDATA",
+	"PROGRAMDATA",
+	"ProgramFiles",
+	"ProgramFiles(x86)",
+	"ProgramW6432",
+	"XDG_CONFIG_HOME",
+	"XDG_DATA_HOME",
+	"XDG_RUNTIME_DIR",
+	"XDG_SESSION_ID",
+	"DISPLAY",
+	"WAYLAND_DISPLAY",
+	"XAUTHORITY",
+	"DBUS_SESSION_BUS_ADDRESS",
+	"LANG",
+	"LANGUAGE",
+	"LC_ALL",
+	"LC_CTYPE",
+	"LC_MESSAGES",
+	"LC_COLLATE",
+	"LC_MONETARY",
+	"LC_NUMERIC",
+	"LC_TIME",
+	"TZ",
+	// WhaleHall-owned, non-secret runtime and sensor configuration.
+	"WHALEHALL_DATA_DIR",
+	"WHALEHALL_DEVICE_ID",
+	"WHALEHALL_SESSION_ID",
+	"WHALEHALL_RUNTIME_CHANNEL",
+	"WHALEHALL_ALLOW_LEGACY_DEV_KEYCHAIN",
+	"WHALEHALL_CI_DISPLAY_MODE",
+	"WHALEHALL_CI_FOREGROUND_MODE",
+	"WHALEHALL_CI_PRESENCE_MODE",
+	"WHALEHALL_ACTIVITY_POLL_MS",
+	"WHALEHALL_APPLICATION_POLL_MS",
+	"WHALEHALL_INSTALLED_APPLICATION_REFRESH_MS",
+	"WHALEHALL_PRESENCE_POLL_MS",
+	"WHALEHALL_AFK_THRESHOLD_MS",
+	"WHALEHALL_SUSPEND_GAP_THRESHOLD_MS",
+	"WHALEHALL_INPUT_MONITORING_ENABLED",
+	"WHALEHALL_BROWSER_PROFILE_ROOT",
+	"WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED",
+	"WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED",
+	"WHALEHALL_BROWSER_TAB_POLL_MS",
+	"WHALEHALL_BROWSER_HISTORY_REFRESH_MS",
+	"WHALEHALL_BROWSER_BRIDGE_MAX_AGE_MS",
+	"WHALEHALL_ACCESSIBILITY_SNAPSHOT_PATH",
+	"WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED",
+	"WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED",
+	"WHALEHALL_ACCESSIBILITY_POLL_MS",
+	"WHALEHALL_ACCESSIBILITY_BRIDGE_MAX_AGE_MS",
+	"WHALEHALL_ACCESSIBILITY_MAX_NODES",
+	"WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT",
+	"WHALEHALL_ACCESSIBILITY_RETENTION_DAYS",
+	"WHALEHALL_VSCODE_BRIDGE_DIRECTORY",
+	"WHALEHALL_OBSERVER_HELPER_PATH",
+	"WHALEHALL_OBSERVER_MONITORING_ENABLED",
+	"WHALEHALL_OBSERVER_CAPTURE_CONTENT",
+	"WHALEHALL_OBSERVER_EXCLUDED_BUNDLE_IDS",
+] as const;
+
+const LOCAL_TOOL_ENVIRONMENT_KEY_BY_NORMALIZED = new Map(
+	LOCAL_TOOL_ENVIRONMENT_KEYS.map((key) => [key.toUpperCase(), key]),
+);
+
+const SENSITIVE_ENVIRONMENT_KEY =
+	/(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASSWD|PRIVATE[_-]?KEY|AUTHORIZATION|COOKIE|CREDENTIAL|BEARER)/i;
+
+/**
+ * Builds the complete environment for whalehall-local without inheriting the
+ * Bun process wholesale. Explicit caller values pass through the same closed
+ * allowlist as inherited values. The startup goal is a trusted one-shot value
+ * supplied only from LocalToolClient state, never from either environment.
+ */
+export function createLocalToolProcessEnvironment(
+	inheritedEnvironment: EnvironmentSource,
+	explicitEnvironment: EnvironmentSource = {},
+	startupGoalChangeJson?: string | null,
+): Record<string, string> {
+	const environment: Record<string, string> = {};
+	copyAllowedEnvironment(inheritedEnvironment, environment);
+	copyAllowedEnvironment(explicitEnvironment, environment);
+	if (startupGoalChangeJson !== undefined && startupGoalChangeJson !== null) {
+		environment[STARTUP_GOAL_CHANGE_ENV] = startupGoalChangeJson;
+	}
+	return environment;
+}
+
+function copyAllowedEnvironment(
+	source: EnvironmentSource,
+	destination: Record<string, string>,
+): void {
+	for (const [sourceKey, value] of Object.entries(source)) {
+		if (typeof value !== "string" || SENSITIVE_ENVIRONMENT_KEY.test(sourceKey)) {
+			continue;
+		}
+		const allowedKey = LOCAL_TOOL_ENVIRONMENT_KEY_BY_NORMALIZED.get(
+			sourceKey.toUpperCase(),
+		);
+		if (allowedKey) destination[allowedKey] = value;
+	}
+}
+
 export interface LocalToolProcess {
 	readonly pid: number | null;
 	readonly isRunning: boolean;
@@ -147,18 +272,9 @@ function spawnLocal(
 	binaryPath: string,
 	environment: Readonly<Record<string, string>> = {},
 ): ChildTransport {
-	const inheritedEnvironment = { ...process.env };
-	// The Rust sensor process never calls the model endpoint. Keep bearer
-	// credentials in the Bun host that owns inference instead of widening
-	// their process exposure.
-	delete inheritedEnvironment.WHALEHALL_MODERNBERT_TOKEN;
-	// This value is a one-shot control-plane handoff. Never inherit a stale
-	// shell value into a sensor process; LocalToolClient adds only the payload
-	// prepared for this exact spawn.
-	delete inheritedEnvironment[STARTUP_GOAL_CHANGE_ENV];
 	return Bun.spawn({
 		cmd: [binaryPath],
-		env: { ...inheritedEnvironment, ...environment },
+		env: environment,
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -254,15 +370,11 @@ export class LocalToolClient implements LocalToolProcess {
 	async start(): Promise<void> {
 		if (this.child) return;
 		this.stopping = false;
-		const environment = { ...this.options.environment };
-		delete environment[STARTUP_GOAL_CHANGE_ENV];
-		if (
-			this.preparedStartupGoalChangeJson !== null &&
-			this.preparedStartupGoalChangeJson !== undefined
-		) {
-			environment[STARTUP_GOAL_CHANGE_ENV] =
-				this.preparedStartupGoalChangeJson;
-		}
+		const environment = createLocalToolProcessEnvironment(
+			process.env,
+			this.options.environment,
+			this.preparedStartupGoalChangeJson,
+		);
 		let child: ChildTransport;
 		try {
 			child = (this.options.spawn ?? spawnLocal)(

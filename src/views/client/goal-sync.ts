@@ -38,6 +38,7 @@ export class ActiveGoalSyncCoordinator {
 	private acknowledgedKey: string | null = null;
 	private generation = 0;
 	private running: Promise<void> | null = null;
+	private disposed = false;
 
 	constructor(options: ActiveGoalSyncCoordinatorOptions) {
 		this.send = options.send;
@@ -53,6 +54,7 @@ export class ActiveGoalSyncCoordinator {
 	}
 
 	setDesired(goal: ActiveGoalContextV1 | null): void {
+		if (this.disposed) return;
 		const snapshot = cloneActiveGoalContext(goal);
 		const key = goalKey(snapshot);
 		if (this.desired?.key === key) {
@@ -71,6 +73,7 @@ export class ActiveGoalSyncCoordinator {
 	waitForAcknowledgement(
 		goal: ActiveGoalContextV1 | null,
 	): Promise<void> {
+		if (this.disposed) return Promise.reject(new Error("Goal synchronizer is disposed."));
 		const snapshot = cloneActiveGoalContext(goal);
 		const key = goalKey(snapshot);
 		this.setDesired(snapshot);
@@ -83,8 +86,19 @@ export class ActiveGoalSyncCoordinator {
 		});
 	}
 
+	dispose(): void {
+		this.disposed = true;
+		this.generation += 1;
+		this.desired = null;
+		for (const waiters of this.acknowledgementWaiters.values()) {
+			for (const resolve of waiters) resolve();
+		}
+		this.acknowledgementWaiters.clear();
+	}
+
 	private ensureRunning(): void {
 		if (
+			this.disposed ||
 			this.running !== null ||
 			this.desired === null ||
 			this.desired.key === this.acknowledgedKey
@@ -106,6 +120,7 @@ export class ActiveGoalSyncCoordinator {
 		let failedAttempt = 0;
 		let attemptedGeneration: number | null = null;
 		for (;;) {
+			if (this.disposed) return;
 			const desired = this.desired;
 			if (desired === null || desired.key === this.acknowledgedKey) return;
 			if (attemptedGeneration !== desired.generation) {
@@ -124,6 +139,7 @@ export class ActiveGoalSyncCoordinator {
 				this.resolveAcknowledgement(desired.key);
 				failedAttempt = 0;
 			} catch {
+				if (this.disposed) return;
 				// A newer desired state must not wait behind the retry delay of an
 				// obsolete request.
 				if (this.desired?.generation !== desired.generation) continue;
@@ -142,17 +158,17 @@ export class ActiveGoalSyncCoordinator {
 	}
 }
 
-export async function clearGoalBeforeAccountTransition(options: {
-	clearLocalGoal: () => void;
-	synchronizer: Pick<
-		ActiveGoalSyncCoordinator,
-		"waitForAcknowledgement"
-	>;
-	transition: () => void | Promise<void>;
-}): Promise<void> {
-	options.clearLocalGoal();
-	await options.synchronizer.waitForAcknowledgement(null);
-	await options.transition();
+export function beginAccountTransition(options: {
+	transition: () => void;
+	clearLocalAccountState: () => void;
+}): void {
+	try {
+		// AuthGate closes synchronously and the Bun sign-out request begins before
+		// any best-effort Renderer cleanup. Bun owns the durable goal barrier.
+		options.transition();
+	} finally {
+		options.clearLocalAccountState();
+	}
 }
 
 class GoalAcknowledgementMismatchError extends Error {

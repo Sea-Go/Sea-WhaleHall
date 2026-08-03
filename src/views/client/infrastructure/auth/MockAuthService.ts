@@ -5,26 +5,22 @@ import {
 } from "../../features/auth/auth-service";
 import {
 	type AuthCredentials,
+	type AuthFailureKind,
 	type AuthSession,
 	type AuthUser,
 	normalizeAuthEmail,
 } from "../../features/auth/domain";
+import { LOCAL_TEST_AUTH_EXPERIENCE, LOCAL_TEST_AUTH_USER } from "../../../../shared/auth";
 
 const MOCK_SESSION_STORAGE_KEY = "whalehall.mock-auth-session.v1";
 const DEFAULT_LATENCY_MS = 420;
 const DEFAULT_SESSION_DURATION_MS = 60 * 60 * 1_000;
 
 const mockUser: AuthUser = {
-	id: "user-demo-wang-yiming",
-	displayName: "王一鸣",
-	email: "demo@whalehall.local",
-	initials: "鸣",
+	...LOCAL_TEST_AUTH_USER,
 };
 
-export const MOCK_AUTH_EXPERIENCE = {
-	email: mockUser.email,
-	password: "whalehall",
-} as const;
+export const MOCK_AUTH_EXPERIENCE = LOCAL_TEST_AUTH_EXPERIENCE;
 
 export const MOCK_AUTH_SCENARIOS = {
 	offlineEmail: "offline@whalehall.local",
@@ -35,12 +31,14 @@ export interface MockAuthServiceOptions {
 	latencyMs?: number;
 	sessionDurationMs?: number;
 	now?: () => number;
+	signInFailure?: AuthFailureKind;
 }
 
 export class MockAuthService implements AuthService {
 	private readonly latencyMs: number;
 	private readonly sessionDurationMs: number;
 	private readonly now: () => number;
+	private readonly signInFailure: AuthFailureKind | null;
 	private readonly sessionExpiredListeners = new Set<SessionExpiredListener>();
 	private expiryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -49,6 +47,7 @@ export class MockAuthService implements AuthService {
 		this.sessionDurationMs =
 			options.sessionDurationMs ?? DEFAULT_SESSION_DURATION_MS;
 		this.now = options.now ?? Date.now;
+		this.signInFailure = options.signInFailure ?? null;
 	}
 
 	async restoreSession(): Promise<AuthSession | null> {
@@ -67,8 +66,8 @@ export class MockAuthService implements AuthService {
 
 	async signIn(credentials: AuthCredentials): Promise<AuthSession> {
 		await this.waitForMockNetwork();
+		if (this.signInFailure) throw new AuthServiceError(this.signInFailure);
 		const email = normalizeAuthEmail(credentials.email);
-
 		if (email === MOCK_AUTH_SCENARIOS.offlineEmail) {
 			throw new AuthServiceError("offline");
 		}

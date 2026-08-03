@@ -5,6 +5,7 @@ import {
 	LocalClientError,
 	LocalToolClient,
 	STARTUP_GOAL_CHANGE_ENV,
+	createLocalToolProcessEnvironment,
 	type ChildTransport,
 } from "../src/agent/local-tool-client";
 import type {
@@ -193,12 +194,59 @@ describe("JsonlParser", () => {
 });
 
 describe("LocalToolClient", () => {
-	test("passes the isolated activity data directory to the Rust process", async () => {
+	test("builds a closed Rust environment and scrubs inherited and explicit credentials", () => {
+		const environment = createLocalToolProcessEnvironment(
+			{
+				Path: "/inherited/bin",
+				SystemRoot: "C:\\Windows",
+				HOME: "/home/whalehall",
+				WHALEHALL_ACTIVITY_POLL_MS: "75",
+				WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "timeline-token",
+				OPENAI_API_KEY: "provider-key",
+				SERVICE_SECRET: "service-secret",
+				DATABASE_PASSWORD: "database-password",
+				AUTHORIZATION: "Bearer access-token",
+				HTTP_COOKIE: "session=cookie",
+				UNREVIEWED_RUNTIME_SETTING: "must-not-pass",
+				[STARTUP_GOAL_CHANGE_ENV]: "stale-inherited-goal",
+			},
+			{
+				PATH: "/explicit/bin",
+				WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data",
+				WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED: "true",
+				WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "explicit-token",
+				SERVICE_PASSWORD: "explicit-password",
+				[STARTUP_GOAL_CHANGE_ENV]: "stale-explicit-goal",
+			},
+			'{"deduplicationKey":"prepared-goal"}',
+		);
+
+		expect(environment).toEqual({
+			PATH: "/explicit/bin",
+			SystemRoot: "C:\\Windows",
+			HOME: "/home/whalehall",
+			WHALEHALL_ACTIVITY_POLL_MS: "75",
+			WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data",
+			WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED: "true",
+			[STARTUP_GOAL_CHANGE_ENV]: '{"deduplicationKey":"prepared-goal"}',
+		});
+	});
+
+	test("passes only reviewed runtime and sensor options to the Rust process", async () => {
 		const child = new FakeChild();
 		let receivedEnvironment: Readonly<Record<string, string>> | undefined;
 		const client = new LocalToolClient("fake", {
 			environment: {
 				WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data",
+				WHALEHALL_ACTIVITY_POLL_MS: "75",
+				WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED: "true",
+				WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "timeline-token",
+				OPENAI_API_KEY: "provider-key",
+				SERVICE_SECRET: "service-secret",
+				DATABASE_PASSWORD: "database-password",
+				AUTHORIZATION: "Bearer access-token",
+				HTTP_COOKIE: "session=cookie",
+				UNREVIEWED_RUNTIME_SETTING: "must-not-pass",
 				[STARTUP_GOAL_CHANGE_ENV]: "stale-shell-value",
 			},
 			spawn: (_binaryPath, environment) => {
@@ -207,9 +255,23 @@ describe("LocalToolClient", () => {
 			},
 		});
 		await client.start();
-		expect(receivedEnvironment).toEqual({
+		expect(receivedEnvironment).toMatchObject({
 			WHALEHALL_DATA_DIR: "/tmp/whalehall-test-data",
+			WHALEHALL_ACTIVITY_POLL_MS: "75",
+			WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED: "true",
 		});
+		expect(receivedEnvironment).not.toHaveProperty(
+			"WHALEHALL_TIMELINE_MODERNBERT_TOKEN",
+		);
+		expect(receivedEnvironment).not.toHaveProperty("OPENAI_API_KEY");
+		expect(receivedEnvironment).not.toHaveProperty("SERVICE_SECRET");
+		expect(receivedEnvironment).not.toHaveProperty("DATABASE_PASSWORD");
+		expect(receivedEnvironment).not.toHaveProperty("AUTHORIZATION");
+		expect(receivedEnvironment).not.toHaveProperty("HTTP_COOKIE");
+		expect(receivedEnvironment).not.toHaveProperty(
+			"UNREVIEWED_RUNTIME_SETTING",
+		);
+		expect(receivedEnvironment).not.toHaveProperty(STARTUP_GOAL_CHANGE_ENV);
 		await client.stop();
 		expect(child.endCalled).toBe(true);
 		expect(child.killCalled).toBe(false);

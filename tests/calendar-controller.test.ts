@@ -69,6 +69,34 @@ class DeferredCalendarService implements CalendarService {
 	}
 }
 
+class DeferredLoadCalendarService implements CalendarService {
+	readonly pendingLoads: Array<{
+		scenario: CalendarScenarioId;
+		deferred: ReturnType<typeof controlledPromise<CalendarLoadResult>>;
+	}> = [];
+
+	load(scenario: CalendarScenarioId = "normal"): Promise<CalendarLoadResult> {
+		const deferred = controlledPromise<CalendarLoadResult>();
+		this.pendingLoads.push({ scenario, deferred });
+		return deferred.promise;
+	}
+
+	async mutate(mutation: CalendarMutation): Promise<CalendarMutationResult> {
+		return {
+			ok: false,
+			mutationId: mutation.mutationId,
+			conflict: unavailableConflict(),
+		};
+	}
+
+	async mutateBatch(
+		batchId: string,
+		_mutations: readonly CalendarMutation[],
+	): Promise<CalendarBatchMutationResult> {
+		return { ok: false, batchId, conflicts: [unavailableConflict()] };
+	}
+}
+
 describe("CalendarController CRUD and rollback", () => {
 	test("creates, updates, deletes, and undoes an event", async () => {
 		const service = new MockCalendarService({ latencyMs: 0 });
@@ -303,5 +331,37 @@ describe("CalendarController recurrence, batch, and load states", () => {
 		expect(controller.getSnapshot().events).toHaveLength(0);
 		await controller.load("dense");
 		expect(controller.getSnapshot().events.length).toBeGreaterThan(10);
+	});
+
+	test("clears stale events while loading and ignores a previous account load after reset", async () => {
+		const service = new DeferredLoadCalendarService();
+		const controller = new CalendarController(service, idSequence());
+		const firstLoad = controller.load("normal");
+		service.pendingLoads[0]!.deferred.resolve({
+			events: calendarScenarioEvents("normal"),
+			timeZone: "Asia/Shanghai",
+			scenario: "normal",
+		});
+		await firstLoad;
+		expect(controller.getSnapshot().events.length).toBeGreaterThan(0);
+
+		const staleLoad = controller.load("dense");
+		expect(controller.getSnapshot()).toMatchObject({
+			loadState: "loading",
+			events: [],
+		});
+
+		controller.clearAccountData();
+		service.pendingLoads[1]!.deferred.resolve({
+			events: calendarScenarioEvents("dense"),
+			timeZone: "Asia/Shanghai",
+			scenario: "dense",
+		});
+		await staleLoad;
+		expect(controller.getSnapshot()).toMatchObject({
+			loadState: "idle",
+			events: [],
+			scenario: "normal",
+		});
 	});
 });

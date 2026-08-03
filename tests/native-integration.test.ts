@@ -17,6 +17,7 @@ import type { LocalMessage } from "../src/agent/local-protocol";
 const projectRoot = resolve(import.meta.dir, "..");
 const sensorDirectory = resolve(projectRoot, "whalehall-local/core/src/sensors");
 const nativeResponseTimeoutMs = 15_000;
+const nativeStartupTimeoutMs = 30_000;
 
 type SensorCiProbe = {
 	sourceFile: string;
@@ -387,8 +388,6 @@ const sensorCiProbes: SensorCiProbe[] = [
 			expect(status).toMatchObject({
 				state: "running",
 				enabled: true,
-				bridgeRoot: context.vscodeBridgeRoot,
-				spoolDirectory: join(context.vscodeBridgeRoot, ".whalehall-vscode-spool-v1"),
 				databasePath: join(context.dataDirectory, "editor-bridge", "editor.sqlite3"),
 				pollIntervalMs: 250,
 				pendingSegments: 0,
@@ -398,6 +397,14 @@ const sensorCiProbes: SensorCiProbe[] = [
 				warnings: [],
 				lastError: null,
 			});
+			expect(normalizeCanonicalWindowsPath(status.bridgeRoot)).toBe(
+				normalizeCanonicalWindowsPath(context.vscodeBridgeRoot),
+			);
+			expect(normalizeCanonicalWindowsPath(status.spoolDirectory)).toBe(
+				normalizeCanonicalWindowsPath(
+					resolve(context.vscodeBridgeRoot, ".whalehall-vscode-spool-v1"),
+				),
+			);
 			expect(typeof status.lastImportedAtMs).toBe("number");
 			expect(typeof status.lastPublishedAtMs).toBe("number");
 		},
@@ -545,9 +552,10 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	const serverReady = deferred();
+	const serverDatabasesInitialized = deferred();
+	const runtimeReady = deferred();
 	const stderrComplete = collectServerStderr(child.stderr, (line) => {
-		if (line.startsWith("editor bridge database:")) serverReady.resolve();
+		if (line.startsWith("editor bridge database:")) serverDatabasesInitialized.resolve();
 	});
 	const messages: LocalMessage[] = [];
 	const queryCallIds = [
@@ -575,6 +583,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	const outputComplete = collectMessages(child.stdout, messages, (message) => {
 		if ("id" in message && typeof message.id === "string") {
 			sensorCompleted.get(message.id)?.resolve();
+			if (message.id === "health") runtimeReady.resolve();
 		}
 		if (
 			"event" in message &&
@@ -610,8 +619,35 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 			queryCompleted.get(message.id)?.resolve();
 		}
 	});
-	await withTimeout(serverReady.promise, "native server startup", 30_000);
+	await withNativeRuntimeStartup(
+		serverDatabasesInitialized.promise,
+		"native database initialization",
+		child.exited,
+		outputComplete,
+		nativeStartupTimeoutMs,
+	);
 	publishVscodeEditFixture(vscodeBridgeRoot);
+	// Database-path diagnostics are emitted before serve_session initializes the
+	// retention tasks, Observer supervisor, stdout writer, and stdin request
+	// loop. Use the protocol itself as the authoritative readiness boundary so
+	// a slow Windows image cannot turn startup work into a sensor response
+	// timeout.
+	child.stdin.write('{"id":"health","method":"runtime.health","params":{}}\n');
+	await child.stdin.flush();
+	await withNativeRuntimeStartup(
+		runtimeReady.promise,
+		"native runtime health response",
+		child.exited,
+		outputComplete,
+		nativeStartupTimeoutMs,
+	);
+	expect(messages.find((message) => "id" in message && message.id === "health")).toMatchObject({
+		ok: true,
+		result: {
+			service: "whalehall-local",
+			status: "ok",
+		},
+	});
 	child.stdin.write('{"id":"list","method":"tool.list","params":{}}\n');
 	child.stdin.write(
 		'{"id":"system","method":"tool.call","params":{"name":"system.info","arguments":{}}}\n',
@@ -1497,6 +1533,40 @@ async function withTimeout(
 			throw new Error(`Timed out waiting for ${label}`);
 		}),
 	]);
+}
+
+async function withNativeRuntimeStartup(
+	ready: Promise<void>,
+	label: string,
+	exited: Promise<number>,
+	outputComplete: Promise<void>,
+	timeoutMs: number,
+): Promise<void> {
+	await Promise.race([
+		ready,
+		exited.then((exitCode) => {
+			throw new Error(`Native runtime exited with code ${exitCode} while waiting for ${label}`);
+		}),
+		outputComplete.then(
+			() => {
+				throw new Error(`Native runtime closed stdout while waiting for ${label}`);
+			},
+			(error) => {
+				throw new Error(`Native runtime stdout failed while waiting for ${label}: ${String(error)}`);
+			},
+		),
+		Bun.sleep(timeoutMs).then(() => {
+			throw new Error(`Timed out waiting for ${label}`);
+		}),
+	]);
+}
+
+function normalizeCanonicalWindowsPath(value: string | null): string | null {
+	if (value === null) return null;
+	const withoutDevicePrefix = process.platform === "win32" && value.startsWith("\\\\?\\")
+		? value.slice(4)
+		: value;
+	return realpathSync.native(resolve(withoutDevicePrefix));
 }
 
 async function collectMessages(

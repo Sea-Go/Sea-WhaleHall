@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ActiveGoalContextV1 } from "../src/shared/goal-context";
 import {
 	ActiveGoalSyncCoordinator,
-	clearGoalBeforeAccountTransition,
+	beginAccountTransition,
 } from "../src/views/client/goal-sync";
 
 function goal(
@@ -94,47 +94,28 @@ describe("ActiveGoalSyncCoordinator", () => {
 	});
 });
 
-describe("account transition goal barrier", () => {
-	test("does not leave the account until null is acknowledged after recovery", async () => {
-		let allowClear = false;
-		let releaseRetry: (() => void) | null = null;
-		let attempts = 0;
-		let localCleared = false;
-		let transitioned = false;
-		const synchronizer = new ActiveGoalSyncCoordinator({
-			send: async (requested) => {
-				attempts += 1;
-				if (!allowClear) throw new Error("runtime unavailable");
-				return requested;
-			},
-			delay: () =>
-				new Promise<void>((resolve) => {
-					releaseRetry = resolve;
-				}),
+describe("account transition ordering", () => {
+	test("closes the auth gate before clearing Renderer account state", () => {
+		const order: string[] = [];
+		beginAccountTransition({
+			transition: () => order.push("sign-out-started"),
+			clearLocalAccountState: () => order.push("renderer-cleared"),
 		});
 
-		const transition = clearGoalBeforeAccountTransition({
-			clearLocalGoal: () => {
+		expect(order).toEqual(["sign-out-started", "renderer-cleared"]);
+	});
+
+	test("still clears Renderer state if starting the transition throws", () => {
+		let localCleared = false;
+		expect(() => beginAccountTransition({
+			transition: () => {
+				throw new Error("transition failed");
+			},
+			clearLocalAccountState: () => {
 				localCleared = true;
 			},
-			synchronizer,
-			transition: () => {
-				transitioned = true;
-			},
-		});
-		await spinUntil(() => attempts === 1 && releaseRetry !== null);
-
+		})).toThrow("transition failed");
 		expect(localCleared).toBeTrue();
-		expect(transitioned).toBeFalse();
-
-		allowClear = true;
-		const release = releaseRetry as (() => void) | null;
-		if (!release) throw new Error("retry delay was not pending");
-		release();
-		await transition;
-
-		expect(attempts).toBe(2);
-		expect(transitioned).toBeTrue();
 	});
 });
 

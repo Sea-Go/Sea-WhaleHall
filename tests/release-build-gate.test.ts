@@ -35,6 +35,16 @@ describe("stable macOS release build gate", () => {
 		const result = await evaluateConfig("canary", {});
 		expect(result.exitCode).toBe(0);
 		expect(result.output).not.toContain("[whalehall-release-gate]");
+		for (const packagedResource of [
+			"native/whalehall-local",
+			"native/whalehall-credential-helper",
+			"native/WhaleHall Observer.app",
+			"native/whalehall-vault-broker-v2",
+			"node/node",
+			"agent/whalehall-agent-host.mjs",
+		]) {
+			expect(result.output).toContain(JSON.stringify(packagedResource));
+		}
 	});
 
 	test("keeps the macOS runtime alive after the control window closes", async () => {
@@ -59,7 +69,16 @@ async function evaluateConfig(
 		[
 			process.execPath,
 			"-e",
-			`console.log(JSON.stringify((await import(${JSON.stringify(configUrl)})).default.runtime))`,
+			[
+				// This is a macOS release-gate fixture even when the Bun test suite
+				// itself runs on a Windows or Linux hosted runner. Override the two
+				// read-only process descriptors before importing the config so the
+				// test cannot silently exercise a non-macOS branch.
+				`Object.defineProperty(process, "platform", { value: "darwin" });`,
+				`Object.defineProperty(process, "arch", { value: "x64" });`,
+				`const config = (await import(${JSON.stringify(configUrl)})).default;`,
+				`console.log(JSON.stringify({ runtime: config.runtime, copy: config.build.copy }));`,
+			].join("\n"),
 			"--",
 			`--env=${channel}`,
 		],

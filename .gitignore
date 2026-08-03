@@ -4,6 +4,7 @@ build/
 artifacts/
 .native/
 whalehall-local/target/
+whalehall-credential-helper/target/
 native/**/target/
 /training/
 
