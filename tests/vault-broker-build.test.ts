@@ -23,15 +23,13 @@ const unsignedHash = "c".repeat(64);
 const machOUuid = "12345678-1234-5678-9ABC-123456789ABC";
 const machODetails = `Load command 8\n      cmd LC_UUID\n  cmdsize 24\n     uuid ${machOUuid}\n`;
 const designatedRequirement =
-	`designated => identifier "com.seago.whalehall.vault-broker.v2" `
-	+ `and certificate leaf = H"${fingerprint}"`;
+	`designated => identifier "com.seago.whalehall.vault-broker.v2" ` +
+	`and certificate leaf = H"${fingerprint}"`;
 
 describe("Vault Broker build contract", () => {
 	test("hard-bumps every immutable identity and wire namespace to v2", () => {
 		expect(vaultBrokerExecutableName).toBe("whalehall-vault-broker-v2");
-		expect(vaultBrokerIdentifier).toBe(
-			"com.seago.whalehall.vault-broker.v2",
-		);
+		expect(vaultBrokerIdentifier).toBe("com.seago.whalehall.vault-broker.v2");
 		const frame = readFileSync(
 			resolve(import.meta.dir, "../native/vault-broker/frame.c"),
 			"utf8",
@@ -89,12 +87,12 @@ describe("Vault Broker build contract", () => {
 			argument.startsWith("-DWHALEHALL_OUTER_REQUIREMENT="),
 		);
 		expect(coreDefinition).toBe(
-			`-DWHALEHALL_CORE_REQUIREMENT="identifier \\"com.seago.whalehall.local\\" `
-				+ `and certificate leaf = H\\"${fingerprint}\\""`,
+			`-DWHALEHALL_CORE_REQUIREMENT="identifier \\"com.seago.whalehall.local\\" ` +
+				`and certificate leaf = H\\"${fingerprint}\\""`,
 		);
 		expect(outerDefinition).toBe(
-			`-DWHALEHALL_OUTER_REQUIREMENT="identifier \\"com.seago.whalehall\\" `
-				+ `and certificate leaf = H\\"${fingerprint}\\""`,
+			`-DWHALEHALL_OUTER_REQUIREMENT="identifier \\"com.seago.whalehall\\" ` +
+				`and certificate leaf = H\\"${fingerprint}\\""`,
 		);
 		expect(command).toContain("-mmacosx-version-min=14.0");
 		expect(command).not.toContain("-Wl,-no_uuid");
@@ -147,8 +145,8 @@ describe("Vault Broker build contract", () => {
 		expect(local).toContain("runtime");
 		expect(local).toContain("--timestamp=none");
 		expect(local).toContain(
-			`=designated => identifier "${vaultBrokerIdentifier}" `
-				+ `and certificate leaf = H"${fingerprint}"`,
+			`=designated => identifier "${vaultBrokerIdentifier}" ` +
+				`and certificate leaf = H"${fingerprint}"`,
 		);
 
 		const developer = vaultBrokerCodesignCommand({
@@ -185,6 +183,18 @@ describe("Vault Broker build contract", () => {
 		expect(command).toContain('-DWHALEHALL_CORE_REQUIREMENT="false"');
 		expect(command).toContain('-DWHALEHALL_OUTER_REQUIREMENT="false"');
 		expect(command).toContain("-DWHALEHALL_VAULT_ENABLED=0");
+	});
+
+	test("keeps the ad-hoc broker requirement deterministic and identifier-bound", () => {
+		const command = vaultBrokerCodesignCommand({
+			executable: "/tmp/ad-hoc-broker",
+			signing: { kind: "ad-hoc", releaseRequired: false },
+		});
+		expect(command).toContain("--requirements");
+		expect(command).toContain(
+			`=designated => identifier "${vaultBrokerIdentifier}"`,
+		);
+		expect(command).toContain("--timestamp=none");
 	});
 
 	test("rejects nondeterministic compilation and changed signed CDHashes", () => {
@@ -260,8 +270,8 @@ describe("Vault Broker build contract", () => {
 
 describe("Vault Broker package continuity", () => {
 	const requirement =
-		`designated => identifier "${MACOS_VAULT_BROKER_IDENTIFIER}" `
-		+ `and certificate leaf = H"${fingerprint}"`;
+		`designated => identifier "${MACOS_VAULT_BROKER_IDENTIFIER}" ` +
+		`and certificate leaf = H"${fingerprint}"`;
 
 	test("accepts identical bytes, CDHash, and designated requirement", () => {
 		expect(

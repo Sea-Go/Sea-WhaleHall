@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
 	existsSync,
@@ -859,11 +859,11 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 			})}\n`,
 		);
 		await child.stdin.flush();
-		await withTimeout(
-			sensorCompleted.get(probe.callId)!.promise,
-			`${probe.toolName} response`,
-			15_000,
-		);
+		const completion = sensorCompleted.get(probe.callId);
+		if (!completion) {
+			throw new Error(`Missing completion handler for ${probe.toolName}.`);
+		}
+		await withTimeout(completion.promise, `${probe.toolName} response`, 15_000);
 	}
 	child.stdin.write(
 		'{"id":"activity-sessions","method":"tool.call","params":{"name":"activity.sessions","arguments":{"limit":10}}}\n',
@@ -1020,13 +1020,16 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		`[sensor-ci] process query count=${processOutput.count} serverPid=${systemOutput.pid} serverFound=${localServerProcess !== undefined}`,
 	);
 	expect(localServerProcess).toBeDefined();
-	expect(localServerProcess!.name.length > 0).toBe(true);
-	expect(localServerProcess!.executablePath.length > 0).toBe(true);
-	expect(typeof localServerProcess!.startedAtMs).toBe("number");
-	expect(localServerProcess!.exitedAt).toBeNull();
-	expect(typeof localServerProcess!.cpuUsagePercent).toBe("number");
-	expect(typeof localServerProcess!.memoryBytes).toBe("number");
-	expect(localServerProcess!.isRunning).toBe(true);
+	if (!localServerProcess) {
+		throw new Error("Native process inventory omitted the WhaleHall server.");
+	}
+	expect(localServerProcess.name.length > 0).toBe(true);
+	expect(localServerProcess.executablePath.length > 0).toBe(true);
+	expect(typeof localServerProcess.startedAtMs).toBe("number");
+	expect(localServerProcess.exitedAt).toBeNull();
+	expect(typeof localServerProcess.cpuUsagePercent).toBe("number");
+	expect(typeof localServerProcess.memoryBytes).toBe("number");
+	expect(localServerProcess.isRunning).toBe(true);
 	const presenceEventsOutput = toolOutput(messages, "presence-events") as {
 		count: number;
 		events: Array<{
