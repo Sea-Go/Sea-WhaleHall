@@ -4,11 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,19 +32,29 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
 
       - name: Lint workflow definitions
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
+      - name: Install workflow lint tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes shellcheck
+
       - name: Validate CI support scripts
         run: bash -n scripts/ci/*.sh
+
+      - name: Run ShellCheck
+        run: shellcheck scripts/ci/*.sh
 
       - name: Install Linux sensor dependencies
         run: scripts/ci/install-linux-dependencies.sh debian sensor
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
@@ -54,13 +65,18 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: whalehall-local -> target
           cache-on-failure: true
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Report changed source lint
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        continue-on-error: true
+        run: bun run lint:changed
 
       - name: Run complete checks
         run: bun run check
@@ -110,14 +126,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Linux sensor dependencies
         if: runner.os == 'Linux'
         run: scripts/ci/install-linux-dependencies.sh debian sensor
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
@@ -129,7 +145,7 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: whalehall-local -> target
           cache-on-failure: true
@@ -140,6 +156,10 @@ jobs:
 
       - name: Test Rust workspace
         run: bun run test:rust
+
+      - name: Test macOS release configuration
+        if: runner.os == 'macOS'
+        run: bun test tests/release-build-gate.test.ts
 
       - name: Open a deterministic Windows foreground application
         if: runner.os == 'Windows'
@@ -225,13 +245,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install distribution dependencies
         run: scripts/ci/install-linux-dependencies.sh "${{ matrix.family }}" sensor
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
@@ -271,13 +291,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install X11 sensor dependencies
         run: scripts/ci/install-linux-dependencies.sh debian x11
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
@@ -288,7 +308,7 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: whalehall-local -> target
           cache-on-failure: true
@@ -324,14 +344,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
         run: scripts/ci/install-linux-dependencies.sh debian desktop
 
       - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
@@ -343,7 +363,7 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: whalehall-local -> target
           cache-on-failure: true
@@ -356,9 +376,36 @@ jobs:
         run: bun run build:canary
 
       - name: Upload unsigned build artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: whalehall-${{ matrix.name }}
           path: artifacts/**
           if-no-files-found: error
           retention-days: 7
+
+  merge-gate:
+    name: Merge gate
+    needs: [quality, hosted-sensors, linux-distros, virtual-x11, package]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every compatibility gate
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          HOSTED_SENSORS_RESULT: ${{ needs.hosted-sensors.result }}
+          LINUX_DISTROS_RESULT: ${{ needs.linux-distros.result }}
+          VIRTUAL_X11_RESULT: ${{ needs.virtual-x11.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          for result in \
+            "$QUALITY_RESULT" \
+            "$HOSTED_SENSORS_RESULT" \
+            "$LINUX_DISTROS_RESULT" \
+            "$VIRTUAL_X11_RESULT" \
+            "$PACKAGE_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "::error::A required CI gate finished with result: $result"
+              exit 1
+            fi
+          done

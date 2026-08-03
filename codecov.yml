@@ -1,0 +1,41 @@
+codecov:
+  require_ci_to_pass: true
+
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+        target: auto
+    patch:
+      default:
+        informational: true
+        target: 80%
+        threshold: 0%
+        if_ci_failed: error
+
+flags:
+  bun:
+    paths:
+      - src/
+  rust:
+    paths:
+      - whalehall-local/core/src/
+      - whalehall-local/protocol/src/
+      - whalehall-local/server/src/
+
+ignore:
+  - tests/
+  - scripts/
+  - dist/
+  - build/
+  - artifacts/
+  - coverage/
+  - whalehall-local/target/
+
+github_checks:
+  annotations: true
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: true

@@ -175,6 +175,7 @@ required gate for the change:
 ```bash
 bun run typecheck
 bun run test
+bun run lint:changed
 bun run build:views
 bun run check
 ```
@@ -191,8 +192,11 @@ bun run scripts/verify-pet-animations.ts
 
 - `bun run check` is the current complete code-quality command. It runs
   TypeScript typecheck, Rust formatting/Clippy/tests, and all Bun tests.
-- There is currently no repository `lint`, `format`, or E2E script. Do not
-  claim one ran until it exists in `package.json`.
+- `bun run lint:changed` reports Biome findings for files changed against
+  `main`. It is intentionally informational in CI until the historical
+  baseline is retired; do not describe it as a hard merge gate.
+- There is currently no repository-wide hard `lint`/format gate or E2E
+  script. Do not claim one ran until it exists in `package.json`.
 - Run `bun run build:views` for client or pet source changes because
   `bun run check` does not build the Vite entries.
 - Run pet animation verification and affected pet tests for pet action,

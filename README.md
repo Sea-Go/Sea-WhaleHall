@@ -217,6 +217,9 @@ bun run scripts/verify-pet-animations.ts
 # TypeScript typecheck, Rust format/Clippy/tests, Bun tests, and JSONL integration
 bun run check
 
+# Report Biome findings in files changed against main
+bun run lint:changed
+
 # Build views or only the native Local Tool Host
 bun run build:views
 bun run build:native

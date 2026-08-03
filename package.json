@@ -16,6 +16,7 @@
 		"start:model-relay": "node build/model-relay/main.js",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
+		"lint:changed": "biome check --changed --since=origin/main --no-errors-on-unmatched --reporter=github",
 		"test:sensors:ci": "bun test tests/native-integration.test.ts",
 		"test:credential-helper": "cargo test --locked --manifest-path whalehall-credential-helper/Cargo.toml --all-targets",
 		"test:rust": "cargo test --locked --manifest-path whalehall-local/Cargo.toml --workspace && bun run test:credential-helper",
@@ -38,6 +39,7 @@
 		"zod": "4.1.12"
 	},
 	"devDependencies": {
+		"@biomejs/biome": "2.5.6",
 		"@happy-dom/global-registrator": "20.11.1",
 		"@testing-library/dom": "10.4.1",
 		"@testing-library/react": "16.3.2",
