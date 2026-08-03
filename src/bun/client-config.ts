@@ -7,56 +7,45 @@ import {
 	mkdirSync,
 	readFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join } from "node:path";
 
-export const CLIENT_CONFIGURATION_SCHEMA_VERSION =
-	"whalehall-client-config.v1" as const;
 export const ACTIVITY_EVENT_WORKER_ENDPOINT =
 	"https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze";
+export const ACTIVITY_EVENT_WORKER_MODEL = "qwen3:1.7b";
+export const ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE =
+	"${WHALEHALL_ACTIVITY_WORKER_TOKEN}";
 
+const LEGACY_CONFIGURATION_SCHEMA_VERSION = "whalehall-client-config.v1";
 const MAXIMUM_CONFIGURATION_BYTES = 64 * 1024;
+const MAXIMUM_MODEL_NAME_LENGTH = 160;
+const MAXIMUM_API_KEY_LENGTH = 4 * 1024;
+const ENVIRONMENT_REFERENCE = /^\$\{([A-Z][A-Z0-9_]*)\}$/u;
 
+export type ModelConfiguration = {
+	name: string;
+	baseurl: string;
+	apikey: string;
+};
+
+/**
+ * The editable user configuration intentionally contains only the two model
+ * roles WhaleHall needs. Both roles may use the same endpoint and key.
+ */
 export type ClientConfiguration = {
-	schemaVersion: typeof CLIENT_CONFIGURATION_SCHEMA_VERSION;
-	request: {
-		teacherOllama: {
-			baseUrl: string;
-		};
-		reflectionModernBert: {
-			endpoint: string;
-		};
-		timelineModernBert: {
-			endpoint: string;
-			manifestEndpoint: string;
-			pinnedManifest: string;
-		};
-		activityEventWorker: {
-			enabled: boolean;
-			endpoint: string;
-			scoreThreshold: number;
-		};
-	};
+	reflection: ModelConfiguration;
+	agent: ModelConfiguration;
 };
 
 export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
-	schemaVersion: CLIENT_CONFIGURATION_SCHEMA_VERSION,
-	request: {
-		teacherOllama: {
-			baseUrl: "http://127.0.0.1:11434",
-		},
-		reflectionModernBert: {
-			endpoint: "http://127.0.0.1:8765/v1/reflections:infer",
-		},
-		timelineModernBert: {
-			endpoint: "",
-			manifestEndpoint: "",
-			pinnedManifest: "",
-		},
-		activityEventWorker: {
-			enabled: true,
-			endpoint: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			scoreThreshold: 1,
-		},
+	reflection: {
+		name: ACTIVITY_EVENT_WORKER_MODEL,
+		baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
+		apikey: ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
+	},
+	agent: {
+		name: ACTIVITY_EVENT_WORKER_MODEL,
+		baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
+		apikey: ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
 	},
 };
 
@@ -77,7 +66,14 @@ export type LoadOrCreateClientConfigurationOptions = {
 	bundledTemplatePath: string;
 };
 
+export type ModelRuntimeConfiguration = {
+	name: string;
+	baseurl: string;
+	apikey: string;
+};
+
 export type ActivityEventWorkerRuntimeConfiguration = {
+	modelName: string;
 	endpoint: string;
 	authorizationToken: string;
 	scoreThreshold: number;
@@ -114,56 +110,49 @@ export function loadOrCreateClientConfiguration(
 }
 
 /**
- * Builds the only Timeline v2 endpoint inputs accepted by the application.
- * Endpoint environment variables are intentionally not inherited; the YAML
- * user copy is the single source of request addresses. The token remains an
- * environment-only secret and is never persisted to config.yaml.
+ * Resolves the reflection model for the activity-event analysis protocol.
+ * A key may be a literal owner-only value or a constrained environment
+ * variable reference. Missing or malformed runtime keys disable delivery
+ * safely.
  */
-export function timelineModernBertEnvironmentFromConfiguration(
+export function reflectionModelConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
 	environment: Readonly<Record<string, string | undefined>>,
-): Record<string, string | undefined> {
-	return {
-		WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
-			nonEmptyOrUndefined(
-				configuration.request.timelineModernBert.endpoint,
-			),
-		WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT:
-			nonEmptyOrUndefined(
-				configuration.request.timelineModernBert.manifestEndpoint,
-			),
-		WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST:
-			nonEmptyOrUndefined(
-				configuration.request.timelineModernBert.pinnedManifest,
-			),
-		WHALEHALL_TIMELINE_MODERNBERT_TOKEN:
-			environment.WHALEHALL_TIMELINE_MODERNBERT_TOKEN,
-	};
+): ModelRuntimeConfiguration | null {
+	return resolveModelRuntimeConfiguration(configuration.reflection, environment);
 }
 
 /**
- * The activity worker is the one reviewed cloud exception to the otherwise
- * local-only request configuration. Its exact HTTPS endpoint is pinned here;
- * a dedicated token remains environment-only and is never copied to YAML or
- * passed to whalehall-local.
+ * Resolves the model reserved for the local Agent executor. The current
+ * activity Worker protocol remains an analysis protocol; loading this role
+ * does not itself start a generic chat request.
+ */
+export function agentModelConfigurationFromConfiguration(
+	configuration: ClientConfiguration,
+	environment: Readonly<Record<string, string | undefined>>,
+): ModelRuntimeConfiguration | null {
+	return resolveModelRuntimeConfiguration(configuration.agent, environment);
+}
+
+/**
+ * The reflection role is the only role that currently sends sealed raw
+ * activity windows. Its score threshold deliberately stays deterministic and
+ * local instead of becoming another YAML setting.
  */
 export function activityEventWorkerConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
 	environment: Readonly<Record<string, string | undefined>>,
 ): ActivityEventWorkerRuntimeConfiguration | null {
-	const worker = configuration.request.activityEventWorker;
-	const authorizationToken = environment.WHALEHALL_ACTIVITY_WORKER_TOKEN?.trim() ?? "";
-	if (
-		!worker.enabled ||
-		authorizationToken.length === 0 ||
-		Array.from(authorizationToken).some((character) => /\s/u.test(character))
-	) {
-		return null;
-	}
+	const reflection = reflectionModelConfigurationFromConfiguration(
+		configuration,
+		environment,
+	);
+	if (reflection === null) return null;
 	return {
-		endpoint: worker.endpoint,
-		authorizationToken,
-		scoreThreshold: worker.scoreThreshold,
+		modelName: reflection.name,
+		endpoint: reflection.baseurl,
+		authorizationToken: reflection.apikey,
+		scoreThreshold: 1,
 	};
 }
 
@@ -179,8 +168,6 @@ function defaultConfiguration(
 }
 
 function seedConfiguration(templatePath: string, destinationPath: string): void {
-	// Validate before copying so a corrupted app resource can never become a
-	// trusted user configuration file.
 	parseConfiguration(readRegularFile(templatePath));
 	mkdirSync(dirname(destinationPath), { recursive: true, mode: 0o700 });
 	try {
@@ -207,179 +194,146 @@ function readRegularFile(path: string): string {
 
 function parseConfiguration(source: string): ClientConfiguration {
 	const value = Bun.YAML.parse(source);
-	if (!isRecord(value) || !hasExactKeys(value, ["schemaVersion", "request"])) {
-		throw new Error("Client configuration root is invalid.");
-	}
-	if (value.schemaVersion !== CLIENT_CONFIGURATION_SCHEMA_VERSION) {
-		throw new Error("Client configuration schema version is unsupported.");
-	}
 	if (
-		!isRecord(value.request) ||
-		!hasRequiredAndAllowedKeys(value.request, [
-			"teacherOllama",
-			"reflectionModernBert",
-			"timelineModernBert",
-		], ["activityEventWorker"])
+		isRecord(value) &&
+		hasExactKeys(value, ["reflection", "agent"])
 	) {
-		throw new Error("Client request configuration is invalid.");
-	}
-	const teacherOllama = value.request.teacherOllama;
-	const reflectionModernBert = value.request.reflectionModernBert;
-	const timelineModernBert = value.request.timelineModernBert;
-	const activityEventWorker = parseActivityEventWorker(
-		value.request.activityEventWorker,
-	);
-	if (
-		!isRecord(teacherOllama) ||
-		!hasExactKeys(teacherOllama, ["baseUrl"]) ||
-		typeof teacherOllama.baseUrl !== "string" ||
-		!isRecord(reflectionModernBert) ||
-		!hasExactKeys(reflectionModernBert, ["endpoint"]) ||
-		typeof reflectionModernBert.endpoint !== "string" ||
-		!isRecord(timelineModernBert) ||
-		!hasExactKeys(timelineModernBert, [
-			"endpoint",
-			"manifestEndpoint",
-			"pinnedManifest",
-		]) ||
-		typeof timelineModernBert.endpoint !== "string" ||
-		typeof timelineModernBert.manifestEndpoint !== "string" ||
-		typeof timelineModernBert.pinnedManifest !== "string"
-	) {
-		throw new Error("Client request endpoint configuration is invalid.");
-	}
-	const endpoint = timelineModernBert.endpoint.trim();
-	const manifestEndpoint = timelineModernBert.manifestEndpoint.trim();
-	const pinnedManifest = timelineModernBert.pinnedManifest.trim();
-	const configuredTimelineValues = [
-		endpoint,
-		manifestEndpoint,
-		pinnedManifest,
-	].filter((entry) => entry.length > 0).length;
-	if (configuredTimelineValues !== 0 && configuredTimelineValues !== 3) {
-		throw new Error("Timeline ModernBERT configuration must be complete.");
-	}
-	if (configuredTimelineValues === 3) {
-		const normalizedEndpoint = normalizeLoopbackHttpUrl(endpoint);
-		const normalizedManifestEndpoint =
-			normalizeLoopbackHttpUrl(manifestEndpoint);
-		if (
-			new URL(normalizedEndpoint).origin !==
-			new URL(normalizedManifestEndpoint).origin ||
-			!isAbsolute(pinnedManifest)
-		) {
-			throw new Error("Timeline ModernBERT configuration is unsafe.");
-		}
 		return {
-			schemaVersion: CLIENT_CONFIGURATION_SCHEMA_VERSION,
-			request: {
-				teacherOllama: {
-					baseUrl: normalizeLoopbackOllamaBaseUrl(
-						teacherOllama.baseUrl,
-					),
-				},
-				reflectionModernBert: {
-					endpoint: normalizeLoopbackHttpUrl(
-						reflectionModernBert.endpoint.trim(),
-					),
-				},
-				timelineModernBert: {
-					endpoint: normalizedEndpoint,
-					manifestEndpoint: normalizedManifestEndpoint,
-					pinnedManifest,
-				},
-				activityEventWorker,
-			},
+			reflection: parseModelConfiguration(value.reflection, "reflection"),
+			agent: parseModelConfiguration(value.agent, "agent"),
 		};
 	}
-	return {
-		schemaVersion: CLIENT_CONFIGURATION_SCHEMA_VERSION,
-		request: {
-			teacherOllama: {
-				baseUrl: normalizeLoopbackOllamaBaseUrl(teacherOllama.baseUrl),
-			},
-			reflectionModernBert: {
-				endpoint: normalizeLoopbackHttpUrl(
-					reflectionModernBert.endpoint.trim(),
-				),
-			},
-			timelineModernBert: {
-				endpoint: "",
-				manifestEndpoint: "",
-				pinnedManifest: "",
-			},
-			activityEventWorker,
-		},
-	};
+	const migrated = parseLegacyConfiguration(value);
+	if (migrated !== null) return migrated;
+	throw new Error("Client configuration root is invalid.");
 }
 
-function parseActivityEventWorker(
-	value: unknown,
-): ClientConfiguration["request"]["activityEventWorker"] {
-	if (value === undefined) {
-		return structuredClone(DEFAULT_CLIENT_CONFIGURATION.request.activityEventWorker);
-	}
+function parseLegacyConfiguration(value: unknown): ClientConfiguration | null {
 	if (
 		!isRecord(value) ||
-		!hasExactKeys(value, ["enabled", "endpoint", "scoreThreshold"]) ||
-		typeof value.enabled !== "boolean" ||
-		typeof value.endpoint !== "string" ||
-		typeof value.scoreThreshold !== "number" ||
-		!Number.isFinite(value.scoreThreshold) ||
-		value.scoreThreshold <= 0 ||
-		value.scoreThreshold > 10_000
+		value.schemaVersion !== LEGACY_CONFIGURATION_SCHEMA_VERSION ||
+		!isRecord(value.request)
 	) {
-		throw new Error("Activity event worker configuration is invalid.");
+		return null;
 	}
+	const worker = value.request.activityEventWorker;
+	if (
+		worker !== undefined &&
+		(!isRecord(worker) || typeof worker.endpoint !== "string")
+	) {
+		throw new Error("Legacy activity Worker configuration is invalid.");
+	}
+	const endpoint =
+		worker === undefined ? ACTIVITY_EVENT_WORKER_ENDPOINT : worker.endpoint;
+	const model = parseModelConfiguration(
+		{
+			name: ACTIVITY_EVENT_WORKER_MODEL,
+			baseurl: endpoint,
+			apikey: ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
+		},
+		"legacy activity Worker",
+	);
 	return {
-		enabled: value.enabled,
-		endpoint: normalizeActivityEventWorkerEndpoint(value.endpoint),
-		scoreThreshold: value.scoreThreshold,
+		reflection: model,
+		agent: { ...model },
 	};
 }
 
-function normalizeActivityEventWorkerEndpoint(value: string): string {
+function parseModelConfiguration(
+	value: unknown,
+	role: string,
+): ModelConfiguration {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, ["name", "baseurl", "apikey"]) ||
+		typeof value.name !== "string" ||
+		typeof value.baseurl !== "string" ||
+		typeof value.apikey !== "string"
+	) {
+		throw new Error(role + " model configuration is invalid.");
+	}
+	return {
+		name: normalizeModelName(value.name, role),
+		baseurl: normalizeModelEndpoint(value.baseurl, role),
+		apikey: normalizeApiKey(value.apikey, role),
+	};
+}
+
+function normalizeModelName(value: string, role: string): string {
+	const name = value.trim();
+	if (
+		name.length === 0 ||
+		name.length > MAXIMUM_MODEL_NAME_LENGTH ||
+		Array.from(name).some((character) => /\s/u.test(character))
+	) {
+		throw new Error(role + " model name is invalid.");
+	}
+	return name;
+}
+
+function normalizeModelEndpoint(value: string, role: string): string {
 	let url: URL;
 	try {
 		url = new URL(value.trim());
 	} catch {
-		throw new Error("Activity event worker endpoint is invalid.");
+		throw new Error(role + " model baseurl is invalid.");
 	}
-	if (url.toString() !== ACTIVITY_EVENT_WORKER_ENDPOINT) {
-		throw new Error("Activity event worker endpoint is not allowlisted.");
-	}
-	return ACTIVITY_EVENT_WORKER_ENDPOINT;
-}
-
-function normalizeLoopbackOllamaBaseUrl(value: string): string {
-	const url = new URL(value.trim());
 	if (
-		url.protocol !== "http:" ||
-		!isLoopbackHostname(url.hostname) ||
-		url.username !== "" ||
-		url.password !== "" ||
-		(url.pathname !== "" && url.pathname !== "/") ||
-		url.search !== "" ||
-		url.hash !== ""
-	) {
-		throw new Error("Teacher Ollama URL must be a loopback HTTP origin.");
-	}
-	return url.origin;
-}
-
-function normalizeLoopbackHttpUrl(value: string): string {
-	const url = new URL(value);
-	if (
-		(url.protocol !== "http:" && url.protocol !== "https:") ||
-		!isLoopbackHostname(url.hostname) ||
+		url.protocol !== "https:" ||
+		isLoopbackHostname(url.hostname) ||
 		url.username !== "" ||
 		url.password !== "" ||
 		url.search !== "" ||
 		url.hash !== ""
 	) {
-		throw new Error("Timeline ModernBERT URLs must be loopback HTTP(S).");
+		throw new Error(role + " model baseurl must be a remote HTTPS URL.");
 	}
 	return url.toString();
+}
+
+function normalizeApiKey(value: string, role: string): string {
+	const apikey = value.trim();
+	if (
+		apikey.length === 0 ||
+		apikey.length > MAXIMUM_API_KEY_LENGTH ||
+		Array.from(apikey).some((character) => /\s/u.test(character))
+	) {
+		throw new Error(role + " model apikey is invalid.");
+	}
+	if (apikey.startsWith("${") && !ENVIRONMENT_REFERENCE.test(apikey)) {
+		throw new Error(role + " model apikey environment reference is invalid.");
+	}
+	return apikey;
+}
+
+function resolveModelRuntimeConfiguration(
+	model: ModelConfiguration,
+	environment: Readonly<Record<string, string | undefined>>,
+): ModelRuntimeConfiguration | null {
+	const apikey = resolveApiKey(model.apikey, environment);
+	if (apikey === null) return null;
+	return {
+		name: model.name,
+		baseurl: model.baseurl,
+		apikey,
+	};
+}
+
+function resolveApiKey(
+	value: string,
+	environment: Readonly<Record<string, string | undefined>>,
+): string | null {
+	const reference = ENVIRONMENT_REFERENCE.exec(value);
+	const candidate =
+		reference === null ? value : environment[reference[1] ?? ""] ?? "";
+	const apikey = candidate.trim();
+	if (
+		apikey.length === 0 ||
+		Array.from(apikey).some((character) => /\s/u.test(character))
+	) {
+		return null;
+	}
+	return apikey;
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -404,22 +358,6 @@ function hasExactKeys(
 ): boolean {
 	const actual = Object.keys(value);
 	return actual.length === keys.length && keys.every((key) => key in value);
-}
-
-function hasRequiredAndAllowedKeys(
-	value: Record<string, unknown>,
-	required: readonly string[],
-	optional: readonly string[],
-): boolean {
-	const actual = Object.keys(value);
-	return (
-		required.every((key) => key in value) &&
-		actual.every((key) => required.includes(key) || optional.includes(key))
-	);
-}
-
-function nonEmptyOrUndefined(value: string): string | undefined {
-	return value.length > 0 ? value : undefined;
 }
 
 function isAlreadyExistsError(error: unknown): boolean {

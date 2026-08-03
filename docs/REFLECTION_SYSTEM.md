@@ -535,18 +535,34 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 `config.yaml` 打包，首次启动再复制为 app user-data 根目录中可编辑的
 `config.yaml`。仓库不会追踪该用户副本，应用以后也不会覆盖已有副本。
 
-除 `activityEventWorker` 外，配置只接受 loopback 地址。`teacherOllama.baseUrl` 同时供
-Reflection 和 Timeline v2 的 reviewed Qwen Teacher lock 使用；即使地址有效，version、model、
-digest、parameter size 和 quantization 仍须完全匹配。`reflectionModernBert.endpoint` 只是遗留
-Reflection primary 的本机地址设置，默认并无服务或训练后的 Student。Timeline ModernBERT 的三项
-全部为空时保持 cold-start；三项非空时还要求同 origin、绝对本机 manifest 路径和完整 artifact pin。
-无效、部分、远端、symlink 或超大配置都回退到本机默认值，且不覆盖用户原文件。请求地址不再继承
-旧的 Timeline endpoint 环境变量。认证 token 仍仅从
-`WHALEHALL_TIMELINE_MODERNBERT_TOKEN` 环境变量注入，禁止写入 YAML、manifest 或日志。
+家里云配置以仓库根目录的
+[`config.example.yaml`](../config.example.yaml) 为模板，并阅读
+[远端模型配置说明](REMOTE_MODEL_CONFIGURATION.md)。它只有两个角色，均为
+`name`、`baseurl`、`apikey`：
 
-`activityEventWorker` 是唯一的受审核云端例外：endpoint 被客户端代码固定校验，不能改为
-任意公网、内网或 loopback URL。它启用且 Bun 主进程具有非空
-`WHALEHALL_ACTIVITY_WORKER_TOKEN` 时，投递器只接收 Reflection collector 已经封闭的
+```yaml
+reflection:
+  name: "qwen3:1.7b"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
+  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+
+agent:
+  name: "qwen3:1.7b"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
+  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+```
+
+两个 `baseurl` 都必须是无 credentials、query 或 fragment 的远端 HTTPS URL。`apikey` 可以是
+owner-only user-data 文件中的直接密钥，或受限的环境变量引用；示例引用
+`WHALEHALL_ACTIVITY_WORKER_TOKEN`。无效、部分、symlink 或超大的配置会回退到安全默认值，
+且不会覆盖用户原文件。
+
+这份 YAML 仅配置家里云的 Qwen 1.7B 活动 Worker。内部 Teacher 和可选 ModernBERT 仍是独立的
+runtime trust boundary：Teacher lock 与 Timeline artifact pin 不会因为填写一个 URL 而被放宽；
+Timeline 未显式通过 runtime 环境与 manifest 校验时保持 deterministic cold-start。真实密钥禁止写入
+Git、日志、SQLite 收据或示例文件。
+
+`reflection` 具有活动投递职责：其密钥可用时，投递器只接收 Reflection collector 已经封闭的
 `EventWindowV1`，绝不按单条 `DesktopEventV1` 或 EventJournal cursor 调用云端。封窗规则保持
 Reflection 原语义：64 条有效语义事件、第一条有效事件后的 5 分钟，或目标切换、AFK/锁屏/睡眠等
 存在状态边界提前封闭一个非空窗口；进程扫描、心跳、工具和反思自身事件不计入 64 条。
@@ -563,13 +579,14 @@ anchor；分类、证据和分数保持不变，且不会形成窗口外引用�
 成功响应和分数在同一 SQLite 事务中落收据；因此重启、重复封窗通知或“远端已响应但进程尚未落库”的
 情况都不会重复加分。首次启用时会在 Reflection 启动前建立本地 cutover，先前已经封闭的窗口不会被
 补传；之后若进程恰好在封窗与通知之间崩溃，下一次启动会从 Reflection 的窗口索引补入尚未处理的窗口。
-累计值达到
-`scoreThreshold` 后只持久化 `agentTriggerPending`，由本地下一步 Agent 执行器显式 claim 后才扣除
-一个阈值并保留超额分数；模型和投递器都不会自行调用未定义的 Agent。网络、超时或服务端暂不可用
-时窗口停留在出站库并按退避重试，不会阻塞 Reflection 的 native cursor。token 从不交给 Rust
-传感器、YAML、SQLite 收据、日志或 renderer。
+累计值达到固定阈值 `1` 后只持久化 `agentTriggerPending`，由本地下一步 Agent 执行器显式
+claim 后才扣除一个阈值并保留超额分数；模型和投递器都不会自行调用未定义的 Agent。`agent`
+角色已经加载相同的模型、地址和密钥，但当前 Worker 仍是活动分析协议，不能被错误地当作通用聊天接口。
+网络、超时或服务端暂不可用时窗口停留在出站库并按退避重试，不会阻塞 Reflection 的 native cursor。
+密钥绝不交给 Rust 传感器、SQLite 收据、日志或 renderer；若不使用环境变量引用，只能保存在
+owner-only user-data YAML。
 
-本机 Qwen lock：
+本机 Qwen Teacher lock：
 
 | 配置 | 值 |
 | --- | --- |
@@ -593,11 +610,9 @@ expectedArtifact, ... }` 才做一次纯元数据验证；未配置、显式关�
 训练侧 runner 在 tokenizer、配置、权重和 calibration 全部载入后重新计算
 artifact tree manifest；若加载期间目录发生替换则拒绝启动，不能以旧 digest
 身份运行新权重。
-loopback HTTP/HTTPS
-默认允许；远端必须使用调用方给出的精确 origin allowlist，并默认要求
-HTTPS。只有显式 `allowInsecureRemote: true` 才允许 allowlist 内的远端
-HTTP。推理 URL 与 manifest URL 必须同 origin，禁止 credentials、query、
-fragment 和 redirect。
+loopback HTTP/HTTPS 默认允许；Timeline runtime 的显式 endpoint 仍要求相应的安全校验，
+不向运行时暴露 `allowInsecureRemote`。推理 URL 与 manifest URL 必须同 origin，
+禁止 credentials、query、fragment 和 redirect。
 
 authorization token 只能通过 runtime options 注入，不得写入仓库、训练
 runtime/manifest 或日志。独立 v2 server 的标准入口从同名
@@ -607,10 +622,9 @@ runtime/manifest 或日志。独立 v2 server 的标准入口从同名
 已有 SSH 控制路径转发到本机 loopback；这仍然需要显式 opt-in 与完整的
 预期 artifact manifest。
 
-当前 Bun composition 从 user-data `config.yaml` 的
-`request.timelineModernBert.endpoint`、`manifestEndpoint` 和 `pinnedManifest` 同时读取三项；
-缺项、相对路径、symlink、坏 manifest 或非 loopback endpoint 都明确保持 cold-start。Bun 不接通
-通用 classifier 的远端 allowlist/insecure 选项。
+当前 Bun composition 从显式的 `WHALEHALL_TIMELINE_MODERNBERT_*` runtime 环境读取
+Timeline deployment 与 artifact pin；它不再占用两模型 `config.yaml`。缺项、相对路径、
+symlink、坏 manifest 或不安全远端都会明确保持 cold-start，不接通通用 classifier 的 insecure 选项。
 
 截至 2026-07-30 的只读基线核对中，独立 `WhaleHall-Training` 工作区可从
 `episode_training_v2.py` 导出 v2 `runtime.json` 和模型/tokenizer 文件；

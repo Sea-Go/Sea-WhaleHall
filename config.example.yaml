@@ -1,6 +1,7 @@
-# WhaleHall only loads two cloud model roles. Both intentionally use the
-# CPU-first Qwen activity Worker on the home cloud. Keep this user-data file
-# owner-only when replacing the environment reference with a literal API key.
+# WhaleHall 家里云配置示例。
+# 两个角色都使用已部署的 CPU 优先 Qwen 1.7B 活动分析 Worker。
+# apikey 可直接填入 owner-only user-data/config.yaml，也可保留下面的
+# 环境变量引用；不要将真实密钥提交到 Git。
 reflection:
   name: "qwen3:1.7b"
   baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"

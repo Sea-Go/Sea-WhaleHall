@@ -41,9 +41,9 @@ import {
 	parseNativeRuntimeChannel,
 } from "./native-runtime-security";
 import {
+	agentModelConfigurationFromConfiguration,
 	activityEventWorkerConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
-	timelineModernBertEnvironmentFromConfiguration,
 } from "./client-config";
 import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import { BackgroundAppLifecycle } from "./app-lifecycle";
@@ -94,12 +94,7 @@ const localRuntimeEnvironment: Record<string, string> = {
 	...nativeRuntimeSecurityEnvironment(runtimeChannel),
 };
 const timelineModernBertConfiguration =
-	loadTimelineModernBertConfiguration(
-		timelineModernBertEnvironmentFromConfiguration(
-			clientConfiguration.configuration,
-			process.env,
-		),
-	);
+	loadTimelineModernBertConfiguration(process.env);
 if (timelineModernBertConfiguration.code === "invalid_config") {
 	console.warn(
 		"WhaleHall Timeline v2 ModernBERT configuration is incomplete or invalid; deterministic cold-start remains active.",
@@ -110,12 +105,18 @@ const activityEventWorkerConfiguration =
 		clientConfiguration.configuration,
 		process.env,
 	);
-if (
-	clientConfiguration.configuration.request.activityEventWorker.enabled &&
-	activityEventWorkerConfiguration === null
-) {
+const agentModelConfiguration = agentModelConfigurationFromConfiguration(
+	clientConfiguration.configuration,
+	process.env,
+);
+if (activityEventWorkerConfiguration === null) {
 	console.warn(
-		"WhaleHall cloud activity analysis is configured but inactive because its dedicated token is unavailable.",
+		"WhaleHall cloud reflection is inactive because its configured apikey is unavailable.",
+	);
+}
+if (agentModelConfiguration === null) {
+	console.warn(
+		"WhaleHall Agent model is inactive because its configured apikey is unavailable.",
 	);
 }
 
@@ -162,8 +163,6 @@ const timelineLifecycle = new TimelineRuntimeLifecycle<TimelineV2Runtime>({
 			dataDirectory: localDataPath,
 			initialGoal: reflection.service.getActiveGoalContext(),
 			rawAuditSource,
-			teacherBaseUrl:
-				clientConfiguration.configuration.request.teacherOllama.baseUrl,
 			modernBert: timelineModernBertConfiguration.modernBert,
 		});
 	},
@@ -667,17 +666,6 @@ startupPromise = (async () => {
 			candidate = await createWhaleHallReflectionRuntime({
 				agent,
 				dataDirectory: localDataPath,
-				teacherBaseUrl:
-					clientConfiguration.configuration.request.teacherOllama.baseUrl,
-					environment: {
-					...process.env,
-					// Address configuration is local-only. Ignore remote ModernBERT
-					// overrides even when the parent shell exports them.
-					WHALEHALL_MODERNBERT_ENDPOINT:
-						clientConfiguration.configuration.request.reflectionModernBert
-							.endpoint,
-					WHALEHALL_MODERNBERT_ALLOWED_ORIGINS: undefined,
-				},
 				onWindowSealed: (window) => {
 					const delivery = activityWindowDelivery;
 					if (delivery === null || shutdownPromise !== null) return;
@@ -807,11 +795,13 @@ async function startActivityWindowDelivery(
 		store,
 		scoreThreshold: activityEventWorkerConfiguration.scoreThreshold,
 		onAgentTriggerRequired: () => {
-			// This is intentionally a local decision boundary. The project does
-			// not yet define a concrete next-Agent executor, so the durable
-			// pending state is retained until that executor claims it.
+			// The Worker endpoint has the activity-analysis contract, not a
+			// generic chat contract. Keep the durable trigger pending until the
+			// local Agent executor explicitly claims it.
 			console.info(
-				"WhaleHall activity score reached its local Agent trigger threshold.",
+				agentModelConfiguration === null
+					? "WhaleHall activity score reached its local Agent trigger threshold."
+					: "WhaleHall activity score reached its local Agent trigger threshold; the configured Agent model is ready for an executor claim.",
 			);
 		},
 		onError: (error) => {
