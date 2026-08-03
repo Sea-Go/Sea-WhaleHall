@@ -6,7 +6,7 @@ const repositoryRoot = join(import.meta.dir, "..");
 const configPath = join(repositoryRoot, "electrobun.config.ts");
 const configUrl = pathToFileURL(configPath).href;
 
-describe("stable macOS release build gate", () => {
+describe.skipIf(process.platform !== "darwin")("stable macOS release build gate", () => {
 	test("terminates config evaluation before Electrobun can fall back to unsigned defaults", async () => {
 		const result = await evaluateConfig("stable", {});
 		expect(result.exitCode).not.toBe(0);

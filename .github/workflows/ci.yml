@@ -157,6 +157,10 @@ jobs:
       - name: Test Rust workspace
         run: bun run test:rust
 
+      - name: Test macOS release configuration
+        if: runner.os == 'macOS'
+        run: bun test tests/release-build-gate.test.ts
+
       - name: Open a deterministic Windows foreground application
         if: runner.os == 'Windows'
         shell: pwsh
