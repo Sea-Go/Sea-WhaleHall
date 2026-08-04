@@ -1,0 +1,76 @@
+name: Feature request
+description: Propose a focused product or engineering outcome with clear acceptance criteria.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem and desired outcome, not only an implementation.
+        Do not include credentials or real activity, browser, calendar, or accessibility data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: Who is affected, and what is difficult or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed outcome and non-goals
+      description: State the intended behavior, user value, and explicitly excluded work.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: dropdown
+    id: boundaries
+    attributes:
+      label: Potentially affected boundaries
+      multiple: true
+      options:
+        - React client
+        - Desktop pet
+        - Electrobun main process or Typed RPC
+        - Agent or model integration
+        - Rust Local Tool or protocol
+        - Sensor, permissions, or local persistence
+        - Build, packaging, or CI
+        - Documentation
+        - Unknown or needs design
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Design, workflow, or reference material
+      description: Add links, a sanitized sketch, or "not applicable". Do not attach third-party artwork without approval.
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Data, privacy, permissions, and migration impact
+      description: Explain the impact, or state why none is expected.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and dependencies
+      description: Include related issues, blockers, or external decisions.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched for an existing issue or proposal.
+          required: true
+        - label: I did not include secrets or real sensitive local data.
+          required: true

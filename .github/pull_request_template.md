@@ -1,3 +1,23 @@
+<!--
+For documentation, dependency, or CI-only changes, complete the applicable
+sections and write N/A with a short reason for the rest. Do not delete the
+headings: reviewers need to see which contract boundaries were considered.
+-->
+
+## Pull request type
+
+- [ ] Feature
+- [ ] Bug fix
+- [ ] Refactor or performance work
+- [ ] Tests or documentation
+- [ ] Dependency or build update
+- [ ] CI, workflow, or security configuration
+
+## Tracking
+
+- Closes / relates to:
+- No linked issue because:
+
 ## Summary
 
 <!-- What user or engineering outcome does this pull request deliver? -->
@@ -11,6 +31,7 @@
 - Persistence, schema, migration, or recovery impact:
 - Activity data, credentials, privacy, or telemetry impact:
 - Lifecycle, concurrency, cancellation, timeout, or retry impact:
+- Dependency, Action, or supply-chain impact:
 - Design/issue reference required for cross-cutting contract or data changes:
 
 ## Scope
@@ -67,6 +88,8 @@ State notes:
 
 | Command | Result |
 | --- | --- |
+| `git diff --check` | Not run |
+| `bun run lint:changed` (informational) | Not run |
 | `bun run typecheck` | Not run |
 | `bun run test` | Not run |
 | `bun run build:views` | Not run |
@@ -81,7 +104,14 @@ Skipped or blocked validation:
 - Data/privacy impact:
 - Compatibility impact:
 - Concurrency/lifecycle impact:
+- Breaking change, migration, or release-note impact:
 - Rollback plan:
+
+## Reviewer focus
+
+<!-- Name the decision, boundary, risk, or file that deserves the closest review. -->
+
+- Please focus on:
 
 ## Related work
 

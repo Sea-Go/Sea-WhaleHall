@@ -1,0 +1,93 @@
+name: Bug report
+description: Report reproducible unexpected behavior without exposing private local data.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Do not include credentials, tokens,
+        real calendar, browser, activity, accessibility, or local database data.
+        For a security vulnerability, do not open a public issue.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Select every area that applies.
+      multiple: true
+      options:
+        - React client
+        - Desktop pet
+        - Electrobun main process or Typed RPC
+        - Agent or model integration
+        - Rust Local Tool or protocol
+        - Sensor, permissions, or local persistence
+        - Build, packaging, or CI
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version, commit, or build source
+      placeholder: "for example: main @ abc1234, canary build, or local dev"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - GitHub Actions
+        - Other or unknown
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Use deterministic, sanitized fixtures or example data.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and impact
+      description: Include user impact, data risk, and whether the issue blocks a workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized logs, screenshots, or additional context
+      description: Remove secrets and all real local data. State "none" if no evidence is available.
+      render: shell
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround and regression information
+      description: Say whether this regressed from a known version, and describe any safe workaround.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched for duplicates before opening this issue.
+          required: true
+        - label: I removed credentials and real user or device data from this report.
+          required: true

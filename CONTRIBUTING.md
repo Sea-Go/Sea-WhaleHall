@@ -90,6 +90,27 @@ not yet a hard merge gate. There is currently no repository-wide hard
 YAML with actionlint and validates shell scripts with `bash -n` and ShellCheck.
 Do not report nonexistent local commands as completed.
 
+## Issues
+
+Use the GitHub Issue Forms when reporting a problem, proposing a feature, or
+requesting engineering work. Keep one issue focused on one user or engineering
+outcome. Search for an existing issue first, then provide enough context for a
+maintainer to reproduce, scope, and prioritize the work.
+
+- **Bug report**: include a sanitized reproduction, expected and actual
+  behavior, environment/build details, impact, and any safe workaround.
+- **Feature request**: describe the problem before the solution, state the
+  intended outcome and non-goals, give acceptance criteria, and identify any
+  affected architecture or privacy boundary.
+- **Engineering task**: state the motivation, included and excluded work,
+  acceptance criteria, validation, risks, and dependencies.
+
+Never put credentials, tokens, real calendar, browser, activity,
+accessibility, or local database data in an issue. Do not report a security
+vulnerability publicly. This repository does not currently publish a private
+vulnerability-reporting channel; use a maintainer-approved private channel for
+security or sensitive reports.
+
 ## Branch names
 
 Use a short lowercase kebab-case name:
@@ -151,6 +172,8 @@ an unrelated feature.
 Keep a pull request focused on one product or engineering outcome. Complete
 [the pull request template](.github/pull_request_template.md) and include:
 
+- one pull-request type and either a `Closes #123` / `Relates to #123` link or
+  a short reason that no issue is needed;
 - a concise summary and explicit scope;
 - affected architecture boundaries;
 - completed change-contract and data/privacy sections;
@@ -158,6 +181,12 @@ Keep a pull request focused on one product or engineering outcome. Complete
 - exact commands run and their results;
 - risk and rollback notes;
 - related issues or specifications.
+
+For documentation, dependency, or CI-only changes, mark non-applicable product
+sections as `N/A` and explain why. Dependency and workflow updates must name
+the upgraded component, any upstream compatibility or advisory context, the
+actual validation run, and the rollback path. Do not treat a Dependabot PR as
+automatically safe merely because it has no handwritten application diff.
 
 UI changes must include before/after screenshots at both `1440x900` and
 `1180x720`. If a state did not exist before, label the before image

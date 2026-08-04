@@ -1,0 +1,3 @@
+# Keep the free-form fallback until the repository enables private vulnerability
+# reporting or publishes a maintained private reporting channel.
+blank_issues_enabled: true
