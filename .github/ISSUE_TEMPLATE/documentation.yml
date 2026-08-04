@@ -1,0 +1,56 @@
+name: "📚 Documentation | 文档问题与改进"
+description: Report unclear, missing, or outdated documentation | 报告文档错误、缺失或改进建议
+title: "[Docs] "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private links, or real local user data.
+        For a security vulnerability, do not open a public issue.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Documentation issue type | 文档问题类型
+      options:
+        - Incorrect or outdated content | 内容错误或过期
+        - Missing documentation | 缺少文档
+        - Unclear explanation or example | 说明或示例不清楚
+        - Translation, wording, or terminology | 翻译、措辞或术语
+        - Other improvement | 其他改进
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location | 文档位置
+      description: Provide a URL, file path, heading, or state that the documentation is missing.
+      placeholder: "for example: README.md → Installation"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is unclear or incorrect? | 哪部分不清楚或有误？
+      description: Describe the reader's problem and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested improvement | 建议的改进方式
+      description: Optional. Include corrected wording, an outline, or an example if available.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context | 补充信息
+      description: Optional. Include a sanitized screenshot or related links.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks | 提交前确认
+      options:
+        - label: I searched existing issues and documentation for a duplicate.
+          required: true
+        - label: I did not include credentials, private links, or real sensitive local data.
+          required: true
