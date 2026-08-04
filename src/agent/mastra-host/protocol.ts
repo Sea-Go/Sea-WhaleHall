@@ -1,8 +1,10 @@
+import type { ActivityAnalysisWorkerResult } from "../../shared/activity-analysis-contract";
+
 export const AGENT_HOST_PROTOCOL_VERSION = 1 as const;
 export const AGENT_HOST_SERVICE = "whalehall-agent-host" as const;
 export const MAX_MODEL_RELAY_CHUNK_BYTES = 64 * 1024;
 
-export type AgentRunKind = "conversation" | "planning";
+export type AgentRunKind = "conversation" | "planning" | "activity";
 export type AgentRunStatus =
 	| "running"
 	| "suspended"
@@ -121,6 +123,15 @@ export interface PlanningAnswerParams {
 	expectedVersion?: number;
 }
 
+export type { ActivityAnalysisWorkerResult } from "../../shared/activity-analysis-contract";
+
+export interface ActivityAnalysisStartParams {
+	runId: string;
+	activityJobId: string;
+	consumedScore: number;
+	analyses: readonly ActivityAnalysisWorkerResult[];
+}
+
 export interface RunTargetParams {
 	runId: string;
 }
@@ -159,6 +170,7 @@ export interface AgentRunSnapshot {
 	terminalState: AgentRunTerminalState | null;
 	conversationId?: string;
 	sessionId?: string;
+	activityJobId?: string;
 	text?: string;
 	result?: unknown;
 	suspendPayload?: unknown;
@@ -180,6 +192,7 @@ export type AgentHostMethod =
 	| "runtime.shutdown"
 	| "conversation.start"
 	| "planning.start"
+	| "activity.start"
 	| "planning.answer"
 	| "agent.approveTool"
 	| "agent.declineTool"
@@ -226,6 +239,7 @@ export type AgentHostRequest =
 	| RequestEnvelope<"runtime.shutdown", Record<string, never>>
 	| RequestEnvelope<"conversation.start", ConversationStartParams>
 	| RequestEnvelope<"planning.start", PlanningStartParams>
+	| RequestEnvelope<"activity.start", ActivityAnalysisStartParams>
 	| RequestEnvelope<"planning.answer", PlanningAnswerParams>
 	| RequestEnvelope<"agent.approveTool", AgentToolDecisionParams>
 	| RequestEnvelope<"agent.declineTool", AgentToolDecisionParams>
@@ -266,7 +280,10 @@ export interface ModelRelayAbortParams {
 export type SidecarHostRequest =
 	| RequestEnvelope<"model/relay.open", ModelRelayOpenParams>
 	| RequestEnvelope<"model/relay.abort", ModelRelayAbortParams>
-	| RequestEnvelope<Exclude<SidecarHostMethod, "model/relay.open" | "model/relay.abort">, Record<string, unknown>>;
+	| RequestEnvelope<
+			Exclude<SidecarHostMethod, "model/relay.open" | "model/relay.abort">,
+			Record<string, unknown>
+	  >;
 
 export interface SuccessResponse<TResult = unknown> {
 	protocolVersion: typeof AGENT_HOST_PROTOCOL_VERSION;
@@ -284,7 +301,9 @@ export interface ErrorResponse {
 	error: AgentHostErrorPayload;
 }
 
-export type ProtocolResponse<TResult = unknown> = SuccessResponse<TResult> | ErrorResponse;
+export type ProtocolResponse<TResult = unknown> =
+	| SuccessResponse<TResult>
+	| ErrorResponse;
 
 export type AgentRunEventPayload =
 	| { kind: "run.started"; runKind: AgentRunKind }
@@ -364,6 +383,7 @@ export const AGENT_HOST_METHODS: readonly AgentHostMethod[] = [
 	"runtime.shutdown",
 	"conversation.start",
 	"planning.start",
+	"activity.start",
 	"planning.answer",
 	"agent.approveTool",
 	"agent.declineTool",
@@ -428,13 +448,16 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function isProtocolResponse(value: unknown): value is ProtocolResponse {
-	if (!(
-		isRecord(value) &&
-		value.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
-		value.type === "response" &&
-		typeof value.requestId === "string" &&
-		typeof value.ok === "boolean"
-	)) return false;
+	if (
+		!(
+			isRecord(value) &&
+			value.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
+			value.type === "response" &&
+			typeof value.requestId === "string" &&
+			typeof value.ok === "boolean"
+		)
+	)
+		return false;
 	return value.ok ? true : isAgentHostErrorPayload(value.error);
 }
 
@@ -450,7 +473,9 @@ export function isAgentHostRequest(value: unknown): value is AgentHostRequest {
 	);
 }
 
-export function isSidecarHostRequest(value: unknown): value is SidecarHostRequest {
+export function isSidecarHostRequest(
+	value: unknown,
+): value is SidecarHostRequest {
 	return (
 		isRecord(value) &&
 		value.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
@@ -462,46 +487,57 @@ export function isSidecarHostRequest(value: unknown): value is SidecarHostReques
 	);
 }
 
-export function isAgentRunEventFrame(value: unknown): value is AgentRunEventFrame {
-	if (!(
-		isRecord(value) &&
-		value.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
-		value.type === "event" &&
-		isBoundedString(value.requestId, 512) &&
-		isBoundedString(value.runId, 512) &&
-		isPositiveInteger(value.sequence) &&
-		isPositiveInteger(value.version) &&
-		isNonNegativeInteger(value.emittedAtMs) &&
-		(value.terminalState === null ||
-			value.terminalState === "completed" ||
-			value.terminalState === "failed" ||
-			value.terminalState === "cancelled") &&
-		isRecord(value.event) &&
-		isAgentRunEventPayload(value.event)
-	)) return false;
-	const terminalForKind = value.event.kind === "run.completed"
-		? "completed"
-		: value.event.kind === "run.failed"
-			? "failed"
-			: value.event.kind === "run.cancelled"
-				? "cancelled"
-				: null;
+export function isAgentRunEventFrame(
+	value: unknown,
+): value is AgentRunEventFrame {
+	if (
+		!(
+			isRecord(value) &&
+			value.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
+			value.type === "event" &&
+			isBoundedString(value.requestId, 512) &&
+			isBoundedString(value.runId, 512) &&
+			isPositiveInteger(value.sequence) &&
+			isPositiveInteger(value.version) &&
+			isNonNegativeInteger(value.emittedAtMs) &&
+			(value.terminalState === null ||
+				value.terminalState === "completed" ||
+				value.terminalState === "failed" ||
+				value.terminalState === "cancelled") &&
+			isRecord(value.event) &&
+			isAgentRunEventPayload(value.event)
+		)
+	)
+		return false;
+	const terminalForKind =
+		value.event.kind === "run.completed"
+			? "completed"
+			: value.event.kind === "run.failed"
+				? "failed"
+				: value.event.kind === "run.cancelled"
+					? "cancelled"
+					: null;
 	return value.terminalState === terminalForKind;
 }
 
-export function isModelRelayEventFrame(value: unknown): value is ModelRelayEventFrame {
-	if (!(
-		isRecord(value) &&
-		value.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
-		value.type === "relay-event" &&
-		typeof value.requestId === "string" &&
-		typeof value.relayId === "string" &&
-		Number.isSafeInteger(value.sequence) &&
-		(value.sequence as number) > 0 &&
-		Number.isSafeInteger(value.emittedAtMs) &&
-		(value.emittedAtMs as number) >= 0 &&
-		isRecord(value.event)
-	)) return false;
+export function isModelRelayEventFrame(
+	value: unknown,
+): value is ModelRelayEventFrame {
+	if (
+		!(
+			isRecord(value) &&
+			value.protocolVersion === AGENT_HOST_PROTOCOL_VERSION &&
+			value.type === "relay-event" &&
+			typeof value.requestId === "string" &&
+			typeof value.relayId === "string" &&
+			Number.isSafeInteger(value.sequence) &&
+			(value.sequence as number) > 0 &&
+			Number.isSafeInteger(value.emittedAtMs) &&
+			(value.emittedAtMs as number) >= 0 &&
+			isRecord(value.event)
+		)
+	)
+		return false;
 	if (value.event.kind === "model/relay.end") return true;
 	if (value.event.kind === "model/relay.error") {
 		return isAgentHostErrorPayload(value.event.error);
@@ -509,11 +545,14 @@ export function isModelRelayEventFrame(value: unknown): value is ModelRelayEvent
 	return (
 		value.event.kind === "model/relay.chunk" &&
 		typeof value.event.bodyBase64 === "string" &&
-		value.event.bodyBase64.length <= Math.ceil((MAX_MODEL_RELAY_CHUNK_BYTES * 4) / 3) + 4
+		value.event.bodyBase64.length <=
+			Math.ceil((MAX_MODEL_RELAY_CHUNK_BYTES * 4) / 3) + 4
 	);
 }
 
-function isAgentHostErrorPayload(value: unknown): value is AgentHostErrorPayload {
+function isAgentHostErrorPayload(
+	value: unknown,
+): value is AgentHostErrorPayload {
 	return (
 		isRecord(value) &&
 		typeof value.code === "string" &&
@@ -523,31 +562,51 @@ function isAgentHostErrorPayload(value: unknown): value is AgentHostErrorPayload
 	);
 }
 
-function isAgentRunEventPayload(value: Record<string, unknown>): value is AgentRunEventPayload {
+function isAgentRunEventPayload(
+	value: Record<string, unknown>,
+): value is AgentRunEventPayload {
 	switch (value.kind) {
 		case "run.started":
-			return value.runKind === "conversation" || value.runKind === "planning";
+			return (
+				value.runKind === "conversation" ||
+				value.runKind === "planning" ||
+				value.runKind === "activity"
+			);
 		case "run.resumed":
-			return value.decision === "resume" || value.decision === "approve" || value.decision === "decline";
+			return (
+				value.decision === "resume" ||
+				value.decision === "approve" ||
+				value.decision === "decline"
+			);
 		case "conversation.text.delta":
-			return isBoundedString(value.delta, 64 * 1024) && isBoundedString(value.text, 64 * 1024);
+			return (
+				isBoundedString(value.delta, 64 * 1024) &&
+				isBoundedString(value.text, 64 * 1024)
+			);
 		case "agent.tool.call":
-			return isBoundedString(value.toolCallId, 512) && isBoundedString(value.toolName, 256);
+			return (
+				isBoundedString(value.toolCallId, 512) &&
+				isBoundedString(value.toolName, 256)
+			);
 		case "agent.tool.approval.required":
-			return isBoundedString(value.toolCallId, 512) &&
+			return (
+				isBoundedString(value.toolCallId, 512) &&
 				isBoundedString(value.toolName, 256) &&
 				isPositiveInteger(value.runVersion) &&
-				isHostToolApprovalSummary(value.approval);
+				isHostToolApprovalSummary(value.approval)
+			);
 		case "agent.tool.result":
-			return isBoundedString(value.toolCallId, 512) &&
+			return (
+				isBoundedString(value.toolCallId, 512) &&
 				isBoundedString(value.toolName, 256) &&
-				typeof value.isError === "boolean";
+				typeof value.isError === "boolean"
+			);
 		case "planning.object.delta":
-			return Object.prototype.hasOwnProperty.call(value, "object");
+			return Object.hasOwn(value, "object");
 		case "run.suspended":
-			return Object.prototype.hasOwnProperty.call(value, "suspendPayload");
+			return Object.hasOwn(value, "suspendPayload");
 		case "run.completed":
-			return Object.prototype.hasOwnProperty.call(value, "result");
+			return Object.hasOwn(value, "result");
 		case "run.cancelled":
 			return value.reason === null || isBoundedString(value.reason, 4_096);
 		case "run.failed":
@@ -557,21 +616,28 @@ function isAgentRunEventPayload(value: Record<string, unknown>): value is AgentR
 	}
 }
 
-function isHostToolApprovalSummary(value: unknown): value is HostToolApprovalSummary {
-	return isRecord(value) &&
+function isHostToolApprovalSummary(
+	value: unknown,
+): value is HostToolApprovalSummary {
+	return (
+		isRecord(value) &&
 		isBoundedString(value.approvalId, 512) &&
 		isBoundedString(value.toolCallId, 512) &&
 		isBoundedString(value.title, 512) &&
 		isBoundedString(value.description, 2_048) &&
 		(value.risk === "write" || value.risk === "control") &&
-		typeof value.inputDigest === "string" && /^[a-f0-9]{64}$/.test(value.inputDigest) &&
+		typeof value.inputDigest === "string" &&
+		/^[a-f0-9]{64}$/.test(value.inputDigest) &&
 		isNonNegativeInteger(value.requestedAtMs) &&
 		isNonNegativeInteger(value.expiresAtMs) &&
-		(value.expiresAtMs as number) > (value.requestedAtMs as number);
+		(value.expiresAtMs as number) > (value.requestedAtMs as number)
+	);
 }
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
-	return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+	return (
+		typeof value === "string" && value.length > 0 && value.length <= maxLength
+	);
 }
 
 function isPositiveInteger(value: unknown): value is number {

@@ -18,6 +18,10 @@ export type OllamaJsonRequest<T> = {
 
 export type OllamaJsonClientOptions = {
 	baseUrl?: string;
+	/** Exact HTTPS origins allowed for a remote Ollama-compatible server. */
+	allowedRemoteOrigins?: readonly string[];
+	/** Environment-only Bearer token for an authenticated remote gateway. */
+	authorizationToken?: string;
 	model?: string;
 	contextLength?: number;
 	keepAlive?: string;
@@ -64,18 +68,23 @@ export class OllamaJsonClient {
 	private readonly model: string;
 	private readonly contextLength: number;
 	private readonly keepAlive: string;
+	private readonly authorizationToken: string | null;
 	private readonly fetchImpl: FetchLike;
 	private readonly realtime: QueueItem<unknown>[] = [];
 	private readonly batch: QueueItem<unknown>[] = [];
 	private draining = false;
 
 	constructor(options: OllamaJsonClientOptions = {}) {
-		this.baseUrl = normalizeLoopbackUrl(
+		this.baseUrl = normalizeOllamaBaseUrl(
 			options.baseUrl ?? "http://127.0.0.1:11434",
+			options.allowedRemoteOrigins ?? [],
 		);
 		this.model = options.model ?? "qwen3:4b";
 		this.contextLength = options.contextLength ?? 4096;
 		this.keepAlive = options.keepAlive ?? "30m";
+		this.authorizationToken = normalizeAuthorizationToken(
+			options.authorizationToken,
+		);
 		this.fetchImpl = options.fetch ?? fetch;
 	}
 
@@ -118,7 +127,10 @@ export class OllamaJsonClient {
 				if (!(lastError instanceof OllamaSchemaError)) throw lastError;
 			}
 		}
-		throw lastError ?? new OllamaSchemaError("Ollama returned invalid structured output.");
+		throw (
+			lastError ??
+			new OllamaSchemaError("Ollama returned invalid structured output.")
+		);
 	}
 
 	private async execute<T>(
@@ -165,9 +177,15 @@ export class OllamaJsonClient {
 			if (request.maxOutputTokens !== undefined) {
 				inferenceOptions.num_predict = request.maxOutputTokens;
 			}
+			const headers: Record<string, string> = {
+				"content-type": "application/json",
+			};
+			if (this.authorizationToken !== null) {
+				headers.authorization = `Bearer ${this.authorizationToken}`;
+			}
 			const response = await this.fetchImpl(`${this.baseUrl}/api/chat`, {
 				method: "POST",
-				headers: { "content-type": "application/json" },
+				headers,
 				body: JSON.stringify({
 					model: this.model,
 					messages,
@@ -279,23 +297,51 @@ function parseJsonObject(envelope: OllamaChatResponse): unknown {
 	}
 }
 
-function normalizeLoopbackUrl(value: string): string {
+function normalizeOllamaBaseUrl(
+	value: string,
+	allowedRemoteOrigins: readonly string[],
+): string {
 	let url: URL;
 	try {
 		url = new URL(value);
 	} catch {
-		throw new Error("The local Ollama client URL is invalid.");
+		throw new Error("The Ollama client URL is invalid.");
 	}
 	if (
-		url.protocol !== "http:" ||
-		!["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname)
+		url.username !== "" ||
+		url.password !== "" ||
+		(url.pathname !== "" && url.pathname !== "/") ||
+		url.search !== "" ||
+		url.hash !== ""
 	) {
-		throw new Error("The local Ollama client only accepts an HTTP loopback URL.");
+		throw new Error(
+			"The Ollama client URL contains disallowed URL components.",
+		);
 	}
-	url.pathname = url.pathname.replace(/\/+$/u, "");
-	url.search = "";
-	url.hash = "";
-	return url.toString().replace(/\/$/u, "");
+	if (isLoopbackHostname(url.hostname)) {
+		if (url.protocol !== "http:") {
+			throw new Error("The loopback Ollama client URL must use HTTP.");
+		}
+		return url.origin;
+	}
+	if (url.protocol !== "https:" || !allowedRemoteOrigins.includes(url.origin)) {
+		throw new Error(
+			"The remote Ollama client requires an allowlisted HTTPS origin.",
+		);
+	}
+	return url.origin;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+	return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(hostname);
+}
+
+function normalizeAuthorizationToken(value: string | undefined): string | null {
+	if (value === undefined) return null;
+	if (value.length < 1 || value.length > 4_096 || /\p{Cc}/u.test(value)) {
+		throw new Error("The Ollama authorization token is invalid.");
+	}
+	return value;
 }
 
 function safeOllamaError(error: unknown): OllamaClientError {

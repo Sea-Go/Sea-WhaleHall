@@ -27,12 +27,12 @@ describe("OllamaJsonClient", () => {
 	test("uses qwen3:4b structured output with fixed local runtime settings", async () => {
 		let body: Record<string, unknown> | null = null;
 		const client = new OllamaJsonClient({
-			fetch: (async (_input, init) => {
+			fetch: async (_input, init) => {
 				body = JSON.parse(String(init?.body)) as Record<string, unknown>;
 				return Response.json({
 					message: { content: '{"label":"development"}' },
 				});
-			}),
+			},
 		});
 		await expect(
 			client.generateJson({
@@ -59,15 +59,14 @@ describe("OllamaJsonClient", () => {
 	test("retries malformed structured output exactly once", async () => {
 		let calls = 0;
 		const client = new OllamaJsonClient({
-			fetch: (async () => {
+			fetch: async () => {
 				calls += 1;
 				return Response.json({
 					message: {
-						content:
-							calls === 1 ? "not-json" : '{"label":"development"}',
+						content: calls === 1 ? "not-json" : '{"label":"development"}',
 					},
 				});
-			}),
+			},
 		});
 		await expect(
 			client.generateJson({
@@ -87,7 +86,7 @@ describe("OllamaJsonClient", () => {
 		});
 		let calls = 0;
 		const client = new OllamaJsonClient({
-			fetch: (async (_input, init) => {
+			fetch: async (_input, init) => {
 				calls += 1;
 				const parsed = JSON.parse(String(init?.body)) as {
 					messages: Array<{ content: string }>;
@@ -98,7 +97,7 @@ describe("OllamaJsonClient", () => {
 				return Response.json({
 					message: { content: '{"label":"development"}' },
 				});
-			}),
+			},
 		});
 		const first = client.generateJson({
 			messages: [{ role: "user", content: "batch-1" }],
@@ -123,16 +122,56 @@ describe("OllamaJsonClient", () => {
 		expect(order).toEqual(["batch-1", "realtime", "batch-2"]);
 	});
 
-	test("rejects non-loopback endpoints", () => {
+	test("requires an explicit HTTPS allowlist entry for a remote endpoint", () => {
 		expect(
 			() => new OllamaJsonClient({ baseUrl: "https://example.com" }),
-		).toThrow("loopback");
+		).toThrow("allowlisted");
+		expect(
+			() =>
+				new OllamaJsonClient({
+					baseUrl: "http://example.com",
+					allowedRemoteOrigins: ["http://example.com"],
+				}),
+		).toThrow("allowlisted HTTPS");
+		expect(
+			() =>
+				new OllamaJsonClient({
+					baseUrl: "https://example.com",
+					allowedRemoteOrigins: ["https://example.com"],
+				}),
+		).not.toThrow();
+	});
+
+	test("sends the environment-only token to an allowlisted remote endpoint", async () => {
+		let endpoint = "";
+		let authorization: string | null = null;
+		const client = new OllamaJsonClient({
+			baseUrl: "https://models.example.test",
+			allowedRemoteOrigins: ["https://models.example.test"],
+			authorizationToken: "remote-only-token",
+			fetch: async (input, init) => {
+				endpoint = String(input);
+				authorization = new Headers(init?.headers).get("authorization");
+				return Response.json({
+					message: { content: '{"label":"development"}' },
+				});
+			},
+		});
+
+		await expect(
+			client.generateJson({
+				messages: [{ role: "user", content: "label this" }],
+				schema,
+				validate: isLabel,
+			}),
+		).resolves.toEqual({ label: "development" });
+		expect(endpoint).toBe("https://models.example.test/api/chat");
+		expect(authorization as string | null).toBe("Bearer remote-only-token");
 	});
 
 	test("fails after the single schema retry", async () => {
 		const client = new OllamaJsonClient({
-			fetch: (async () =>
-				Response.json({ message: { content: "{}" } })),
+			fetch: async () => Response.json({ message: { content: "{}" } }),
 		});
 		await expect(
 			client.generateJson({
@@ -153,9 +192,7 @@ describe("OllamaJsonClient", () => {
 		let transportError: unknown;
 		try {
 			await transportClient.generateJson({
-				messages: [
-					{ role: "user", content: "sensitive user prompt" },
-				],
+				messages: [{ role: "user", content: "sensitive user prompt" }],
 				schema,
 				validate: isLabel,
 			});
@@ -163,16 +200,10 @@ describe("OllamaJsonClient", () => {
 			transportError = error;
 		}
 		expect(transportError).toBeInstanceOf(OllamaClientError);
-		expect((transportError as OllamaClientError).code).toBe(
-			"transport_error",
-		);
-		expect((transportError as Error).message).toBe(
-			"Ollama request failed.",
-		);
+		expect((transportError as OllamaClientError).code).toBe("transport_error");
+		expect((transportError as Error).message).toBe("Ollama request failed.");
 		expect(
-			JSON.stringify(
-				(transportError as OllamaClientError).toDiagnostic(),
-			),
+			JSON.stringify((transportError as OllamaClientError).toDiagnostic()),
 		).not.toContain(transportSecret);
 
 		const generatedSecret = "private generated response";
@@ -185,9 +216,7 @@ describe("OllamaJsonClient", () => {
 		let schemaError: unknown;
 		try {
 			await schemaClient.generateJson({
-				messages: [
-					{ role: "user", content: "another sensitive prompt" },
-				],
+				messages: [{ role: "user", content: "another sensitive prompt" }],
 				schema,
 				validate: isLabel,
 			});
@@ -198,9 +227,7 @@ describe("OllamaJsonClient", () => {
 		expect((schemaError as OllamaClientError).code).toBe("invalid_json");
 		expect((schemaError as Error).message).not.toContain(generatedSecret);
 		expect(
-			JSON.stringify(
-				(schemaError as OllamaClientError).toDiagnostic(),
-			),
+			JSON.stringify((schemaError as OllamaClientError).toDiagnostic()),
 		).not.toContain(generatedSecret);
 	});
 });

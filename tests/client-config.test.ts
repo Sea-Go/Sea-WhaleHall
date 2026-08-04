@@ -10,12 +10,23 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	ACTIVITY_EVENT_WORKER_ENDPOINT,
+	ACTIVITY_EVENT_WORKER_MODEL,
+	AGENT_RELAY_BASE_URL,
+	activityEventWorkerConfigurationFromConfiguration,
+	agentModelConfigurationFromConfiguration,
+	type ClientConfiguration,
 	DEFAULT_CLIENT_CONFIGURATION,
 	loadOrCreateClientConfiguration,
-	timelineModernBertEnvironmentFromConfiguration,
+	reflectionModelConfigurationFromConfiguration,
+	UNPROVISIONED_ACTIVITY_WORKER_KEY,
+	UNPROVISIONED_AGENT_RELAY_KEY,
+	writeProvisionedClientConfiguration,
 } from "../src/bun/client-config";
 
 const directories: string[] = [];
+const fixtureActivityWorkerKey = ["fixture", "activity", "worker"].join("-");
+const fixtureRelayKey = ["fixture", "personal", "relay"].join("-");
 
 afterEach(() => {
 	for (const directory of directories.splice(0)) {
@@ -29,36 +40,52 @@ function temporaryDirectory(): string {
 	return directory;
 }
 
-function validConfiguration(overrides = ""): string {
-	return `schemaVersion: whalehall-client-config.v1
-request:
-  teacherOllama:
-    baseUrl: "http://127.0.0.1:11434"
-  reflectionModernBert:
-    endpoint: "http://127.0.0.1:8765/v1/reflections:infer"
-  timelineModernBert:
-    endpoint: ""
-    manifestEndpoint: ""
-    pinnedManifest: ""
-${overrides}`;
+function templateConfiguration(): string {
+	return [
+		"reflection:",
+		`  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
+		`  baseurl: "${ACTIVITY_EVENT_WORKER_ENDPOINT}"`,
+		`  apikey: "${UNPROVISIONED_ACTIVITY_WORKER_KEY}"`,
+		"",
+		"agent:",
+		`  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
+		`  baseurl: "${AGENT_RELAY_BASE_URL}"`,
+		`  apikey: "${UNPROVISIONED_AGENT_RELAY_KEY}"`,
+		"",
+	].join("\n");
 }
 
-function writeTemplate(directory: string, source = validConfiguration()): string {
+function provisionedConfiguration(): ClientConfiguration {
+	return {
+		reflection: {
+			name: ACTIVITY_EVENT_WORKER_MODEL,
+			baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
+			apikey: fixtureActivityWorkerKey,
+		},
+		agent: {
+			name: ACTIVITY_EVENT_WORKER_MODEL,
+			baseurl: AGENT_RELAY_BASE_URL,
+			apikey: fixtureRelayKey,
+		},
+	};
+}
+
+function writeTemplate(
+	directory: string,
+	source = templateConfiguration(),
+): string {
 	const path = join(directory, "template.yaml");
 	writeFileSync(path, source, { mode: 0o600 });
 	return path;
 }
 
-function expectPrivateFile(path: string): void {
-	const metadata = lstatSync(path);
-	expect(metadata.isFile()).toBeTrue();
-	if (process.platform !== "win32") {
-		expect(metadata.mode & 0o777).toBe(0o600);
-	}
+function expectOwnerOnlyMode(path: string): void {
+	if (process.platform !== "win32")
+		expect(lstatSync(path).mode & 0o777).toBe(0o600);
 }
 
 describe("WhaleHall client config.yaml", () => {
-	test("seeds a private editable user copy from the bundled template", () => {
+	test("seeds a private two-role placeholder copy without enabling either remote path", () => {
 		const directory = temporaryDirectory();
 		const templatePath = writeTemplate(directory);
 		const userDataDirectory = join(directory, "user-data");
@@ -74,145 +101,134 @@ describe("WhaleHall client config.yaml", () => {
 		expect(readFileSync(result.path, "utf8")).toBe(
 			readFileSync(templatePath, "utf8"),
 		);
-		expectPrivateFile(result.path);
+		expectOwnerOnlyMode(result.path);
+		expect(
+			reflectionModelConfigurationFromConfiguration(result.configuration),
+		).toBeNull();
+		expect(
+			agentModelConfigurationFromConfiguration(result.configuration),
+		).toBeNull();
 	});
 
-	test("loads the user copy without overwriting a configured local endpoint", () => {
+	test("loads literal Worker and personal relay keys into their separate roles", () => {
 		const directory = temporaryDirectory();
-		const templatePath = writeTemplate(directory);
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		writeProvisionedClientConfiguration({
+			path,
+			configuration: provisionedConfiguration(),
+		});
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.status).toBe("loaded");
+		expect(result.configuration).toEqual(provisionedConfiguration());
+		expect(
+			reflectionModelConfigurationFromConfiguration(result.configuration),
+		).toEqual(provisionedConfiguration().reflection);
+		expect(
+			agentModelConfigurationFromConfiguration(result.configuration),
+		).toEqual(provisionedConfiguration().agent);
+		expect(
+			activityEventWorkerConfigurationFromConfiguration(result.configuration),
+		).toEqual({
+			modelName: ACTIVITY_EVENT_WORKER_MODEL,
+			endpoint: ACTIVITY_EVENT_WORKER_ENDPOINT,
+			authorizationToken: fixtureActivityWorkerKey,
+			scoreThreshold: 1,
+		});
+		expectOwnerOnlyMode(path);
+	});
+
+	test("rejects environment references, swapped endpoints, unknown fields, and non-approved models", () => {
+		const sources = [
+			templateConfiguration().replace(
+				UNPROVISIONED_ACTIVITY_WORKER_KEY,
+				"$" + "{WHALEHALL_ACTIVITY_WORKER_TOKEN}",
+			),
+			templateConfiguration().replace(
+				AGENT_RELAY_BASE_URL,
+				ACTIVITY_EVENT_WORKER_ENDPOINT,
+			),
+			templateConfiguration().replace(
+				ACTIVITY_EVENT_WORKER_MODEL,
+				"qwen3:other",
+			),
+			templateConfiguration().replace(
+				`agent:\n  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
+				'agent:\n  name: "qwen3:other"',
+			),
+			templateConfiguration().replace(
+				UNPROVISIONED_AGENT_RELAY_KEY,
+				"a".repeat(1_025),
+			),
+			`${templateConfiguration()}unexpected: true\n`,
+		];
+		for (const source of sources) {
+			const directory = temporaryDirectory();
+			const userDataDirectory = join(directory, "user-data");
+			const path = join(userDataDirectory, "config.yaml");
+			mkdirSync(userDataDirectory, { mode: 0o700 });
+			writeFileSync(path, source);
+
+			const result = loadOrCreateClientConfiguration({
+				userDataDirectory,
+				bundledTemplatePath: writeTemplate(directory),
+			});
+
+			expect(result.status).toBe("invalid");
+			expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
+			expect(readFileSync(path, "utf8")).toBe(source);
+		}
+	});
+
+	test("leaves legacy configuration untouched and disables remote work until provisioned", () => {
+		const directory = temporaryDirectory();
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		const legacy = [
+			"schemaVersion: whalehall-client-config.v1",
+			"request:",
+			"  teacherOllama:",
+			'    baseUrl: "http://127.0.0.1:11434"',
+			"",
+		].join("\n");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		writeFileSync(path, legacy);
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.status).toBe("legacy-unprovisioned");
+		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
+		expect(readFileSync(path, "utf8")).toBe(legacy);
+	});
+
+	test("keeps checked-in placeholders parseable without treating them as credentials", () => {
+		const directory = temporaryDirectory();
 		const userDataDirectory = join(directory, "user-data");
 		const path = join(userDataDirectory, "config.yaml");
 		mkdirSync(userDataDirectory, { mode: 0o700 });
 		writeFileSync(
 			path,
-			`schemaVersion: whalehall-client-config.v1
-request:
-  teacherOllama:
-    baseUrl: "http://localhost:11437"
-  reflectionModernBert:
-    endpoint: "http://127.0.0.1:8765/v1/reflections:infer"
-  timelineModernBert:
-    endpoint: "http://127.0.0.1:8766/v2/episodes:classify"
-    manifestEndpoint: "http://127.0.0.1:8766/v2/manifest"
-    pinnedManifest: "/private/tmp/modernbert-manifest.json"
-`,
+			readFileSync(join(import.meta.dir, "..", "config.example.yaml"), "utf8"),
 		);
 
 		const result = loadOrCreateClientConfiguration({
 			userDataDirectory,
-			bundledTemplatePath: templatePath,
+			bundledTemplatePath: writeTemplate(directory),
 		});
 
 		expect(result.status).toBe("loaded");
-		expect(result.configuration.request.teacherOllama.baseUrl).toBe(
-			"http://localhost:11437",
-		);
-		expect(result.configuration.request.timelineModernBert).toEqual({
-			endpoint: "http://127.0.0.1:8766/v2/episodes:classify",
-			manifestEndpoint: "http://127.0.0.1:8766/v2/manifest",
-			pinnedManifest: "/private/tmp/modernbert-manifest.json",
-		});
-	});
-
-	test("fails closed on remote, partial, or unknown endpoint settings", () => {
-		const sources = [
-			validConfiguration().replace(
-				"http://127.0.0.1:11434",
-				"https://models.example.test",
-			),
-			validConfiguration().replace(
-				"http://127.0.0.1:8765/v1/reflections:infer",
-				"https://models.example.test/v1/reflections:infer",
-			),
-			validConfiguration().replace(
-				'endpoint: ""',
-				'endpoint: "http://127.0.0.1:8766/v2/episodes:classify"',
-			),
-			validConfiguration("unexpectedRemote: https://models.example.test\n"),
-		];
-		for (const source of sources) {
-			const directory = temporaryDirectory();
-			const templatePath = writeTemplate(directory);
-			const userDataDirectory = join(directory, "user-data");
-			const path = join(userDataDirectory, "config.yaml");
-			mkdirSync(userDataDirectory, { mode: 0o700 });
-			writeFileSync(path, source);
-
-			const result = loadOrCreateClientConfiguration({
-				userDataDirectory,
-				bundledTemplatePath: templatePath,
-			});
-
-			expect(result.status).toBe("invalid");
-			expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
-			expect(readFileSync(path, "utf8")).toBe(source);
-		}
-	});
-
-	test("uses config.yaml as the sole Timeline endpoint source and keeps tokens out of it", () => {
-		const configuration = {
-			...DEFAULT_CLIENT_CONFIGURATION,
-			request: {
-				...DEFAULT_CLIENT_CONFIGURATION.request,
-				timelineModernBert: {
-					endpoint:
-						"http://127.0.0.1:8766/v2/episodes:classify",
-					manifestEndpoint: "http://127.0.0.1:8766/v2/manifest",
-					pinnedManifest: "/private/tmp/modernbert-manifest.json",
-				},
-			},
-		};
-
+		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
 		expect(
-			timelineModernBertEnvironmentFromConfiguration(configuration, {
-				WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
-					"https://ignored.example.test/v2/episodes:classify",
-				WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "environment-only-token",
-			}),
-		).toEqual({
-			WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
-				"http://127.0.0.1:8766/v2/episodes:classify",
-			WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT:
-				"http://127.0.0.1:8766/v2/manifest",
-			WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST:
-				"/private/tmp/modernbert-manifest.json",
-			WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "environment-only-token",
-		});
-	});
-
-	test("rejects every removed activity worker or unknown public endpoint setting", () => {
-		const sources = [
-			`${validConfiguration()}  activityEventWorker:
-    enabled: true
-    endpoint: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-    scoreThreshold: 1
-`,
-			`${validConfiguration()}  activityEventWorker:
-    enabled: false
-    endpoint: "http://127.0.0.1:8767/v1/activity/analyze"
-    scoreThreshold: 1
-`,
-			validConfiguration(
-				"publicActivityAnalysis: https://other.example.test/v1/activity/analyze\n",
-			),
-		];
-
-		for (const source of sources) {
-			const directory = temporaryDirectory();
-			const templatePath = writeTemplate(directory);
-			const userDataDirectory = join(directory, "user-data");
-			const path = join(userDataDirectory, "config.yaml");
-			mkdirSync(userDataDirectory, { mode: 0o700 });
-			writeFileSync(path, source);
-
-			const result = loadOrCreateClientConfiguration({
-				userDataDirectory,
-				bundledTemplatePath: templatePath,
-			});
-
-			expect(result.status).toBe("invalid");
-			expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
-			expect(readFileSync(path, "utf8")).toBe(source);
-		}
+			activityEventWorkerConfigurationFromConfiguration(result.configuration),
+		).toBeNull();
 	});
 });

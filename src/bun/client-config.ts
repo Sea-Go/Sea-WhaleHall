@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	constants,
@@ -6,51 +7,55 @@ import {
 	lstatSync,
 	mkdirSync,
 	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join } from "node:path";
 
-export const CLIENT_CONFIGURATION_SCHEMA_VERSION =
-	"whalehall-client-config.v1" as const;
+export const ACTIVITY_EVENT_WORKER_ENDPOINT =
+	"https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze";
+export const AGENT_RELAY_BASE_URL =
+	"https://model.sea-ridethewindbreakthewaves.xyz";
+export const ACTIVITY_EVENT_WORKER_MODEL = "qwen3:1.7b";
+export const UNPROVISIONED_ACTIVITY_WORKER_KEY =
+	"REPLACE_WITH_ACTIVITY_WORKER_KEY";
+export const UNPROVISIONED_AGENT_RELAY_KEY = "REPLACE_WITH_PERSONAL_RELAY_KEY";
 
+const LEGACY_CONFIGURATION_SCHEMA_VERSION = "whalehall-client-config.v1";
 const MAXIMUM_CONFIGURATION_BYTES = 64 * 1024;
+const MAXIMUM_ACTIVITY_WORKER_KEY_LENGTH = 4 * 1024;
+const MAXIMUM_PERSONAL_RELAY_KEY_LENGTH = 1_024;
 
+export type ModelConfiguration = {
+	name: typeof ACTIVITY_EVENT_WORKER_MODEL;
+	baseurl: string;
+	apikey: string;
+};
+
+/** The editable desktop configuration intentionally contains only these roles. */
 export type ClientConfiguration = {
-	schemaVersion: typeof CLIENT_CONFIGURATION_SCHEMA_VERSION;
-	request: {
-		teacherOllama: {
-			baseUrl: string;
-		};
-		reflectionModernBert: {
-			endpoint: string;
-		};
-		timelineModernBert: {
-			endpoint: string;
-			manifestEndpoint: string;
-			pinnedManifest: string;
-		};
-	};
+	reflection: ModelConfiguration;
+	agent: ModelConfiguration;
 };
 
 export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
-	schemaVersion: CLIENT_CONFIGURATION_SCHEMA_VERSION,
-	request: {
-		teacherOllama: {
-			baseUrl: "http://127.0.0.1:11434",
-		},
-		reflectionModernBert: {
-			endpoint: "http://127.0.0.1:8765/v1/reflections:infer",
-		},
-		timelineModernBert: {
-			endpoint: "",
-			manifestEndpoint: "",
-			pinnedManifest: "",
-		},
+	reflection: {
+		name: ACTIVITY_EVENT_WORKER_MODEL,
+		baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
+		apikey: UNPROVISIONED_ACTIVITY_WORKER_KEY,
+	},
+	agent: {
+		name: ACTIVITY_EVENT_WORKER_MODEL,
+		baseurl: AGENT_RELAY_BASE_URL,
+		apikey: UNPROVISIONED_AGENT_RELAY_KEY,
 	},
 };
 
 export type ClientConfigurationLoadStatus =
 	| "loaded"
 	| "seeded"
+	| "legacy-unprovisioned"
 	| "invalid"
 	| "defaults";
 
@@ -65,10 +70,27 @@ export type LoadOrCreateClientConfigurationOptions = {
 	bundledTemplatePath: string;
 };
 
+export type ModelRuntimeConfiguration = {
+	name: typeof ACTIVITY_EVENT_WORKER_MODEL;
+	baseurl: string;
+	apikey: string;
+};
+
+export type ActivityEventWorkerRuntimeConfiguration = {
+	modelName: typeof ACTIVITY_EVENT_WORKER_MODEL;
+	endpoint: string;
+	authorizationToken: string;
+	scoreThreshold: number;
+};
+
+export type WriteProvisionedClientConfigurationOptions = {
+	path: string;
+	configuration: ClientConfiguration;
+};
+
 /**
- * Loads the user's editable config.yaml, seeding it once from the signed app
- * bundle. Invalid, non-regular, oversized, or unsafe configuration falls back
- * to safe defaults; the existing user file is never overwritten.
+ * Loads the user-owned config.yaml, seeding it once from the packaged
+ * placeholder template. Invalid or legacy files are never overwritten.
  */
 export function loadOrCreateClientConfiguration(
 	options: LoadOrCreateClientConfigurationOptions,
@@ -84,9 +106,16 @@ export function loadOrCreateClientConfiguration(
 		}
 	}
 	try {
-		const configuration = parseConfiguration(readRegularFile(path));
+		const parsed = parseConfiguration(readRegularFile(path));
+		if (parsed.kind === "legacy") {
+			return {
+				configuration: structuredClone(DEFAULT_CLIENT_CONFIGURATION),
+				path,
+				status: "legacy-unprovisioned",
+			};
+		}
 		return {
-			configuration,
+			configuration: parsed.configuration,
 			path,
 			status: seeded ? "seeded" : "loaded",
 		};
@@ -96,30 +125,81 @@ export function loadOrCreateClientConfiguration(
 }
 
 /**
- * Builds the only Timeline v2 endpoint inputs accepted by the application.
- * Endpoint environment variables are intentionally not inherited; the YAML
- * user copy is the single source of request addresses. The token remains an
- * environment-only secret and is never persisted to config.yaml.
+ * Writes a validated literal-key configuration atomically with owner-only
+ * permissions. It is used by the interactive owner provisioning command;
+ * application startup intentionally never writes or repairs a user file.
  */
-export function timelineModernBertEnvironmentFromConfiguration(
+export function writeProvisionedClientConfiguration(
+	options: WriteProvisionedClientConfigurationOptions,
+): void {
+	const normalized = normalizeClientConfiguration(options.configuration);
+	if (
+		isUnprovisionedKey(normalized.reflection.apikey) ||
+		isUnprovisionedKey(normalized.agent.apikey)
+	) {
+		throw new Error(
+			"Provisioned client configuration requires literal API keys.",
+		);
+	}
+	const destination = options.path;
+	const directory = dirname(destination);
+	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	hardenPath(directory, 0o700);
+	if (existsSync(destination)) {
+		const stat = lstatSync(destination);
+		if (stat.isSymbolicLink() || !stat.isFile()) {
+			throw new Error(
+				"Client configuration destination must be a regular file.",
+			);
+		}
+	}
+	const temporary = join(directory, `.config.${randomUUID()}.tmp`);
+	try {
+		writeFileSync(temporary, serializeConfiguration(normalized), {
+			encoding: "utf8",
+			mode: 0o600,
+			flag: "wx",
+		});
+		chmodSync(temporary, 0o600);
+		renameSync(temporary, destination);
+		chmodSync(destination, 0o600);
+	} catch (error) {
+		try {
+			unlinkSync(temporary);
+		} catch {}
+		throw error;
+	}
+}
+
+/** Returns null until the reflection Worker key is provisioned literally. */
+export function reflectionModelConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
-	environment: Readonly<Record<string, string | undefined>>,
-): Record<string, string | undefined> {
+): ModelRuntimeConfiguration | null {
+	return runtimeConfiguration(configuration.reflection);
+}
+
+/** Returns null until the personal relay key is provisioned literally. */
+export function agentModelConfigurationFromConfiguration(
+	configuration: ClientConfiguration,
+): ModelRuntimeConfiguration | null {
+	return runtimeConfiguration(configuration.agent);
+}
+
+/**
+ * The reflection role is the sole sender of sealed raw activity windows. The
+ * score threshold remains deterministic local policy, not editable YAML.
+ */
+export function activityEventWorkerConfigurationFromConfiguration(
+	configuration: ClientConfiguration,
+): ActivityEventWorkerRuntimeConfiguration | null {
+	const reflection =
+		reflectionModelConfigurationFromConfiguration(configuration);
+	if (!reflection) return null;
 	return {
-		WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
-			nonEmptyOrUndefined(
-				configuration.request.timelineModernBert.endpoint,
-			),
-		WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT:
-			nonEmptyOrUndefined(
-				configuration.request.timelineModernBert.manifestEndpoint,
-			),
-		WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST:
-			nonEmptyOrUndefined(
-				configuration.request.timelineModernBert.pinnedManifest,
-			),
-		WHALEHALL_TIMELINE_MODERNBERT_TOKEN:
-			environment.WHALEHALL_TIMELINE_MODERNBERT_TOKEN,
+		modelName: reflection.name,
+		endpoint: reflection.baseurl,
+		authorizationToken: reflection.apikey,
+		scoreThreshold: 1,
 	};
 }
 
@@ -134,11 +214,18 @@ function defaultConfiguration(
 	};
 }
 
-function seedConfiguration(templatePath: string, destinationPath: string): void {
-	// Validate before copying so a corrupted app resource can never become a
-	// trusted user configuration file.
-	parseConfiguration(readRegularFile(templatePath));
+function seedConfiguration(
+	templatePath: string,
+	destinationPath: string,
+): void {
+	const parsed = parseConfiguration(readRegularFile(templatePath));
+	if (parsed.kind !== "current") {
+		throw new Error(
+			"Bundled client configuration must use the current schema.",
+		);
+	}
 	mkdirSync(dirname(destinationPath), { recursive: true, mode: 0o700 });
+	hardenPath(dirname(destinationPath), 0o700);
 	try {
 		copyFileSync(templatePath, destinationPath, constants.COPYFILE_EXCL);
 		chmodSync(destinationPath, 0o600);
@@ -161,138 +248,148 @@ function readRegularFile(path: string): string {
 	return readFileSync(path, "utf8");
 }
 
-function parseConfiguration(source: string): ClientConfiguration {
+function parseConfiguration(
+	source: string,
+):
+	| { kind: "current"; configuration: ClientConfiguration }
+	| { kind: "legacy" } {
 	const value = Bun.YAML.parse(source);
-	if (!isRecord(value) || !hasExactKeys(value, ["schemaVersion", "request"])) {
-		throw new Error("Client configuration root is invalid.");
-	}
-	if (value.schemaVersion !== CLIENT_CONFIGURATION_SCHEMA_VERSION) {
-		throw new Error("Client configuration schema version is unsupported.");
-	}
-	if (
-		!isRecord(value.request) ||
-		!hasExactKeys(value.request, [
-			"teacherOllama",
-			"reflectionModernBert",
-			"timelineModernBert",
-		])
-	) {
-		throw new Error("Client request configuration is invalid.");
-	}
-	const teacherOllama = value.request.teacherOllama;
-	const reflectionModernBert = value.request.reflectionModernBert;
-	const timelineModernBert = value.request.timelineModernBert;
-	if (
-		!isRecord(teacherOllama) ||
-		!hasExactKeys(teacherOllama, ["baseUrl"]) ||
-		typeof teacherOllama.baseUrl !== "string" ||
-		!isRecord(reflectionModernBert) ||
-		!hasExactKeys(reflectionModernBert, ["endpoint"]) ||
-		typeof reflectionModernBert.endpoint !== "string" ||
-		!isRecord(timelineModernBert) ||
-		!hasExactKeys(timelineModernBert, [
-			"endpoint",
-			"manifestEndpoint",
-			"pinnedManifest",
-		]) ||
-		typeof timelineModernBert.endpoint !== "string" ||
-		typeof timelineModernBert.manifestEndpoint !== "string" ||
-		typeof timelineModernBert.pinnedManifest !== "string"
-	) {
-		throw new Error("Client request endpoint configuration is invalid.");
-	}
-	const endpoint = timelineModernBert.endpoint.trim();
-	const manifestEndpoint = timelineModernBert.manifestEndpoint.trim();
-	const pinnedManifest = timelineModernBert.pinnedManifest.trim();
-	const configuredTimelineValues = [
-		endpoint,
-		manifestEndpoint,
-		pinnedManifest,
-	].filter((entry) => entry.length > 0).length;
-	if (configuredTimelineValues !== 0 && configuredTimelineValues !== 3) {
-		throw new Error("Timeline ModernBERT configuration must be complete.");
-	}
-	if (configuredTimelineValues === 3) {
-		const normalizedEndpoint = normalizeLoopbackHttpUrl(endpoint);
-		const normalizedManifestEndpoint =
-			normalizeLoopbackHttpUrl(manifestEndpoint);
-		if (
-			new URL(normalizedEndpoint).origin !==
-			new URL(normalizedManifestEndpoint).origin ||
-			!isAbsolute(pinnedManifest)
-		) {
-			throw new Error("Timeline ModernBERT configuration is unsafe.");
-		}
-		return {
-			schemaVersion: CLIENT_CONFIGURATION_SCHEMA_VERSION,
-			request: {
-				teacherOllama: {
-					baseUrl: normalizeLoopbackOllamaBaseUrl(
-						teacherOllama.baseUrl,
-					),
-				},
-				reflectionModernBert: {
-					endpoint: normalizeLoopbackHttpUrl(
-						reflectionModernBert.endpoint.trim(),
-					),
-				},
-				timelineModernBert: {
-					endpoint: normalizedEndpoint,
-					manifestEndpoint: normalizedManifestEndpoint,
-					pinnedManifest,
-				},
-			},
-		};
-	}
+	if (isLegacyConfiguration(value)) return { kind: "legacy" };
 	return {
-		schemaVersion: CLIENT_CONFIGURATION_SCHEMA_VERSION,
-		request: {
-			teacherOllama: {
-				baseUrl: normalizeLoopbackOllamaBaseUrl(teacherOllama.baseUrl),
-			},
-			reflectionModernBert: {
-				endpoint: normalizeLoopbackHttpUrl(
-					reflectionModernBert.endpoint.trim(),
-				),
-			},
-			timelineModernBert: {
-				endpoint: "",
-				manifestEndpoint: "",
-				pinnedManifest: "",
-			},
-		},
+		kind: "current",
+		configuration: normalizeClientConfiguration(value),
 	};
 }
 
-function normalizeLoopbackOllamaBaseUrl(value: string): string {
-	const url = new URL(value.trim());
-	if (
-		url.protocol !== "http:" ||
-		!isLoopbackHostname(url.hostname) ||
-		url.username !== "" ||
-		url.password !== "" ||
-		(url.pathname !== "" && url.pathname !== "/") ||
-		url.search !== "" ||
-		url.hash !== ""
-	) {
-		throw new Error("Teacher Ollama URL must be a loopback HTTP origin.");
-	}
-	return url.origin;
+function isLegacyConfiguration(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		value.schemaVersion === LEGACY_CONFIGURATION_SCHEMA_VERSION &&
+		isRecord(value.request)
+	);
 }
 
-function normalizeLoopbackHttpUrl(value: string): string {
-	const url = new URL(value);
-	if (
-		(url.protocol !== "http:" && url.protocol !== "https:") ||
-		!isLoopbackHostname(url.hostname) ||
-		url.username !== "" ||
-		url.password !== "" ||
-		url.search !== "" ||
-		url.hash !== ""
-	) {
-		throw new Error("Timeline ModernBERT URLs must be loopback HTTP(S).");
+function normalizeClientConfiguration(value: unknown): ClientConfiguration {
+	if (!isRecord(value) || !hasExactKeys(value, ["reflection", "agent"])) {
+		throw new Error("Client configuration root is invalid.");
 	}
-	return url.toString();
+	return {
+		reflection: normalizeModelConfiguration(value.reflection, "reflection"),
+		agent: normalizeModelConfiguration(value.agent, "agent"),
+	};
+}
+
+function normalizeModelConfiguration(
+	value: unknown,
+	role: "reflection" | "agent",
+): ModelConfiguration {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, ["name", "baseurl", "apikey"]) ||
+		typeof value.name !== "string" ||
+		typeof value.baseurl !== "string" ||
+		typeof value.apikey !== "string"
+	) {
+		throw new Error(`${role} model configuration is invalid.`);
+	}
+	if (value.name.trim() !== ACTIVITY_EVENT_WORKER_MODEL) {
+		throw new Error(`${role} model name is not approved.`);
+	}
+	const baseurl =
+		role === "reflection"
+			? normalizeReflectionEndpoint(value.baseurl)
+			: normalizeAgentRelayBaseUrl(value.baseurl);
+	return {
+		name: ACTIVITY_EVENT_WORKER_MODEL,
+		baseurl,
+		apikey: normalizeLiteralApiKey(value.apikey, role),
+	};
+}
+
+function normalizeReflectionEndpoint(value: string): string {
+	const endpoint = parseRemoteHttpsUrl(value, "reflection");
+	if (endpoint.toString() !== ACTIVITY_EVENT_WORKER_ENDPOINT) {
+		throw new Error(
+			"reflection model baseurl is not the approved activity endpoint.",
+		);
+	}
+	return ACTIVITY_EVENT_WORKER_ENDPOINT;
+}
+
+function normalizeAgentRelayBaseUrl(value: string): string {
+	const endpoint = parseRemoteHttpsUrl(value, "agent");
+	if (endpoint.pathname !== "/" && endpoint.pathname !== "") {
+		throw new Error("agent model baseurl must be the relay origin.");
+	}
+	if (endpoint.origin !== AGENT_RELAY_BASE_URL) {
+		throw new Error("agent model baseurl is not the approved relay origin.");
+	}
+	return AGENT_RELAY_BASE_URL;
+}
+
+function parseRemoteHttpsUrl(value: string, role: string): URL {
+	let endpoint: URL;
+	try {
+		endpoint = new URL(value.trim());
+	} catch {
+		throw new Error(`${role} model baseurl is invalid.`);
+	}
+	if (
+		endpoint.protocol !== "https:" ||
+		isLoopbackHostname(endpoint.hostname) ||
+		endpoint.username !== "" ||
+		endpoint.password !== "" ||
+		endpoint.search !== "" ||
+		endpoint.hash !== ""
+	) {
+		throw new Error(`${role} model baseurl must be a remote HTTPS URL.`);
+	}
+	return endpoint;
+}
+
+function normalizeLiteralApiKey(value: string, role: string): string {
+	const apikey = value.trim();
+	if (
+		apikey.length < 1 ||
+		apikey.length >
+			(role === "agent"
+				? MAXIMUM_PERSONAL_RELAY_KEY_LENGTH
+				: MAXIMUM_ACTIVITY_WORKER_KEY_LENGTH) ||
+		/[\p{Cc}\s]/u.test(apikey) ||
+		apikey.includes("${")
+	) {
+		throw new Error(`${role} model apikey must be a literal non-empty key.`);
+	}
+	return apikey;
+}
+
+function runtimeConfiguration(
+	model: ModelConfiguration,
+): ModelRuntimeConfiguration | null {
+	if (isUnprovisionedKey(model.apikey)) return null;
+	return structuredClone(model);
+}
+
+function isUnprovisionedKey(value: string): boolean {
+	return (
+		value === UNPROVISIONED_ACTIVITY_WORKER_KEY ||
+		value === UNPROVISIONED_AGENT_RELAY_KEY
+	);
+}
+
+function serializeConfiguration(configuration: ClientConfiguration): string {
+	return [
+		"reflection:",
+		`  name: ${JSON.stringify(configuration.reflection.name)}`,
+		`  baseurl: ${JSON.stringify(configuration.reflection.baseurl)}`,
+		`  apikey: ${JSON.stringify(configuration.reflection.apikey)}`,
+		"",
+		"agent:",
+		`  name: ${JSON.stringify(configuration.agent.name)}`,
+		`  baseurl: ${JSON.stringify(configuration.agent.baseurl)}`,
+		`  apikey: ${JSON.stringify(configuration.agent.apikey)}`,
+		"",
+	].join("\n");
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -319,8 +416,12 @@ function hasExactKeys(
 	return actual.length === keys.length && keys.every((key) => key in value);
 }
 
-function nonEmptyOrUndefined(value: string): string | undefined {
-	return value.length > 0 ? value : undefined;
+function hardenPath(path: string, mode: number): void {
+	try {
+		chmodSync(path, mode);
+	} catch {
+		// Some test/virtual filesystems do not implement POSIX permissions.
+	}
 }
 
 function isAlreadyExistsError(error: unknown): boolean {

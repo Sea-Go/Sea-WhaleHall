@@ -1,16 +1,10 @@
-import type {
-	AuthCredentials,
-	AuthSession,
-	AuthUser,
-} from "../../../../shared/auth";
+import type { AuthSession } from "../../../../shared/auth";
 
 export type {
 	AuthCredentials,
 	AuthSession,
 	AuthUser,
 } from "../../../../shared/auth";
-
-export type AuthExperienceCredentials = AuthCredentials;
 
 export type AuthFailureKind =
 	| "invalid-credentials"
@@ -43,7 +37,7 @@ const authFailureCopy: Record<
 	{ message: string; retryable: boolean }
 > = {
 	"invalid-credentials": {
-		message: "邮箱或密码不正确，请使用页面显示的体验账号重新登录。",
+		message: "邮箱或密码不正确，请重试。",
 		retryable: false,
 	},
 	offline: {
@@ -51,7 +45,7 @@ const authFailureCopy: Record<
 		retryable: true,
 	},
 	"service-unavailable": {
-		message: "测试账户登录服务暂时不可用，请稍后重试。",
+		message: "登录服务暂时不可用，请稍后重试。",
 		retryable: true,
 	},
 	expired: {

@@ -2,70 +2,77 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent } from "@mastra/core/agent";
 import { RequestContext } from "@mastra/core/request-context";
 import type { MastraModelOutput } from "@mastra/core/stream";
+import {
+	isActivityAnalysisWorkerResult,
+	MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS,
+	MAXIMUM_ACTIVITY_ANALYSIS_RESULTS,
+	serializedActivityAnalysisLength,
+} from "../../shared/activity-analysis-contract";
 import { createMastraAgentSet, type MastraAgentSet } from "./agents";
 import {
-	HostStateAdapters,
 	type CalendarSnapshot,
+	HostStateAdapters,
 	type HostToolProposal,
 	type PlanningValidationIssue,
 } from "./host-adapters";
+import {
+	type ConversationMemoryExecutionContext,
+	HostMastraStorage,
+} from "./mastra-storage";
 import { ModelRelay } from "./model-relay";
 import {
-	HostMastraStorage,
-	type ConversationMemoryExecutionContext,
-} from "./mastra-storage";
-import {
-	planningWorkflowResumeLabel,
-	planningWorkflowStepId,
-	planningWorkflowClarificationSchema,
-	planningWorkflowCompletionSchema,
 	type PlanningWorkflowClarification,
 	type PlanningWorkflowCompletion,
 	type PlanningWorkflowDriverInput,
 	type PlanningWorkflowOutcome,
 	type PlanningWorkflowResume,
+	planningWorkflowClarificationSchema,
+	planningWorkflowCompletionSchema,
+	planningWorkflowResumeLabel,
+	planningWorkflowStepId,
 } from "./planning-workflow";
 import {
+	type ActivityAnalysisStartParams,
+	type ActivityAnalysisWorkerResult,
 	AGENT_HOST_METHODS,
 	AGENT_HOST_PROTOCOL_VERSION,
 	AGENT_HOST_SERVICE,
-	SIDECAR_HOST_METHODS,
-	isRecord,
 	type AgentHostErrorPayload,
 	type AgentHostRequest,
 	type AgentRunEventFrame,
 	type AgentRunEventPayload,
 	type AgentRunSnapshot,
-	type AgentRunTerminalState,
 	type ConversationInputMessage,
 	type ConversationStartParams,
 	type HostPlanningState,
+	isRecord,
 	type PlanningAnswerParams,
 	type PlanningStartParams,
 	type RunAcceptedResult,
 	type RuntimeInitializeParams,
 	type RuntimeInitializeResult,
+	SIDECAR_HOST_METHODS,
 	type SidecarHostMethod,
 	type TaskPlanningAnswer,
 	type TaskPlanningInput,
 } from "./protocol";
 import {
-	taskPlanningQuestionKeySchema,
-	taskPlanningResultSchema,
 	type TaskPlanningDraft,
 	type TaskPlanningResult,
+	taskPlanningQuestionKeySchema,
+	taskPlanningResultSchema,
 } from "./schemas";
 import {
+	type AgentToolExecutionInput,
 	canonicalToolName,
 	isApprovalRequiredToolName,
-	type AgentToolExecutionInput,
 } from "./tools";
 import {
 	AgentHostRuntimeError,
-	protocolError,
 	type HostRequestOptions,
 	type HostRequestPeer,
 	type ProtocolWriter,
+	protocolError,
 } from "./transport";
 
 const defaultRelayBaseUrl = "https://model-relay.whalehall.invalid/v1";
@@ -86,12 +93,19 @@ interface PlanningRunContext {
 	operation: "start" | "answer";
 }
 
+interface ActivityAnalysisRunContext {
+	activityJobId: string;
+	consumedScore: number;
+	analyses: readonly ActivityAnalysisWorkerResult[];
+}
+
 interface RunRecord {
 	snapshot: AgentRunSnapshot;
 	controller: AbortController;
 	cancelReason: string | null;
 	conversation?: ConversationRunContext;
 	planning?: PlanningRunContext;
+	activity?: ActivityAnalysisRunContext;
 	toolProposals: Map<string, HostToolProposal>;
 }
 
@@ -117,7 +131,7 @@ export class AgentHostRuntime {
 	private shuttingDown = false;
 
 	constructor(
-		private readonly peer: HostRequestPeer,
+		peer: HostRequestPeer,
 		private readonly writer: ProtocolWriter,
 		options: AgentHostRuntimeOptions = {},
 	) {
@@ -132,27 +146,32 @@ export class AgentHostRuntime {
 				const contextualOwnerRunId = hostRunContext.getStore();
 				const ownerRunId = requestOptions?.ownerRunId ?? contextualOwnerRunId;
 				if (!ownerRunId) {
-					return Promise.reject(new Error("Sidecar host call is not bound to an Agent run."));
+					return Promise.reject(
+						new Error("Sidecar host call is not bound to an Agent run."),
+					);
 				}
 				if (
 					contextualOwnerRunId &&
 					requestOptions?.ownerRunId &&
 					requestOptions.ownerRunId !== contextualOwnerRunId
 				) {
-					return Promise.reject(new Error("Sidecar host-call run binding changed."));
+					return Promise.reject(
+						new Error("Sidecar host-call run binding changed."),
+					);
 				}
 				return peer.requestHost<TResult>(
 					method,
 					{ ...params, ownerRunId },
 					requestOptions
 						? {
-							requestId: requestOptions.requestId,
-							signal: requestOptions.signal,
-						}
+								requestId: requestOptions.requestId,
+								signal: requestOptions.signal,
+							}
 						: undefined,
 				);
 			},
-			subscribeRelay: (relayId, listener) => peer.subscribeRelay(relayId, listener),
+			subscribeRelay: (relayId, listener) =>
+				peer.subscribeRelay(relayId, listener),
 		};
 		this.adapters = new HostStateAdapters(this.runBoundPeer);
 		this.onShutdownRequested = options.onShutdownRequested ?? (() => undefined);
@@ -169,6 +188,8 @@ export class AgentHostRuntime {
 				return this.startConversation(request.requestId, request.params);
 			case "planning.start":
 				return this.startPlanning(request.requestId, request.params);
+			case "activity.start":
+				return this.startActivityAnalysis(request.requestId, request.params);
 			case "planning.answer":
 				return this.answerPlanning(request.requestId, request.params);
 			case "run.cancel":
@@ -194,7 +215,9 @@ export class AgentHostRuntime {
 					request.requestId,
 					request.params.runId,
 					{
-						...(isRecord(request.params.resumeData) ? request.params.resumeData : {}),
+						...(isRecord(request.params.resumeData)
+							? request.params.resumeData
+							: {}),
 						approved: false,
 						reason: request.params.reason,
 					},
@@ -268,7 +291,10 @@ export class AgentHostRuntime {
 		return this.initialized;
 	}
 
-	private async shutdown(): Promise<{ accepted: true; cancelledRunIds: string[] }> {
+	private async shutdown(): Promise<{
+		accepted: true;
+		cancelledRunIds: string[];
+	}> {
 		if (this.shuttingDown) return { accepted: true, cancelledRunIds: [] };
 		this.shuttingDown = true;
 		const cancelledRunIds: string[] = [];
@@ -287,8 +313,15 @@ export class AgentHostRuntime {
 	): RunAcceptedResult {
 		this.ensureReady();
 		const runId = requiredString(params.runId, "runId");
-		const conversationId = requiredString(params.conversationId, "conversationId");
-		const message = requiredString(params.message, "message", maxConversationCharacters);
+		const conversationId = requiredString(
+			params.conversationId,
+			"conversationId",
+		);
+		const message = requiredString(
+			params.message,
+			"message",
+			maxConversationCharacters,
+		);
 		const resourceId = optionalString(params.resourceId) ?? "whalehall.desktop";
 		const history = (params.history ?? []).map(validateConversationMessage);
 		const record = this.createRun(requestId, runId, "conversation", {
@@ -325,6 +358,29 @@ export class AgentHostRuntime {
 		};
 		record.snapshot.sessionId = sessionId;
 		this.schedule(record, () => this.executePlanningStart(record));
+		return accepted(record);
+	}
+
+	private startActivityAnalysis(
+		requestId: string,
+		params: ActivityAnalysisStartParams,
+	): RunAcceptedResult {
+		this.ensureReady();
+		const runId = requiredString(params.runId, "runId");
+		const activityJobId = requiredString(params.activityJobId, "activityJobId");
+		const consumedScore = requiredNonNegativeFiniteNumber(
+			params.consumedScore,
+			"consumedScore",
+		);
+		const analyses = validateActivityAnalysisWorkerResults(params.analyses);
+		const record = this.createRun(requestId, runId, "activity");
+		record.activity = {
+			activityJobId,
+			consumedScore,
+			analyses,
+		};
+		record.snapshot.activityJobId = activityJobId;
+		this.schedule(record, () => this.executeActivityAnalysis(record));
 		return accepted(record);
 	}
 
@@ -370,10 +426,13 @@ export class AgentHostRuntime {
 			expectedVersion !== undefined &&
 			planning.state.version !== expectedVersion
 		) {
-			throw conflictError("Planning session version changed before answers were applied.", {
-				expectedVersion,
-				actualVersion: planning.state.version,
-			});
+			throw conflictError(
+				"Planning session version changed before answers were applied.",
+				{
+					expectedVersion,
+					actualVersion: planning.state.version,
+				},
+			);
 		}
 		record.snapshot.requestId = requestId;
 		record.snapshot.status = "running";
@@ -381,12 +440,7 @@ export class AgentHostRuntime {
 		record.snapshot.updatedAtMs = this.now();
 		record.controller = new AbortController();
 		this.schedule(record, () =>
-			this.executePlanningAnswer(
-				record,
-				sessionId,
-				answers,
-				expectedVersion,
-			),
+			this.executePlanningAnswer(record, sessionId, answers, expectedVersion),
 		);
 		return accepted(record);
 	}
@@ -401,7 +455,8 @@ export class AgentHostRuntime {
 			await this.rehydratePlanningRun(record, sessionId);
 			if (this.isTerminal(record)) return;
 			const planning = record.planning;
-			if (!planning) throw new Error("Planning run context is missing after recovery.");
+			if (!planning)
+				throw new Error("Planning run context is missing after recovery.");
 			if (
 				expectedVersion !== undefined &&
 				planning.state.version !== expectedVersion
@@ -440,11 +495,13 @@ export class AgentHostRuntime {
 				`Planning session ${sessionId} does not belong to run ${runId}.`,
 			);
 		}
-		const workflowSnapshot = await this.requireStorage().workflows.loadWorkflowSnapshot({
-			workflowName: "task-planning",
-			runId: state.workflowRunId,
-		});
-		const clarification = planningClarificationFromWorkflowSnapshot(workflowSnapshot);
+		const workflowSnapshot =
+			await this.requireStorage().workflows.loadWorkflowSnapshot({
+				workflowName: "task-planning",
+				runId: state.workflowRunId,
+			});
+		const clarification =
+			planningClarificationFromWorkflowSnapshot(workflowSnapshot);
 		if (!clarification) {
 			throw runtimeError(
 				"RUN_NOT_RESUMABLE",
@@ -456,11 +513,14 @@ export class AgentHostRuntime {
 			clarification.version !== state.version ||
 			clarification.clarificationRounds !== state.clarificationRounds
 		) {
-			throw conflictError("Planning state and Workflow snapshot changed independently.", {
-				sessionId,
-				planningVersion: state.version,
-				workflowVersion: clarification.version,
-			});
+			throw conflictError(
+				"Planning state and Workflow snapshot changed independently.",
+				{
+					sessionId,
+					planningVersion: state.version,
+					workflowVersion: clarification.version,
+				},
+			);
 		}
 		if (this.isTerminal(record)) return;
 		record.snapshot.status = "suspended";
@@ -479,8 +539,13 @@ export class AgentHostRuntime {
 		const context = record.conversation;
 		if (!context) throw new Error("Conversation run context is missing.");
 		try {
-			if (operation === "start") await this.emit(record, { kind: "run.started", runKind: "conversation" });
-			else await this.emit(record, { kind: "run.resumed", decision: operation });
+			if (operation === "start")
+				await this.emit(record, {
+					kind: "run.started",
+					runKind: "conversation",
+				});
+			else
+				await this.emit(record, { kind: "run.resumed", decision: operation });
 			const agents = this.requireAgents();
 			const relay = this.requireRelay();
 			const memoryExecution: ConversationMemoryExecutionContext = {
@@ -491,126 +556,214 @@ export class AgentHostRuntime {
 				expectedVersion: context.expectedVersion,
 				versionChecked: false,
 			};
-			await this.requireStorage().runConversation(memoryExecution, () => relay.runInContext(
+			await this.requireStorage().runConversation(memoryExecution, () =>
+				relay.runInContext(
+					{
+						runId: record.snapshot.runId,
+						originatingRequestId: record.snapshot.requestId,
+					},
+					async () => {
+						const requestContext = this.createRequestContext(record);
+						const stream =
+							operation === "start"
+								? await agents.conversation.stream(context.message, {
+										runId: record.snapshot.runId,
+										abortSignal: record.controller.signal,
+										requestContext,
+										memory: {
+											thread: context.conversationId,
+											resource: context.resourceId,
+										},
+									})
+								: await resumeAgentStream(
+										agents.conversation,
+										operation,
+										record.snapshot.runId,
+										record.controller.signal,
+										resumeData,
+										toolCallId,
+										requestContext,
+										context.conversationId,
+										context.resourceId,
+									);
+						let text = record.snapshot.text ?? "";
+						let receivedTextDelta = false;
+						for await (const chunk of stream.fullStream) {
+							if (this.isTerminal(record)) return;
+							if (chunk.type === "text-delta") {
+								const delta = chunk.payload.text;
+								receivedTextDelta = true;
+								text += delta;
+								record.snapshot.text = text;
+								await this.emit(record, {
+									kind: "conversation.text.delta",
+									delta,
+									text,
+								});
+								continue;
+							}
+							if (chunk.type === "tool-call") {
+								const toolName = requireCanonicalToolName(
+									chunk.payload.toolName,
+								);
+								await this.emit(record, {
+									kind: "agent.tool.call",
+									toolCallId: chunk.payload.toolCallId,
+									toolName,
+								});
+								continue;
+							}
+							if (chunk.type === "tool-call-approval") {
+								memoryExecution.suspendedForApproval = true;
+								const toolName = requireCanonicalToolName(
+									chunk.payload.toolName,
+								);
+								const argumentsValue = toolArguments(chunk.payload.args);
+								let proposal = record.toolProposals.get(
+									chunk.payload.toolCallId,
+								);
+								if (!proposal) {
+									proposal = await this.adapters.proposeTool({
+										runId: record.snapshot.runId,
+										toolCallId: chunk.payload.toolCallId,
+										name: toolName,
+										arguments: argumentsValue,
+									});
+									record.toolProposals.set(chunk.payload.toolCallId, proposal);
+								}
+								await this.emit(record, {
+									kind: "agent.tool.approval.required",
+									toolCallId: chunk.payload.toolCallId,
+									toolName,
+									approval: publicToolApproval(proposal),
+									runVersion: proposal.runVersion,
+								});
+								continue;
+							}
+							if (chunk.type === "tool-result") {
+								const toolName = requireCanonicalToolName(
+									chunk.payload.toolName,
+								);
+								await this.emit(record, {
+									kind: "agent.tool.result",
+									toolCallId: chunk.payload.toolCallId,
+									toolName,
+									isError: chunk.payload.isError === true,
+								});
+							}
+						}
+						if (this.isTerminal(record)) return;
+						const finishReason = await stream.finishReason;
+						if (finishReason === "suspended" || stream.status === "suspended") {
+							const proposal = [...record.toolProposals.values()].at(-1);
+							await this.suspend(
+								record,
+								proposal
+									? {
+											kind: "tool-approval",
+											toolCallId: proposal.toolCallId,
+											toolName: proposal.name,
+											approval: publicToolApproval(proposal),
+											runVersion: proposal.runVersion,
+										}
+									: { kind: "agent-suspended" },
+							);
+							return;
+						}
+						const finalText = await stream.text;
+						if (!receivedTextDelta && finalText) {
+							text += finalText;
+							record.snapshot.text = text;
+						}
+						const memoryVersion = memoryExecution.persistedVersion;
+						if (memoryVersion === undefined) {
+							throw runtimeError(
+								"INTERNAL_ERROR",
+								"Mastra Memory did not persist the completed conversation turn.",
+							);
+						}
+						await this.complete(record, {
+							conversationId: context.conversationId,
+							message: { role: "assistant", content: text },
+							memoryVersion,
+						});
+					},
+				),
+			);
+		} catch (error) {
+			await this.failUnlessTerminal(record, error);
+		}
+	}
+
+	private async executeActivityAnalysis(record: RunRecord): Promise<void> {
+		const activity = record.activity;
+		if (!activity || record.snapshot.kind !== "activity") {
+			throw new Error("Activity analysis run context is missing.");
+		}
+		try {
+			await this.emit(record, { kind: "run.started", runKind: "activity" });
+			const agents = this.requireAgents();
+			const relay = this.requireRelay();
+			await relay.runInContext(
 				{
 					runId: record.snapshot.runId,
 					originatingRequestId: record.snapshot.requestId,
 				},
 				async () => {
-					const requestContext = this.createRequestContext(record);
-					const stream =
-						operation === "start"
-							? await agents.conversation.stream(context.message, {
-									runId: record.snapshot.runId,
-									abortSignal: record.controller.signal,
-									requestContext,
-									memory: {
-										thread: context.conversationId,
-										resource: context.resourceId,
-									},
-								})
-							: await resumeAgentStream(
-									agents.conversation,
-									operation,
-									record.snapshot.runId,
-									record.controller.signal,
-									resumeData,
-									toolCallId,
-									requestContext,
-									context.conversationId,
-									context.resourceId,
-								);
-					let text = record.snapshot.text ?? "";
-					let receivedTextDelta = false;
+					const stream = await agents.activity.stream(
+						activityAnalysisPrompt(activity),
+						{
+							runId: record.snapshot.runId,
+							abortSignal: record.controller.signal,
+							requestContext: this.createRequestContext(record),
+						},
+					);
+					let text = "";
 					for await (const chunk of stream.fullStream) {
 						if (this.isTerminal(record)) return;
 						if (chunk.type === "text-delta") {
-							const delta = chunk.payload.text;
-							receivedTextDelta = true;
-							text += delta;
-							record.snapshot.text = text;
-							await this.emit(record, { kind: "conversation.text.delta", delta, text });
-							continue;
-						}
-						if (chunk.type === "tool-call") {
-							const toolName = requireCanonicalToolName(chunk.payload.toolName);
-							await this.emit(record, {
-								kind: "agent.tool.call",
-								toolCallId: chunk.payload.toolCallId,
-								toolName,
-							});
-							continue;
-						}
-						if (chunk.type === "tool-call-approval") {
-							memoryExecution.suspendedForApproval = true;
-							const toolName = requireCanonicalToolName(chunk.payload.toolName);
-							const argumentsValue = toolArguments(chunk.payload.args);
-							let proposal = record.toolProposals.get(chunk.payload.toolCallId);
-							if (!proposal) {
-								proposal = await this.adapters.proposeTool({
-									runId: record.snapshot.runId,
-									toolCallId: chunk.payload.toolCallId,
-									name: toolName,
-									arguments: argumentsValue,
-								});
-								record.toolProposals.set(chunk.payload.toolCallId, proposal);
+							text += chunk.payload.text;
+							if (text.length > maxConversationCharacters) {
+								throw runtimeError(
+									"INVALID_REQUEST",
+									"Activity analysis response is too large.",
+								);
 							}
-							await this.emit(record, {
-								kind: "agent.tool.approval.required",
-								toolCallId: chunk.payload.toolCallId,
-								toolName,
-								approval: publicToolApproval(proposal),
-								runVersion: proposal.runVersion,
-							});
 							continue;
 						}
-						if (chunk.type === "tool-result") {
-							const toolName = requireCanonicalToolName(chunk.payload.toolName);
-							await this.emit(record, {
-								kind: "agent.tool.result",
-								toolCallId: chunk.payload.toolCallId,
-								toolName,
-								isError: chunk.payload.isError === true,
-							});
+						if (
+							chunk.type === "tool-call" ||
+							chunk.type === "tool-call-approval" ||
+							chunk.type === "tool-result"
+						) {
+							throw runtimeError(
+								"INTERNAL_ERROR",
+								"Activity analysis Agent attempted to use a forbidden Tool.",
+							);
 						}
 					}
 					if (this.isTerminal(record)) return;
 					const finishReason = await stream.finishReason;
 					if (finishReason === "suspended" || stream.status === "suspended") {
-						const proposal = [...record.toolProposals.values()].at(-1);
-						await this.suspend(
-							record,
-							proposal
-								? {
-									kind: "tool-approval",
-									toolCallId: proposal.toolCallId,
-									toolName: proposal.name,
-									approval: publicToolApproval(proposal),
-									runVersion: proposal.runVersion,
-								}
-								: { kind: "agent-suspended" },
-						);
-						return;
-					}
-					const finalText = await stream.text;
-					if (!receivedTextDelta && finalText) {
-						text += finalText;
-						record.snapshot.text = text;
-					}
-					const memoryVersion = memoryExecution.persistedVersion;
-					if (memoryVersion === undefined) {
 						throw runtimeError(
 							"INTERNAL_ERROR",
-							"Mastra Memory did not persist the completed conversation turn.",
+							"Activity analysis Agent suspended unexpectedly.",
+						);
+					}
+					const finalText = await stream.text;
+					if (!text && finalText) text = finalText;
+					if (!text.trim()) {
+						throw runtimeError(
+							"INTERNAL_ERROR",
+							"Activity analysis Agent returned an empty summary.",
 						);
 					}
 					await this.complete(record, {
-						conversationId: context.conversationId,
-						message: { role: "assistant", content: text },
-						memoryVersion,
+						activityJobId: activity.activityJobId,
+						summary: text,
 					});
 				},
-			));
+			);
 		} catch (error) {
 			await this.failUnlessTerminal(record, error);
 		}
@@ -619,7 +772,10 @@ export class AgentHostRuntime {
 	private async executeTool(input: AgentToolExecutionInput): Promise<unknown> {
 		const record = this.requireRun(input.runId);
 		if (record.snapshot.status !== "running" || this.isTerminal(record)) {
-			throw runtimeError("RUN_NOT_RESUMABLE", `Run ${input.runId} cannot execute a Tool.`);
+			throw runtimeError(
+				"RUN_NOT_RESUMABLE",
+				`Run ${input.runId} cannot execute a Tool.`,
+			);
 		}
 		const proposal = record.toolProposals.get(input.toolCallId) ?? null;
 		if (isApprovalRequiredToolName(input.name) && !proposal) {
@@ -629,7 +785,10 @@ export class AgentHostRuntime {
 			);
 		}
 		if (proposal && proposal.name !== input.name) {
-			throw runtimeError("RUN_CONFLICT", "Approved Tool name changed before execution.");
+			throw runtimeError(
+				"RUN_CONFLICT",
+				"Approved Tool name changed before execution.",
+			);
 		}
 		return this.adapters.callTool(proposal, input);
 	}
@@ -670,21 +829,30 @@ export class AgentHostRuntime {
 			if (this.isTerminal(record)) return;
 			const current = record.planning?.state;
 			if (!current || state.workflowRunId !== current.workflowRunId) {
-				throw conflictError("Planning workflow identity changed before answers were applied.", {
-					sessionId,
-				});
+				throw conflictError(
+					"Planning workflow identity changed before answers were applied.",
+					{
+						sessionId,
+					},
+				);
 			}
 			if (state.version !== current.version) {
-				throw conflictError("Planning session changed while clarification was suspended.", {
-					expectedVersion: current.version,
-					actualVersion: state.version,
-				});
+				throw conflictError(
+					"Planning session changed while clarification was suspended.",
+					{
+						expectedVersion: current.version,
+						actualVersion: state.version,
+					},
+				);
 			}
 			if (expectedVersion !== undefined && state.version !== expectedVersion) {
-				throw conflictError("Planning session version changed before answers were applied.", {
-					expectedVersion,
-					actualVersion: state.version,
-				});
+				throw conflictError(
+					"Planning session version changed before answers were applied.",
+					{
+						expectedVersion,
+						actualVersion: state.version,
+					},
+				);
 			}
 			await this.adapters.resumePlanningWorkflow({
 				workflowRunId: state.workflowRunId,
@@ -719,9 +887,13 @@ export class AgentHostRuntime {
 			runId: planning.state.workflowRunId,
 		});
 		const cancelWorkflow = () => {
-			void run.cancel().catch((error) => this.onBackgroundError(asError(error)));
+			void run
+				.cancel()
+				.catch((error) => this.onBackgroundError(asError(error)));
 		};
-		record.controller.signal.addEventListener("abort", cancelWorkflow, { once: true });
+		record.controller.signal.addEventListener("abort", cancelWorkflow, {
+			once: true,
+		});
 		try {
 			const requestContext = this.createRequestContext(record);
 			const result =
@@ -750,7 +922,9 @@ export class AgentHostRuntime {
 				return;
 			}
 			if (result.status === "success") {
-				const completion = planningWorkflowCompletionSchema.parse(result.result);
+				const completion = planningWorkflowCompletionSchema.parse(
+					result.result,
+				);
 				record.snapshot.result = completion;
 				await this.complete(record, completion);
 				return;
@@ -778,13 +952,19 @@ export class AgentHostRuntime {
 			record.snapshot.sessionId !== input.sessionId ||
 			planning.state.sessionId !== input.sessionId
 		) {
-			throw conflictError("Planning Workflow does not match the active planning run.", {
-				runId: input.sidecarRunId,
-				sessionId: input.sessionId,
-			});
+			throw conflictError(
+				"Planning Workflow does not match the active planning run.",
+				{
+					runId: input.sidecarRunId,
+					sessionId: input.sessionId,
+				},
+			);
 		}
 		if (this.isTerminal(record)) {
-			throw runtimeError("RUN_NOT_RESUMABLE", `Run ${input.sidecarRunId} is terminal.`);
+			throw runtimeError(
+				"RUN_NOT_RESUMABLE",
+				`Run ${input.sidecarRunId} is terminal.`,
+			);
 		}
 		if (resumeData) {
 			if (
@@ -794,16 +974,22 @@ export class AgentHostRuntime {
 					resumeData.expectedVersion !== planning.state.version) ||
 				!answersMatchTail(planning.state.answers, resumeData.answers)
 			) {
-				throw conflictError("Planning Workflow resume data does not match persisted answers.", {
-					runId: input.sidecarRunId,
-					sessionId: input.sessionId,
-				});
+				throw conflictError(
+					"Planning Workflow resume data does not match persisted answers.",
+					{
+						runId: input.sidecarRunId,
+						sessionId: input.sessionId,
+					},
+				);
 			}
 		} else if (planning.operation !== "start") {
-			throw conflictError("Planning Workflow is missing its clarification resume data.", {
-				runId: input.sidecarRunId,
-				sessionId: input.sessionId,
-			});
+			throw conflictError(
+				"Planning Workflow is missing its clarification resume data.",
+				{
+					runId: input.sidecarRunId,
+					sessionId: input.sessionId,
+				},
+			);
 		}
 		const calendar = await this.adapters.queryCalendar(planning.state.input);
 		return this.executePlanningModel(record, calendar, abortSignal);
@@ -842,7 +1028,11 @@ export class AgentHostRuntime {
 					},
 				);
 				const result = await this.consumePlanningStream(record, stream);
-				if (!result) throw runtimeError("RUN_NOT_RESUMABLE", "Planning run was cancelled.");
+				if (!result)
+					throw runtimeError(
+						"RUN_NOT_RESUMABLE",
+						"Planning run was cancelled.",
+					);
 				if (result.status === "clarifying") {
 					if (planning.state.clarificationRounds >= maxClarificationRounds) {
 						throw runtimeError(
@@ -873,7 +1063,9 @@ export class AgentHostRuntime {
 					draft,
 				);
 				if (!validation.ok) {
-					const latestCalendar = await this.adapters.queryCalendar(planning.state.input);
+					const latestCalendar = await this.adapters.queryCalendar(
+						planning.state.input,
+					);
 					const repairStream = await agents.planning.stream(
 						planningRepairPrompt(
 							planning.state,
@@ -891,8 +1083,15 @@ export class AgentHostRuntime {
 							},
 						},
 					);
-					const repaired = await this.consumePlanningStream(record, repairStream);
-					if (!repaired) throw runtimeError("RUN_NOT_RESUMABLE", "Planning run was cancelled.");
+					const repaired = await this.consumePlanningStream(
+						record,
+						repairStream,
+					);
+					if (!repaired)
+						throw runtimeError(
+							"RUN_NOT_RESUMABLE",
+							"Planning run was cancelled.",
+						);
 					if (repaired.status === "draft") {
 						draft = repaired.draft;
 						validation = await this.adapters.validatePlanning(
@@ -940,10 +1139,13 @@ export class AgentHostRuntime {
 					return completion;
 				}
 
-				planning.state.version = await this.adapters.savePlanning(planning.state, {
-					status: "draft",
-					draft,
-				});
+				planning.state.version = await this.adapters.savePlanning(
+					planning.state,
+					{
+						status: "draft",
+						draft,
+					},
+				);
 				const completion: PlanningWorkflowCompletion = {
 					sessionId: planning.state.sessionId,
 					status: "draft",
@@ -1008,9 +1210,12 @@ export class AgentHostRuntime {
 		if (decision !== "resume") {
 			const decisionToolCallId = requiredString(toolCallId, "toolCallId");
 			if (!record.toolProposals.has(decisionToolCallId)) {
-				throw conflictError("Tool approval does not match this suspended run.", {
-					toolCallId: decisionToolCallId,
-				});
+				throw conflictError(
+					"Tool approval does not match this suspended run.",
+					{
+						toolCallId: decisionToolCallId,
+					},
+				);
 			}
 		}
 		record.snapshot.requestId = requestId;
@@ -1019,7 +1224,12 @@ export class AgentHostRuntime {
 		record.snapshot.updatedAtMs = this.now();
 		record.controller = new AbortController();
 		this.schedule(record, () =>
-			this.executeConversation(record, decision, resumeData, optionalString(toolCallId)),
+			this.executeConversation(
+				record,
+				decision,
+				resumeData,
+				optionalString(toolCallId),
+			),
 		);
 		return accepted(record);
 	}
@@ -1027,18 +1237,27 @@ export class AgentHostRuntime {
 	private async cancelRun(
 		runId: string,
 		reason?: string,
-	): Promise<{ accepted: true; runId: string; status: AgentRunSnapshot["status"] }> {
+	): Promise<{
+		accepted: true;
+		runId: string;
+		status: AgentRunSnapshot["status"];
+	}> {
 		this.ensureReady();
 		const record = this.requireRun(requiredString(runId, "runId"));
-		if (!this.isTerminal(record)) await this.cancelRecord(record, optionalString(reason) ?? null);
+		if (!this.isTerminal(record))
+			await this.cancelRecord(record, optionalString(reason) ?? null);
 		return { accepted: true, runId, status: record.snapshot.status };
 	}
 
-	private async cancelRecord(record: RunRecord, reason: string | null): Promise<void> {
+	private async cancelRecord(
+		record: RunRecord,
+		reason: string | null,
+	): Promise<void> {
 		record.cancelReason = reason;
 		record.controller.abort(reason ?? "Run cancelled");
 		this.agents?.conversation.abortRunStream(record.snapshot.runId);
 		this.agents?.planning.abortRunStream(record.snapshot.runId);
+		this.agents?.activity.abortRunStream(record.snapshot.runId);
 		record.snapshot.status = "cancelled";
 		record.snapshot.terminalState = "cancelled";
 		record.toolProposals.clear();
@@ -1047,7 +1266,9 @@ export class AgentHostRuntime {
 
 	private snapshot(runId: string): AgentRunSnapshot {
 		this.ensureReady();
-		return structuredClone(this.requireRun(requiredString(runId, "runId")).snapshot);
+		return structuredClone(
+			this.requireRun(requiredString(runId, "runId")).snapshot,
+		);
 	}
 
 	private createRun(
@@ -1072,7 +1293,9 @@ export class AgentHostRuntime {
 				startedAtMs: timestamp,
 				updatedAtMs: timestamp,
 				terminalState: null,
-				...(conversation ? { conversationId: conversation.conversationId } : {}),
+				...(conversation
+					? { conversationId: conversation.conversationId }
+					: {}),
 			},
 			controller: new AbortController(),
 			cancelReason: null,
@@ -1083,7 +1306,10 @@ export class AgentHostRuntime {
 		return record;
 	}
 
-	private async emit(record: RunRecord, event: AgentRunEventPayload): Promise<void> {
+	private async emit(
+		record: RunRecord,
+		event: AgentRunEventPayload,
+	): Promise<void> {
 		record.snapshot.sequence += 1;
 		record.snapshot.version += 1;
 		record.snapshot.updatedAtMs = this.now();
@@ -1110,14 +1336,20 @@ export class AgentHostRuntime {
 		await this.emit(record, { kind: "run.completed", result });
 	}
 
-	private async suspend(record: RunRecord, suspendPayload: unknown): Promise<void> {
+	private async suspend(
+		record: RunRecord,
+		suspendPayload: unknown,
+	): Promise<void> {
 		if (this.isTerminal(record)) return;
 		record.snapshot.status = "suspended";
 		record.snapshot.suspendPayload = suspendPayload;
 		await this.emit(record, { kind: "run.suspended", suspendPayload });
 	}
 
-	private async failUnlessTerminal(record: RunRecord, error: unknown): Promise<void> {
+	private async failUnlessTerminal(
+		record: RunRecord,
+		error: unknown,
+	): Promise<void> {
 		if (this.isTerminal(record)) return;
 		if (record.controller.signal.aborted) {
 			await this.cancelRecord(record, record.cancelReason);
@@ -1133,7 +1365,11 @@ export class AgentHostRuntime {
 
 	private ensureReady(): void {
 		if (!this.initialized || !this.agents || !this.relay) {
-			throw runtimeError("NOT_INITIALIZED", "Call runtime.initialize before starting a run.", true);
+			throw runtimeError(
+				"NOT_INITIALIZED",
+				"Call runtime.initialize before starting a run.",
+				true,
+			);
 		}
 		if (this.shuttingDown) {
 			throw runtimeError("INVALID_REQUEST", "The Agent host is shutting down.");
@@ -1157,7 +1393,8 @@ export class AgentHostRuntime {
 
 	private requireRun(runId: string): RunRecord {
 		const record = this.runs.get(runId);
-		if (!record) throw runtimeError("RUN_NOT_FOUND", `Run ${runId} does not exist.`);
+		if (!record)
+			throw runtimeError("RUN_NOT_FOUND", `Run ${runId} does not exist.`);
 		return record;
 	}
 
@@ -1204,7 +1441,9 @@ async function resumeAgentStream(
 	resourceId?: string,
 ) {
 	const memory =
-		threadId && resourceId ? { thread: threadId, resource: resourceId } : undefined;
+		threadId && resourceId
+			? { thread: threadId, resource: resourceId }
+			: undefined;
 	if (decision === "approve") {
 		return agent.approveToolCall({
 			runId,
@@ -1232,7 +1471,10 @@ async function resumeAgentStream(
 	});
 }
 
-function planningPrompt(state: HostPlanningState, calendar: CalendarSnapshot): string {
+function planningPrompt(
+	state: HostPlanningState,
+	calendar: CalendarSnapshot,
+): string {
 	const remainingClarificationRounds = Math.max(
 		0,
 		maxClarificationRounds - state.clarificationRounds,
@@ -1292,12 +1534,18 @@ function planningAgentRunId(
 function planningClarificationFromWorkflowSnapshot(
 	value: unknown,
 ): PlanningWorkflowClarification | null {
-	if (!isRecord(value) || value.status !== "suspended" || !isRecord(value.context)) {
+	if (
+		!isRecord(value) ||
+		value.status !== "suspended" ||
+		!isRecord(value.context)
+	) {
 		return null;
 	}
 	const step = value.context[planningWorkflowStepId];
 	if (!isRecord(step) || step.status !== "suspended") return null;
-	const parsed = planningWorkflowClarificationSchema.safeParse(step.suspendPayload);
+	const parsed = planningWorkflowClarificationSchema.safeParse(
+		step.suspendPayload,
+	);
 	return parsed.success ? parsed.data : null;
 }
 
@@ -1316,6 +1564,58 @@ function answersMatchTail(
 	});
 }
 
+function activityAnalysisPrompt(context: ActivityAnalysisRunContext): string {
+	const serializedAnalyses = JSON.stringify(context.analyses);
+	if (serializedAnalyses.length > MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS) {
+		throw runtimeError(
+			"INVALID_REQUEST",
+			"Activity analysis exceeds the prompt safety limit.",
+		);
+	}
+	return [
+		"以下是已经由活动 Worker 整理过的事件和分数，不是原始活动窗口。",
+		"只能根据这些 Worker 结果生成后台反思摘要；不得要求或猜测原始桌面内容，不得调用任何工具。",
+		`可消费总分：${context.consumedScore}`,
+		"Worker 结果：",
+		serializedAnalyses,
+		"请用简洁中文输出：事件主题、分数含义、以及一个谨慎的下一步建议。",
+	].join("\n");
+}
+
+function validateActivityAnalysisWorkerResults(
+	value: unknown,
+): readonly ActivityAnalysisWorkerResult[] {
+	if (
+		!Array.isArray(value) ||
+		value.length < 1 ||
+		value.length > MAXIMUM_ACTIVITY_ANALYSIS_RESULTS
+	) {
+		throw runtimeError(
+			"INVALID_REQUEST",
+			"Activity analysis must contain Worker results.",
+		);
+	}
+	const analyses = value.map((analysis) => {
+		if (!isActivityAnalysisWorkerResult(analysis)) {
+			throw runtimeError(
+				"INVALID_REQUEST",
+				"Activity analysis may contain Worker results only.",
+			);
+		}
+		return structuredClone(analysis);
+	});
+	if (
+		serializedActivityAnalysisLength(analyses) >
+		MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS
+	) {
+		throw runtimeError(
+			"INVALID_REQUEST",
+			"Activity analysis exceeds the prompt safety limit.",
+		);
+	}
+	return analyses;
+}
+
 function validateConversationMessage(value: unknown): ConversationInputMessage {
 	if (
 		!isRecord(value) ||
@@ -1323,14 +1623,22 @@ function validateConversationMessage(value: unknown): ConversationInputMessage {
 		typeof value.content !== "string" ||
 		value.content.length > maxConversationCharacters
 	) {
-		throw runtimeError("INVALID_REQUEST", "Conversation history contains an invalid message.");
+		throw runtimeError(
+			"INVALID_REQUEST",
+			"Conversation history contains an invalid message.",
+		);
 	}
 	return { role: value.role, content: value.content };
 }
 
-function validatePlanningAnswers(value: unknown): readonly TaskPlanningAnswer[] {
+function validatePlanningAnswers(
+	value: unknown,
+): readonly TaskPlanningAnswer[] {
 	if (!Array.isArray(value) || value.length < 1 || value.length > 3) {
-		throw runtimeError("INVALID_REQUEST", "Planning answers must contain one to three items.");
+		throw runtimeError(
+			"INVALID_REQUEST",
+			"Planning answers must contain one to three items.",
+		);
 	}
 	return value.map((answer) => {
 		if (
@@ -1340,14 +1648,18 @@ function validatePlanningAnswers(value: unknown): readonly TaskPlanningAnswer[] 
 			typeof answer.answerText !== "string" ||
 			!answer.answerText.trim()
 		) {
-			throw runtimeError("INVALID_REQUEST", "Planning answers contain an invalid item.");
+			throw runtimeError(
+				"INVALID_REQUEST",
+				"Planning answers contain an invalid item.",
+			);
 		}
 		return answer as unknown as TaskPlanningAnswer;
 	});
 }
 
 function validatePlanningInput(value: unknown): TaskPlanningInput {
-	if (!isRecord(value)) throw runtimeError("INVALID_REQUEST", "Planning input must be an object.");
+	if (!isRecord(value))
+		throw runtimeError("INVALID_REQUEST", "Planning input must be an object.");
 	const minutes = value.preferredSessionMinutes;
 	if (
 		typeof value.goal !== "string" ||
@@ -1355,7 +1667,9 @@ function validatePlanningInput(value: unknown): TaskPlanningInput {
 		(value.planType !== "short-term" && value.planType !== "long-term") ||
 		typeof value.deadline !== "string" ||
 		!/^\d{4}-\d{2}-\d{2}$/.test(value.deadline) ||
-		(value.priority !== "low" && value.priority !== "medium" && value.priority !== "high") ||
+		(value.priority !== "low" &&
+			value.priority !== "medium" &&
+			value.priority !== "high") ||
 		typeof value.weeklyCapacityHours !== "number" ||
 		!Number.isFinite(value.weeklyCapacityHours) ||
 		value.weeklyCapacityHours <= 0 ||
@@ -1376,7 +1690,25 @@ function validatePlanningInput(value: unknown): TaskPlanningInput {
 
 function requiredString(value: unknown, name: string, max = 256): string {
 	if (typeof value !== "string" || !value.trim() || value.length > max) {
-		throw runtimeError("INVALID_REQUEST", `${name} must be a non-empty string up to ${max} characters.`);
+		throw runtimeError(
+			"INVALID_REQUEST",
+			`${name} must be a non-empty string up to ${max} characters.`,
+		);
+	}
+	return value;
+}
+
+function requiredNonNegativeFiniteNumber(value: unknown, name: string): number {
+	if (
+		typeof value !== "number" ||
+		!Number.isFinite(value) ||
+		value < 0 ||
+		value > 10_000
+	) {
+		throw runtimeError(
+			"INVALID_REQUEST",
+			`${name} must be a non-negative finite number.`,
+		);
 	}
 	return value;
 }
@@ -1384,7 +1716,10 @@ function requiredString(value: unknown, name: string, max = 256): string {
 function optionalString(value: unknown): string | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "string" || !value.trim()) {
-		throw runtimeError("INVALID_REQUEST", "Optional string values cannot be empty.");
+		throw runtimeError(
+			"INVALID_REQUEST",
+			"Optional string values cannot be empty.",
+		);
 	}
 	return value;
 }
@@ -1392,22 +1727,33 @@ function optionalString(value: unknown): string | undefined {
 function optionalVersion(value: unknown): number | undefined {
 	if (value === undefined) return undefined;
 	if (!Number.isSafeInteger(value) || (value as number) < 0) {
-		throw runtimeError("INVALID_REQUEST", "Version must be a non-negative safe integer.");
+		throw runtimeError(
+			"INVALID_REQUEST",
+			"Version must be a non-negative safe integer.",
+		);
 	}
 	return value as number;
 }
 
-function requireCanonicalToolName(value: string): NonNullable<ReturnType<typeof canonicalToolName>> {
+function requireCanonicalToolName(
+	value: string,
+): NonNullable<ReturnType<typeof canonicalToolName>> {
 	const name = canonicalToolName(value);
 	if (!name) {
-		throw runtimeError("INVALID_REQUEST", `Agent attempted to use unavailable Tool ${value}.`);
+		throw runtimeError(
+			"INVALID_REQUEST",
+			`Agent attempted to use unavailable Tool ${value}.`,
+		);
 	}
 	return name;
 }
 
 function toolArguments(value: unknown): Record<string, unknown> {
 	if (!isRecord(value) || Array.isArray(value)) {
-		throw runtimeError("INVALID_REQUEST", "Agent Tool arguments must be an object.");
+		throw runtimeError(
+			"INVALID_REQUEST",
+			"Agent Tool arguments must be an object.",
+		);
 	}
 	const { __mastraMetadata: _metadata, ...argumentsValue } = value;
 	return structuredClone(argumentsValue);
@@ -1426,7 +1772,10 @@ function publicToolApproval(proposal: HostToolProposal) {
 	};
 }
 
-function conflictError(message: string, details: Record<string, unknown>): AgentHostRuntimeError {
+function conflictError(
+	message: string,
+	details: Record<string, unknown>,
+): AgentHostRuntimeError {
 	return new AgentHostRuntimeError({
 		code: "RUN_CONFLICT",
 		message,

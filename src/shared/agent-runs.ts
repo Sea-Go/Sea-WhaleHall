@@ -6,13 +6,21 @@ import type {
 } from "./task-planning";
 
 export const AGENT_RUN_EVENT_SCHEMA_VERSION = "agent-run-event.v1" as const;
-export const AGENT_RUN_SNAPSHOT_SCHEMA_VERSION = "agent-run-snapshot.v1" as const;
+export const AGENT_RUN_SNAPSHOT_SCHEMA_VERSION =
+	"agent-run-snapshot.v1" as const;
 
 /**
  * Stable, renderer-safe Agent boundary. Provider SDK and framework-specific
  * event types must be translated before they cross this contract.
  */
-export type AgentRunKind = "conversation-turn" | "task-planning";
+export type AgentRunKind =
+	| "conversation-turn"
+	| "task-planning"
+	/** Internal-only background run; it is never emitted to the renderer. */
+	| "activity-analysis";
+
+/** The renderer contract cannot represent internal activity-analysis runs. */
+export type RendererAgentRunKind = Exclude<AgentRunKind, "activity-analysis">;
 
 export type AgentRunStatus =
 	| "starting"
@@ -24,10 +32,7 @@ export type AgentRunStatus =
 	| "interrupted"
 	| "failed";
 
-export type AgentRunProgressPhase =
-	| "thinking"
-	| "using-tool"
-	| "finalizing";
+export type AgentRunProgressPhase = "thinking" | "using-tool" | "finalizing";
 
 export type AgentToolRisk = "read" | "write" | "control";
 
@@ -135,7 +140,10 @@ export type AgentRunEvent =
 			session: Exclude<TaskPlanningSession, { status: "clarifying" }>;
 	  }
 	| { type: "planning.completed"; session: TaskPlanningSession }
-	| { type: "run.suspended"; reason: "approval-required" | "clarification-required" }
+	| {
+			type: "run.suspended";
+			reason: "approval-required" | "clarification-required";
+	  }
 	| { type: "run.cancelling" }
 	| { type: "run.completed"; completedAtMs: number }
 	| { type: "run.cancelled"; cancelledAtMs: number; message?: string }
@@ -148,16 +156,24 @@ export type AgentRunEvent =
 	| { type: "run.failed"; failedAtMs: number; failure: AgentRunFailure };
 
 /** sequence is strictly increasing per run; revision protects mutations. */
-export interface AgentRunEventEnvelope {
+interface AgentRunEventEnvelopeBase<TKind extends AgentRunKind> {
 	schemaVersion: typeof AGENT_RUN_EVENT_SCHEMA_VERSION;
 	runId: string;
 	requestId: string;
-	kind: AgentRunKind;
+	kind: TKind;
 	sequence: number;
 	revision: number;
 	emittedAtMs: number;
 	event: AgentRunEvent;
 }
+
+/** Public event envelope sent through renderer RPC only. */
+export type AgentRunEventEnvelope =
+	AgentRunEventEnvelopeBase<RendererAgentRunKind>;
+
+/** Bun-only envelope; it may represent a hidden activity-analysis run. */
+export type InternalAgentRunEventEnvelope =
+	AgentRunEventEnvelopeBase<AgentRunKind>;
 
 export interface AgentRunSnapshotBase {
 	schemaVersion: typeof AGENT_RUN_SNAPSHOT_SCHEMA_VERSION;
@@ -188,9 +204,23 @@ export interface TaskPlanningAgentRunSnapshot extends AgentRunSnapshotBase {
 	session: TaskPlanningSession | null;
 }
 
+/**
+ * Persisted only in the encrypted local Agent repository. The payload itself
+ * contains Worker-produced event summaries and scores, never a raw activity
+ * window. It intentionally has no renderer RPC start command or view state.
+ */
+export interface ActivityAnalysisAgentRunSnapshot extends AgentRunSnapshotBase {
+	kind: "activity-analysis";
+	activityJobId: string;
+	analysisCount: number;
+	consumedScore: number;
+	result: string | null;
+}
+
 export type AgentRunSnapshot =
 	| ConversationAgentRunSnapshot
-	| TaskPlanningAgentRunSnapshot;
+	| TaskPlanningAgentRunSnapshot
+	| ActivityAnalysisAgentRunSnapshot;
 
 export interface AgentRunAccepted {
 	runId: string;

@@ -1,5 +1,5 @@
-# Packaged placeholder only. The owner provisioning command writes literal
-# keys to the private user-data/config.yaml file; do not put usable keys here.
+# Copy this shape only through the owner provisioning command. These values are
+# intentional non-credentials and keep the checked-in example unusable.
 reflection:
   name: "qwen3:1.7b"
   baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"

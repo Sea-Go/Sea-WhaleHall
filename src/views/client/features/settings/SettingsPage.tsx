@@ -12,32 +12,31 @@ import {
 	ShieldCheck,
 } from "lucide-react";
 import {
+	type KeyboardEvent,
+	type ReactNode,
 	useEffect,
 	useRef,
 	useState,
 	useSyncExternalStore,
-	type KeyboardEvent,
-	type ReactNode,
 } from "react";
 import {
 	hasAllAgentReadPermissions,
 	hasAnyAgentReadPermission,
 } from "../../../../shared/agent-permissions";
-import type { AuthUser } from "../auth/public";
-import {
-	MonitoringExclusionsControl,
-	MonitoringPermissionsControl,
-	type MonitoringController,
-} from "../monitoring/public";
-import {
-	AuditExportControl,
-	type AuditExportService,
-} from "../audit-export/public";
 import { Button } from "../../shared/ui/Button";
 import { ConfirmationDialog } from "../../shared/ui/ConfirmationDialog";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { PageHeader } from "../../shared/ui/PageHeader";
-import type { PreferencesController } from "./PreferencesController";
+import {
+	AuditExportControl,
+	type AuditExportService,
+} from "../audit-export/public";
+import type { AuthUser } from "../auth/public";
+import {
+	type MonitoringController,
+	MonitoringExclusionsControl,
+	MonitoringPermissionsControl,
+} from "../monitoring/public";
 import type {
 	AgentPermissionsController,
 	AgentPermissionsState,
@@ -45,15 +44,16 @@ import type {
 import {
 	APPEARANCE_THEME_IDS,
 	APPEARANCE_THEME_LABELS,
+	type AppearanceTheme,
+	createDefaultPreferences,
+	type PreferencesSnapshot,
+	type PreferenceValues,
+	preferenceValuesEqual,
 	SETTINGS_CATEGORY_IDS,
 	SETTINGS_CATEGORY_LABELS,
-	createDefaultPreferences,
-	preferenceValuesEqual,
-	type AppearanceTheme,
-	type PreferenceValues,
-	type PreferencesSnapshot,
 	type SettingsCategory,
 } from "./domain";
+import type { PreferencesController } from "./PreferencesController";
 import "./SettingsPage.css";
 
 const categoryIcons = {
@@ -135,7 +135,9 @@ export function SettingsPage({
 		const nextCategory = SETTINGS_CATEGORY_IDS[nextIndex];
 		if (!nextCategory) return;
 		onCategoryChange(nextCategory);
-		window.requestAnimationFrame(() => categoryRefs.current[nextIndex]?.focus());
+		window.requestAnimationFrame(() =>
+			categoryRefs.current[nextIndex]?.focus(),
+		);
 	}
 
 	const hasPreferences = "snapshot" in state;
@@ -223,9 +225,7 @@ export function SettingsPage({
 										controller.update(section, value)
 									}
 									onLogout={onLogout}
-									agentPermissionsController={
-										agentPermissionsController
-									}
+									agentPermissionsController={agentPermissionsController}
 								/>
 							</div>
 							<footer className="settings-savebar">
@@ -364,7 +364,7 @@ function AccountSettings({
 		<SettingsSection
 			eyebrow="账号"
 			title="你的 WhaleHall"
-			description="当前体验环境使用固定本地测试账户，正式远端账户认证将在后续接入。"
+			description="当前账号通过已配置的 WhaleHall 远端认证服务登录。"
 		>
 			<div className="settings-account-card">
 				<span aria-hidden="true">{user.initials}</span>
@@ -378,7 +378,7 @@ function AccountSettings({
 			</div>
 			<SettingRow
 				title="退出当前账号"
-				description="退出后会立即清理本地测试会话并返回登录门禁。"
+				description="退出后会立即清理本地会话、撤销远端会话并返回登录门禁。"
 				control={
 					<Button variant="danger" onClick={onLogout}>
 						退出登录
@@ -630,11 +630,7 @@ function NotificationSettings({
 	);
 }
 
-function CalendarSettings({
-	values,
-	disabled,
-	onUpdate,
-}: SettingsPanelProps) {
+function CalendarSettings({ values, disabled, onUpdate }: SettingsPanelProps) {
 	const section = values.calendar;
 	return (
 		<SettingsSection
@@ -710,15 +706,8 @@ function AgentReadPermissionsSetting({
 	if (!controller) {
 		return (
 			<div className="settings-agent-permissions">
-				<AgentPermissionRow
-					checked={false}
-					disabled
-					onChange={() => {}}
-				/>
-				<div
-					className="settings-agent-permissions__status"
-					role="status"
-				>
+				<AgentPermissionRow checked={false} disabled onChange={() => {}} />
+				<div className="settings-agent-permissions__status" role="status">
 					桌面授权服务尚未连接，当前保持未授权。
 				</div>
 				<AgentPermissionDisclosure />
@@ -760,10 +749,7 @@ function ConnectedAgentReadPermissionsSetting({
 		state.status === "saving";
 
 	return (
-		<div
-			className="settings-agent-permissions"
-			aria-busy={busy}
-		>
+		<div className="settings-agent-permissions" aria-busy={busy}>
 			<AgentPermissionRow
 				checked={enabled}
 				disabled={
@@ -873,7 +859,8 @@ function AgentPermissionDisclosure() {
 		<div className="settings-agent-permissions__disclosure">
 			<ShieldCheck size={16} aria-hidden="true" />
 			<span>
-				启用后，本地 Agent 会读取完整规划窗口内的日历和当前计划，在本机组装上下文后发送给模型；远端只负责转发模型请求与回答。
+				启用后，本地 Agent
+				会读取完整规划窗口内的日历和当前计划，在本机组装上下文后发送给模型；远端只负责转发模型请求与回答。
 			</span>
 		</div>
 	);
@@ -946,8 +933,7 @@ function PrivacySettings({
 							disabled={disabled}
 							onChange={(event) => {
 								const value = Number(event.currentTarget.value);
-								const retentionDays =
-									value === 7 || value === 90 ? value : 30;
+								const retentionDays = value === 7 || value === 90 ? value : 30;
 								onUpdate("privacy", { ...section, retentionDays });
 							}}
 						>
@@ -988,7 +974,8 @@ function AboutSettings() {
 			<div className="settings-about-copy">
 				<strong>把时间留给重要的事。</strong>
 				<p>
-					WhaleHall 帮助你制定计划、安排时间并诚实回顾投入。数据能力默认留在本机边界内。
+					WhaleHall
+					帮助你制定计划、安排时间并诚实回顾投入。数据能力默认留在本机边界内。
 				</p>
 			</div>
 		</SettingsSection>

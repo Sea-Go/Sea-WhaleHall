@@ -1,5 +1,12 @@
-import { lstatSync, readFileSync } from "node:fs";
-import { isAbsolute, join, parse, resolve, sep } from "node:path";
+import {
+	closeSync,
+	constants,
+	fstatSync,
+	openSync,
+	readFileSync,
+	realpathSync,
+} from "node:fs";
+import { resolve, sep } from "node:path";
 import {
 	ModernBertEpisodeClassifier,
 	type ModernBertRuntimeOptIn,
@@ -7,10 +14,19 @@ import {
 } from "../agent/timeline-v2/modernbert-classifier";
 
 const MAXIMUM_PINNED_MANIFEST_BYTES = 256 * 1024;
+const PINNED_MANIFEST_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$/u;
 
 export type TimelineModernBertConfiguration = {
 	modernBert: ModernBertRuntimeOptIn;
 	code: "disabled" | "enabled" | "invalid_config";
+};
+
+/**
+ * The environment may select only a manifest file name. The containing
+ * directory is owned by desktop composition, never by the environment.
+ */
+export type TimelineModernBertConfigurationOptions = {
+	manifestDirectory: string;
 };
 
 /**
@@ -22,13 +38,16 @@ export type TimelineModernBertConfiguration = {
  */
 export function loadTimelineModernBertConfiguration(
 	environment: Readonly<Record<string, string | undefined>>,
+	options: TimelineModernBertConfigurationOptions,
 ): TimelineModernBertConfiguration {
-	const endpoint =
-		environment.WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT?.trim();
+	const endpoint = environment.WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT?.trim();
 	const manifestEndpoint =
 		environment.WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT?.trim();
 	const pinnedManifestPath =
 		environment.WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST?.trim();
+	const allowedRemoteOrigins = parseAllowedRemoteOrigins(
+		environment.WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS,
+	);
 	const configured = [endpoint, manifestEndpoint, pinnedManifestPath].filter(
 		(value) => value !== undefined && value.length > 0,
 	).length;
@@ -47,40 +66,61 @@ export function loadTimelineModernBertConfiguration(
 		return invalidConfiguration();
 	}
 	try {
-		if (!isAbsolute(pinnedManifestPath)) {
+		if (!PINNED_MANIFEST_FILE_NAME.test(pinnedManifestPath)) {
 			return invalidConfiguration();
 		}
-		if (pathContainsSymbolicLink(pinnedManifestPath)) {
-			return invalidConfiguration();
-		}
-		const stat = lstatSync(pinnedManifestPath);
+		const manifestRoot = realpathSync(options.manifestDirectory);
+		const manifestRootPrefix = manifestRoot.endsWith(sep)
+			? manifestRoot
+			: `${manifestRoot}${sep}`;
+		const normalizedManifestPath = resolve(manifestRoot, pinnedManifestPath);
 		if (
-			stat.isSymbolicLink() ||
-			!stat.isFile() ||
-			stat.size < 1 ||
-			stat.size > MAXIMUM_PINNED_MANIFEST_BYTES
+			!normalizedManifestPath.startsWith(manifestRoot) ||
+			!normalizedManifestPath.startsWith(manifestRootPrefix)
 		) {
 			return invalidConfiguration();
 		}
-		const expectedArtifact =
-			validatePinnedModernBertArtifactManifest(
-				JSON.parse(
-					readFileSync(pinnedManifestPath, "utf8"),
-				) as unknown,
+		const resolvedManifestPath = realpathSync(normalizedManifestPath);
+		if (
+			!resolvedManifestPath.startsWith(manifestRoot) ||
+			!resolvedManifestPath.startsWith(manifestRootPrefix)
+		) {
+			return invalidConfiguration();
+		}
+		const descriptor = openSync(
+			resolvedManifestPath,
+			constants.O_RDONLY | constants.O_NOFOLLOW,
+		);
+		let expectedArtifact: ReturnType<
+			typeof validatePinnedModernBertArtifactManifest
+		>;
+		try {
+			const stat = fstatSync(descriptor);
+			if (
+				stat.isSymbolicLink() ||
+				!stat.isFile() ||
+				stat.size < 1 ||
+				stat.size > MAXIMUM_PINNED_MANIFEST_BYTES
+			) {
+				return invalidConfiguration();
+			}
+			expectedArtifact = validatePinnedModernBertArtifactManifest(
+				JSON.parse(readFileSync(descriptor, "utf8")) as unknown,
 			);
-		const authorizationToken =
-			environment.WHALEHALL_TIMELINE_MODERNBERT_TOKEN;
+		} finally {
+			closeSync(descriptor);
+		}
+		const authorizationToken = environment.WHALEHALL_TIMELINE_MODERNBERT_TOKEN;
 		const modernBert = {
 			enabled: true as const,
 			endpoint,
 			manifestEndpoint,
 			expectedArtifact,
-			...(authorizationToken === undefined
-				? {}
-				: { authorizationToken }),
+			allowedRemoteOrigins,
+			...(authorizationToken === undefined ? {} : { authorizationToken }),
 		};
-		// Constructor validation is metadata-only and applies the classifier's
-		// default loopback policy before composition can report "enabled".
+		// Constructor validation is metadata-only and requires an exact HTTPS
+		// allowlist entry before a remote deployment can report "enabled".
 		new ModernBertEpisodeClassifier(modernBert);
 		return {
 			modernBert,
@@ -91,16 +131,12 @@ export function loadTimelineModernBertConfiguration(
 	}
 }
 
-function pathContainsSymbolicLink(path: string): boolean {
-	const absolutePath = resolve(path);
-	const root = parse(absolutePath).root;
-	let current = root;
-	for (const segment of absolutePath.slice(root.length).split(sep)) {
-		if (segment.length === 0) continue;
-		current = join(current, segment);
-		if (lstatSync(current).isSymbolicLink()) return true;
-	}
-	return false;
+function parseAllowedRemoteOrigins(value: string | undefined): string[] {
+	if (value === undefined || value.trim().length === 0) return [];
+	return value
+		.split(",")
+		.map((origin) => origin.trim())
+		.filter((origin) => origin.length > 0);
 }
 
 function invalidConfiguration(): TimelineModernBertConfiguration {

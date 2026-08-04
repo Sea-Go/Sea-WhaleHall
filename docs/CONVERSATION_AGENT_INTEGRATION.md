@@ -1,13 +1,13 @@
 # 本地 Mastra Agent 与模型转发
 
-WhaleHall 的“Agent 本地”是指：对话上下文、Memory、规划 Workflow、澄清、Tool Loop、审批、日历冲突修复和恢复状态均在桌面客户端运行。模型推理可由远端模型完成，但远端服务只会是身份与原始请求转发器，不是 Agent。当前开发体验只启用本地测试账户；正式远端身份尚未接入，因此模型转发会明确返回 unavailable，而不会伪造 bearer 或回退到远端 Agent。
+WhaleHall 的“Agent 本地”是指：对话上下文、Memory、规划 Workflow、澄清、Tool Loop、审批、日历冲突修复和恢复状态均在桌面客户端运行。模型推理可由远端模型完成，但远端服务只会是身份与原始请求转发器，不是 Agent。生产桌面端使用远端账号密码登录；bearer 与个人 relay key 只保留在 Bun 主进程，不下发给 Renderer 或 Sidecar。
 
 ```mermaid
 flowchart LR
   React["React WebView\n只负责 UI"] <-->|"Typed RPC"| Bun["Bun 主进程\n身份、存储、日历、政策"]
   Bun <-->|"Content-Length stdio"| Sidecar["Node 22.18 Mastra Sidecar\nAgent、Memory、Workflow、Tool Loop"]
   Sidecar -->|"完整 OpenAI-compatible body"| Bun
-  Bun -.->|"未来：Bearer + HTTPS\n测试账户禁用"| Relay["远端 auth/model relay"]
+  Bun -->|"Bearer + personal relay key\nHTTPS"| Relay["远端 auth/model relay"]
   Relay --> Provider["模型供应商"]
   Bun --> SQLite["字段加密 SQLite"]
   Bun --> Vault["Credential Manager / Keychain"]
@@ -31,15 +31,14 @@ repository 管理。Mastra 首版不会把 browser、accessibility、activity、
 macOS 的签名 Observer 和不可变 `whalehall-vault-broker-v2` 安全链保持不变。
 Vault Broker 负责敏感 observation content；新增的 credential helper 只负责
 固定 WhaleHall namespace 下的账号凭据和 Agent 数据密钥，二者不能互相替代。
-Reflection、Timeline、Qwen 和 ModernBERT endpoint 继续从打包的
-`config.yaml` 读取；`WHALEHALL_RELAY_URL` 与 `WHALEHALL_MODEL_ID` 仅服务于
-Mastra 模型转发边界。
+可编辑 `config.yaml` 只保存 `reflection` 与 `agent` 两个固定角色的
+`name/baseurl/apikey`；Timeline 和 ModernBERT 不从该文件接受远端模型地址。
 
 ## 不可跨越的边界
 
 - React 不导入 Mastra、AI SDK、数据库、Rust 协议或 native API；Renderer 不提交 `userId`。
 - Sidecar 不接触 access token、refresh token、厂商 API Key或 OS 凭据库，不监听 HTTP 端口，也不启用 Mastra Server、Studio、Cloud 或遥测。
-- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。当前测试会话没有 bearer，模型转发 fail closed。
+- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。模型 relay 只接受同一账号的短期 bearer 加个人 relay key。
 - 远端不添加 system prompt、不拼接历史、不保存可恢复会话状态、不执行 Tool，也没有读取历史的接口。
 - Rust Local Tool Host 继续拥有传感器和本地能力。首版 Mastra Agent 不注册 browser、accessibility、activity、cleanup 或完整 Rust Tool catalogue。
 
@@ -62,27 +61,17 @@ Agent 数据库位于平台 `userData/agent/whalehall-agent.sqlite3`，与 Rust 
 
 每个账号使用独立 32 字节数据密钥；Windows 存在 Credential Manager，macOS 存在 Keychain。消息、标题、目标、Tool 参数与结果、精确排程、计划草案和 Workflow snapshot 使用 AES-256-GCM 字段加密，AAD 绑定账号、表、行、字段、schema/key/cipher version。数据库只保留必要的 opaque ID、状态、版本、时间和粗粒度日期索引明文。
 
-普通退出只结束当前测试会话，不删除数据密钥或本地内容。旧数据存在但密钥丢失、密文被篡改、AAD/账号/版本不匹配时拒绝解密，绝不创建新密钥覆盖。Linux helper 明确返回 secure storage unavailable，不回退到 sessionStorage 或明文文件。
+普通退出只结束当前远端登录会话，不删除数据密钥或本地内容。旧数据存在但密钥丢失、密文被篡改、AAD/账号/版本不匹配时拒绝解密，绝不创建新密钥覆盖。Linux helper 明确返回 secure storage unavailable，不回退到 sessionStorage 或明文文件。
 
 ## 认证
 
-当前桌面体验账号固定为：
+桌面使用 `POST /v1/auth/sessions` 的邮箱密码登录，并安全保存 refresh token；短期
+access token 和 personal relay key 只停留在 Bun 主进程。密码提交后立即从 React
+state 清除，不写入数据库、日志、argv 或环境变量。refresh、退出与会话过期会先关闭
+AuthGate、递增 generation、终止模型流并清理旧账号的本地运行，再允许新账号开始。
 
-```text
-邮箱：demo@whalehall.local
-密码：whalehall
-账号 ID：user-demo-wang-yiming
-```
-
-页面预填邮箱并明示体验密码。密码提交后立即从 React state 清除；Bun 只在本机严格校验这组固定值，并绑定固定账号 ID 和 session generation，不访问远端、不签发 token、不把凭据写入数据库、日志、argv 或环境变量。退出会先关闭 AuthGate 并递增 generation，同步中止模型流、隐藏日程并使 active goal 失效，再等待 Agent run和 Reflection 清理屏障。登录或恢复在本地账号初始化完成后必须复验原 session ID 与 generation，避免退出竞态返回过期成功。
-
-桌面目前只使用模型选择配置：
-
-```text
-WHALEHALL_MODEL_ID=gpt-4.1-mini
-```
-
-正式远端账户认证、access/refresh token、旋转和 revoke 属于后续工作。在它接入前，`WHALEHALL_RELAY_URL` 不会赋予本地测试账户模型访问能力。
+`config.yaml` 的 `agent` 角色固定为 `qwen3:1.7b` 与 relay origin。每个聊天请求
+同时附带 bearer 和 `X-WhaleHall-Agent-Key`；relay 验证两者同属一个账户后才转发。
 
 ## 对话、Tool 与审批
 
@@ -111,9 +100,12 @@ Bun 在模型后验证 schema、引用、日期、IANA 时区、时长、截止�
 - `GET /v1/auth/me`
 - `POST /v1/chat/completions`
 
-Chat endpoint 只信 bearer subject，拒绝 body/header中的自报身份与供应商凭据，执行 16 MiB大小限制、精确模型 allowlist、限流和幂等检查，注入远端 provider key，然后转发原始 OpenAI-compatible字节。SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，流式中断不会续传。部署、数据保留与多实例存储说明见 `services/model-relay/README.md`。
-
-该服务是未来正式认证接入时的部署目标；当前固定本地测试账户不会调用这些身份接口，也没有 bearer 可调用 Chat endpoint。
+Chat endpoint 同时验证 bearer subject 和该 subject 的 scrypt `agentKeyHash`，拒绝
+body/header 中的自报身份与供应商凭据，执行 16 MiB 大小限制、精确模型 allowlist、
+限流和幂等检查，然后把原始 OpenAI-compatible 字节转发到固定 CPU-only Ollama
+loopback。SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，
+流式中断不会续传。部署、数据保留与多实例存储说明见
+`deploy/home-cloud/model-relay/README.md`。
 
 ## 本地联调和验证
 
@@ -129,7 +121,9 @@ versioned Vault Broker，并继续执行既有 post-wrap/post-package 签名和�
 在 macOS 授予 monitoring 权限前，先按 README 使用
 `bun run setup:macos-signing -- --create` 建立固定本地开发身份。
 
-远端服务使用 `services/model-relay/main.ts`，provider key 只能在远端进程环境中设置。完整门禁：
+远端服务使用 `services/model-relay/main.ts`，relay 固定绑定
+`127.0.0.1:8787`，并且只向 CPU-only Ollama loopback
+`127.0.0.1:11437` 转发 allowlisted 的 `qwen3:1.7b`。完整门禁：
 
 ```bash
 bun run typecheck

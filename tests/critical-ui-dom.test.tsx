@@ -2,7 +2,6 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { AuthCredentials } from "../src/views/client/features/auth/domain";
 import type { ConversationRun } from "../src/views/client/features/conversation/domain";
-import { MOCK_AUTH_EXPERIENCE } from "../src/views/client/infrastructure/auth/MockAuthService";
 
 GlobalRegistrator.register({
 	url: "http://whalehall.test/",
@@ -14,13 +13,17 @@ const reactActEnvironment = globalThis as typeof globalThis & {
 };
 reactActEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
 
-const [{ cleanup, render }, { default: userEvent }, { AuthPage }, { ConversationPage }] =
-	await Promise.all([
-		import("@testing-library/react"),
-		import("@testing-library/user-event"),
-		import("../src/views/client/features/auth/AuthPage"),
-		import("../src/views/client/features/conversation/ConversationPage"),
-	]);
+const [
+	{ cleanup, render },
+	{ default: userEvent },
+	{ AuthPage },
+	{ ConversationPage },
+] = await Promise.all([
+	import("@testing-library/react"),
+	import("@testing-library/user-event"),
+	import("../src/views/client/features/auth/AuthPage"),
+	import("../src/views/client/features/conversation/ConversationPage"),
+]);
 
 afterEach(() => cleanup());
 
@@ -86,14 +89,18 @@ describe("critical ConversationPage DOM behavior", () => {
 					thread: streamingThread,
 					turn: { status: "running", run: runningRun },
 				}}
-				actions={{ onStopRun: () => { stopCalls += 1; } }}
+				actions={{
+					onStopRun: () => {
+						stopCalls += 1;
+					},
+				}}
 			/>,
 		);
 		const user = userEvent.setup({ document });
 
-		expect(view.getByText("你今天有两个").closest("article")?.className).toContain(
-			"conversation-message--assistant",
-		);
+		expect(
+			view.getByText("你今天有两个").closest("article")?.className,
+		).toContain("conversation-message--assistant");
 		expect(view.getByText("正在生成回复…")).toBeTruthy();
 		expect(view.getByText("已读取 2 个日程块")).toBeTruthy();
 		const liveTextBefore = liveRegionText(view.container);
@@ -114,7 +121,11 @@ describe("critical ConversationPage DOM behavior", () => {
 					},
 					turn: { status: "running", run: runningRun },
 				}}
-				actions={{ onStopRun: () => { stopCalls += 1; } }}
+				actions={{
+					onStopRun: () => {
+						stopCalls += 1;
+					},
+				}}
 			/>,
 		);
 		expect(view.getByText("你今天有两个重要日程")).toBeTruthy();
@@ -152,8 +163,12 @@ describe("critical ConversationPage DOM behavior", () => {
 		const pageActions = {
 			onSendMessage: () => {},
 			onStopRun: () => {},
-			onApproveTool: () => { approveCalls += 1; },
-			onDeclineTool: () => { declineCalls += 1; },
+			onApproveTool: () => {
+				approveCalls += 1;
+			},
+			onDeclineTool: () => {
+				declineCalls += 1;
+			},
 		};
 		const view = render(
 			<ConversationPage
@@ -254,12 +269,14 @@ describe("critical ConversationPage DOM behavior", () => {
 				actions={pageActions}
 			/>,
 		);
-		expect(document.activeElement).toBe(view.getByRole("button", { name: "停止" }));
+		expect(document.activeElement).toBe(
+			view.getByRole("button", { name: "停止" }),
+		);
 	});
 });
 
 describe("critical AuthPage DOM behavior", () => {
-	test("prefills the historical account, reveals the password, and clears it on Enter submit", async () => {
+	test("requires account input, reveals the password, and clears it on Enter submit", async () => {
 		const submissions: AuthCredentials[] = [];
 		let releaseSubmission!: () => void;
 		const submission = new Promise<void>((resolve) => {
@@ -268,7 +285,6 @@ describe("critical AuthPage DOM behavior", () => {
 		const view = render(
 			<AuthPage
 				state={{ status: "unauthenticated", notice: null }}
-				experienceCredentials={MOCK_AUTH_EXPERIENCE}
 				onSubmit={(credentials) => {
 					submissions.push({ ...credentials });
 					return submission;
@@ -280,11 +296,11 @@ describe("critical AuthPage DOM behavior", () => {
 		const email = view.getByLabelText("邮箱") as HTMLInputElement;
 		const password = view.getByLabelText("密码") as HTMLInputElement;
 
-		expect(email.value).toBe("demo@whalehall.local");
+		expect(email.value).toBe("");
 		expect(password.value).toBe("");
 		expect(password.type).toBe("password");
-		expect(view.getByText("体验密码：whalehall")).toBeTruthy();
 
+		await user.type(email, "owner@example.test");
 		await user.type(password, "whalehall");
 		await user.click(view.getByRole("button", { name: "显示密码" }));
 		expect(password.type).toBe("text");
@@ -294,7 +310,7 @@ describe("critical AuthPage DOM behavior", () => {
 		await user.keyboard("{Enter}");
 		expect(submissions).toEqual([
 			{
-				email: "demo@whalehall.local",
+				email: "owner@example.test",
 				password: "whalehall",
 			},
 		]);

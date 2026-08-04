@@ -1,6 +1,6 @@
 # WhaleHall model relay
 
-This service is intentionally not an Agent. It exposes only five endpoints:
+This native Node 22 service is intentionally not an Agent. It exposes only:
 
 - `POST /v1/auth/sessions`
 - `POST /v1/auth/sessions/refresh`
@@ -8,39 +8,45 @@ This service is intentionally not an Agent. It exposes only five endpoints:
 - `GET /v1/auth/me`
 - `POST /v1/chat/completions`
 
-The chat endpoint authenticates an opaque bearer token, enforces an exact model
-allowlist, request-size/rate/idempotency limits, stores the request and response,
-adds the provider credential, and forwards the original OpenAI-compatible JSON
-bytes. It never adds prompts, loads conversation history, executes tools, or
-offers a history-read endpoint. Streaming responses remain streaming and are
-recorded in byte order; incomplete streams are not replayed.
+The chat endpoint requires both a short-lived bearer token and
+`X-WhaleHall-Agent-Key`. It resolves the bearer subject first and verifies the
+personal key against that exact user's `agentKeyHash` with the existing scrypt
+format. Neither desktop bearer/relay keys nor upstream Qwen credentials are
+forwarded upstream or returned in an API response.
 
-## Runtime configuration
+It enforces an exact `qwen3:1.7b` allowlist, size/rate/idempotency limits, and
+byte-preserving OpenAI-compatible forwarding. Relay records are retained for
+30 days. It has no prompt injection, conversation/history, Tool, planning, or
+activity-analysis endpoint; the latter is a local encrypted desktop workflow.
 
-The executable entry point is `main.ts`. `bun run build:model-relay` emits ESM
-for Node 22, and `bun run start:model-relay` starts that build. Provider
-credentials are never bundled. The following environment values are
-required at runtime:
+## Fixed production boundary
 
-- `WHALEHALL_RELAY_USERS_FILE`: absolute path to a private JSON user file.
+`bun run build:model-relay` emits ESM for Node 22 and `bun run start:model-relay`
+starts it. The production entry point has no provider URL/key environment
+options. It always:
+
+- binds `127.0.0.1:8787`;
+- forwards only to CPU-only Ollama
+  `http://127.0.0.1:11437/v1/chat/completions`;
+- allows only `qwen3:1.7b`;
+- records requests/responses for 30 days.
+
+Required environment values are intentionally limited to local file paths:
+
+- `WHALEHALL_RELAY_USERS_FILE`: absolute owner-only JSON user file.
 - `WHALEHALL_RELAY_DATA_DIR`: private directory for token digests and relay
   records.
-- `WHALEHALL_PROVIDER_CHAT_COMPLETIONS_URL`: exact HTTPS provider endpoint.
-- `WHALEHALL_PROVIDER_API_KEY`: provider credential, used only in the upstream
-  `Authorization` header.
-- `WHALEHALL_ALLOWED_MODELS`: comma-separated exact model identifiers; `*` is
-  rejected.
 
-The process binds to `127.0.0.1:8787` by default, for placement behind a TLS
-reverse proxy. A non-loopback bind fails closed unless
-`WHALEHALL_TRUSTED_TLS_PROXY=true` is explicitly set. Optional retention and
-rate settings are documented by the names used in `main.ts`.
+`WHALEHALL_CHAT_REQUESTS_PER_MINUTE` and
+`WHALEHALL_LOGIN_ATTEMPTS_PER_MINUTE` are bounded optional limits. The service
+rejects all alternate HTTP endpoints, including GPU/Ollama paths.
 
-The user file is an array (or `{ "users": [...] }`) containing `id`, `email`,
-`displayName`, `initials`, `passwordHash`, and optional `disabled`. Generate the
-`passwordHash` with `createScryptPasswordHash`; plaintext passwords must never
-be written to this file.
+The users file is an array (or `{ "users": [...] }`) containing `id`, `email`,
+`displayName`, `initials`, `passwordHash`, `agentKeyHash`, and optional
+`disabled`. Generate it using `bun run provision:relay-owner`; plaintext
+passwords and personal relay keys must never be written to this file.
 
-The built-in file stores are single-process adapters. Multi-instance deployments
-must inject transactional shared implementations of `SessionStore`,
-`RelayRecordStore`, and `RateLimiter` into `createModelRelayHandler`.
+Deployment assets, CPU preflight, exact Caddy routes, and rollback steps are in
+[`deploy/home-cloud/model-relay/README.md`](../../deploy/home-cloud/model-relay/README.md).
+They use systemd and Caddy only—never Docker, FRP, Cloudflare, or the GPU
+training Worker.

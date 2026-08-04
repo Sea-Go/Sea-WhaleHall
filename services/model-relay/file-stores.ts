@@ -3,8 +3,8 @@ import {
 	appendFile,
 	chmod,
 	mkdir,
-	readFile,
 	readdir,
+	readFile,
 	rename,
 	stat,
 	unlink,
@@ -45,7 +45,8 @@ export class JsonFileUserStore implements UserStore {
 		const emails = new Set<string>();
 		for (const user of users) {
 			const email = user.email.toLowerCase();
-			if (ids.has(user.id) || emails.has(email)) throw new Error("Relay users file contains duplicates.");
+			if (ids.has(user.id) || emails.has(email))
+				throw new Error("Relay users file contains duplicates.");
 			ids.add(user.id);
 			emails.add(email);
 		}
@@ -53,7 +54,9 @@ export class JsonFileUserStore implements UserStore {
 	}
 
 	async findByEmail(normalizedEmail: string): Promise<RelayUser | null> {
-		const user = this.users.find((item) => item.email.toLowerCase() === normalizedEmail);
+		const user = this.users.find(
+			(item) => item.email.toLowerCase() === normalizedEmail,
+		);
 		return user ? { ...user } : null;
 	}
 
@@ -73,7 +76,14 @@ export class FileSessionStore implements SessionStore {
 	async create(session: StoredSession): Promise<void> {
 		await this.exclusive(async () => {
 			const sessions = await this.read();
-			if (sessions.some((item) => item.id === session.id || item.accessDigest === session.accessDigest || item.refreshDigest === session.refreshDigest)) {
+			if (
+				sessions.some(
+					(item) =>
+						item.id === session.id ||
+						item.accessDigest === session.accessDigest ||
+						item.refreshDigest === session.refreshDigest,
+				)
+			) {
 				throw new Error("Duplicate session record.");
 			}
 			sessions.push({ ...session });
@@ -81,22 +91,34 @@ export class FileSessionStore implements SessionStore {
 		});
 	}
 
-	async findActiveByAccessDigest(digest: string, nowMs: number): Promise<StoredSession | null> {
+	async findActiveByAccessDigest(
+		digest: string,
+		nowMs: number,
+	): Promise<StoredSession | null> {
 		return this.exclusive(async () => {
 			const sessions = await this.read();
-			const match = sessions.find((session) => session.accessDigest === digest
-				&& session.revokedAtMs === null
-				&& session.accessExpiresAtMs > nowMs);
+			const match = sessions.find(
+				(session) =>
+					session.accessDigest === digest &&
+					session.revokedAtMs === null &&
+					session.accessExpiresAtMs > nowMs,
+			);
 			return match ? { ...match } : null;
 		});
 	}
 
-	async consumeRefresh(digest: string, nowMs: number): Promise<StoredSession | null> {
+	async consumeRefresh(
+		digest: string,
+		nowMs: number,
+	): Promise<StoredSession | null> {
 		return this.exclusive(async () => {
 			const sessions = await this.read();
-			const match = sessions.find((session) => session.refreshDigest === digest
-				&& session.revokedAtMs === null
-				&& session.refreshExpiresAtMs > nowMs);
+			const match = sessions.find(
+				(session) =>
+					session.refreshDigest === digest &&
+					session.revokedAtMs === null &&
+					session.refreshExpiresAtMs > nowMs,
+			);
 			if (!match) return null;
 			match.revokedAtMs = nowMs;
 			await this.write(sessions);
@@ -121,7 +143,9 @@ export class FileSessionStore implements SessionStore {
 	async cleanup(nowMs: number): Promise<void> {
 		await this.exclusive(async () => {
 			const sessions = await this.read();
-			const retained = sessions.filter((session) => session.refreshExpiresAtMs > nowMs);
+			const retained = sessions.filter(
+				(session) => session.refreshExpiresAtMs > nowMs,
+			);
 			if (retained.length !== sessions.length) await this.write(retained);
 		});
 	}
@@ -143,7 +167,10 @@ export class FileSessionStore implements SessionStore {
 
 	private exclusive<T>(operation: () => Promise<T>): Promise<T> {
 		const result = this.tail.then(operation, operation);
-		this.tail = result.then(() => {}, () => {});
+		this.tail = result.then(
+			() => {},
+			() => {},
+		);
 		return result;
 	}
 }
@@ -174,7 +201,8 @@ export class FileRelayRecordStore implements RelayRecordStore {
 	private lastCleanupMs = 0;
 
 	constructor(private readonly directory: string) {
-		if (!basename(resolve(directory))) throw new Error("Relay record directory is invalid.");
+		if (!basename(resolve(directory)))
+			throw new Error("Relay record directory is invalid.");
 	}
 
 	async claim(claim: RelayRecordClaim): Promise<RelayClaimResult> {
@@ -188,7 +216,8 @@ export class FileRelayRecordStore implements RelayRecordStore {
 				if (existing.requestHash !== claim.requestHash) {
 					return { kind: "conflict", recordId: existing.recordId };
 				}
-				if (existing.state === "inflight") return { kind: "inflight", recordId: existing.recordId };
+				if (existing.state === "inflight")
+					return { kind: "inflight", recordId: existing.recordId };
 				if (existing.state === "completed" && !existing.stream) {
 					return {
 						kind: "replay",
@@ -196,19 +225,30 @@ export class FileRelayRecordStore implements RelayRecordStore {
 						response: {
 							status: existing.responseStatus ?? 500,
 							headers: { ...existing.responseHeaders },
-							body: new Uint8Array(await readFile(join(this.directory, `${existing.recordId}.response.bin`))),
+							body: new Uint8Array(
+								await readFile(
+									join(this.directory, `${existing.recordId}.response.bin`),
+								),
+							),
 						},
 					};
 				}
 				return { kind: "duplicate", recordId: existing.recordId };
 			}
-			if (existing) await deleteRecordArtifacts(this.directory, existing, metadataPath);
+			if (existing)
+				await deleteRecordArtifacts(this.directory, existing, metadataPath);
 
 			const requestPath = join(this.directory, `${recordId}.request.bin`);
 			const responsePath = join(this.directory, `${recordId}.response.bin`);
 			try {
-				await writeFile(requestPath, claim.requestBody, { mode: FILE_MODE, flag: "wx" });
-				await writeFile(responsePath, new Uint8Array(), { mode: FILE_MODE, flag: "wx" });
+				await writeFile(requestPath, claim.requestBody, {
+					mode: FILE_MODE,
+					flag: "wx",
+				});
+				await writeFile(responsePath, new Uint8Array(), {
+					mode: FILE_MODE,
+					flag: "wx",
+				});
 			} catch (error) {
 				await unlink(requestPath).catch(ignoreMissing);
 				await unlink(responsePath).catch(ignoreMissing);
@@ -300,16 +340,26 @@ export class FileRelayRecordStore implements RelayRecordStore {
 
 	private exclusive<T>(operation: () => Promise<T>): Promise<T> {
 		const result = this.tail.then(operation, operation);
-		this.tail = result.then(() => {}, () => {});
+		this.tail = result.then(
+			() => {},
+			() => {},
+		);
 		return result;
 	}
 }
 
-async function atomicPrivateWrite(path: string, contents: string): Promise<void> {
+async function atomicPrivateWrite(
+	path: string,
+	contents: string,
+): Promise<void> {
 	await mkdir(dirname(path), { recursive: true, mode: DIRECTORY_MODE });
 	const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
 	try {
-		await writeFile(temporary, contents, { encoding: "utf8", mode: FILE_MODE, flag: "wx" });
+		await writeFile(temporary, contents, {
+			encoding: "utf8",
+			mode: FILE_MODE,
+			flag: "wx",
+		});
 		await rename(temporary, path);
 		await chmod(path, FILE_MODE).catch(() => {});
 	} catch (error) {
@@ -338,8 +388,12 @@ async function deleteRecordArtifacts(
 	metadata: FileRelayMetadata,
 	metadataPath: string,
 ): Promise<void> {
-	await unlink(join(directory, `${metadata.recordId}.request.bin`)).catch(ignoreMissing);
-	await unlink(join(directory, `${metadata.recordId}.response.bin`)).catch(ignoreMissing);
+	await unlink(join(directory, `${metadata.recordId}.request.bin`)).catch(
+		ignoreMissing,
+	);
+	await unlink(join(directory, `${metadata.recordId}.response.bin`)).catch(
+		ignoreMissing,
+	);
 	await unlink(metadataPath).catch(ignoreMissing);
 }
 
@@ -351,6 +405,7 @@ function validateUser(value: unknown): RelayUser {
 		displayName: boundedString(value.displayName, 256),
 		initials: boundedString(value.initials, 16),
 		passwordHash: boundedString(value.passwordHash, 4_096),
+		agentKeyHash: boundedString(value.agentKeyHash, 4_096),
 		disabled: value.disabled === true,
 	};
 }
@@ -366,19 +421,28 @@ function validateSession(value: unknown): StoredSession {
 		accessExpiresAtMs: finiteNumber(value.accessExpiresAtMs),
 		refreshExpiresAtMs: finiteNumber(value.refreshExpiresAtMs),
 		createdAtMs: finiteNumber(value.createdAtMs),
-		revokedAtMs: value.revokedAtMs === null ? null : finiteNumber(value.revokedAtMs),
+		revokedAtMs:
+			value.revokedAtMs === null ? null : finiteNumber(value.revokedAtMs),
 	};
 }
 
 function validateMetadata(value: unknown): FileRelayMetadata {
 	if (!isRecord(value)) throw new Error("Relay metadata is malformed.");
-	if (value.state !== "inflight" && value.state !== "completed" && value.state !== "failed") {
+	if (
+		value.state !== "inflight" &&
+		value.state !== "completed" &&
+		value.state !== "failed"
+	) {
 		throw new Error("Relay metadata state is invalid.");
 	}
-	if (!isRecord(value.responseHeaders)) throw new Error("Relay response headers are invalid.");
+	if (!isRecord(value.responseHeaders))
+		throw new Error("Relay response headers are invalid.");
 	const responseHeaders: Record<string, string> = {};
 	for (const [name, headerValue] of Object.entries(value.responseHeaders)) {
-		responseHeaders[boundedString(name, 256)] = boundedString(headerValue, 8_192);
+		responseHeaders[boundedString(name, 256)] = boundedString(
+			headerValue,
+			8_192,
+		);
 	}
 	return {
 		recordId: safeRecordId(value.recordId),
@@ -390,19 +454,31 @@ function validateMetadata(value: unknown): FileRelayMetadata {
 		state: value.state,
 		createdAtMs: finiteNumber(value.createdAtMs),
 		expiresAtMs: finiteNumber(value.expiresAtMs),
-		responseStatus: value.responseStatus === null ? null : finiteNumber(value.responseStatus),
+		responseStatus:
+			value.responseStatus === null ? null : finiteNumber(value.responseStatus),
 		responseHeaders,
-		failureReason: value.failureReason === null ? null : boundedString(value.failureReason, 64),
+		failureReason:
+			value.failureReason === null
+				? null
+				: boundedString(value.failureReason, 64),
 	};
 }
 
 function scopedFileName(subject: string, idempotencyKey: string): string {
-	return createHash("sha256").update(subject).update("\0").update(idempotencyKey).digest("hex");
+	return createHash("sha256")
+		.update(subject)
+		.update("\0")
+		.update(idempotencyKey)
+		.digest("hex");
 }
 
 function safeRecordId(value: unknown): string {
 	const id = boundedString(value, 64);
-	if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(id)) {
+	if (
+		!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(
+			id,
+		)
+	) {
 		throw new Error("Relay record id is invalid.");
 	}
 	return id;
@@ -422,7 +498,8 @@ function boundedString(value: unknown, maximum: number): string {
 }
 
 function finiteNumber(value: unknown): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("Stored number is invalid.");
+	if (typeof value !== "number" || !Number.isFinite(value))
+		throw new Error("Stored number is invalid.");
 	return value;
 }
 
