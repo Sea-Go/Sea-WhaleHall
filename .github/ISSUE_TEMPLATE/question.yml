@@ -17,6 +17,9 @@ body:
         - Usage / how-to | 使用方式
         - Compatibility / integration | 兼容性或集成
         - Build, packaging, or development | 构建、打包或开发
+        - Privacy, permissions, or local data behavior | 隐私、权限或本地数据行为
+        - Agent, model, or runtime integration | Agent、模型或运行时集成
+        - Desktop UI, accessibility, or workflow | 桌面界面、无障碍或工作流
         - Community / contribution | 社区或贡献
         - Other | 其他
     validations:

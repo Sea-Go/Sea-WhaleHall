@@ -1,0 +1,72 @@
+name: "🎨 UI / UX & accessibility | 界面、交互与无障碍"
+description: Give UI, interaction, or accessibility feedback | 提交界面、交互或无障碍反馈
+title: "[UX] "
+labels: ["ui-ux"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use sanitized examples only. Do not attach real activity, browser,
+        calendar, accessibility, or local database data. Security vulnerabilities
+        must not be disclosed in a public issue.
+  - type: dropdown
+    id: feedback_type
+    attributes:
+      label: Feedback type | 反馈类型
+      options:
+        - Layout, visual design, or readability | 布局、视觉设计或可读性
+        - Interaction flow, feedback, or discoverability | 交互流程、反馈或可发现性
+        - Keyboard, focus, or screen-reader accessibility | 键盘、焦点或读屏无障碍
+        - Motion, contrast, scaling, or localization | 动效、对比度、缩放或本地化
+        - Other UI or UX feedback | 其他界面或体验反馈
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface | 受影响界面
+      multiple: true
+      options:
+        - Client control window | 客户端控制窗口
+        - Desktop pet | 桌宠窗口
+        - Onboarding, settings, or permissions | 引导、设置或权限
+        - Native desktop window behavior | 原生桌面窗口行为
+        - Documentation or examples | 文档或示例
+        - Other or unknown | 其他或未知
+    validations:
+      required: true
+  - type: textarea
+    id: current_experience
+    attributes:
+      label: Current experience | 当前体验
+      description: Describe the workflow, friction, or accessibility barrier.
+    validations:
+      required: true
+  - type: textarea
+    id: desired_experience
+    attributes:
+      label: Desired experience | 期望体验
+      description: Describe the observable result, not only a visual implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: user_impact
+    attributes:
+      label: User impact | 用户影响
+      description: Explain who is affected and whether there is a workaround.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and sanitized evidence | 背景与脱敏材料
+      description: Optional. Include viewport, platform, assistive technology, sanitized mockups, or screenshots.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks | 提交前确认
+      options:
+        - label: I searched for existing issues and feature requests.
+          required: true
+        - label: I removed credentials and real sensitive local data from all materials.
+          required: true

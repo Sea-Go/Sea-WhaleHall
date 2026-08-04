@@ -1,0 +1,79 @@
+name: "🏗️ Design proposal / RFC | 设计提案"
+description: Discuss a cross-cutting design before implementation | 在实现前讨论跨模块设计提案
+title: "[RFC] "
+labels: ["rfc"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for decisions that affect multiple components, interfaces,
+        protocols, persistence, privacy, or long-term maintenance. A proposal is
+        discussion input, not an implementation commitment. Do not include secrets
+        or real local user data.
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision requested | 希望作出的决策
+      description: State the specific decision or agreement requested from maintainers.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and motivation | 问题与动机
+      description: What decision or recurring problem needs a shared direction?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed design | 提议的设计
+      description: Explain the expected behavior, affected boundaries, and major trade-offs.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals | 范围与非目标
+      placeholder: |
+        Included:
+        Out of scope:
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and affected boundaries | 约束与受影响边界
+      description: Include relevant interfaces, protocols, data, permissions, performance, and maintenance constraints.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered | 考虑过的替代方案
+      description: Describe rejected options and why, or state that none were considered.
+    validations:
+      required: true
+  - type: textarea
+    id: implications
+    attributes:
+      label: Compatibility, privacy, and migration implications | 兼容性、隐私与迁移影响
+      description: State the impact on protocols, stored data, permissions, users, and rollback.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance and release plan | 验收与发布计划
+      description: What agreement, evidence, rollout, or migration plan would make this ready to implement?
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks | 提交前确认
+      options:
+        - label: I searched for related issues, pull requests, and documentation.
+          required: true
+        - label: I did not include credentials or real sensitive local data.
+          required: true

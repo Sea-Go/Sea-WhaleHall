@@ -1,0 +1,78 @@
+name: "⚡ Performance / reliability | 性能与稳定性"
+description: Report slow, resource-heavy, unstable, or intermittent behavior | 报告性能、资源、稳定性或间歇性问题
+title: "[Performance] "
+labels: ["performance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use sanitized, reproducible examples only. Do not include credentials,
+        tokens, real activity, browser, calendar, accessibility, or local database
+        data. Security vulnerabilities must not be disclosed in a public issue.
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: Affected area | 受影响区域
+      multiple: true
+      options:
+        - Client control window | 客户端控制窗口
+        - Desktop pet | 桌宠窗口
+        - Agent, model, or runtime | Agent、模型或运行时
+        - Typed RPC, Local Tool, or protocol | Typed RPC、Local Tool 或协议
+        - Sensors, permissions, or local persistence | 传感器、权限或本地持久化
+        - Build, packaging, or CI | 构建、打包或 CI
+        - Other or unknown | 其他或未知
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Version, platform, and hardware | 版本、平台与硬件
+      description: Include app version or commit, operating system, and relevant hardware or VM details.
+      placeholder: "for example: main @ abc1234, macOS 15, Apple Silicon"
+    validations:
+      required: true
+  - type: textarea
+    id: baseline_and_observation
+    attributes:
+      label: Expected baseline and observed result | 预期基线与实际观测
+      description: Include measurable values when possible, such as startup time, latency, CPU, memory, or error rate.
+    validations:
+      required: true
+  - type: textarea
+    id: frequency_and_impact
+    attributes:
+      label: Frequency and user impact | 发生频率与用户影响
+      description: State whether it is intermittent, how often it happens, and whether it blocks a workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction and duration | 最小复现与耗时
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+        Observed duration or metric: ...
+    validations:
+      required: true
+  - type: textarea
+    id: regression_and_workaround
+    attributes:
+      label: Regression point and workaround | 回归点与临时方案
+      description: Optional. State a known good version and any safe workaround.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized logs, profiles, or additional context | 脱敏日志、性能数据或补充信息
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks | 提交前确认
+      options:
+        - label: I searched for existing bug and performance reports.
+          required: true
+        - label: I removed credentials and real sensitive local data from all evidence.
+          required: true
