@@ -24,6 +24,8 @@ body:
         - Sensor, permissions, or local persistence
         - Build, packaging, or CI
         - Documentation
+        - Accessibility, keyboard, or localization
+        - Third-party compatibility or integration
         - Other
     validations:
       required: true
