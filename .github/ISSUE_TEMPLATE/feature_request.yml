@@ -1,6 +1,6 @@
-name: Feature request
-description: Propose a focused product or engineering outcome with clear acceptance criteria.
-title: "[Feature]: "
+name: "✨ Feature request | 功能建议"
+description: Propose a feature or suggestion | 提出功能需求或建议
+title: "[Feature] "
 labels: ["enhancement"]
 body:
   - type: markdown
@@ -11,30 +11,21 @@ body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem or opportunity
+      label: Problem or opportunity | 要解决的问题
       description: Who is affected, and what is difficult or missing today?
     validations:
       required: true
   - type: textarea
     id: outcome
     attributes:
-      label: Proposed outcome and non-goals
-      description: State the intended behavior, user value, and explicitly excluded work.
-    validations:
-      required: true
-  - type: textarea
-    id: acceptance
-    attributes:
-      label: Acceptance criteria
-      placeholder: |
-        - [ ] ...
-        - [ ] ...
+      label: Proposed solution | 期望的解决方案
+      description: State the intended behavior and user value.
     validations:
       required: true
   - type: dropdown
     id: boundaries
     attributes:
-      label: Potentially affected boundaries
+      label: Potentially affected boundaries | 可能涉及的区域
       multiple: true
       options:
         - React client
@@ -49,26 +40,19 @@ body:
     validations:
       required: true
   - type: textarea
-    id: design
-    attributes:
-      label: Design, workflow, or reference material
-      description: Add links, a sanitized sketch, or "not applicable". Do not attach third-party artwork without approval.
-  - type: textarea
-    id: privacy
-    attributes:
-      label: Data, privacy, permissions, and migration impact
-      description: Explain the impact, or state why none is expected.
-    validations:
-      required: true
-  - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives and dependencies
-      description: Include related issues, blockers, or external decisions.
+      label: Alternatives considered | 考虑过的替代方案
+      description: Optional. Include alternatives, dependencies, or related issues.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context | 补充说明
+      description: Add links, a sanitized sketch, screenshots, or other useful context.
   - type: checkboxes
     id: checks
     attributes:
-      label: Submission checks
+      label: Submission checks | 提交前确认
       options:
         - label: I searched for an existing issue or proposal.
           required: true

@@ -1,19 +1,19 @@
-name: Bug report
-description: Report reproducible unexpected behavior without exposing private local data.
-title: "[Bug]: "
+name: "🐛 Bug report | 缺陷报告"
+description: Report reproducible unexpected behavior | 报告可复现的问题
+title: "[Bug] "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you for reporting a problem. Do not include credentials, tokens,
-        real calendar, browser, activity, accessibility, or local database data.
-        For a security vulnerability, do not open a public issue.
+        Do not include credentials, tokens, real calendar, browser, activity,
+        accessibility, or local database data. For a security vulnerability,
+        do not open a public issue.
   - type: dropdown
     id: area
     attributes:
-      label: Affected area
-      description: Select every area that applies.
+      label: Affected area | 受影响区域
+      description: Select every area that applies | 可多选
       multiple: true
       options:
         - React client
@@ -30,14 +30,14 @@ body:
   - type: input
     id: version
     attributes:
-      label: App version, commit, or build source
+      label: App version, commit, or build source | 版本、提交或构建来源
       placeholder: "for example: main @ abc1234, canary build, or local dev"
     validations:
       required: true
   - type: dropdown
     id: platform
     attributes:
-      label: Platform
+      label: Platform | 平台
       multiple: true
       options:
         - macOS
@@ -50,8 +50,8 @@ body:
   - type: textarea
     id: reproduce
     attributes:
-      label: Steps to reproduce
-      description: Use deterministic, sanitized fixtures or example data.
+      label: Steps to reproduce | 复现步骤
+      description: Use deterministic, sanitized fixtures or example data | 请使用脱敏样例
       placeholder: |
         1. ...
         2. ...
@@ -61,31 +61,31 @@ body:
   - type: textarea
     id: expected
     attributes:
-      label: Expected behavior
+      label: Expected behavior | 预期行为
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
-      label: Actual behavior and impact
+      label: Actual behavior and impact | 实际行为与影响
       description: Include user impact, data risk, and whether the issue blocks a workflow.
     validations:
       required: true
   - type: textarea
     id: evidence
     attributes:
-      label: Sanitized logs, screenshots, or additional context
+      label: Sanitized logs, screenshots, or additional context | 脱敏日志、截图或补充信息
       description: Remove secrets and all real local data. State "none" if no evidence is available.
       render: shell
   - type: textarea
     id: workaround
     attributes:
-      label: Workaround and regression information
+      label: Workaround and regression information | 临时解决方式与回归信息
       description: Say whether this regressed from a known version, and describe any safe workaround.
   - type: checkboxes
     id: checks
     attributes:
-      label: Submission checks
+      label: Submission checks | 提交前确认
       options:
         - label: I searched for duplicates before opening this issue.
           required: true
