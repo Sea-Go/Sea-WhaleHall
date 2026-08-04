@@ -35,6 +35,15 @@ export type VerifiedOllamaRuntime = {
 	quantizationLevel: string;
 };
 
+export type VerifyOllamaModelLockOptions = {
+	fetch?: FetchLike;
+	timeoutMs?: number;
+	/** Exact HTTPS origins allowed for an authenticated remote Ollama server. */
+	allowedRemoteOrigins?: readonly string[];
+	/** Environment-only Bearer token for the remote gateway. */
+	authorizationToken?: string;
+};
+
 export class OllamaModelLockError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -43,22 +52,32 @@ export class OllamaModelLockError extends Error {
 }
 
 /**
- * Fails closed when the local teacher runtime differs from the reviewed lock.
- * It reads only Ollama's loopback metadata endpoints and never sends user data.
+ * Fails closed when the teacher runtime differs from the reviewed lock. It
+ * reads only Ollama metadata endpoints and never sends user data.
  */
 export async function verifyOllamaModelLock(
 	lock: OllamaModelLock = WHALEHALL_TEACHER_MODEL_LOCK,
-	options: { fetch?: FetchLike; timeoutMs?: number } = {},
+	options: VerifyOllamaModelLockOptions = {},
 ): Promise<VerifiedOllamaRuntime> {
-	const base = normalizeLoopbackBaseUrl(lock.baseUrl);
+	const base = normalizeOllamaBaseUrl(
+		lock.baseUrl,
+		options.allowedRemoteOrigins ?? [],
+	);
+	const headers = authorizationHeaders(options.authorizationToken);
 	const controller = new AbortController();
 	const timeoutMs = options.timeoutMs ?? 3_000;
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
 		const fetchImpl = options.fetch ?? fetch;
 		const [versionResponse, tagsResponse] = await Promise.all([
-			fetchImpl(`${base}/api/version`, { signal: controller.signal }),
-			fetchImpl(`${base}/api/tags`, { signal: controller.signal }),
+			fetchImpl(`${base}/api/version`, {
+				headers,
+				signal: controller.signal,
+			}),
+			fetchImpl(`${base}/api/tags`, {
+				headers,
+				signal: controller.signal,
+			}),
 		]);
 		if (!versionResponse.ok || !tagsResponse.ok) {
 			throw new OllamaModelLockError(
@@ -125,7 +144,10 @@ export async function verifyOllamaModelLock(
 	}
 }
 
-function normalizeLoopbackBaseUrl(value: string): string {
+function normalizeOllamaBaseUrl(
+	value: string,
+	allowedRemoteOrigins: readonly string[],
+): string {
 	let url: URL;
 	try {
 		url = new URL(value);
@@ -133,13 +155,49 @@ function normalizeLoopbackBaseUrl(value: string): string {
 		throw new OllamaModelLockError("Ollama base URL is invalid.");
 	}
 	if (
-		url.protocol !== "http:" ||
-		!["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname) ||
-		(url.pathname !== "/" && url.pathname !== "")
+		url.username !== "" ||
+		url.password !== "" ||
+		(url.pathname !== "/" && url.pathname !== "") ||
+		url.search !== "" ||
+		url.hash !== ""
 	) {
 		throw new OllamaModelLockError(
-			"Ollama model lock may only use a loopback HTTP origin.",
+			"Ollama model lock URL contains disallowed URL components.",
+		);
+	}
+	if (isLoopbackHostname(url.hostname)) {
+		if (url.protocol !== "http:") {
+			throw new OllamaModelLockError(
+				"Ollama loopback model lock must use an HTTP origin.",
+			);
+		}
+		return url.origin;
+	}
+	if (
+		url.protocol !== "https:" ||
+		!allowedRemoteOrigins.includes(url.origin)
+	) {
+		throw new OllamaModelLockError(
+			"Remote Ollama model lock requires an allowlisted HTTPS origin.",
 		);
 	}
 	return url.origin;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+	return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(hostname);
+}
+
+function authorizationHeaders(
+	authorizationToken: string | undefined,
+): Readonly<Record<string, string>> {
+	if (authorizationToken === undefined) return {};
+	if (
+		authorizationToken.length < 1 ||
+		authorizationToken.length > 4_096 ||
+		/[\u0000-\u001f\u007f]/u.test(authorizationToken)
+	) {
+		throw new OllamaModelLockError("Ollama authorization token is invalid.");
+	}
+	return { authorization: `Bearer ${authorizationToken}` };
 }

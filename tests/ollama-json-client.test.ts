@@ -123,10 +123,44 @@ describe("OllamaJsonClient", () => {
 		expect(order).toEqual(["batch-1", "realtime", "batch-2"]);
 	});
 
-	test("rejects non-loopback endpoints", () => {
+	test("requires an explicit HTTPS allowlist entry for a remote endpoint", () => {
 		expect(
 			() => new OllamaJsonClient({ baseUrl: "https://example.com" }),
-		).toThrow("loopback");
+		).toThrow("allowlisted");
+		expect(
+			() =>
+				new OllamaJsonClient({
+					baseUrl: "https://example.com",
+					allowedRemoteOrigins: ["https://example.com"],
+				}),
+		).not.toThrow();
+	});
+
+	test("sends the environment-only token to an allowlisted remote endpoint", async () => {
+		let endpoint = "";
+		let authorization: string | null = null;
+		const client = new OllamaJsonClient({
+			baseUrl: "https://models.example.test",
+			allowedRemoteOrigins: ["https://models.example.test"],
+			authorizationToken: "remote-only-token",
+			fetch: async (input, init) => {
+				endpoint = String(input);
+				authorization = new Headers(init?.headers).get("authorization");
+				return Response.json({
+					message: { content: '{"label":"development"}' },
+				});
+			},
+		});
+
+		await expect(
+			client.generateJson({
+				messages: [{ role: "user", content: "label this" }],
+				schema,
+				validate: isLabel,
+			}),
+		).resolves.toEqual({ label: "development" });
+		expect(endpoint).toBe("https://models.example.test/api/chat");
+		expect(authorization as string | null).toBe("Bearer remote-only-token");
 	});
 
 	test("fails after the single schema retry", async () => {

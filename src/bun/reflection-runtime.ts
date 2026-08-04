@@ -31,10 +31,14 @@ export type CreateWhaleHallReflectionRuntimeOptions = {
 	agent: AgentRuntime;
 	dataDirectory: string;
 	/**
-	 * User-configured local Teacher address. The reviewed model lock still
-	 * verifies its exact model metadata before any content request.
+	 * User-configured Teacher address. The reviewed model lock still verifies
+	 * exact model metadata before any content request.
 	 */
 	teacherBaseUrl?: string;
+	/** Exact HTTPS origins allowed when the Teacher is remote. */
+	teacherAllowedRemoteOrigins?: readonly string[];
+	/** Environment-only Bearer token for an authenticated Teacher gateway. */
+	teacherAuthorizationToken?: string;
 	environment?: Readonly<Record<string, string | undefined>>;
 	onError?: (error: unknown) => void;
 	onWindowSealed?: (window: EventWindowV1) => void | Promise<void>;
@@ -63,10 +67,15 @@ export async function createWhaleHallReflectionRuntime(
 	let teacherVerified = false;
 	let fallback: OllamaJsonClient | undefined;
 	try {
-		await verifyOllamaModelLock(teacherLock);
+		await verifyOllamaModelLock(teacherLock, {
+			allowedRemoteOrigins: options.teacherAllowedRemoteOrigins,
+			authorizationToken: options.teacherAuthorizationToken,
+		});
 		teacherVerified = true;
 		fallback = new OllamaJsonClient({
 			baseUrl: teacherLock.baseUrl,
+			allowedRemoteOrigins: options.teacherAllowedRemoteOrigins,
+			authorizationToken: options.teacherAuthorizationToken,
 			model: teacherLock.model,
 			contextLength: teacherLock.numCtx,
 			keepAlive: "30m",

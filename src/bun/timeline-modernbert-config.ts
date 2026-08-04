@@ -29,6 +29,9 @@ export function loadTimelineModernBertConfiguration(
 		environment.WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT?.trim();
 	const pinnedManifestPath =
 		environment.WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST?.trim();
+	const allowedRemoteOrigins = parseAllowedRemoteOrigins(
+		environment.WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS,
+	);
 	const configured = [endpoint, manifestEndpoint, pinnedManifestPath].filter(
 		(value) => value !== undefined && value.length > 0,
 	).length;
@@ -75,12 +78,13 @@ export function loadTimelineModernBertConfiguration(
 			endpoint,
 			manifestEndpoint,
 			expectedArtifact,
+			allowedRemoteOrigins,
 			...(authorizationToken === undefined
 				? {}
 				: { authorizationToken }),
 		};
-		// Constructor validation is metadata-only and applies the classifier's
-		// default loopback policy before composition can report "enabled".
+		// Constructor validation is metadata-only and requires an exact HTTPS
+		// allowlist entry before a remote deployment can report "enabled".
 		new ModernBertEpisodeClassifier(modernBert);
 		return {
 			modernBert,
@@ -98,9 +102,25 @@ function pathContainsSymbolicLink(path: string): boolean {
 	for (const segment of absolutePath.slice(root.length).split(sep)) {
 		if (segment.length === 0) continue;
 		current = join(current, segment);
-		if (lstatSync(current).isSymbolicLink()) return true;
+		// macOS exposes the system-owned /var alias as a symlink to /private/var.
+		// It is part of the platform pathname, not a caller-controlled manifest
+		// indirection; descendants are still checked individually.
+		if (
+			lstatSync(current).isSymbolicLink() &&
+			!(process.platform === "darwin" && current === "/var")
+		) {
+			return true;
+		}
 	}
 	return false;
+}
+
+function parseAllowedRemoteOrigins(value: string | undefined): string[] {
+	if (value === undefined || value.trim().length === 0) return [];
+	return value
+		.split(",")
+		.map((origin) => origin.trim())
+		.filter((origin) => origin.length > 0);
 }
 
 function invalidConfiguration(): TimelineModernBertConfiguration {
