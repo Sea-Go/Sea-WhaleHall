@@ -1,0 +1,73 @@
+name: "⚙️ Engineering / maintenance | 工程与维护"
+description: Track a focused test, CI, dependency, tooling, or refactoring task | 追踪测试、CI、依赖、工具或重构任务
+title: "[Maintenance] "
+labels: ["maintenance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for a focused, actionable engineering task. Do not include
+        credentials, tokens, or real local user data. Security vulnerabilities
+        must not be disclosed in a public issue.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Task type | 任务类型
+      options:
+        - Tests or quality | 测试或质量
+        - Build, packaging, or CI | 构建、打包或 CI
+        - Dependency maintenance | 依赖维护
+        - Refactor or technical debt | 重构或技术债
+        - Developer tooling or workflow | 开发工具或流程
+        - Investigation or research | 调查或研究
+        - Other maintenance | 其他维护
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation | 背景与目标
+      description: What concrete engineering or user outcome does this work support?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals | 范围与非目标
+      placeholder: |
+        Included:
+        Out of scope:
+        Affected area:
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria and validation | 验收标准与验证方式
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+        Validation:
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks, compatibility, and rollback | 风险、兼容性与回滚
+      description: State "none expected" only after considering data, permissions, and compatibility.
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related work or dependencies | 关联工作或依赖
+      description: Optional. Link issues, pull requests, specifications, or blockers.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks | 提交前确认
+      options:
+        - label: I searched for a duplicate and kept this to one focused outcome.
+          required: true
+        - label: I did not include credentials or real sensitive local data.
+          required: true
