@@ -1,12 +1,11 @@
-# WhaleHall only loads two cloud model roles. Both intentionally use the
-# CPU-first Qwen activity Worker on the home cloud. Keep this user-data file
-# owner-only when replacing the environment reference with a literal API key.
+# Packaged placeholder only. The owner provisioning command writes literal
+# keys to the private user-data/config.yaml file; do not put usable keys here.
 reflection:
   name: "qwen3:1.7b"
   baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+  apikey: "REPLACE_WITH_ACTIVITY_WORKER_KEY"
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"

@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import {
-	LOCAL_TEST_AUTH_EXPERIENCE,
-	LOCAL_TEST_AUTH_USER,
 	type AuthCredentials,
 	type AuthRpcFailureKind,
 	type AuthSession,
+	LOCAL_TEST_AUTH_EXPERIENCE,
+	LOCAL_TEST_AUTH_USER,
 } from "../shared/auth";
+import type {
+	AuthSessionIdentity,
+	DesktopAuthSessionManager,
+} from "./auth-session";
 
 export const LOCAL_TEST_ACCOUNT_ID = LOCAL_TEST_AUTH_USER.id;
 
@@ -14,11 +18,7 @@ export interface LocalTestAuthSessionManagerOptions {
 	onBeforeSessionClear?: (accountId: string | null) => Promise<void>;
 }
 
-export interface LocalTestSessionIdentity {
-	accountId: string;
-	sessionId: string;
-	generation: number;
-}
+export type LocalTestSessionIdentity = AuthSessionIdentity;
 
 export class LocalTestAuthError extends Error {
 	constructor(
@@ -32,23 +32,27 @@ export class LocalTestAuthError extends Error {
 }
 
 /**
- * Temporary desktop-owned test identity.
+ * Unit-test-only desktop-owned identity.
  *
  * The Renderer may submit only the documented experience email/password. Bun
  * validates those fixed values locally and always binds the same account; no
- * caller-supplied identity is trusted. This manager deliberately has no remote
- * bearer, so model relay calls fail closed until formal authentication exists.
+ * caller-supplied identity is trusted. Production composition uses
+ * RemoteAuthSessionManager instead. This fixture deliberately has no remote
+ * bearer, so relay calls fail closed.
  */
-export class LocalTestAuthSessionManager {
+export class LocalTestAuthSessionManager implements DesktopAuthSessionManager {
 	private readonly onSessionInvalidated: (accountId: string | null) => void;
-	private readonly onBeforeSessionClear: (accountId: string | null) => Promise<void>;
+	private readonly onBeforeSessionClear: (
+		accountId: string | null,
+	) => Promise<void>;
 	private current: AuthSession | null = null;
 	private generation = 0;
 	private transitionTail = Promise.resolve();
 
 	constructor(options: LocalTestAuthSessionManagerOptions = {}) {
 		this.onSessionInvalidated = options.onSessionInvalidated ?? (() => {});
-		this.onBeforeSessionClear = options.onBeforeSessionClear ?? (async () => {});
+		this.onBeforeSessionClear =
+			options.onBeforeSessionClear ?? (async () => {});
 	}
 
 	get accountId(): string | null {
@@ -69,12 +73,13 @@ export class LocalTestAuthSessionManager {
 
 	async signInTestAccount(credentials: AuthCredentials): Promise<AuthSession> {
 		if (
-			credentials.email.trim().toLowerCase() !== LOCAL_TEST_AUTH_EXPERIENCE.email ||
+			credentials.email.trim().toLowerCase() !==
+				LOCAL_TEST_AUTH_EXPERIENCE.email ||
 			credentials.password !== LOCAL_TEST_AUTH_EXPERIENCE.password
 		) {
 			throw new LocalTestAuthError(
 				"invalid-credentials",
-				"邮箱或密码不正确，请使用页面显示的体验账号重新登录。",
+				"邮箱或密码不正确。",
 				401,
 			);
 		}
@@ -84,16 +89,25 @@ export class LocalTestAuthSessionManager {
 		const expectedSessionId = existing?.id ?? null;
 		return this.withTransitionLock(async () => {
 			if (expectedGeneration !== this.generation) {
-				throw new LocalTestAuthError("expired", "测试账户登录已被新的会话操作取代。");
+				throw new LocalTestAuthError(
+					"expired",
+					"测试会话已被新的会话操作取代。",
+				);
 			}
 			if (this.current) {
 				if (this.current.id !== expectedSessionId) {
-					throw new LocalTestAuthError("expired", "测试账户登录已被新的会话操作取代。");
+					throw new LocalTestAuthError(
+						"expired",
+						"测试会话已被新的会话操作取代。",
+					);
 				}
 				return structuredClone(this.current);
 			}
 			if (expectedSessionId !== null) {
-				throw new LocalTestAuthError("expired", "测试账户登录已被新的会话操作取代。");
+				throw new LocalTestAuthError(
+					"expired",
+					"测试会话已被新的会话操作取代。",
+				);
 			}
 			this.current = {
 				id: `local-test-session-${randomUUID()}`,
@@ -102,6 +116,10 @@ export class LocalTestAuthSessionManager {
 			};
 			return structuredClone(this.current);
 		});
+	}
+
+	async signIn(credentials: AuthCredentials): Promise<AuthSession> {
+		return this.signInTestAccount(credentials);
 	}
 
 	captureCurrentSession(): LocalTestSessionIdentity | null {
@@ -121,7 +139,9 @@ export class LocalTestAuthSessionManager {
 		);
 	}
 
-	async clearSessionIfCurrent(identity: LocalTestSessionIdentity): Promise<boolean> {
+	async clearSessionIfCurrent(
+		identity: LocalTestSessionIdentity,
+	): Promise<boolean> {
 		if (!this.isCurrentSession(identity)) return false;
 		const accountId = this.current?.user.id ?? null;
 		this.generation += 1;
@@ -139,10 +159,13 @@ export class LocalTestAuthSessionManager {
 		await this.withTransitionLock(() => this.onBeforeSessionClear(accountId));
 	}
 
-	async authorizedFetch(_path: string, _init: RequestInit = {}): Promise<Response> {
+	async authorizedFetch(
+		_path: string,
+		_init: RequestInit = {},
+	): Promise<Response> {
 		throw new LocalTestAuthError(
 			"service-unavailable",
-			"当前测试账户没有远端模型凭据；正式远端认证将在后续版本提供。",
+			"测试身份不提供远端模型凭据。",
 		);
 	}
 
@@ -159,7 +182,8 @@ export class LocalTestAuthSessionManager {
 			return await operation();
 		} finally {
 			release();
-			if (this.transitionTail === queued) this.transitionTail = Promise.resolve();
+			if (this.transitionTail === queued)
+				this.transitionTail = Promise.resolve();
 		}
 	}
 

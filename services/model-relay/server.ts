@@ -1,12 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { FixedWindowRateLimiter } from "./memory-stores.js";
-import {
-	dummyScryptPasswordHash,
-	verifyScryptPassword,
-} from "./password.js";
+import { dummyScryptPasswordHash, verifyScryptPassword } from "./password.js";
 import {
 	publicUser,
-	systemClock,
 	type RateLimiter,
 	type RelayClock,
 	type RelayPublicUser,
@@ -14,6 +10,7 @@ import {
 	type RelayUser,
 	type SessionStore,
 	type StoredSession,
+	systemClock,
 	type UserStore,
 } from "./types.js";
 
@@ -23,6 +20,8 @@ const DEFAULT_MAX_RESPONSE_BYTES = 64 * MEBIBYTE;
 const DEFAULT_ACCESS_TTL_MS = 15 * 60_000;
 const DEFAULT_REFRESH_TTL_MS = 30 * 24 * 60 * 60_000;
 const DEFAULT_RECORD_RETENTION_MS = 30 * 24 * 60 * 60_000;
+export const CPU_ONLY_OLLAMA_CHAT_COMPLETIONS_URL =
+	"http://127.0.0.1:11437/v1/chat/completions";
 const AUTH_BODY_LIMIT = 64 * 1024;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:/+-]{1,200}$/;
 const IDENTITY_HEADERS = [
@@ -50,7 +49,8 @@ const SELF_REPORTED_IDENTITY_FIELDS = [
 
 export interface ModelRelayServerConfig {
 	providerChatCompletionsUrl: string;
-	providerApiKey: string;
+	/** Optional only for a protected upstream; never returned to a desktop. */
+	providerApiKey?: string;
 	allowedModels: readonly string[] | ReadonlySet<string>;
 	accessTokenTtlMs?: number;
 	refreshTokenTtlMs?: number;
@@ -59,6 +59,7 @@ export interface ModelRelayServerConfig {
 	maxResponseBytes?: number;
 	chatRequestsPerMinute?: number;
 	loginAttemptsPerMinute?: number;
+	/** Enables only the fixed CPU-only loopback Ollama endpoint below. */
 	allowInsecureLoopbackProvider?: boolean;
 }
 
@@ -85,7 +86,7 @@ export type ModelRelayHandler = (
 
 interface ValidatedConfig {
 	providerUrl: URL;
-	providerApiKey: string;
+	providerApiKey: string | null;
 	allowedModels: ReadonlySet<string>;
 	accessTokenTtlMs: number;
 	refreshTokenTtlMs: number;
@@ -109,36 +110,54 @@ export function createModelRelayHandler(
 	const config = validateConfig(inputConfig);
 	const fetchImpl = dependencies.fetch ?? fetch;
 	const clock = dependencies.clock ?? systemClock;
-	const chatRateLimiter = dependencies.chatRateLimiter
-		?? new FixedWindowRateLimiter(config.chatRequestsPerMinute, 60_000);
-	const loginRateLimiter = dependencies.loginRateLimiter
-		?? new FixedWindowRateLimiter(config.loginAttemptsPerMinute, 60_000);
+	const chatRateLimiter =
+		dependencies.chatRateLimiter ??
+		new FixedWindowRateLimiter(config.chatRequestsPerMinute, 60_000);
+	const loginRateLimiter =
+		dependencies.loginRateLimiter ??
+		new FixedWindowRateLimiter(config.loginAttemptsPerMinute, 60_000);
 	const verifyPassword = dependencies.passwordVerifier ?? verifyScryptPassword;
 
 	return async (request, context = {}) => {
 		try {
 			const url = new URL(request.url);
-			if (url.search || url.hash) throw new HttpError(404, "not-found", "Endpoint not found.");
+			if (url.search || url.hash)
+				throw new HttpError(404, "not-found", "Endpoint not found.");
 
 			if (request.method === "POST" && url.pathname === "/v1/auth/sessions") {
 				return await createSession(request, context);
 			}
-			if (request.method === "POST" && url.pathname === "/v1/auth/sessions/refresh") {
+			if (
+				request.method === "POST" &&
+				url.pathname === "/v1/auth/sessions/refresh"
+			) {
 				return await refreshSession(request);
 			}
-			if (request.method === "DELETE" && url.pathname === "/v1/auth/sessions/current") {
+			if (
+				request.method === "DELETE" &&
+				url.pathname === "/v1/auth/sessions/current"
+			) {
 				return await deleteCurrentSession(request);
 			}
 			if (request.method === "GET" && url.pathname === "/v1/auth/me") {
 				return await getCurrentUser(request);
 			}
-			if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+			if (
+				request.method === "POST" &&
+				url.pathname === "/v1/chat/completions"
+			) {
 				return await relayChatCompletion(request);
 			}
 			throw new HttpError(404, "not-found", "Endpoint not found.");
 		} catch (error) {
 			if (error instanceof HttpError) return errorResponse(error);
-			return errorResponse(new HttpError(500, "internal-error", "The relay could not process the request."));
+			return errorResponse(
+				new HttpError(
+					500,
+					"internal-error",
+					"The relay could not process the request.",
+				),
+			);
 		}
 	};
 
@@ -161,7 +180,11 @@ export function createModelRelayHandler(
 			user?.passwordHash ?? dummyScryptPasswordHash(),
 		);
 		if (!user || user.disabled || !valid) {
-			throw new HttpError(401, "invalid-credentials", "Invalid email or password.");
+			throw new HttpError(
+				401,
+				"invalid-credentials",
+				"Invalid email or password.",
+			);
 		}
 		const session = await issueSession(user, null);
 		return jsonResponse(session, 201);
@@ -171,9 +194,17 @@ export function createModelRelayHandler(
 		requireJson(request);
 		const input = parseObject(await readBoundedBody(request, AUTH_BODY_LIMIT));
 		assertExactKeys(input, ["refreshToken"]);
-		const refreshToken = requireString(input.refreshToken, "refreshToken", 16, 16_384);
+		const refreshToken = requireString(
+			input.refreshToken,
+			"refreshToken",
+			16,
+			16_384,
+		);
 		const nowMs = clock.now();
-		const previous = await dependencies.sessions.consumeRefresh(digest(refreshToken), nowMs);
+		const previous = await dependencies.sessions.consumeRefresh(
+			digest(refreshToken),
+			nowMs,
+		);
 		if (!previous) throw unauthorized();
 		const user = await dependencies.users.findById(previous.subject);
 		if (!user || user.disabled) throw unauthorized();
@@ -183,7 +214,10 @@ export function createModelRelayHandler(
 
 	async function deleteCurrentSession(request: Request): Promise<Response> {
 		const auth = await authenticate(request);
-		await dependencies.sessions.revokeByAccessDigest(auth.accessDigest, clock.now());
+		await dependencies.sessions.revokeByAccessDigest(
+			auth.accessDigest,
+			clock.now(),
+		);
 		return withSecurityHeaders(new Response(null, { status: 204 }));
 	}
 
@@ -194,25 +228,40 @@ export function createModelRelayHandler(
 
 	async function relayChatCompletion(request: Request): Promise<Response> {
 		const auth = await authenticate(request);
-		requireJson(request);
-
-		const rate = await chatRateLimiter.consume(`chat:${auth.session.subject}`, clock.now());
+		const rate = await chatRateLimiter.consume(
+			`chat:${auth.session.subject}`,
+			clock.now(),
+		);
 		if (!rate.allowed) throw rateLimitError(rate.retryAfterSeconds);
+		await authenticateAgentKey(request, auth.user);
+		requireJson(request);
 
 		const rawBody = await readBoundedBody(request, config.maxRequestBytes);
 		const body = parseObject(rawBody);
 		rejectSelfReportedIdentity(body);
 		const model = requireString(body.model, "model", 1, 256);
 		if (!config.allowedModels.has(model)) {
-			throw new HttpError(403, "model-not-allowed", "The requested model is not allowed.");
+			throw new HttpError(
+				403,
+				"model-not-allowed",
+				"The requested model is not allowed.",
+			);
 		}
 		if (body.stream !== undefined && typeof body.stream !== "boolean") {
-			throw new HttpError(400, "invalid-request", "stream must be a boolean when present.");
+			throw new HttpError(
+				400,
+				"invalid-request",
+				"stream must be a boolean when present.",
+			);
 		}
 		const stream = body.stream === true;
 		const idempotencyKey = request.headers.get("idempotency-key") ?? "";
 		if (!IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
-			throw new HttpError(400, "invalid-idempotency-key", "A valid Idempotency-Key header is required.");
+			throw new HttpError(
+				400,
+				"invalid-idempotency-key",
+				"A valid Idempotency-Key header is required.",
+			);
 		}
 
 		const nowMs = clock.now();
@@ -229,47 +278,73 @@ export function createModelRelayHandler(
 			expiresAtMs: nowMs + config.recordRetentionMs,
 		});
 		if (claim.kind === "conflict") {
-			throw new HttpError(409, "idempotency-conflict", "Idempotency-Key was already used for another request.");
+			throw new HttpError(
+				409,
+				"idempotency-conflict",
+				"Idempotency-Key was already used for another request.",
+			);
 		}
 		if (claim.kind === "inflight") {
-			throw new HttpError(409, "request-in-progress", "An identical request is already in progress.", {
-				"retry-after": "1",
-			});
+			throw new HttpError(
+				409,
+				"request-in-progress",
+				"An identical request is already in progress.",
+				{
+					"retry-after": "1",
+				},
+			);
 		}
 		if (claim.kind === "duplicate") {
-			throw new HttpError(409, "stream-not-replayable", "This streaming request cannot be resumed or replayed.");
+			throw new HttpError(
+				409,
+				"stream-not-replayable",
+				"This streaming request cannot be resumed or replayed.",
+			);
 		}
 		if (claim.kind === "replay") {
 			const headers = new Headers(claim.response.headers);
 			headers.set("x-whalehall-idempotent-replay", "true");
-			return withSecurityHeaders(new Response(asArrayBuffer(claim.response.body), {
-				status: claim.response.status,
-				headers,
-			}));
+			return withSecurityHeaders(
+				new Response(asArrayBuffer(claim.response.body), {
+					status: claim.response.status,
+					headers,
+				}),
+			);
 		}
 
 		const relayAbort = new AbortController();
 		const abortFromClient = () => relayAbort.abort(request.signal.reason);
 		if (request.signal.aborted) abortFromClient();
-		else request.signal.addEventListener("abort", abortFromClient, { once: true });
+		else
+			request.signal.addEventListener("abort", abortFromClient, { once: true });
 
 		let upstream: Response;
 		try {
+			const upstreamHeaders: Record<string, string> = {
+				"content-type": "application/json",
+				accept: stream ? "text/event-stream" : "application/json",
+				"idempotency-key": idempotencyKey,
+			};
+			if (config.providerApiKey !== null) {
+				upstreamHeaders.authorization = `Bearer ${config.providerApiKey}`;
+			}
 			upstream = await fetchImpl(config.providerUrl, {
 				method: "POST",
-				headers: {
-					authorization: `Bearer ${config.providerApiKey}`,
-					"content-type": "application/json",
-					accept: stream ? "text/event-stream" : "application/json",
-					"idempotency-key": idempotencyKey,
-				},
+				headers: upstreamHeaders,
 				body: Buffer.from(rawBody),
 				signal: relayAbort.signal,
 			});
 		} catch {
 			request.signal.removeEventListener("abort", abortFromClient);
-			await safeFail(claim.recordId, request.signal.aborted ? "client-abort" : "upstream");
-			throw new HttpError(502, "upstream-unavailable", "The model provider is unavailable.");
+			await safeFail(
+				claim.recordId,
+				request.signal.aborted ? "client-abort" : "upstream",
+			);
+			throw new HttpError(
+				502,
+				"upstream-unavailable",
+				"The model provider is unavailable.",
+			);
 		}
 
 		const responseHeaders = forwardedResponseHeaders(upstream.headers);
@@ -279,28 +354,43 @@ export function createModelRelayHandler(
 				headers: responseHeaders,
 			});
 			request.signal.removeEventListener("abort", abortFromClient);
-			return withSecurityHeaders(new Response(null, {
-				status: upstream.status,
-				headers: responseHeaders,
-			}));
+			return withSecurityHeaders(
+				new Response(null, {
+					status: upstream.status,
+					headers: responseHeaders,
+				}),
+			);
 		}
 
 		if (!stream) {
 			try {
-				const responseBody = await readBoundedResponse(upstream.body, config.maxResponseBytes, relayAbort);
+				const responseBody = await readBoundedResponse(
+					upstream.body,
+					config.maxResponseBytes,
+					relayAbort,
+				);
 				await dependencies.records.appendResponse(claim.recordId, responseBody);
 				await dependencies.records.complete(claim.recordId, {
 					status: upstream.status,
 					headers: responseHeaders,
 				});
-				return withSecurityHeaders(new Response(asArrayBuffer(responseBody), {
-					status: upstream.status,
-					headers: responseHeaders,
-				}));
+				return withSecurityHeaders(
+					new Response(asArrayBuffer(responseBody), {
+						status: upstream.status,
+						headers: responseHeaders,
+					}),
+				);
 			} catch (error) {
 				const tooLarge = error instanceof ResponseTooLargeError;
-				await safeFail(claim.recordId, tooLarge ? "response-too-large" : "upstream");
-				throw new HttpError(502, tooLarge ? "upstream-response-too-large" : "upstream-failure", "The model response could not be relayed.");
+				await safeFail(
+					claim.recordId,
+					tooLarge ? "response-too-large" : "upstream",
+				);
+				throw new HttpError(
+					502,
+					tooLarge ? "upstream-response-too-large" : "upstream-failure",
+					"The model response could not be relayed.",
+				);
 			} finally {
 				request.signal.removeEventListener("abort", abortFromClient);
 			}
@@ -351,13 +441,20 @@ export function createModelRelayHandler(
 					}
 					responseBytes += item.value.byteLength;
 					if (responseBytes > config.maxResponseBytes) {
-						await finishFailure(controller, "response-too-large", new ResponseTooLargeError());
+						await finishFailure(
+							controller,
+							"response-too-large",
+							new ResponseTooLargeError(),
+						);
 						return;
 					}
 					// Storage is awaited before enqueueing. That preserves order and applies
 					// downstream backpressure all the way to the provider stream.
 					try {
-						await dependencies.records.appendResponse(claim.recordId, item.value);
+						await dependencies.records.appendResponse(
+							claim.recordId,
+							item.value,
+						);
 					} catch (error) {
 						await finishFailure(controller, "storage", error);
 						return;
@@ -382,21 +479,38 @@ export function createModelRelayHandler(
 			},
 		});
 
-		return withSecurityHeaders(new Response(responseBody, {
-			status: upstream.status,
-			headers: responseHeaders,
-		}));
+		return withSecurityHeaders(
+			new Response(responseBody, {
+				status: upstream.status,
+				headers: responseHeaders,
+			}),
+		);
 	}
 
 	async function authenticate(request: Request): Promise<AuthenticatedRequest> {
 		rejectIdentityHeaders(request.headers);
 		const token = bearerToken(request.headers);
 		const accessDigest = digest(token);
-		const session = await dependencies.sessions.findActiveByAccessDigest(accessDigest, clock.now());
+		const session = await dependencies.sessions.findActiveByAccessDigest(
+			accessDigest,
+			clock.now(),
+		);
 		if (!session) throw unauthorized();
 		const user = await dependencies.users.findById(session.subject);
 		if (!user || user.disabled) throw unauthorized();
 		return { accessDigest, session, user };
+	}
+
+	async function authenticateAgentKey(
+		request: Request,
+		user: RelayUser,
+	): Promise<void> {
+		const key = request.headers.get("x-whalehall-agent-key") ?? "";
+		const valid = await verifyPassword(
+			isPersonalRelayKey(key) ? key : "",
+			user.agentKeyHash || dummyScryptPasswordHash(),
+		);
+		if (!valid) throw unauthorized();
 	}
 
 	async function issueSession(
@@ -457,47 +571,126 @@ class HttpError extends Error {
 class ResponseTooLargeError extends Error {}
 
 function validateConfig(config: ModelRelayServerConfig): ValidatedConfig {
-	if (!config || typeof config !== "object") throw new Error("Relay config is required.");
+	if (!config || typeof config !== "object")
+		throw new Error("Relay config is required.");
 	const providerUrl = new URL(config.providerChatCompletionsUrl);
-	const loopback = providerUrl.hostname === "127.0.0.1"
-		|| providerUrl.hostname === "localhost"
-		|| providerUrl.hostname === "[::1]";
+	const loopback =
+		providerUrl.hostname === "127.0.0.1" ||
+		providerUrl.hostname === "localhost" ||
+		providerUrl.hostname === "[::1]";
+	const cpuOnlyProviderUrl = new URL(CPU_ONLY_OLLAMA_CHAT_COMPLETIONS_URL);
 	if (
-		providerUrl.username
-		|| providerUrl.password
-		|| providerUrl.hash
-		|| (providerUrl.protocol !== "https:"
-			&& !(config.allowInsecureLoopbackProvider === true && providerUrl.protocol === "http:" && loopback))
+		providerUrl.username ||
+		providerUrl.password ||
+		providerUrl.hash ||
+		providerUrl.search ||
+		(providerUrl.protocol !== "https:" && providerUrl.protocol !== "http:")
 	) {
-		throw new Error("Provider URL must be HTTPS and must not contain credentials or a fragment.");
+		throw new Error(
+			"Provider URL must be HTTPS and must not contain credentials or a fragment.",
+		);
 	}
-	if (typeof config.providerApiKey !== "string" || config.providerApiKey.trim().length < 8) {
-		throw new Error("Provider API key is required.");
+	if (
+		providerUrl.protocol === "http:" &&
+		(!loopback ||
+			config.allowInsecureLoopbackProvider !== true ||
+			providerUrl.toString() !== cpuOnlyProviderUrl.toString())
+	) {
+		throw new Error(
+			"Insecure provider URL must be the fixed CPU-only Ollama endpoint.",
+		);
+	}
+	const providerApiKey = config.providerApiKey?.trim() || null;
+	if (
+		providerUrl.protocol === "https:" &&
+		(!providerApiKey || providerApiKey.length < 8)
+	) {
+		throw new Error("HTTPS provider API key is required.");
+	}
+	if (providerApiKey !== null && providerApiKey.length > 4_096) {
+		throw new Error("Provider API key is invalid.");
 	}
 	const models = new Set(config.allowedModels);
-	if (models.size < 1 || [...models].some((model) => typeof model !== "string" || model.length < 1 || model.length > 256 || model === "*")) {
+	if (
+		models.size < 1 ||
+		[...models].some(
+			(model) =>
+				typeof model !== "string" ||
+				model.length < 1 ||
+				model.length > 256 ||
+				model === "*",
+		)
+	) {
 		throw new Error("At least one exact allowed model is required.");
 	}
 	return {
 		providerUrl,
-		providerApiKey: config.providerApiKey,
+		providerApiKey,
 		allowedModels: models,
-		accessTokenTtlMs: boundedInteger(config.accessTokenTtlMs ?? DEFAULT_ACCESS_TTL_MS, 60_000, 60 * 60_000, "accessTokenTtlMs"),
-		refreshTokenTtlMs: boundedInteger(config.refreshTokenTtlMs ?? DEFAULT_REFRESH_TTL_MS, 24 * 60 * 60_000, 90 * 24 * 60 * 60_000, "refreshTokenTtlMs"),
-		recordRetentionMs: boundedInteger(config.recordRetentionMs ?? DEFAULT_RECORD_RETENTION_MS, 60_000, 365 * 24 * 60 * 60_000, "recordRetentionMs"),
-		maxRequestBytes: boundedInteger(config.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES, 1_024, DEFAULT_MAX_REQUEST_BYTES, "maxRequestBytes"),
-		maxResponseBytes: boundedInteger(config.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES, 1_024, 256 * MEBIBYTE, "maxResponseBytes"),
-		chatRequestsPerMinute: boundedInteger(config.chatRequestsPerMinute ?? 60, 1, 10_000, "chatRequestsPerMinute"),
-		loginAttemptsPerMinute: boundedInteger(config.loginAttemptsPerMinute ?? 10, 1, 1_000, "loginAttemptsPerMinute"),
+		accessTokenTtlMs: boundedInteger(
+			config.accessTokenTtlMs ?? DEFAULT_ACCESS_TTL_MS,
+			60_000,
+			60 * 60_000,
+			"accessTokenTtlMs",
+		),
+		refreshTokenTtlMs: boundedInteger(
+			config.refreshTokenTtlMs ?? DEFAULT_REFRESH_TTL_MS,
+			24 * 60 * 60_000,
+			90 * 24 * 60 * 60_000,
+			"refreshTokenTtlMs",
+		),
+		recordRetentionMs: boundedInteger(
+			config.recordRetentionMs ?? DEFAULT_RECORD_RETENTION_MS,
+			60_000,
+			365 * 24 * 60 * 60_000,
+			"recordRetentionMs",
+		),
+		maxRequestBytes: boundedInteger(
+			config.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES,
+			1_024,
+			DEFAULT_MAX_REQUEST_BYTES,
+			"maxRequestBytes",
+		),
+		maxResponseBytes: boundedInteger(
+			config.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+			1_024,
+			256 * MEBIBYTE,
+			"maxResponseBytes",
+		),
+		chatRequestsPerMinute: boundedInteger(
+			config.chatRequestsPerMinute ?? 60,
+			1,
+			10_000,
+			"chatRequestsPerMinute",
+		),
+		loginAttemptsPerMinute: boundedInteger(
+			config.loginAttemptsPerMinute ?? 10,
+			1,
+			1_000,
+			"loginAttemptsPerMinute",
+		),
 	};
 }
 
-async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array> {
+async function readBoundedBody(
+	request: Request,
+	maxBytes: number,
+): Promise<Uint8Array> {
 	const contentLength = request.headers.get("content-length");
 	if (contentLength !== null) {
 		const size = Number(contentLength);
-		if (!Number.isSafeInteger(size) || size < 0) throw new HttpError(400, "invalid-content-length", "Invalid Content-Length header.");
-		if (size > maxBytes) throw new HttpError(413, "request-too-large", "Request body exceeds the configured limit.");
+		if (!Number.isSafeInteger(size) || size < 0)
+			throw new HttpError(
+				400,
+				"invalid-content-length",
+				"Invalid Content-Length header.",
+			);
+		if (size > maxBytes)
+			throw new HttpError(
+				413,
+				"request-too-large",
+				"Request body exceeds the configured limit.",
+			);
 	}
 	if (!request.body) return new Uint8Array();
 	const reader = request.body.getReader();
@@ -510,7 +703,11 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
 			size += item.value.byteLength;
 			if (size > maxBytes) {
 				await reader.cancel().catch(() => {});
-				throw new HttpError(413, "request-too-large", "Request body exceeds the configured limit.");
+				throw new HttpError(
+					413,
+					"request-too-large",
+					"Request body exceeds the configured limit.",
+				);
 			}
 			chunks.push(item.value);
 		}
@@ -567,24 +764,44 @@ function parseObject(bytes: Uint8Array): Record<string, unknown> {
 	try {
 		text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 	} catch {
-		throw new HttpError(400, "invalid-json", "Request body must be valid UTF-8 JSON.");
+		throw new HttpError(
+			400,
+			"invalid-json",
+			"Request body must be valid UTF-8 JSON.",
+		);
 	}
 	let value: unknown;
 	try {
 		value = JSON.parse(text);
 	} catch {
-		throw new HttpError(400, "invalid-json", "Request body must be valid JSON.");
+		throw new HttpError(
+			400,
+			"invalid-json",
+			"Request body must be valid JSON.",
+		);
 	}
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		throw new HttpError(400, "invalid-request", "Request body must be a JSON object.");
+		throw new HttpError(
+			400,
+			"invalid-request",
+			"Request body must be a JSON object.",
+		);
 	}
 	return value as Record<string, unknown>;
 }
 
 function requireJson(request: Request): void {
-	const value = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+	const value = request.headers
+		.get("content-type")
+		?.split(";", 1)[0]
+		?.trim()
+		.toLowerCase();
 	if (value !== "application/json") {
-		throw new HttpError(415, "unsupported-media-type", "Content-Type must be application/json.");
+		throw new HttpError(
+			415,
+			"unsupported-media-type",
+			"Content-Type must be application/json.",
+		);
 	}
 }
 
@@ -595,10 +812,20 @@ function bearerToken(headers: Headers): string {
 	return match[1];
 }
 
+function isPersonalRelayKey(value: string): boolean {
+	return (
+		value.length >= 16 && value.length <= 1_024 && !/[^\x21-\x7e]/u.test(value)
+	);
+}
+
 function rejectIdentityHeaders(headers: Headers): void {
 	for (const name of IDENTITY_HEADERS) {
 		if (headers.has(name)) {
-			throw new HttpError(400, "self-reported-identity", "Self-reported identity and provider credentials are not accepted.");
+			throw new HttpError(
+				400,
+				"self-reported-identity",
+				"Self-reported identity and provider credentials are not accepted.",
+			);
 		}
 	}
 }
@@ -606,7 +833,11 @@ function rejectIdentityHeaders(headers: Headers): void {
 function rejectSelfReportedIdentity(body: Record<string, unknown>): void {
 	for (const name of SELF_REPORTED_IDENTITY_FIELDS) {
 		if (Object.hasOwn(body, name)) {
-			throw new HttpError(400, "self-reported-identity", "Self-reported identity and credentials are not accepted.");
+			throw new HttpError(
+				400,
+				"self-reported-identity",
+				"Self-reported identity and credentials are not accepted.",
+			);
 		}
 	}
 }
@@ -627,7 +858,8 @@ function forwardedResponseHeaders(input: Headers): Record<string, string> {
 		"upgrade",
 	]);
 	for (const [name, value] of input) {
-		if (!forbidden.has(name.toLowerCase())) headers[name] = value.slice(0, 8_192);
+		if (!forbidden.has(name.toLowerCase()))
+			headers[name] = value.slice(0, 8_192);
 	}
 	return headers;
 }
@@ -646,20 +878,36 @@ function requireString(
 	minLength: number,
 	maxLength: number,
 ): string {
-	if (typeof value !== "string" || value.length < minLength || value.length > maxLength) {
+	if (
+		typeof value !== "string" ||
+		value.length < minLength ||
+		value.length > maxLength
+	) {
 		throw new HttpError(400, "invalid-request", `${name} is invalid.`);
 	}
 	return value;
 }
 
-function assertExactKeys(input: Record<string, unknown>, expected: readonly string[]): void {
+function assertExactKeys(
+	input: Record<string, unknown>,
+	expected: readonly string[],
+): void {
 	const allowed = new Set(expected);
 	if (Object.keys(input).some((key) => !allowed.has(key))) {
-		throw new HttpError(400, "invalid-request", "Request contains unsupported fields.");
+		throw new HttpError(
+			400,
+			"invalid-request",
+			"Request contains unsupported fields.",
+		);
 	}
 }
 
-function boundedInteger(value: number, minimum: number, maximum: number, name: string): number {
+function boundedInteger(
+	value: number,
+	minimum: number,
+	maximum: number,
+	name: string,
+): number {
 	if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
 		throw new Error(`${name} is outside its safe range.`);
 	}
@@ -675,9 +923,14 @@ function digestBytes(value: Uint8Array): string {
 }
 
 function unauthorized(): HttpError {
-	return new HttpError(401, "unauthorized", "A valid bearer session is required.", {
-		"www-authenticate": "Bearer",
-	});
+	return new HttpError(
+		401,
+		"unauthorized",
+		"A valid bearer session is required.",
+		{
+			"www-authenticate": "Bearer",
+		},
+	);
 }
 
 function rateLimitError(retryAfterSeconds: number): HttpError {
@@ -687,29 +940,39 @@ function rateLimitError(retryAfterSeconds: number): HttpError {
 }
 
 function jsonResponse(value: unknown, status = 200): Response {
-	return withSecurityHeaders(Response.json(value, {
-		status,
-		headers: { "cache-control": "no-store" },
-	}));
+	return withSecurityHeaders(
+		Response.json(value, {
+			status,
+			headers: { "cache-control": "no-store" },
+		}),
+	);
 }
 
 function errorResponse(error: HttpError): Response {
-	return withSecurityHeaders(Response.json({
-		error: {
-			code: error.code,
-			message: error.message,
-		},
-	}, {
-		status: error.status,
-		headers: {
-			"cache-control": "no-store",
-			...error.headers,
-		},
-	}));
+	return withSecurityHeaders(
+		Response.json(
+			{
+				error: {
+					code: error.code,
+					message: error.message,
+				},
+			},
+			{
+				status: error.status,
+				headers: {
+					"cache-control": "no-store",
+					...error.headers,
+				},
+			},
+		),
+	);
 }
 
 function withSecurityHeaders(response: Response): Response {
-	response.headers.set("cache-control", response.headers.get("cache-control") ?? "no-store");
+	response.headers.set(
+		"cache-control",
+		response.headers.get("cache-control") ?? "no-store",
+	);
 	response.headers.set("x-content-type-options", "nosniff");
 	response.headers.set("referrer-policy", "no-referrer");
 	return response;

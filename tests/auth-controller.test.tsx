@@ -1,13 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { AuthController } from "../src/views/client/features/auth/AuthController";
+import { AuthGate } from "../src/views/client/features/auth/AuthGate";
+import {
+	AuthBootScreen,
+	AuthPage,
+} from "../src/views/client/features/auth/AuthPage";
 import type {
 	AuthService,
 	SessionExpiredListener,
 } from "../src/views/client/features/auth/auth-service";
 import { AuthServiceError } from "../src/views/client/features/auth/auth-service";
-import { AuthController } from "../src/views/client/features/auth/AuthController";
-import { AuthBootScreen, AuthPage } from "../src/views/client/features/auth/AuthPage";
-import { AuthGate } from "../src/views/client/features/auth/AuthGate";
 import type {
 	AuthCredentials,
 	AuthSession,
@@ -36,7 +39,9 @@ class FakeAuthService implements AuthService {
 	signInCalls = 0;
 	signOutCalls = 0;
 	restoreImplementation: () => Promise<AuthSession | null> = async () => null;
-	signInImplementation: (_credentials: AuthCredentials) => Promise<AuthSession> = async () => demoSession;
+	signInImplementation: (
+		_credentials: AuthCredentials,
+	) => Promise<AuthSession> = async () => demoSession;
 	signOutImplementation: () => Promise<void> = async () => {};
 	private readonly expiryListeners = new Set<SessionExpiredListener>();
 
@@ -141,7 +146,9 @@ describe("AuthController", () => {
 		expect(state.failure.kind).toBe("invalid-credentials");
 		expect(state.failure.message).toContain("邮箱或密码不正确");
 		expect(state.email).toBe(MOCK_AUTH_EXPERIENCE.email);
-		expect(state.failure.message).not.toContain("Authentication service failure");
+		expect(state.failure.message).not.toContain(
+			"Authentication service failure",
+		);
 	});
 
 	test("exposes retryable offline and service-unavailable states", async () => {
@@ -303,11 +310,10 @@ describe("authentication UI", () => {
 		expect(markup).not.toContain("受保护的工作空间");
 	});
 
-	test("login page pre-fills the fixed experience account and shows its password", () => {
+	test("login page asks for a remote account without exposing a demo credential", () => {
 		const markup = renderToStaticMarkup(
 			<AuthPage
 				state={{ status: "unauthenticated", notice: null }}
-				experienceCredentials={MOCK_AUTH_EXPERIENCE}
 				onSubmit={noSubmit}
 				onRetry={noSubmit}
 			/>,
@@ -315,9 +321,10 @@ describe("authentication UI", () => {
 
 		expect(markup).toContain("登录");
 		expect(markup).toContain('type="submit"');
-		expect(markup).toContain(`value="${MOCK_AUTH_EXPERIENCE.email}"`);
-		expect(markup).toContain(`体验密码：${MOCK_AUTH_EXPERIENCE.password}`);
-		expect(markup).toContain("邮箱和密码只提交给桌面主进程");
+		expect(markup).toContain('value=""');
+		expect(markup).toContain("使用你的 WhaleHall 账号安全登录");
+		expect(markup).toContain("不会发送给模型");
+		expect(markup).not.toContain("体验密码");
 		expect(markup).not.toContain("userId");
 	});
 

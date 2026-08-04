@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
 	OllamaModelLockError,
-	WHALEHALL_TEACHER_MODEL_LOCK,
 	verifyOllamaModelLock,
+	WHALEHALL_TEACHER_MODEL_LOCK,
 } from "../src/agent/model/ollama-model-lock";
 
 describe("verifyOllamaModelLock", () => {
@@ -10,7 +10,9 @@ describe("verifyOllamaModelLock", () => {
 		const fetch = async (input: string | URL | Request): Promise<Response> => {
 			const url = String(input);
 			if (url.endsWith("/api/version")) {
-				return Response.json({ version: WHALEHALL_TEACHER_MODEL_LOCK.ollamaVersion });
+				return Response.json({
+					version: WHALEHALL_TEACHER_MODEL_LOCK.ollamaVersion,
+				});
 			}
 			return Response.json({
 				models: [
@@ -37,7 +39,9 @@ describe("verifyOllamaModelLock", () => {
 	test("fails closed on a changed model digest", async () => {
 		const fetch = async (input: string | URL | Request): Promise<Response> => {
 			if (String(input).endsWith("/api/version")) {
-				return Response.json({ version: WHALEHALL_TEACHER_MODEL_LOCK.ollamaVersion });
+				return Response.json({
+					version: WHALEHALL_TEACHER_MODEL_LOCK.ollamaVersion,
+				});
 			}
 			return Response.json({
 				models: [
@@ -56,6 +60,39 @@ describe("verifyOllamaModelLock", () => {
 		await expect(
 			verifyOllamaModelLock(WHALEHALL_TEACHER_MODEL_LOCK, { fetch }),
 		).rejects.toBeInstanceOf(OllamaModelLockError);
+	});
+
+	test("rejects untrusted metadata before it can enter an error message", async () => {
+		const untrustedDigest = `digest\\n${"a".repeat(2_000)}`;
+		const fetch = async (input: string | URL | Request): Promise<Response> => {
+			if (String(input).endsWith("/api/version")) {
+				return Response.json({
+					version: WHALEHALL_TEACHER_MODEL_LOCK.ollamaVersion,
+				});
+			}
+			return Response.json({
+				models: [
+					{
+						name: WHALEHALL_TEACHER_MODEL_LOCK.model,
+						digest: untrustedDigest,
+						details: {
+							parameter_size: WHALEHALL_TEACHER_MODEL_LOCK.parameterSize,
+							quantization_level:
+								WHALEHALL_TEACHER_MODEL_LOCK.quantizationLevel,
+						},
+					},
+				],
+			});
+		};
+		let observed: unknown;
+		try {
+			await verifyOllamaModelLock(WHALEHALL_TEACHER_MODEL_LOCK, { fetch });
+		} catch (error) {
+			observed = error;
+		}
+		expect(observed).toBeInstanceOf(OllamaModelLockError);
+		expect((observed as Error).message).toContain("invalid metadata");
+		expect((observed as Error).message).not.toContain(untrustedDigest);
 	});
 
 	test("rejects unallowlisted remote lock destinations before any request", async () => {
@@ -100,8 +137,7 @@ describe("verifyOllamaModelLock", () => {
 									name: WHALEHALL_TEACHER_MODEL_LOCK.model,
 									digest: WHALEHALL_TEACHER_MODEL_LOCK.digest,
 									details: {
-										parameter_size:
-											WHALEHALL_TEACHER_MODEL_LOCK.parameterSize,
+										parameter_size: WHALEHALL_TEACHER_MODEL_LOCK.parameterSize,
 										quantization_level:
 											WHALEHALL_TEACHER_MODEL_LOCK.quantizationLevel,
 									},

@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import type { AuthCredentials } from "../shared/auth";
+import type {
+	AuthSessionIdentity,
+	DesktopAuthSessionManager,
+} from "./auth-session";
 
 const REFRESH_TOKEN_KEY = "auth.refresh-token.current";
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
@@ -48,6 +53,8 @@ export class RemoteAuthError extends Error {
 
 export interface RemoteAuthSessionManagerOptions {
 	baseUrl?: string;
+	/** Personal relay capability; never leaves the Bun main process except as a header. */
+	agentKey?: string;
 	fetch?: typeof fetch;
 	requestTimeoutMs?: number;
 	onBeforeSessionClear?: (accountId: string | null) => Promise<void>;
@@ -58,13 +65,17 @@ export interface RemoteAuthSessionManagerOptions {
  * Owns all bearer credentials in the Bun main process. Renderers and the
  * Mastra sidecar only receive the public session projection.
  */
-export class RemoteAuthSessionManager {
+export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	private readonly baseUrl: URL | null;
+	private readonly agentKey: string | null;
 	private readonly fetchImpl: typeof fetch;
 	private readonly requestTimeoutMs: number;
-	private readonly onBeforeSessionClear: (accountId: string | null) => Promise<void>;
+	private readonly onBeforeSessionClear: (
+		accountId: string | null,
+	) => Promise<void>;
 	private readonly onSessionExpired: () => void;
-	private current: { session: RemoteAuthSession; accessToken: string } | null = null;
+	private current: { session: RemoteAuthSession; accessToken: string } | null =
+		null;
 	private refreshPromise: Promise<RemoteAuthSession> | null = null;
 	private generation = 0;
 	private transitionTail = Promise.resolve();
@@ -73,10 +84,17 @@ export class RemoteAuthSessionManager {
 		private readonly credentials: SecureCredentialStore,
 		options: RemoteAuthSessionManagerOptions = {},
 	) {
-		this.baseUrl = options.baseUrl ? validateRemoteBaseUrl(options.baseUrl) : null;
+		this.baseUrl = options.baseUrl
+			? validateRemoteBaseUrl(options.baseUrl)
+			: null;
+		this.agentKey = options.agentKey
+			? normalizeAgentKey(options.agentKey)
+			: null;
 		this.fetchImpl = options.fetch ?? fetch;
-		this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-		this.onBeforeSessionClear = options.onBeforeSessionClear ?? (async () => {});
+		this.requestTimeoutMs =
+			options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+		this.onBeforeSessionClear =
+			options.onBeforeSessionClear ?? (async () => {});
 		this.onSessionExpired = options.onSessionExpired ?? (() => {});
 	}
 
@@ -86,6 +104,10 @@ export class RemoteAuthSessionManager {
 
 	get accountId(): string | null {
 		return this.current?.session.user.id ?? null;
+	}
+
+	get sessionGeneration(): number {
+		return this.generation;
 	}
 
 	async restoreSession(): Promise<RemoteAuthSession | null> {
@@ -101,7 +123,7 @@ export class RemoteAuthSessionManager {
 		return this.refreshWith(refreshToken, generation);
 	}
 
-	async signIn(email: string, password: string): Promise<RemoteAuthSession> {
+	async signIn(credentials: AuthCredentials): Promise<RemoteAuthSession> {
 		this.requireConfigured();
 		const generation = ++this.generation;
 		let response: Response;
@@ -109,13 +131,20 @@ export class RemoteAuthSessionManager {
 			response = await this.request("/v1/auth/sessions", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+				body: JSON.stringify({
+					email: credentials.email.trim().toLowerCase(),
+					password: credentials.password,
+				}),
 			});
 		} catch (error) {
 			throw transportFailure(error);
 		}
 		if (response.status === 401) {
-			throw new RemoteAuthError("invalid-credentials", "邮箱或密码不正确。", 401);
+			throw new RemoteAuthError(
+				"invalid-credentials",
+				"邮箱或密码不正确。",
+				401,
+			);
 		}
 		if (!response.ok) throw responseFailure(response);
 		const payload = parseSessionResponse(await readJson(response));
@@ -126,6 +155,29 @@ export class RemoteAuthSessionManager {
 			throw new RemoteAuthError("expired", "登录操作已被新的会话操作取代。");
 		}
 		return cloneSession(payload);
+	}
+
+	captureCurrentSession(): AuthSessionIdentity | null {
+		if (!this.current) return null;
+		return {
+			accountId: this.current.session.user.id,
+			sessionId: this.current.session.id,
+			generation: this.generation,
+		};
+	}
+
+	isCurrentSession(identity: AuthSessionIdentity): boolean {
+		return (
+			this.generation === identity.generation &&
+			this.current?.session.id === identity.sessionId &&
+			this.current.session.user.id === identity.accountId
+		);
+	}
+
+	async clearSessionIfCurrent(identity: AuthSessionIdentity): Promise<boolean> {
+		if (!this.isCurrentSession(identity)) return false;
+		await this.expireLocalSession(identity.generation);
+		return true;
 	}
 
 	async signOut(): Promise<void> {
@@ -161,18 +213,29 @@ export class RemoteAuthSessionManager {
 		});
 	}
 
-	async authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
-		const token = await this.getValidAccessToken();
+	async authorizedFetch(
+		path: string,
+		init: RequestInit = {},
+	): Promise<Response> {
+		const agentKey = this.requireAgentKey();
+		await this.getValidAccessToken();
+		const current = this.current;
+		if (!current) throw new RemoteAuthError("expired", "登录会话已过期。", 401);
 		const headers = new Headers(init.headers);
-		headers.set("authorization", `Bearer ${token}`);
+		headers.set("authorization", `Bearer ${current.accessToken}`);
+		headers.set("x-whalehall-agent-key", agentKey);
+		headers.set("x-session-generation", String(this.generation));
 		const first = await this.request(path, { ...init, headers });
 		if (first.status !== 401) return first;
 
-		const session = await this.refreshSession();
+		await this.refreshSession();
+		const refreshed = this.current;
+		if (!refreshed)
+			throw new RemoteAuthError("expired", "登录会话已过期。", 401);
 		const nextHeaders = new Headers(init.headers);
-		nextHeaders.set("authorization", `Bearer ${this.current?.accessToken ?? ""}`);
+		nextHeaders.set("authorization", `Bearer ${refreshed.accessToken}`);
+		nextHeaders.set("x-whalehall-agent-key", agentKey);
 		nextHeaders.set("x-session-generation", String(this.generation));
-		if (!session) throw new RemoteAuthError("expired", "登录会话已过期。", 401);
 		const second = await this.request(path, { ...init, headers: nextHeaders });
 		if (second.status === 401) await this.expireLocalSession();
 		return second;
@@ -206,7 +269,10 @@ export class RemoteAuthSessionManager {
 	}
 
 	private async getValidAccessToken(): Promise<string> {
-		if (this.current && this.current.session.expiresAtMs - Date.now() > 30_000) {
+		if (
+			this.current &&
+			this.current.session.expiresAtMs - Date.now() > 30_000
+		) {
 			return this.current.accessToken;
 		}
 		await this.refreshSession();
@@ -220,7 +286,11 @@ export class RemoteAuthSessionManager {
 	): Promise<RemoteAuthSession> {
 		this.requireConfigured();
 		if (generation !== this.generation) {
-			throw new RemoteAuthError("expired", "刷新操作已被新的会话操作取代。", 401);
+			throw new RemoteAuthError(
+				"expired",
+				"刷新操作已被新的会话操作取代。",
+				401,
+			);
 		}
 		let response: Response;
 		try {
@@ -239,12 +309,18 @@ export class RemoteAuthSessionManager {
 		if (!response.ok) throw responseFailure(response);
 		const payload = parseSessionResponse(await readJson(response));
 		if (!(await this.persistAndActivate(payload, generation))) {
-			throw new RemoteAuthError("expired", "刷新操作已被新的会话操作取代。", 401);
+			throw new RemoteAuthError(
+				"expired",
+				"刷新操作已被新的会话操作取代。",
+				401,
+			);
 		}
 		return cloneSession(payload);
 	}
 
-	private async expireLocalSession(expectedGeneration = this.generation): Promise<void> {
+	private async expireLocalSession(
+		expectedGeneration = this.generation,
+	): Promise<void> {
 		if (expectedGeneration !== this.generation) return;
 		this.generation += 1;
 		const accountId = this.current?.session.user.id ?? null;
@@ -266,7 +342,10 @@ export class RemoteAuthSessionManager {
 		});
 	}
 
-	private async persistAndActivate(payload: SessionResponse, generation: number): Promise<boolean> {
+	private async persistAndActivate(
+		payload: SessionResponse,
+		generation: number,
+	): Promise<boolean> {
 		return this.withTransitionLock(async () => {
 			if (generation !== this.generation) return false;
 			const previousAccountId = this.current?.session.user.id ?? null;
@@ -310,7 +389,8 @@ export class RemoteAuthSessionManager {
 			return await operation();
 		} finally {
 			release();
-			if (this.transitionTail === queued) this.transitionTail = Promise.resolve();
+			if (this.transitionTail === queued)
+				this.transitionTail = Promise.resolve();
 		}
 	}
 
@@ -322,6 +402,7 @@ export class RemoteAuthSessionManager {
 		}
 		return this.fetchImpl(url, {
 			...init,
+			redirect: "error",
 			signal: init.signal ?? AbortSignal.timeout(this.requestTimeoutMs),
 		});
 	}
@@ -335,16 +416,50 @@ export class RemoteAuthSessionManager {
 		}
 		return this.baseUrl;
 	}
+
+	private requireAgentKey(): string {
+		if (!this.agentKey) {
+			throw new RemoteAuthError(
+				"service-unavailable",
+				"尚未配置个人 Agent relay key。",
+			);
+		}
+		return this.agentKey;
+	}
 }
 
 function validateRemoteBaseUrl(value: string): URL {
 	const url = new URL(value);
-	const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+	const loopback =
+		url.hostname === "127.0.0.1" ||
+		url.hostname === "localhost" ||
+		url.hostname === "[::1]";
 	if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-		throw new Error("WHALEHALL_RELAY_URL must use HTTPS, or HTTP on loopback only.");
+		throw new Error(
+			"Agent relay base URL must use HTTPS, or HTTP on loopback only.",
+		);
 	}
-	url.pathname = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+	if (
+		url.username ||
+		url.password ||
+		url.search ||
+		url.hash ||
+		(url.pathname !== "" && url.pathname !== "/")
+	) {
+		throw new Error(
+			"Agent relay base URL must be an origin without URL components.",
+		);
+	}
+	url.pathname = "/";
 	return url;
+}
+
+function normalizeAgentKey(value: string): string {
+	const key = value.trim();
+	if (key.length < 1 || key.length > 1_024 || /[\p{Cc}\s]/u.test(key)) {
+		throw new Error("Personal Agent relay key is invalid.");
+	}
+	return key;
 }
 
 function parseSessionResponse(value: unknown): SessionResponse {
@@ -366,12 +481,18 @@ function parseSessionResponse(value: unknown): SessionResponse {
 }
 
 function requiredString(value: unknown, maxLength: number): string {
-	if (typeof value !== "string" || value.length === 0 || value.length > maxLength) throw malformedResponse();
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		value.length > maxLength
+	)
+		throw malformedResponse();
 	return value;
 }
 
 function requiredFiniteNumber(value: unknown): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) throw malformedResponse();
+	if (typeof value !== "number" || !Number.isFinite(value))
+		throw malformedResponse();
 	return value;
 }
 
@@ -392,14 +513,27 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 function responseFailure(response: Response): RemoteAuthError {
-	if (response.status === 401) return new RemoteAuthError("expired", "登录会话已过期。", response.status);
-	if (response.status >= 500) return new RemoteAuthError("service-unavailable", "认证服务暂时不可用。", response.status);
-	return new RemoteAuthError("unexpected", `认证请求失败（${response.status}）。`, response.status);
+	if (response.status === 401)
+		return new RemoteAuthError("expired", "登录会话已过期。", response.status);
+	if (response.status >= 500)
+		return new RemoteAuthError(
+			"service-unavailable",
+			"认证服务暂时不可用。",
+			response.status,
+		);
+	return new RemoteAuthError(
+		"unexpected",
+		`认证请求失败（${response.status}）。`,
+		response.status,
+	);
 }
 
 function transportFailure(error: unknown): RemoteAuthError {
 	if (error instanceof RemoteAuthError) return error;
-	if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+	if (
+		error instanceof DOMException &&
+		(error.name === "TimeoutError" || error.name === "AbortError")
+	) {
 		return new RemoteAuthError("offline", "网络连接超时。");
 	}
 	return new RemoteAuthError("offline", "无法连接登录服务。");

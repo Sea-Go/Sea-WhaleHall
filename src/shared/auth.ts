@@ -1,7 +1,7 @@
 /**
  * Public authentication projection. Long-lived tokens never cross the Bun
- * boundary. The fixed experience password is intentionally public UI copy and
- * is only validated locally by the desktop main process.
+ * boundary. Test-only LocalTestAuth fixtures live separately and are never
+ * rendered by the production desktop login screen.
  */
 export interface AuthCredentials {
 	email: string;

@@ -4,6 +4,8 @@ export interface RelayUser {
 	displayName: string;
 	initials: string;
 	passwordHash: string;
+	/** scrypt hash of the owner's personal desktop relay key. */
+	agentKeyHash: string;
 	disabled?: boolean;
 }
 
@@ -33,7 +35,10 @@ export interface StoredSession {
 
 export interface SessionStore {
 	create(session: StoredSession): Promise<void>;
-	findActiveByAccessDigest(digest: string, nowMs: number): Promise<StoredSession | null>;
+	findActiveByAccessDigest(
+		digest: string,
+		nowMs: number,
+	): Promise<StoredSession | null>;
 	consumeRefresh(digest: string, nowMs: number): Promise<StoredSession | null>;
 	revokeByAccessDigest(digest: string, nowMs: number): Promise<void>;
 	cleanup(nowMs: number): Promise<void>;
@@ -69,7 +74,10 @@ export interface RelayRecordStore {
 		recordId: string,
 		response: { status: number; headers: Record<string, string> },
 	): Promise<void>;
-	fail(recordId: string, reason: "upstream" | "client-abort" | "storage" | "response-too-large"): Promise<void>;
+	fail(
+		recordId: string,
+		reason: "upstream" | "client-abort" | "storage" | "response-too-large",
+	): Promise<void>;
 	cleanup(nowMs: number): Promise<void>;
 }
 

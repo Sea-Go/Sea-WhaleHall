@@ -1,36 +1,33 @@
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { Temporal } from "temporal-polyfill";
 import { AppShell } from "./app/AppShell";
 import { applyAppearancePreferences } from "./app/appearance";
 import { AuthGate, type AuthSession } from "./features/auth/public";
-import { PlanningController } from "./features/planning/public";
+import { CalendarController } from "./features/calendar/public";
+import { ConversationController } from "./features/conversation/public";
 import { MonitoringController } from "./features/monitoring/public";
+import { PlanningController } from "./features/planning/public";
 import { ReportController } from "./features/reports/public";
 import {
 	AgentPermissionsController,
 	PreferencesController,
 } from "./features/settings/public";
-import { ConversationController } from "./features/conversation/public";
-import {
-	MOCK_AUTH_EXPERIENCE,
-	MockAuthService,
-} from "./infrastructure/auth/MockAuthService";
+import { beginAccountTransition } from "./goal-sync";
+import { ElectrobunAuditExportService } from "./infrastructure/audit-export/ElectrobunAuditExportService";
 import { ElectrobunAuthService } from "./infrastructure/auth/ElectrobunAuthService";
-import { MockCalendarService } from "./infrastructure/calendar/MockCalendarService";
+import { MockAuthService } from "./infrastructure/auth/MockAuthService";
 import { ElectrobunCalendarService } from "./infrastructure/calendar/ElectrobunCalendarService";
-import { CalendarController } from "./features/calendar/public";
-import { CalendarPlanningGateway } from "./infrastructure/planning/CalendarPlanningGateway";
+import { MockCalendarService } from "./infrastructure/calendar/MockCalendarService";
+import { ElectrobunConversationService } from "./infrastructure/conversation/ElectrobunConversationService";
+import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
+import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
 import { AgentPlanningGenerationService } from "./infrastructure/planning/AgentPlanningGenerationService";
+import { CalendarPlanningGateway } from "./infrastructure/planning/CalendarPlanningGateway";
 import { ElectrobunPlanningAuthorityGateway } from "./infrastructure/planning/ElectrobunPlanningAuthorityGateway";
 import { MockReportService } from "./infrastructure/reports/MockReportService";
-import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
-import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
-import { ElectrobunAuditExportService } from "./infrastructure/audit-export/ElectrobunAuditExportService";
-import { MockPreferencesService } from "./infrastructure/settings/MockPreferencesService";
 import { ElectrobunAgentPermissionsService } from "./infrastructure/settings/ElectrobunAgentPermissionsService";
 import { MockAgentPermissionsService } from "./infrastructure/settings/MockAgentPermissionsService";
-import { ElectrobunConversationService } from "./infrastructure/conversation/ElectrobunConversationService";
-import { beginAccountTransition } from "./goal-sync";
-import { Temporal } from "temporal-polyfill";
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { MockPreferencesService } from "./infrastructure/settings/MockPreferencesService";
 
 const desktopRuntime = hasElectrobunRuntime();
 const authService = desktopRuntime
@@ -42,9 +39,7 @@ const calendarService = desktopRuntime
 const planningTimeZone =
 	Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
 const currentDate = () =>
-	Temporal.Now.zonedDateTimeISO(planningTimeZone)
-		.toPlainDate()
-		.toString();
+	Temporal.Now.zonedDateTimeISO(planningTimeZone).toPlainDate().toString();
 const reportController = new ReportController(
 	new MockReportService(),
 	currentDate,
@@ -83,12 +78,12 @@ export function App() {
 	return (
 		<AuthGate
 			service={authService}
-			experienceCredentials={MOCK_AUTH_EXPERIENCE}
 			renderAuthenticated={({ session, logout }) => (
-					<AuthenticatedApp
-						session={session}
-						enableQaControls={enableQaControls}
-						onLogout={logout}
+				<AuthenticatedApp
+					key={session.user.id}
+					session={session}
+					enableQaControls={enableQaControls}
+					onLogout={logout}
 				/>
 			)}
 		/>
@@ -107,31 +102,33 @@ function AuthenticatedApp({
 	const logoutPendingRef = useRef(false);
 	const calendarController = useMemo(
 		() => new CalendarController(calendarService),
-		[session.user.id],
+		[],
 	);
 	const planningCalendarGateway = useMemo(
 		() => new CalendarPlanningGateway(calendarService),
-		[session.user.id],
+		[],
 	);
 	const planningAuthorityGateway = useMemo(
-		() => desktopRuntime ? new ElectrobunPlanningAuthorityGateway() : undefined,
-		[session.user.id],
+		() =>
+			desktopRuntime ? new ElectrobunPlanningAuthorityGateway() : undefined,
+		[],
 	);
 	const planningController = useMemo(
-		() => new PlanningController(
-			new AgentPlanningGenerationService(),
-			planningCalendarGateway,
-			currentDate,
-			() => planningTimeZone,
-			undefined,
-			undefined,
-			planningAuthorityGateway,
-		),
-		[session.user.id],
+		() =>
+			new PlanningController(
+				new AgentPlanningGenerationService(),
+				planningCalendarGateway,
+				currentDate,
+				() => planningTimeZone,
+				undefined,
+				undefined,
+				planningAuthorityGateway,
+			),
+		[planningAuthorityGateway, planningCalendarGateway],
 	);
 	const conversationController = useMemo(
 		() => new ConversationController(new ElectrobunConversationService()),
-		[planningCalendarGateway, session.user.id],
+		[],
 	);
 
 	useEffect(() => {
@@ -139,12 +136,13 @@ function AuthenticatedApp({
 	}, [calendarController]);
 
 	const agentPermissionsController = useMemo(
-		() => new AgentPermissionsController(
-			desktopRuntime
-				? new ElectrobunAgentPermissionsService()
-				: new MockAgentPermissionsService(),
-		),
-		[session.user.id],
+		() =>
+			new AgentPermissionsController(
+				desktopRuntime
+					? new ElectrobunAgentPermissionsService()
+					: new MockAgentPermissionsService(),
+			),
+		[],
 	);
 	const conversationState = useSyncExternalStore(
 		conversationController.subscribe,
@@ -188,13 +186,16 @@ function AuthenticatedApp({
 			auditExportService={auditExportService}
 			conversationState={conversationState}
 			conversationActions={{
-				onCreateConversation: () => void conversationController.createConversation(),
-				onSendMessage: (draft) => void conversationController.sendMessage(draft),
+				onCreateConversation: () =>
+					void conversationController.createConversation(),
+				onSendMessage: (draft) =>
+					void conversationController.sendMessage(draft),
 				onRetry: () => void conversationController.retry(),
 				onStopRun: () => void conversationController.stopRun(),
 				onApproveTool: () => void conversationController.approveTool(),
 				onDeclineTool: () => void conversationController.declineTool(),
-				onRestoreRun: (runId) => void conversationController.resumeInterruptedRun(runId),
+				onRestoreRun: (runId) =>
+					void conversationController.resumeInterruptedRun(runId),
 			}}
 			enableQaControls={enableQaControls}
 		/>

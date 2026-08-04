@@ -2,20 +2,20 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { dirname, resolve } from "node:path";
 import { buildAgentHost } from "../scripts/build-agent-host";
 import {
-	AGENT_HOST_PROTOCOL_VERSION,
-	MAX_MODEL_RELAY_CHUNK_BYTES,
-	SIDECAR_HOST_METHODS,
-	isRecord,
-	successResponse,
-	type AgentRunEventFrame,
-	type ModelRelayOpenParams,
-	type ProtocolMessage,
-	type SidecarHostRequest,
-} from "../src/agent/mastra-host/protocol";
-import {
 	ContentLengthFrameParser,
 	encodeContentLengthFrame,
 } from "../src/agent/mastra-host/framing";
+import {
+	AGENT_HOST_PROTOCOL_VERSION,
+	type AgentRunEventFrame,
+	isRecord,
+	MAX_MODEL_RELAY_CHUNK_BYTES,
+	type ModelRelayOpenParams,
+	type ProtocolMessage,
+	SIDECAR_HOST_METHODS,
+	type SidecarHostRequest,
+	successResponse,
+} from "../src/agent/mastra-host/protocol";
 
 let sidecarPath = "";
 let sidecarNodePath = "";
@@ -34,543 +34,592 @@ afterAll(() => {
 });
 
 describe("Mastra Node sidecar", () => {
-	test(
-		"streams conversation and authoritative structured planning through host calls",
-		async () => {
-			const host = new FakeHost();
-			const harness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => harness.send(message)),
-			);
-			await harness.initialize();
+	test("streams conversation and authoritative structured planning through host calls", async () => {
+		const host = new FakeHost();
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
 
-			const conversationResponse = await harness.request("conversation.start", {
-				runId: "conversation-run-1",
+		const conversationResponse = await harness.request("conversation.start", {
+			runId: "conversation-run-1",
+			conversationId: "conversation-1",
+			resourceId: "installation-1",
+			message: "请用一句话说明今天的重点。",
+			expectedVersion: 0,
+		});
+		expect(conversationResponse).toMatchObject({
+			ok: true,
+			result: { accepted: true },
+		});
+		const conversationTerminal =
+			await harness.waitForRunTerminal("conversation-run-1");
+		expect(conversationTerminal.terminalState).toBe("completed");
+		expect(conversationTerminal.event).toMatchObject({
+			kind: "run.completed",
+			result: {
 				conversationId: "conversation-1",
-				resourceId: "installation-1",
-				message: "请用一句话说明今天的重点。",
-				expectedVersion: 0,
-			});
-			expect(conversationResponse).toMatchObject({ ok: true, result: { accepted: true } });
-			const conversationTerminal = await harness.waitForRunTerminal("conversation-run-1");
-			expect(conversationTerminal.terminalState).toBe("completed");
-			expect(conversationTerminal.event).toMatchObject({
-				kind: "run.completed",
-				result: {
-					conversationId: "conversation-1",
-					message: { role: "assistant", content: "今天先完成最重要的一件事。" },
+				message: { role: "assistant", content: "今天先完成最重要的一件事。" },
+			},
+		});
+		const conversationEvents = harness.runEvents("conversation-run-1");
+		expect(conversationEvents.map((event) => event.sequence)).toEqual(
+			conversationEvents.map((_, index) => index + 1),
+		);
+		expect(conversationEvents.map((event) => event.version)).toEqual(
+			conversationEvents.map((_, index) => index + 1),
+		);
+		expect(
+			conversationEvents.some(
+				(event) => event.event.kind === "conversation.text.delta",
+			),
+		).toBe(true);
+		const snapshot = await harness.request("run.snapshot", {
+			runId: "conversation-run-1",
+		});
+		expect(snapshot).toMatchObject({
+			ok: true,
+			result: { runId: "conversation-run-1", terminalState: "completed" },
+		});
+		expect(host.calls).toContain("memory/load");
+		expect(host.calls).toContain("memory/append");
+
+		const planningInput = {
+			goal: "在年底前完成 WhaleHall Beta",
+			planType: "long-term" as const,
+			deadline: "2099-12-31",
+			priority: "high" as const,
+			weeklyCapacityHours: 10,
+			unavailableDays: ["Sunday"],
+			preferredSessionMinutes: 60 as const,
+			preferredDayPart: "morning" as const,
+			timeZone: "Asia/Shanghai",
+		};
+		await harness.request("planning.start", {
+			runId: "planning-run-1",
+			sessionId: "planning-session-1",
+			input: planningInput,
+			expectedVersion: 0,
+		});
+		const clarification = await harness.waitForRunSuspended("planning-run-1");
+		expect(clarification.terminalState).toBeNull();
+		expect(clarification.event).toMatchObject({
+			kind: "run.suspended",
+			suspendPayload: {
+				kind: "planning.clarification",
+				status: "clarifying",
+				clarificationRounds: 1,
+				questions: [{ key: "expected_outcome" }],
+			},
+		});
+
+		await harness.request("planning.answer", {
+			runId: "planning-run-1",
+			sessionId: "planning-session-1",
+			answers: [
+				{ questionKey: "expected_outcome", answerText: "可安装并通过核心验收" },
+			],
+			expectedVersion: 1,
+		});
+		const draft = await harness.waitForRunTerminal("planning-run-1");
+		expect(draft.terminalState).toBe("completed");
+		expect(draft.event).toMatchObject({
+			kind: "run.completed",
+			result: {
+				status: "draft",
+				draft: {
+					calendarRevision: 7,
+					schedule: [
+						{
+							taskId: "task-1",
+							start: "2099-12-01T09:00:00+08:00",
+							end: "2099-12-01T10:00:00+08:00",
+							timeZone: "Asia/Shanghai",
+						},
+					],
+					unscheduledTaskIds: [],
 				},
-			});
-			const conversationEvents = harness.runEvents("conversation-run-1");
-			expect(conversationEvents.map((event) => event.sequence)).toEqual(
-				conversationEvents.map((_, index) => index + 1),
-			);
-			expect(conversationEvents.map((event) => event.version)).toEqual(
-				conversationEvents.map((_, index) => index + 1),
-			);
-			expect(
-				conversationEvents.some((event) => event.event.kind === "conversation.text.delta"),
-			).toBe(true);
-			const snapshot = await harness.request("run.snapshot", { runId: "conversation-run-1" });
-			expect(snapshot).toMatchObject({
-				ok: true,
-				result: { runId: "conversation-run-1", terminalState: "completed" },
-			});
-			expect(host.calls).toContain("memory/load");
-			expect(host.calls).toContain("memory/append");
+			},
+		});
+		expect(
+			harness
+				.runEvents("planning-run-1")
+				.some((event) => event.event.kind === "planning.object.delta"),
+		).toBe(true);
+		const planningEvents = harness.runEvents("planning-run-1");
+		expect(planningEvents.map((event) => event.sequence)).toEqual(
+			planningEvents.map((_, index) => index + 1),
+		);
+		expect(
+			planningEvents.some((event) => event.event.kind === "run.resumed"),
+		).toBe(true);
+		expect(
+			host.calls.filter((method) => method === "calendar/query"),
+		).toHaveLength(2);
+		expect(host.calls).toContain("workflow/start");
+		expect(host.calls).toContain("workflow/resume");
+		expect(host.calls).toContain("planning/load");
+		expect(host.calls).toContain("planning/validate");
+		expect(
+			host.calls.filter((method) => method === "planning/save"),
+		).toHaveLength(2);
+		expect(host.modelBodies.every((body) => body.stream === true)).toBe(true);
 
-			const planningInput = {
-				goal: "在年底前完成 WhaleHall Beta",
-				planType: "long-term" as const,
-				deadline: "2099-12-31",
-				priority: "high" as const,
-				weeklyCapacityHours: 10,
-				unavailableDays: ["Sunday"],
-				preferredSessionMinutes: 60 as const,
-				preferredDayPart: "morning" as const,
-				timeZone: "Asia/Shanghai",
-			};
-			await harness.request("planning.start", {
-				runId: "planning-run-1",
-				sessionId: "planning-session-1",
-				input: planningInput,
-				expectedVersion: 0,
-			});
-			const clarification = await harness.waitForRunSuspended("planning-run-1");
-			expect(clarification.terminalState).toBeNull();
-			expect(clarification.event).toMatchObject({
-				kind: "run.suspended",
-				suspendPayload: {
-					kind: "planning.clarification",
-					status: "clarifying",
-					clarificationRounds: 1,
-					questions: [{ key: "expected_outcome" }],
-				},
-			});
+		await harness.shutdown();
+	}, 30_000);
 
-			await harness.request("planning.answer", {
-				runId: "planning-run-1",
-				sessionId: "planning-session-1",
-				answers: [
-					{ questionKey: "expected_outcome", answerText: "可安装并通过核心验收" },
-				],
-				expectedVersion: 1,
-			});
-			const draft = await harness.waitForRunTerminal("planning-run-1");
-			expect(draft.terminalState).toBe("completed");
-			expect(draft.event).toMatchObject({
-				kind: "run.completed",
-				result: {
-					status: "draft",
-					draft: {
-						calendarRevision: 7,
-						schedule: [
-							{
-								taskId: "task-1",
-								start: "2099-12-01T09:00:00+08:00",
-								end: "2099-12-01T10:00:00+08:00",
-								timeZone: "Asia/Shanghai",
-							},
-						],
-						unscheduledTaskIds: [],
-					},
-				},
-			});
-			expect(
-				harness
-					.runEvents("planning-run-1")
-					.some((event) => event.event.kind === "planning.object.delta"),
-			).toBe(true);
-			const planningEvents = harness.runEvents("planning-run-1");
-			expect(planningEvents.map((event) => event.sequence)).toEqual(
-				planningEvents.map((_, index) => index + 1),
-			);
-			expect(
-				planningEvents.some((event) => event.event.kind === "run.resumed"),
-			).toBe(true);
-			expect(host.calls.filter((method) => method === "calendar/query")).toHaveLength(2);
-			expect(host.calls).toContain("workflow/start");
-			expect(host.calls).toContain("workflow/resume");
-			expect(host.calls).toContain("planning/load");
-			expect(host.calls).toContain("planning/validate");
-			expect(host.calls.filter((method) => method === "planning/save")).toHaveLength(2);
-			expect(host.modelBodies.every((body) => body.stream === true)).toBe(true);
-
-			await harness.shutdown();
-		},
-		30_000,
-	);
-
-	test(
-		"recalls Bun-owned conversation history through Mastra Memory",
-		async () => {
-			const host = new FakeHost({
-				memoryMessages: [
-					{ role: "user", content: "请记住项目代号是蓝鲸。" },
-					{ role: "assistant", content: "已记住项目代号。" },
-				],
-			});
-			const harness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => harness.send(message)),
-			);
-			await harness.initialize();
-			await harness.request("conversation.start", {
-				runId: "memory-run",
-				conversationId: "memory-conversation",
-				resourceId: "installation-1",
-				message: "项目代号是什么？",
-				expectedVersion: 2,
-			});
-			const terminal = await harness.waitForRunTerminal("memory-run");
-			expect(terminal.event).toMatchObject({
-				kind: "run.completed",
-				result: { memoryVersion: 4 },
-			});
-			const modelMessages = JSON.stringify(host.modelBodies[0]?.messages);
-			expect(modelMessages).toContain("请记住项目代号是蓝鲸。");
-			expect(modelMessages).toContain("已记住项目代号。");
-			expect(modelMessages.indexOf("请记住项目代号是蓝鲸。")).toBeLessThan(
-				modelMessages.indexOf("已记住项目代号。"),
-			);
-			expect(modelMessages.indexOf("已记住项目代号。")).toBeLessThan(
-				modelMessages.indexOf("项目代号是什么？"),
-			);
-			const appendedMessages = host.lastMemoryAppend?.messages;
-			expect(Array.isArray(appendedMessages) ? appendedMessages : []).toHaveLength(2);
-			expect(host.lastMemoryAppend).toMatchObject({
-				expectedVersion: 2,
-				messages: expect.arrayContaining([
-					{ role: "assistant", content: "今天先完成最重要的一件事。" },
-				]),
-			});
-			await harness.shutdown();
-		},
-		30_000,
-	);
-
-	test(
-		"rehydrates a suspended planning Workflow after the Sidecar restarts",
-		async () => {
-			const host = new FakeHost();
-			const firstHarness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => firstHarness.send(message)),
-			);
-			await firstHarness.initialize();
-			await firstHarness.request("planning.start", {
-				runId: "planning-restart-run",
-				sessionId: "planning-restart-session",
-				input: planningInputFixture(),
-				expectedVersion: 0,
-			});
-			await firstHarness.waitForRunSuspended("planning-restart-run");
-			const suspendedSnapshot = host.workflowSnapshotCalls.findLast(
-				(call) =>
-					call.method === "workflow/snapshot.persist" &&
-					call.params.workflowName === "task-planning" &&
-					isRecord(call.params.snapshot) &&
-					call.params.snapshot.status === "suspended",
-			);
-			expect(suspendedSnapshot?.params).toMatchObject({
-				workflowName: "task-planning",
-				runId: "workflow-1",
-				snapshot: {
-					status: "suspended",
-					resumeLabels: {
-						"planning.clarification": { stepId: "planning-cycle" },
-					},
-				},
-			});
-			await firstHarness.shutdown();
-
-			const callsBeforeRestart = host.workflowSnapshotCalls.length;
-			const secondHarness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => secondHarness.send(message)),
-			);
-			await secondHarness.initialize();
-			const modelCallsBeforeRecovery = host.modelBodies.length;
-			await secondHarness.request("planning.answer", {
-				runId: "different-planning-run",
-				sessionId: "planning-restart-session",
-				answers: [
-					{ questionKey: "expected_outcome", answerText: "尝试串用会话" },
-				],
-				expectedVersion: 1,
-			});
-			const rejected = await secondHarness.waitForRunTerminal(
-				"different-planning-run",
-			);
-			expect(rejected.event).toMatchObject({
-				kind: "run.failed",
-				error: { code: "SESSION_NOT_FOUND" },
-			});
-			expect(host.modelBodies).toHaveLength(modelCallsBeforeRecovery);
-			const accepted = await secondHarness.request("planning.answer", {
-				runId: "planning-restart-run",
-				sessionId: "planning-restart-session",
-				answers: [
-					{ questionKey: "expected_outcome", answerText: "可安装并通过核心验收" },
-				],
-				expectedVersion: 1,
-			});
-			expect(accepted).toMatchObject({
-				ok: true,
-				result: { accepted: true, runId: "planning-restart-run" },
-			});
-			const terminal = await secondHarness.waitForRunTerminal(
-				"planning-restart-run",
-			);
-			expect(terminal.event).toMatchObject({
-				kind: "run.completed",
-				result: { status: "draft", draft: { phases: [{ id: "phase-1" }] } },
-			});
-			const recoveryCalls = host.workflowSnapshotCalls.slice(callsBeforeRestart);
-			expect(
-				recoveryCalls.filter(
-					(call) =>
-						call.method === "workflow/snapshot.load" &&
-						call.params.workflowName === "task-planning" &&
-						call.params.runId === "workflow-1",
-				),
-			).toHaveLength(2);
-			await secondHarness.shutdown();
-		},
-		30_000,
-	);
-
-	test(
-		"proposes an approval-bound write Tool before executing it and resumes the same run",
-		async () => {
-			const host = new FakeHost({ toolApprovalScenario: true });
-			const harness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => harness.send(message)),
-			);
-			await harness.initialize();
-			await harness.request("conversation.start", {
-				runId: "tool-run-1",
-				conversationId: "tool-conversation-1",
-				resourceId: "installation-1",
-				message: "请创建一个明天上午的日程。",
-				expectedVersion: 0,
-			});
-
-			const approvalEvent = (await harness.waitFor(
-				(message) =>
-					isRunEvent(message) &&
-					message.runId === "tool-run-1" &&
-					message.event.kind === "agent.tool.approval.required",
-			)) as AgentRunEventFrame;
-			expect(approvalEvent.event).toMatchObject({
-				kind: "agent.tool.approval.required",
-				toolCallId: "tool-call-1",
-				toolName: "calendar.create_event",
-				runVersion: 41,
-				approval: {
-					approvalId: "approval-1",
-					inputDigest: "digest-1",
-				},
-			});
-			expect(approvalEvent.event).not.toHaveProperty("arguments");
-			await harness.waitForRunSuspended("tool-run-1");
-			expect(host.calls).toContain("tool/propose");
-			expect(host.calls).not.toContain("tool/call");
-			expect(host.calls.filter((method) => method === "memory/append")).toHaveLength(0);
-			expect(
-				host.workflowSnapshotCalls.some(
-					(call) =>
-						call.method === "workflow/snapshot.persist" &&
-						call.params.workflowName === "agentic-loop" &&
-						call.params.runId === "tool-run-1" &&
-						isRecord(call.params.snapshot) &&
-						call.params.snapshot.status === "suspended",
-				),
-			).toBe(true);
-			const bypass = await harness.request("run.resume", {
-				runId: "tool-run-1",
-				resumeData: { approved: true },
-			});
-			expect(bypass).toMatchObject({
-				ok: false,
-				error: { code: "RUN_NOT_RESUMABLE" },
-			});
-
-			await harness.request("agent.approveTool", {
-				runId: "tool-run-1",
-				toolCallId: "tool-call-1",
-			});
-			const terminal = await harness.waitForRunTerminal("tool-run-1");
-			expect(terminal.terminalState).toBe("completed");
-			expect(terminal.event).toMatchObject({
-				kind: "run.completed",
-				result: {
-					message: { content: "我来处理。日程已经按你的要求创建。" },
-				},
-			});
-			expect(host.calls).toContain("tool/call");
-			expect(
-				host.workflowSnapshotCalls.some(
-					(call) =>
-						call.method === "workflow/snapshot.load" &&
-						call.params.workflowName === "agentic-loop" &&
-						call.params.runId === "tool-run-1",
-				),
-			).toBe(true);
-			expect(host.lastToolCall).toMatchObject({
-				runId: "tool-run-1",
-				toolCallId: "tool-call-1",
-				name: "calendar.create_event",
-				runVersion: 41,
-				approvalId: "approval-1",
-				inputDigest: "digest-1",
-			});
-			const toolEvents = harness.runEvents("tool-run-1");
-			expect(toolEvents.map((event) => event.sequence)).toEqual(
-				toolEvents.map((_, index) => index + 1),
-			);
-			expect(
-				toolEvents
-					.filter((event) => event.event.kind === "agent.tool.result")
-					.every((event) => !("result" in event.event)),
-			).toBe(true);
-			await harness.shutdown();
-		},
-		30_000,
-	);
-
-	test(
-		"auto-executes an allowlisted read Tool without proposing approval",
-		async () => {
-			const host = new FakeHost({ readToolScenario: true });
-			const harness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => harness.send(message)),
-			);
-			await harness.initialize();
-			await harness.request("conversation.start", {
-				runId: "read-tool-run",
-				conversationId: "read-tool-conversation",
-				resourceId: "installation-1",
-				message: "当前目标是什么？",
-				expectedVersion: 0,
-			});
-			const terminal = await harness.waitForRunTerminal("read-tool-run");
-			expect(terminal.terminalState).toBe("completed");
-			expect(host.calls).toContain("tool/call");
-			expect(host.calls).not.toContain("tool/propose");
-			expect(host.lastToolCall).toMatchObject({
-				runId: "read-tool-run",
-				toolCallId: "read-tool-call-1",
-				name: "planning.get_active_goal",
-				arguments: {},
-			});
-			expect(host.lastToolCall).not.toHaveProperty("approvalId");
-			expect(
-				harness
-					.runEvents("read-tool-run")
-					.some((event) => event.event.kind === "run.suspended"),
-			).toBe(false);
-			const firstModelBody = host.modelBodies[0];
-			const toolNames = Array.isArray(firstModelBody?.tools)
-				? firstModelBody.tools
-						.map((tool) =>
-							isRecord(tool) &&
-							isRecord(tool.function) &&
-							typeof tool.function.name === "string"
-								? tool.function.name
-								: null,
-						)
-						.filter((name): name is string => name !== null)
-						.sort()
-				: [];
-			expect(toolNames).toEqual(
-				[
-					"calendar_commit_plan_schedule",
-					"calendar_create_event",
-					"calendar_delete_event",
-					"calendar_list_events",
-					"calendar_update_event",
-					"planning_get_active_goal",
-					"planning_get_active_plan",
-					"planning_save_draft",
-				].sort(),
-			);
-			await harness.shutdown();
-		},
-		30_000,
-	);
-
-	test(
-		"declines an approval-bound write Tool without executing it",
-		async () => {
-			const host = new FakeHost({ toolApprovalScenario: true });
-			const harness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => harness.send(message)),
-			);
-			await harness.initialize();
-			await harness.request("conversation.start", {
-				runId: "decline-tool-run",
-				conversationId: "decline-tool-conversation",
-				resourceId: "installation-1",
-				message: "请创建一个明天上午的日程。",
-				expectedVersion: 0,
-			});
-			await harness.waitForRunSuspended("decline-tool-run");
-			await harness.request("agent.declineTool", {
-				runId: "decline-tool-run",
-				toolCallId: "tool-call-1",
-				reason: "用户拒绝",
-			});
-			const terminal = await harness.waitForRunTerminal("decline-tool-run");
-			expect(terminal.terminalState).toBe("completed");
-			expect(host.calls).not.toContain("tool/call");
-			expect(
-				harness
-					.runEvents("decline-tool-run")
-					.some(
-						(event) =>
-							event.event.kind === "run.resumed" &&
-							event.event.decision === "decline",
-					),
-			).toBe(true);
-			await harness.shutdown();
-		},
-		30_000,
-	);
-
-	test(
-		"retries an invalid draft once and persists a conflict instead of failing the run",
-		async () => {
-			const host = new FakeHost({ planningConflictScenario: true });
-			const harness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => harness.send(message)),
-			);
-			await harness.initialize();
-			await harness.request("planning.start", {
-				runId: "planning-conflict-run",
-				sessionId: "planning-conflict-session",
-				input: planningInputFixture(),
-				expectedVersion: 0,
-			});
-			const terminal = await harness.waitForRunTerminal("planning-conflict-run");
-			expect(terminal.terminalState).toBe("completed");
-			expect(terminal.event).toMatchObject({
-				kind: "run.completed",
-				result: {
-					status: "conflict",
-					draft: { calendarRevision: 8 },
-					validationIssues: [
-						{ code: "calendar-conflict", proposalId: "proposal-1" },
+	test("runs activity analysis with Worker results only and never calls a local Tool", async () => {
+		const host = new FakeHost();
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("activity.start", {
+			runId: "activity-run-1",
+			activityJobId: "activity-job-1",
+			consumedScore: 0,
+			analyses: [
+				{
+					request_id: "worker-request-1",
+					score: 0.8,
+					score_reason: "goal-relevant activity",
+					events: [
+						{
+							source_event_ids: ["sealed-window-id"],
+							activity: "development",
+							goal_relevance: "direct",
+							confidence: 0.9,
+							reason_codes: ["worker"],
+							evidence: ["Worker-produced evidence"],
+							started_at_ms: 1,
+							ended_at_ms: 2,
+						},
 					],
 				},
-			});
-			expect(host.calls.filter((method) => method === "calendar/query")).toHaveLength(2);
-			expect(host.calls.filter((method) => method === "planning/validate")).toHaveLength(2);
-			expect(
-				host.modelBodies.filter((body) => body.response_format !== undefined),
-			).toHaveLength(2);
-			expect(host.calls.filter((method) => method === "planning/save")).toHaveLength(1);
-			expect(host.lastPlanningSave).toMatchObject({
-				result: { status: "conflict", draft: { calendarRevision: 8 } },
-			});
-			expect(
-				harness
-					.runEvents("planning-conflict-run")
-					.some((event) => event.event.kind === "run.failed"),
-			).toBe(false);
-			await harness.shutdown();
-		},
-		30_000,
-	);
+			],
+		});
+		const terminal = await harness.waitForRunTerminal("activity-run-1");
+		expect(terminal.event).toMatchObject({
+			kind: "run.completed",
+			result: {
+				activityJobId: "activity-job-1",
+				summary: "今天先完成最重要的一件事。",
+			},
+		});
+		expect(host.calls).toContain("model/relay.open");
+		expect(
+			host.calls.some(
+				(method) =>
+					method.startsWith("tool/") ||
+					method.startsWith("memory/") ||
+					method.startsWith("calendar/") ||
+					method.startsWith("planning/"),
+			),
+		).toBeFalse();
+		const modelInput = JSON.stringify(host.modelBodies[0]?.messages);
+		expect(modelInput).toContain("Worker-produced evidence");
+		expect(modelInput).not.toContain("raw_event");
+		await harness.shutdown();
+	}, 30_000);
 
-	test(
-		"cancels an active run and aborts the in-flight model relay",
-		async () => {
-			const host = new FakeHost({ holdModelOpen: true });
-			const harness = new SidecarHarness(sidecarPath, (request) =>
-				host.handle(request, (message) => harness.send(message)),
-			);
-			await harness.initialize();
-			await harness.request("conversation.start", {
-				runId: "cancel-run-1",
-				conversationId: "cancel-conversation",
-				message: "等待模型",
-				expectedVersion: 0,
-			});
-			await harness.waitFor(
-				(message) => isSidecarRequest(message) && message.method === "model/relay.open",
-			);
-			await harness.request("run.cancel", {
-				runId: "cancel-run-1",
-				reason: "用户停止生成",
-			});
-			const terminal = await harness.waitForRunTerminal("cancel-run-1");
-			expect(terminal.terminalState).toBe("cancelled");
-			expect(terminal.event).toEqual({ kind: "run.cancelled", reason: "用户停止生成" });
-			await harness.waitFor(
-				(message) => isSidecarRequest(message) && message.method === "model/relay.abort",
-			);
-			expect(host.calls).toContain("model/relay.abort");
-			await harness.shutdown();
-		},
-		30_000,
-	);
+	test("recalls Bun-owned conversation history through Mastra Memory", async () => {
+		const host = new FakeHost({
+			memoryMessages: [
+				{ role: "user", content: "请记住项目代号是蓝鲸。" },
+				{ role: "assistant", content: "已记住项目代号。" },
+			],
+		});
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("conversation.start", {
+			runId: "memory-run",
+			conversationId: "memory-conversation",
+			resourceId: "installation-1",
+			message: "项目代号是什么？",
+			expectedVersion: 2,
+		});
+		const terminal = await harness.waitForRunTerminal("memory-run");
+		expect(terminal.event).toMatchObject({
+			kind: "run.completed",
+			result: { memoryVersion: 4 },
+		});
+		const modelMessages = JSON.stringify(host.modelBodies[0]?.messages);
+		expect(modelMessages).toContain("请记住项目代号是蓝鲸。");
+		expect(modelMessages).toContain("已记住项目代号。");
+		expect(modelMessages.indexOf("请记住项目代号是蓝鲸。")).toBeLessThan(
+			modelMessages.indexOf("已记住项目代号。"),
+		);
+		expect(modelMessages.indexOf("已记住项目代号。")).toBeLessThan(
+			modelMessages.indexOf("项目代号是什么？"),
+		);
+		const appendedMessages = host.lastMemoryAppend?.messages;
+		expect(
+			Array.isArray(appendedMessages) ? appendedMessages : [],
+		).toHaveLength(2);
+		expect(host.lastMemoryAppend).toMatchObject({
+			expectedVersion: 2,
+			messages: expect.arrayContaining([
+				{ role: "assistant", content: "今天先完成最重要的一件事。" },
+			]),
+		});
+		await harness.shutdown();
+	}, 30_000);
+
+	test("rehydrates a suspended planning Workflow after the Sidecar restarts", async () => {
+		const host = new FakeHost();
+		const firstHarness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => firstHarness.send(message)),
+		);
+		await firstHarness.initialize();
+		await firstHarness.request("planning.start", {
+			runId: "planning-restart-run",
+			sessionId: "planning-restart-session",
+			input: planningInputFixture(),
+			expectedVersion: 0,
+		});
+		await firstHarness.waitForRunSuspended("planning-restart-run");
+		const suspendedSnapshot = host.workflowSnapshotCalls.findLast(
+			(call) =>
+				call.method === "workflow/snapshot.persist" &&
+				call.params.workflowName === "task-planning" &&
+				isRecord(call.params.snapshot) &&
+				call.params.snapshot.status === "suspended",
+		);
+		expect(suspendedSnapshot?.params).toMatchObject({
+			workflowName: "task-planning",
+			runId: "workflow-1",
+			snapshot: {
+				status: "suspended",
+				resumeLabels: {
+					"planning.clarification": { stepId: "planning-cycle" },
+				},
+			},
+		});
+		await firstHarness.shutdown();
+
+		const callsBeforeRestart = host.workflowSnapshotCalls.length;
+		const secondHarness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => secondHarness.send(message)),
+		);
+		await secondHarness.initialize();
+		const modelCallsBeforeRecovery = host.modelBodies.length;
+		await secondHarness.request("planning.answer", {
+			runId: "different-planning-run",
+			sessionId: "planning-restart-session",
+			answers: [
+				{ questionKey: "expected_outcome", answerText: "尝试串用会话" },
+			],
+			expectedVersion: 1,
+		});
+		const rejected = await secondHarness.waitForRunTerminal(
+			"different-planning-run",
+		);
+		expect(rejected.event).toMatchObject({
+			kind: "run.failed",
+			error: { code: "SESSION_NOT_FOUND" },
+		});
+		expect(host.modelBodies).toHaveLength(modelCallsBeforeRecovery);
+		const accepted = await secondHarness.request("planning.answer", {
+			runId: "planning-restart-run",
+			sessionId: "planning-restart-session",
+			answers: [
+				{ questionKey: "expected_outcome", answerText: "可安装并通过核心验收" },
+			],
+			expectedVersion: 1,
+		});
+		expect(accepted).toMatchObject({
+			ok: true,
+			result: { accepted: true, runId: "planning-restart-run" },
+		});
+		const terminal = await secondHarness.waitForRunTerminal(
+			"planning-restart-run",
+		);
+		expect(terminal.event).toMatchObject({
+			kind: "run.completed",
+			result: { status: "draft", draft: { phases: [{ id: "phase-1" }] } },
+		});
+		const recoveryCalls = host.workflowSnapshotCalls.slice(callsBeforeRestart);
+		expect(
+			recoveryCalls.filter(
+				(call) =>
+					call.method === "workflow/snapshot.load" &&
+					call.params.workflowName === "task-planning" &&
+					call.params.runId === "workflow-1",
+			),
+		).toHaveLength(2);
+		await secondHarness.shutdown();
+	}, 30_000);
+
+	test("proposes an approval-bound write Tool before executing it and resumes the same run", async () => {
+		const host = new FakeHost({ toolApprovalScenario: true });
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("conversation.start", {
+			runId: "tool-run-1",
+			conversationId: "tool-conversation-1",
+			resourceId: "installation-1",
+			message: "请创建一个明天上午的日程。",
+			expectedVersion: 0,
+		});
+
+		const approvalEvent = (await harness.waitFor(
+			(message) =>
+				isRunEvent(message) &&
+				message.runId === "tool-run-1" &&
+				message.event.kind === "agent.tool.approval.required",
+		)) as AgentRunEventFrame;
+		expect(approvalEvent.event).toMatchObject({
+			kind: "agent.tool.approval.required",
+			toolCallId: "tool-call-1",
+			toolName: "calendar.create_event",
+			runVersion: 41,
+			approval: {
+				approvalId: "approval-1",
+				inputDigest: "digest-1",
+			},
+		});
+		expect(approvalEvent.event).not.toHaveProperty("arguments");
+		await harness.waitForRunSuspended("tool-run-1");
+		expect(host.calls).toContain("tool/propose");
+		expect(host.calls).not.toContain("tool/call");
+		expect(
+			host.calls.filter((method) => method === "memory/append"),
+		).toHaveLength(0);
+		expect(
+			host.workflowSnapshotCalls.some(
+				(call) =>
+					call.method === "workflow/snapshot.persist" &&
+					call.params.workflowName === "agentic-loop" &&
+					call.params.runId === "tool-run-1" &&
+					isRecord(call.params.snapshot) &&
+					call.params.snapshot.status === "suspended",
+			),
+		).toBe(true);
+		const bypass = await harness.request("run.resume", {
+			runId: "tool-run-1",
+			resumeData: { approved: true },
+		});
+		expect(bypass).toMatchObject({
+			ok: false,
+			error: { code: "RUN_NOT_RESUMABLE" },
+		});
+
+		await harness.request("agent.approveTool", {
+			runId: "tool-run-1",
+			toolCallId: "tool-call-1",
+		});
+		const terminal = await harness.waitForRunTerminal("tool-run-1");
+		expect(terminal.terminalState).toBe("completed");
+		expect(terminal.event).toMatchObject({
+			kind: "run.completed",
+			result: {
+				message: { content: "我来处理。日程已经按你的要求创建。" },
+			},
+		});
+		expect(host.calls).toContain("tool/call");
+		expect(
+			host.workflowSnapshotCalls.some(
+				(call) =>
+					call.method === "workflow/snapshot.load" &&
+					call.params.workflowName === "agentic-loop" &&
+					call.params.runId === "tool-run-1",
+			),
+		).toBe(true);
+		expect(host.lastToolCall).toMatchObject({
+			runId: "tool-run-1",
+			toolCallId: "tool-call-1",
+			name: "calendar.create_event",
+			runVersion: 41,
+			approvalId: "approval-1",
+			inputDigest: "digest-1",
+		});
+		const toolEvents = harness.runEvents("tool-run-1");
+		expect(toolEvents.map((event) => event.sequence)).toEqual(
+			toolEvents.map((_, index) => index + 1),
+		);
+		expect(
+			toolEvents
+				.filter((event) => event.event.kind === "agent.tool.result")
+				.every((event) => !("result" in event.event)),
+		).toBe(true);
+		await harness.shutdown();
+	}, 30_000);
+
+	test("auto-executes an allowlisted read Tool without proposing approval", async () => {
+		const host = new FakeHost({ readToolScenario: true });
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("conversation.start", {
+			runId: "read-tool-run",
+			conversationId: "read-tool-conversation",
+			resourceId: "installation-1",
+			message: "当前目标是什么？",
+			expectedVersion: 0,
+		});
+		const terminal = await harness.waitForRunTerminal("read-tool-run");
+		expect(terminal.terminalState).toBe("completed");
+		expect(host.calls).toContain("tool/call");
+		expect(host.calls).not.toContain("tool/propose");
+		expect(host.lastToolCall).toMatchObject({
+			runId: "read-tool-run",
+			toolCallId: "read-tool-call-1",
+			name: "planning.get_active_goal",
+			arguments: {},
+		});
+		expect(host.lastToolCall).not.toHaveProperty("approvalId");
+		expect(
+			harness
+				.runEvents("read-tool-run")
+				.some((event) => event.event.kind === "run.suspended"),
+		).toBe(false);
+		const firstModelBody = host.modelBodies[0];
+		const toolNames = Array.isArray(firstModelBody?.tools)
+			? firstModelBody.tools
+					.map((tool) =>
+						isRecord(tool) &&
+						isRecord(tool.function) &&
+						typeof tool.function.name === "string"
+							? tool.function.name
+							: null,
+					)
+					.filter((name): name is string => name !== null)
+					.sort()
+			: [];
+		expect(toolNames).toEqual(
+			[
+				"calendar_commit_plan_schedule",
+				"calendar_create_event",
+				"calendar_delete_event",
+				"calendar_list_events",
+				"calendar_update_event",
+				"planning_get_active_goal",
+				"planning_get_active_plan",
+				"planning_save_draft",
+			].sort(),
+		);
+		await harness.shutdown();
+	}, 30_000);
+
+	test("declines an approval-bound write Tool without executing it", async () => {
+		const host = new FakeHost({ toolApprovalScenario: true });
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("conversation.start", {
+			runId: "decline-tool-run",
+			conversationId: "decline-tool-conversation",
+			resourceId: "installation-1",
+			message: "请创建一个明天上午的日程。",
+			expectedVersion: 0,
+		});
+		await harness.waitForRunSuspended("decline-tool-run");
+		await harness.request("agent.declineTool", {
+			runId: "decline-tool-run",
+			toolCallId: "tool-call-1",
+			reason: "用户拒绝",
+		});
+		const terminal = await harness.waitForRunTerminal("decline-tool-run");
+		expect(terminal.terminalState).toBe("completed");
+		expect(host.calls).not.toContain("tool/call");
+		expect(
+			harness
+				.runEvents("decline-tool-run")
+				.some(
+					(event) =>
+						event.event.kind === "run.resumed" &&
+						event.event.decision === "decline",
+				),
+		).toBe(true);
+		await harness.shutdown();
+	}, 30_000);
+
+	test("retries an invalid draft once and persists a conflict instead of failing the run", async () => {
+		const host = new FakeHost({ planningConflictScenario: true });
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("planning.start", {
+			runId: "planning-conflict-run",
+			sessionId: "planning-conflict-session",
+			input: planningInputFixture(),
+			expectedVersion: 0,
+		});
+		const terminal = await harness.waitForRunTerminal("planning-conflict-run");
+		expect(terminal.terminalState).toBe("completed");
+		expect(terminal.event).toMatchObject({
+			kind: "run.completed",
+			result: {
+				status: "conflict",
+				draft: { calendarRevision: 8 },
+				validationIssues: [
+					{ code: "calendar-conflict", proposalId: "proposal-1" },
+				],
+			},
+		});
+		expect(
+			host.calls.filter((method) => method === "calendar/query"),
+		).toHaveLength(2);
+		expect(
+			host.calls.filter((method) => method === "planning/validate"),
+		).toHaveLength(2);
+		expect(
+			host.modelBodies.filter((body) => body.response_format !== undefined),
+		).toHaveLength(2);
+		expect(
+			host.calls.filter((method) => method === "planning/save"),
+		).toHaveLength(1);
+		expect(host.lastPlanningSave).toMatchObject({
+			result: { status: "conflict", draft: { calendarRevision: 8 } },
+		});
+		expect(
+			harness
+				.runEvents("planning-conflict-run")
+				.some((event) => event.event.kind === "run.failed"),
+		).toBe(false);
+		await harness.shutdown();
+	}, 30_000);
+
+	test("cancels an active run and aborts the in-flight model relay", async () => {
+		const host = new FakeHost({ holdModelOpen: true });
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("conversation.start", {
+			runId: "cancel-run-1",
+			conversationId: "cancel-conversation",
+			message: "等待模型",
+			expectedVersion: 0,
+		});
+		await harness.waitFor(
+			(message) =>
+				isSidecarRequest(message) && message.method === "model/relay.open",
+		);
+		await harness.request("run.cancel", {
+			runId: "cancel-run-1",
+			reason: "用户停止生成",
+		});
+		const terminal = await harness.waitForRunTerminal("cancel-run-1");
+		expect(terminal.terminalState).toBe("cancelled");
+		expect(terminal.event).toEqual({
+			kind: "run.cancelled",
+			reason: "用户停止生成",
+		});
+		await harness.waitFor(
+			(message) =>
+				isSidecarRequest(message) && message.method === "model/relay.abort",
+		);
+		expect(host.calls).toContain("model/relay.abort");
+		await harness.shutdown();
+	}, 30_000);
 });
 
 type HostHandler = (request: SidecarHostRequest) => Promise<void>;
@@ -588,7 +637,10 @@ class SidecarHarness {
 	private readonly readTask: Promise<void>;
 	private readFailure: Error | null = null;
 
-	constructor(path: string, private readonly hostHandler: HostHandler) {
+	constructor(
+		path: string,
+		private readonly hostHandler: HostHandler,
+	) {
 		this.child = Bun.spawn([sidecarNodePath, path], {
 			cwd: resolve(import.meta.dir, ".."),
 			stdin: "pipe",
@@ -619,6 +671,7 @@ class SidecarHarness {
 					methods: expect.arrayContaining([
 						"conversation.start",
 						"planning.start",
+						"activity.start",
 						"planning.answer",
 						"agent.approveTool",
 						"agent.declineTool",
@@ -630,7 +683,10 @@ class SidecarHarness {
 		});
 	}
 
-	async request(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+	async request(
+		method: string,
+		params: Record<string, unknown>,
+	): Promise<Record<string, unknown>> {
 		const requestId = `host:${method}:${crypto.randomUUID()}`;
 		await this.send({
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
@@ -666,7 +722,11 @@ class SidecarHarness {
 				reject,
 				timer: setTimeout(() => {
 					this.waiters.delete(waiter);
-					reject(new Error(`Timed out waiting for sidecar message. Seen: ${JSON.stringify(this.messages)}`));
+					reject(
+						new Error(
+							`Timed out waiting for sidecar message. Seen: ${JSON.stringify(this.messages)}`,
+						),
+					);
 				}, timeoutMs),
 			};
 			this.waiters.add(waiter);
@@ -676,7 +736,9 @@ class SidecarHarness {
 	async waitForRunTerminal(runId: string): Promise<AgentRunEventFrame> {
 		return (await this.waitFor(
 			(message) =>
-				isRunEvent(message) && message.runId === runId && message.terminalState !== null,
+				isRunEvent(message) &&
+				message.runId === runId &&
+				message.terminalState !== null,
 		)) as AgentRunEventFrame;
 	}
 
@@ -691,7 +753,8 @@ class SidecarHarness {
 
 	runEvents(runId: string): AgentRunEventFrame[] {
 		return this.messages.filter(
-			(message): message is AgentRunEventFrame => isRunEvent(message) && message.runId === runId,
+			(message): message is AgentRunEventFrame =>
+				isRunEvent(message) && message.runId === runId,
 		);
 	}
 
@@ -701,7 +764,10 @@ class SidecarHarness {
 		const exitCode = await Promise.race([
 			this.child.exited,
 			new Promise<never>((_, reject) =>
-				setTimeout(() => reject(new Error("Node sidecar did not exit after shutdown.")), 5_000),
+				setTimeout(
+					() => reject(new Error("Node sidecar did not exit after shutdown.")),
+					5_000,
+				),
 			),
 		]);
 		if (exitCode !== 0) {
@@ -774,13 +840,13 @@ class FakeHost {
 		private readonly options: {
 			holdModelOpen?: boolean;
 			toolApprovalScenario?: boolean;
-				readToolScenario?: boolean;
-				planningConflictScenario?: boolean;
-				memoryMessages?: readonly {
-					role: "user" | "assistant";
-					content: string;
-				}[];
-			} = {},
+			readToolScenario?: boolean;
+			planningConflictScenario?: boolean;
+			memoryMessages?: readonly {
+				role: "user" | "assistant";
+				content: string;
+			}[];
+		} = {},
 	) {}
 
 	async handle(
@@ -790,19 +856,25 @@ class FakeHost {
 		this.calls.push(request.method);
 		switch (request.method) {
 			case "memory/load":
-				await send(successResponse(request.requestId, {
-					messages: structuredClone(this.options.memoryMessages ?? []),
-					version: this.options.memoryMessages?.length ?? 0,
-				}));
+				await send(
+					successResponse(request.requestId, {
+						messages: structuredClone(this.options.memoryMessages ?? []),
+						version: this.options.memoryMessages?.length ?? 0,
+					}),
+				);
 				return;
 			case "memory/append":
 				this.lastMemoryAppend = structuredClone(request.params);
-				await send(successResponse(request.requestId, {
-					version: (this.options.memoryMessages?.length ?? 0) + 2,
-				}));
+				await send(
+					successResponse(request.requestId, {
+						version: (this.options.memoryMessages?.length ?? 0) + 2,
+					}),
+				);
 				return;
 			case "workflow/start":
-				await send(successResponse(request.requestId, { workflowRunId: "workflow-1" }));
+				await send(
+					successResponse(request.requestId, { workflowRunId: "workflow-1" }),
+				);
 				return;
 			case "workflow/resume":
 				await send(successResponse(request.requestId, { resumed: true }));
@@ -827,7 +899,8 @@ class FakeHost {
 					successResponse(request.requestId, {
 						accountId: "calendar-account-1",
 						revision:
-							this.options.planningConflictScenario && this.calendarQueryCalls > 1
+							this.options.planningConflictScenario &&
+							this.calendarQueryCalls > 1
 								? 8
 								: 7,
 						timeZone: request.params.timeZone,
@@ -924,7 +997,7 @@ class FakeHost {
 			default:
 				throw new Error(`Unexpected host call ${request.method}`);
 		}
-		}
+	}
 
 	private handleWorkflowSnapshot(
 		method: string,
@@ -944,11 +1017,12 @@ class FakeHost {
 			return { runs: structuredClone(runs), total: runs.length };
 		}
 		if (method === "workflow/snapshot.get") {
-			const record = workflowName && runId
-				? this.workflowSnapshots.get(workflowSnapshotKey(workflowName, runId))
-				: [...this.workflowSnapshots.values()].find(
-						(candidate) => candidate.runId === runId,
-					);
+			const record =
+				workflowName && runId
+					? this.workflowSnapshots.get(workflowSnapshotKey(workflowName, runId))
+					: [...this.workflowSnapshots.values()].find(
+							(candidate) => candidate.runId === runId,
+						);
 			return record ? structuredClone(record) : null;
 		}
 		if (!workflowName || !runId) {
@@ -971,7 +1045,7 @@ class FakeHost {
 				createdAtMs:
 					typeof params.createdAtMs === "number"
 						? params.createdAtMs
-						: existing?.createdAtMs ?? now,
+						: (existing?.createdAtMs ?? now),
 				updatedAtMs:
 					typeof params.updatedAtMs === "number" ? params.updatedAtMs : now,
 			});
@@ -984,9 +1058,11 @@ class FakeHost {
 		if (method === "workflow/snapshot.delete") {
 			return { deleted: this.workflowSnapshots.delete(key) };
 		}
-		if (!record) return method === "workflow/snapshot.update-results" ? {} : null;
+		if (!record)
+			return method === "workflow/snapshot.update-results" ? {} : null;
 		if (method === "workflow/snapshot.update-state") {
-			if (!isRecord(params.opts)) throw new Error("Invalid Workflow state update");
+			if (!isRecord(params.opts))
+				throw new Error("Invalid Workflow state update");
 			record.snapshot = {
 				...record.snapshot,
 				...structuredClone(params.opts),
@@ -1061,10 +1137,10 @@ class FakeHost {
 								"我来处理。",
 							)
 					: openAiSse(
-						this.options.readToolScenario
-							? "当前目标是完成 WhaleHall Beta。"
-							: "日程已经按你的要求创建。",
-					);
+							this.options.readToolScenario
+								? "当前目标是完成 WhaleHall Beta。"
+								: "日程已经按你的要求创建。",
+						);
 			await this.streamRelay(request, params, sse, send);
 			return;
 		}
@@ -1075,17 +1151,17 @@ class FakeHost {
 				this.options.planningConflictScenario
 					? planningDraftFixture(this.planningModelCalls === 1 ? 7 : 8)
 					: this.planningModelCalls === 1
-					? {
-							status: "clarifying",
-							questions: [
-								{
-									key: "expected_outcome",
-									text: "你希望 Beta 达到什么验收结果？",
-									required: true,
-								},
-							],
-						}
-					: planningDraftFixture(),
+						? {
+								status: "clarifying",
+								questions: [
+									{
+										key: "expected_outcome",
+										text: "你希望 Beta 达到什么验收结果？",
+										required: true,
+									},
+								],
+							}
+						: planningDraftFixture(),
 			);
 		} else {
 			content = "今天先完成最重要的一件事。";
@@ -1110,7 +1186,10 @@ class FakeHost {
 				relayId: params.relayId,
 				sequence: ++sequence,
 				emittedAtMs: Date.now(),
-				event: { kind: "model/relay.chunk", bodyBase64: Buffer.from(chunk).toString("base64") },
+				event: {
+					kind: "model/relay.chunk",
+					bodyBase64: Buffer.from(chunk).toString("base64"),
+				},
 			});
 		}
 		await send({
@@ -1213,12 +1292,14 @@ function planningDraftFixture(calendarRevision = 7) {
 			title: "WhaleHall Beta 计划",
 			assumptions: [],
 			calendarRevision,
-			phases: [{
-				id: "phase-1",
-				title: "核心阶段",
-				objective: "完成核心能力",
-				order: 1,
-			}],
+			phases: [
+				{
+					id: "phase-1",
+					title: "核心阶段",
+					objective: "完成核心能力",
+					order: 1,
+				},
+			],
 			milestones: [
 				{
 					id: "milestone-1",
@@ -1320,7 +1401,8 @@ function isPendingWorkflowMarker(value: unknown): boolean {
 }
 
 function canResetWorkflowOutput(value: unknown): boolean {
-	if (value === null || value === undefined || isPendingWorkflowMarker(value)) return true;
+	if (value === null || value === undefined || isPendingWorkflowMarker(value))
+		return true;
 	return (
 		isRecord(value) &&
 		value.status === "suspended" &&

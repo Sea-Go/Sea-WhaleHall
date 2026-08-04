@@ -1,73 +1,69 @@
 # WhaleHall 家里云模型配置
 
-WhaleHall 的用户配置现在只加载两个模型角色：
+桌面端用户配置只有两个模型角色，并且每个角色只有 `name`、`baseurl`、`apikey`
+三个字面量字段：
 
 ```yaml
 reflection:
   name: "qwen3:1.7b"
   baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+  apikey: "REPLACE_WITH_ACTIVITY_WORKER_KEY"
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
 ```
 
-字段只有以下三个：
+| 角色 | 用途 | 凭据边界 |
+| --- | --- | --- |
+| `reflection` | 将已封闭的完整原始活动窗口投给活动 Worker，获得事件列表和分数 | 活动 Worker key |
+| `agent` | 远端账号密码登录后，将聊天与后台活动分析经 relay 转到 Qwen | 仅属于该账号的 personal relay key |
 
-| 字段 | 含义 |
-| --- | --- |
-| `name` | 家里云上固定使用的模型名，本配置为 `qwen3:1.7b`。 |
-| `baseurl` | HTTPS Worker 的完整活动分析 URL。 |
-| `apikey` | Worker Bearer 密钥，或受限的环境变量引用。 |
+两个 checked-in 示例文件只含 `REPLACE_WITH_*` 不可用占位符。它们不会启用远端
+请求，也不接受 `${ENV_VAR}`、空白密钥、替换模型、替换路径或其他字段。首次启动会把
+`config.template.yaml` 复制到 user-data 的 `config.yaml`，权限为 `0600`；无效或旧版
+配置绝不被应用自动重写。
 
-`config.template.yaml` 会在首次启动时复制为应用 user-data 目录的
-`config.yaml`，该用户副本权限为 `0600`。仓库中的
-[`config.example.yaml`](../config.example.yaml) 与根目录 `config.yaml`
-都采用同一份家里云地址，但不包含真实密钥。
+## Owner provisioning
 
-## 密钥
+不要手工把密钥提交到仓库。owner 在本机交互式终端运行：
 
-两项 `apikey` 当前都使用：
-
-```text
-${WHALEHALL_ACTIVITY_WORKER_TOKEN}
+```sh
+bun run provision:relay-owner -- \
+  --config /absolute/local/WhaleHall-user-data/config.yaml \
+  --users /absolute/local/model-relay-users.json
 ```
 
-这会在应用启动时读取 `WHALEHALL_ACTIVITY_WORKER_TOKEN`。也可以在
-owner-only 的 user-data `config.yaml` 中直接填写密钥：
+该命令询问账号资料、密码和活动 Worker key，生成 personal relay key，并将两个真实
+字面量 key 写入 owner-only 本机 `config.yaml`。生成的 `model-relay-users.json` 只含
+`passwordHash` 与 `agentKeyHash`，可部署到 relay；它不含 personal relay key，也不应
+打印、上传或提交本机 `config.yaml`。
 
-```yaml
-apikey: "your-worker-key"
-```
+## 自动活动链路
 
-不要把真实密钥写进 `config.example.yaml`、仓库根目录文件、Git、日志或
-SQLite 收据。Finder 或安装包启动的桌面应用必须由对应启动机制提供该环境变量；
-终端中的一次 `export` 不会传给已经运行的应用。
+1. Reflection 仅在自然封闭的 `EventWindowV1` 后提交一次完整 `raw_event` 给
+   `/v1/activity/analyze`，不会逐条原始事件请求模型。
+2. Worker 返回严格校验的事件列表、分数和原因。本机持久化 receipt、重试 outbox 和
+   分数账本；请求 ID 使重复投递幂等。
+3. 累积分数达到固定阈值 `1` 时，所有尚未处理的 Worker 事件/分数会合并成一个串行
+   后台 job。该 job 不包含原始活动窗口，不注册 Tool，也不会向 renderer 广播结果。
+4. 该 job 只在已登录的同一账号下运行；登录切换不会跨账号重放。完成结果加密保存到
+   本机 Agent 数据库。断电、模型失败和退出会保留可恢复 job，并在原账号恢复后重试。
 
-## 当前行为
+活动 Worker 固定走其部署的 CPU 优先服务。正式 chat/activity-analysis relay 则只允许
+家里云的 CPU loopback `127.0.0.1:11437` 和 `qwen3:1.7b`；它不会回退到 GPU，因此
+既有 GPU 训练 Worker 不会被这个 relay 占用。
 
-`reflection` 会接收已经封闭的完整原始活动窗口，Worker 使用 Qwen 1.7B
-整理为事件列表并返回分数。服务端保持 CPU 优先；GPU 仅在 CPU 无可用容量且
-没有训练 work 占用时作为回退。
+## 远端认证与聊天
 
-`agent` 也已加载同一模型、地址和密钥，供本地 Agent 执行器领取
-`agentTriggerPending` 后使用。当前 Worker 的 HTTP 契约是
-`activity-event-analysis-request.v1` / `activity-event-analysis-response.v1`，
-不是通用 OpenAI 聊天接口；因此仅配置 Agent 不会额外发起一条聊天请求。
+生产桌面端使用 `POST /v1/auth/sessions` 的邮箱密码登录、refresh 与 logout。access/
+refresh token 保留在 Bun 主进程安全凭据存储中，renderer 和 sidecar 都拿不到它们。
 
-本地累计分数达到固定阈值 `1` 后，只持久化 `agentTriggerPending`。Worker
-不会自行启动未定义的 Agent。保存配置后重启 WhaleHall 才会重新读取它。
+每个 `POST /v1/chat/completions` 同时带短期 bearer 与
+`X-WhaleHall-Agent-Key`。relay 对 bearer 所属账号的 `agentKeyHash` 做 scrypt 验证；
+两个凭据必须属于同一账号。上游 Ollama/Qwen 凭据永不下发桌面端。
 
-## 校验
-
-WhaleHall 严格拒绝以下情况，并保留原配置文件：
-
-- 除 `reflection`、`agent` 以外的根字段；
-- 每个角色缺少 `name`、`baseurl` 或 `apikey`；
-- 非 HTTPS、回环地址、含用户名/密码、query 或 fragment 的 `baseurl`；
-- 空白、含空格或格式错误的 `apikey` 环境变量引用。
-
-旧版 `whalehall-client-config.v1` 会在内存中映射为这两个角色，以免已有
-用户配置在升级时被覆盖；下一次手动保存时可改成上面的简化结构。
+原生 Node 22 + systemd + Caddy 部署与回滚步骤见
+[`deploy/home-cloud/model-relay/README.md`](../deploy/home-cloud/model-relay/README.md)。
+该部署在 PR 合并后才执行，且不使用 Docker、不改动 FRP、Cloudflare 或训练服务。

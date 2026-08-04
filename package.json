@@ -9,6 +9,7 @@
 		"dev:hmr": "concurrently -k -n vite,electrobun \"vite --host 127.0.0.1 --port 5173\" \"electrobun dev --watch\"",
 		"build:agent-host": "bun run scripts/build-agent-host.ts",
 		"build:model-relay": "tsc -p services/model-relay/tsconfig.json",
+		"provision:relay-owner": "bun run scripts/provision-relay-owner.ts",
 		"build:views": "vite build && bun run scripts/stage-view-assets.ts",
 		"build:native": "bun run scripts/build-native.ts",
 		"build:canary": "electrobun build --env=canary",

@@ -9,15 +9,13 @@ import {
 	type PlanningWorkflowDriver,
 	type TaskPlanningWorkflow,
 } from "./planning-workflow";
-import {
-	createWhaleHallAgentTools,
-	type AgentToolExecutor,
-} from "./tools";
+import { type AgentToolExecutor, createWhaleHallAgentTools } from "./tools";
 
 export interface MastraAgentSet {
 	mastra: Mastra;
 	conversation: Agent<"whalehall-conversation">;
 	planning: Agent<"whalehall-planning">;
+	activity: Agent<"whalehall-activity-analysis">;
 	planningWorkflow: TaskPlanningWorkflow;
 }
 
@@ -32,7 +30,9 @@ export interface MastraAgentSetOptions {
 	executePlanningWorkflow: PlanningWorkflowDriver;
 }
 
-export function createMastraAgentSet(options: MastraAgentSetOptions): MastraAgentSet {
+export function createMastraAgentSet(
+	options: MastraAgentSetOptions,
+): MastraAgentSet {
 	const provider = createOpenAICompatible({
 		name: options.provider,
 		baseURL: normalizeBaseUrl(options.baseUrl),
@@ -80,16 +80,30 @@ export function createMastraAgentSet(options: MastraAgentSetOptions): MastraAgen
 		model,
 		maxRetries: 0,
 	});
+	const activity = new Agent({
+		id: "whalehall-activity-analysis",
+		name: "WhaleHall 活动分析助手",
+		description: "仅整理活动 Worker 返回的事件与分数，不读取或调用本地工具。",
+		instructions: [
+			"你是 WhaleHall 的后台活动分析助手。只分析输入中已有的 Worker 事件列表和分数。",
+			"绝不请求、推断或复述原始活动窗口、桌面事件、配置、账号资料或密钥。",
+			"不调用工具；没有工具可用。不要把结果当作用户对话回复。",
+			"用简洁中文给出可供本地加密保存的反思摘要，说明事件主题、分数含义和一个谨慎的下一步建议。",
+		].join("\n"),
+		model,
+		tools: {},
+		maxRetries: 0,
+	});
 	const planningWorkflow = createTaskPlanningWorkflow(
 		options.executePlanningWorkflow,
 	);
 	const mastra = new Mastra({
 		storage: options.storage.composite,
-		agents: { conversation, planning },
+		agents: { conversation, planning, activity },
 		workflows: { planning: planningWorkflow },
 		logger: false,
 	});
-	return { mastra, conversation, planning, planningWorkflow };
+	return { mastra, conversation, planning, activity, planningWorkflow };
 }
 
 function normalizeBaseUrl(value: string): string {

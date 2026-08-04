@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	constants,
@@ -6,31 +7,33 @@ import {
 	lstatSync,
 	mkdirSync,
 	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
 export const ACTIVITY_EVENT_WORKER_ENDPOINT =
 	"https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze";
+export const AGENT_RELAY_BASE_URL =
+	"https://model.sea-ridethewindbreakthewaves.xyz";
 export const ACTIVITY_EVENT_WORKER_MODEL = "qwen3:1.7b";
-export const ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE =
-	"${WHALEHALL_ACTIVITY_WORKER_TOKEN}";
+export const UNPROVISIONED_ACTIVITY_WORKER_KEY =
+	"REPLACE_WITH_ACTIVITY_WORKER_KEY";
+export const UNPROVISIONED_AGENT_RELAY_KEY = "REPLACE_WITH_PERSONAL_RELAY_KEY";
 
 const LEGACY_CONFIGURATION_SCHEMA_VERSION = "whalehall-client-config.v1";
 const MAXIMUM_CONFIGURATION_BYTES = 64 * 1024;
-const MAXIMUM_MODEL_NAME_LENGTH = 160;
-const MAXIMUM_API_KEY_LENGTH = 4 * 1024;
-const ENVIRONMENT_REFERENCE = /^\$\{([A-Z][A-Z0-9_]*)\}$/u;
+const MAXIMUM_ACTIVITY_WORKER_KEY_LENGTH = 4 * 1024;
+const MAXIMUM_PERSONAL_RELAY_KEY_LENGTH = 1_024;
 
 export type ModelConfiguration = {
-	name: string;
+	name: typeof ACTIVITY_EVENT_WORKER_MODEL;
 	baseurl: string;
 	apikey: string;
 };
 
-/**
- * The editable user configuration intentionally contains only the two model
- * roles WhaleHall needs. Both roles may use the same endpoint and key.
- */
+/** The editable desktop configuration intentionally contains only these roles. */
 export type ClientConfiguration = {
 	reflection: ModelConfiguration;
 	agent: ModelConfiguration;
@@ -40,18 +43,19 @@ export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 	reflection: {
 		name: ACTIVITY_EVENT_WORKER_MODEL,
 		baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-		apikey: ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
+		apikey: UNPROVISIONED_ACTIVITY_WORKER_KEY,
 	},
 	agent: {
 		name: ACTIVITY_EVENT_WORKER_MODEL,
-		baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-		apikey: ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
+		baseurl: AGENT_RELAY_BASE_URL,
+		apikey: UNPROVISIONED_AGENT_RELAY_KEY,
 	},
 };
 
 export type ClientConfigurationLoadStatus =
 	| "loaded"
 	| "seeded"
+	| "legacy-unprovisioned"
 	| "invalid"
 	| "defaults";
 
@@ -67,22 +71,26 @@ export type LoadOrCreateClientConfigurationOptions = {
 };
 
 export type ModelRuntimeConfiguration = {
-	name: string;
+	name: typeof ACTIVITY_EVENT_WORKER_MODEL;
 	baseurl: string;
 	apikey: string;
 };
 
 export type ActivityEventWorkerRuntimeConfiguration = {
-	modelName: string;
+	modelName: typeof ACTIVITY_EVENT_WORKER_MODEL;
 	endpoint: string;
 	authorizationToken: string;
 	scoreThreshold: number;
 };
 
+export type WriteProvisionedClientConfigurationOptions = {
+	path: string;
+	configuration: ClientConfiguration;
+};
+
 /**
- * Loads the user's editable config.yaml, seeding it once from the signed app
- * bundle. Invalid, non-regular, oversized, or unsafe configuration falls back
- * to safe defaults; the existing user file is never overwritten.
+ * Loads the user-owned config.yaml, seeding it once from the packaged
+ * placeholder template. Invalid or legacy files are never overwritten.
  */
 export function loadOrCreateClientConfiguration(
 	options: LoadOrCreateClientConfigurationOptions,
@@ -98,9 +106,16 @@ export function loadOrCreateClientConfiguration(
 		}
 	}
 	try {
-		const configuration = parseConfiguration(readRegularFile(path));
+		const parsed = parseConfiguration(readRegularFile(path));
+		if (parsed.kind === "legacy") {
+			return {
+				configuration: structuredClone(DEFAULT_CLIENT_CONFIGURATION),
+				path,
+				status: "legacy-unprovisioned",
+			};
+		}
 		return {
-			configuration,
+			configuration: parsed.configuration,
 			path,
 			status: seeded ? "seeded" : "loaded",
 		};
@@ -110,44 +125,76 @@ export function loadOrCreateClientConfiguration(
 }
 
 /**
- * Resolves the reflection model for the activity-event analysis protocol.
- * A key may be a literal owner-only value or a constrained environment
- * variable reference. Missing or malformed runtime keys disable delivery
- * safely.
+ * Writes a validated literal-key configuration atomically with owner-only
+ * permissions. It is used by the interactive owner provisioning command;
+ * application startup intentionally never writes or repairs a user file.
  */
+export function writeProvisionedClientConfiguration(
+	options: WriteProvisionedClientConfigurationOptions,
+): void {
+	const normalized = normalizeClientConfiguration(options.configuration);
+	if (
+		isUnprovisionedKey(normalized.reflection.apikey) ||
+		isUnprovisionedKey(normalized.agent.apikey)
+	) {
+		throw new Error(
+			"Provisioned client configuration requires literal API keys.",
+		);
+	}
+	const destination = options.path;
+	const directory = dirname(destination);
+	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	hardenPath(directory, 0o700);
+	if (existsSync(destination)) {
+		const stat = lstatSync(destination);
+		if (stat.isSymbolicLink() || !stat.isFile()) {
+			throw new Error(
+				"Client configuration destination must be a regular file.",
+			);
+		}
+	}
+	const temporary = join(directory, `.config.${randomUUID()}.tmp`);
+	try {
+		writeFileSync(temporary, serializeConfiguration(normalized), {
+			encoding: "utf8",
+			mode: 0o600,
+			flag: "wx",
+		});
+		chmodSync(temporary, 0o600);
+		renameSync(temporary, destination);
+		chmodSync(destination, 0o600);
+	} catch (error) {
+		try {
+			unlinkSync(temporary);
+		} catch {}
+		throw error;
+	}
+}
+
+/** Returns null until the reflection Worker key is provisioned literally. */
 export function reflectionModelConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
-	environment: Readonly<Record<string, string | undefined>>,
 ): ModelRuntimeConfiguration | null {
-	return resolveModelRuntimeConfiguration(configuration.reflection, environment);
+	return runtimeConfiguration(configuration.reflection);
 }
 
-/**
- * Resolves the model reserved for the local Agent executor. The current
- * activity Worker protocol remains an analysis protocol; loading this role
- * does not itself start a generic chat request.
- */
+/** Returns null until the personal relay key is provisioned literally. */
 export function agentModelConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
-	environment: Readonly<Record<string, string | undefined>>,
 ): ModelRuntimeConfiguration | null {
-	return resolveModelRuntimeConfiguration(configuration.agent, environment);
+	return runtimeConfiguration(configuration.agent);
 }
 
 /**
- * The reflection role is the only role that currently sends sealed raw
- * activity windows. Its score threshold deliberately stays deterministic and
- * local instead of becoming another YAML setting.
+ * The reflection role is the sole sender of sealed raw activity windows. The
+ * score threshold remains deterministic local policy, not editable YAML.
  */
 export function activityEventWorkerConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
-	environment: Readonly<Record<string, string | undefined>>,
 ): ActivityEventWorkerRuntimeConfiguration | null {
-	const reflection = reflectionModelConfigurationFromConfiguration(
-		configuration,
-		environment,
-	);
-	if (reflection === null) return null;
+	const reflection =
+		reflectionModelConfigurationFromConfiguration(configuration);
+	if (!reflection) return null;
 	return {
 		modelName: reflection.name,
 		endpoint: reflection.baseurl,
@@ -167,9 +214,18 @@ function defaultConfiguration(
 	};
 }
 
-function seedConfiguration(templatePath: string, destinationPath: string): void {
-	parseConfiguration(readRegularFile(templatePath));
+function seedConfiguration(
+	templatePath: string,
+	destinationPath: string,
+): void {
+	const parsed = parseConfiguration(readRegularFile(templatePath));
+	if (parsed.kind !== "current") {
+		throw new Error(
+			"Bundled client configuration must use the current schema.",
+		);
+	}
 	mkdirSync(dirname(destinationPath), { recursive: true, mode: 0o700 });
+	hardenPath(dirname(destinationPath), 0o700);
 	try {
 		copyFileSync(templatePath, destinationPath, constants.COPYFILE_EXCL);
 		chmodSync(destinationPath, 0o600);
@@ -192,56 +248,40 @@ function readRegularFile(path: string): string {
 	return readFileSync(path, "utf8");
 }
 
-function parseConfiguration(source: string): ClientConfiguration {
+function parseConfiguration(
+	source: string,
+):
+	| { kind: "current"; configuration: ClientConfiguration }
+	| { kind: "legacy" } {
 	const value = Bun.YAML.parse(source);
-	if (
-		isRecord(value) &&
-		hasExactKeys(value, ["reflection", "agent"])
-	) {
-		return {
-			reflection: parseModelConfiguration(value.reflection, "reflection"),
-			agent: parseModelConfiguration(value.agent, "agent"),
-		};
-	}
-	const migrated = parseLegacyConfiguration(value);
-	if (migrated !== null) return migrated;
-	throw new Error("Client configuration root is invalid.");
-}
-
-function parseLegacyConfiguration(value: unknown): ClientConfiguration | null {
-	if (
-		!isRecord(value) ||
-		value.schemaVersion !== LEGACY_CONFIGURATION_SCHEMA_VERSION ||
-		!isRecord(value.request)
-	) {
-		return null;
-	}
-	const worker = value.request.activityEventWorker;
-	if (
-		worker !== undefined &&
-		(!isRecord(worker) || typeof worker.endpoint !== "string")
-	) {
-		throw new Error("Legacy activity Worker configuration is invalid.");
-	}
-	const endpoint =
-		worker === undefined ? ACTIVITY_EVENT_WORKER_ENDPOINT : worker.endpoint;
-	const model = parseModelConfiguration(
-		{
-			name: ACTIVITY_EVENT_WORKER_MODEL,
-			baseurl: endpoint,
-			apikey: ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
-		},
-		"legacy activity Worker",
-	);
+	if (isLegacyConfiguration(value)) return { kind: "legacy" };
 	return {
-		reflection: model,
-		agent: { ...model },
+		kind: "current",
+		configuration: normalizeClientConfiguration(value),
 	};
 }
 
-function parseModelConfiguration(
+function isLegacyConfiguration(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		value.schemaVersion === LEGACY_CONFIGURATION_SCHEMA_VERSION &&
+		isRecord(value.request)
+	);
+}
+
+function normalizeClientConfiguration(value: unknown): ClientConfiguration {
+	if (!isRecord(value) || !hasExactKeys(value, ["reflection", "agent"])) {
+		throw new Error("Client configuration root is invalid.");
+	}
+	return {
+		reflection: normalizeModelConfiguration(value.reflection, "reflection"),
+		agent: normalizeModelConfiguration(value.agent, "agent"),
+	};
+}
+
+function normalizeModelConfiguration(
 	value: unknown,
-	role: string,
+	role: "reflection" | "agent",
 ): ModelConfiguration {
 	if (
 		!isRecord(value) ||
@@ -250,90 +290,106 @@ function parseModelConfiguration(
 		typeof value.baseurl !== "string" ||
 		typeof value.apikey !== "string"
 	) {
-		throw new Error(role + " model configuration is invalid.");
+		throw new Error(`${role} model configuration is invalid.`);
 	}
+	if (value.name.trim() !== ACTIVITY_EVENT_WORKER_MODEL) {
+		throw new Error(`${role} model name is not approved.`);
+	}
+	const baseurl =
+		role === "reflection"
+			? normalizeReflectionEndpoint(value.baseurl)
+			: normalizeAgentRelayBaseUrl(value.baseurl);
 	return {
-		name: normalizeModelName(value.name, role),
-		baseurl: normalizeModelEndpoint(value.baseurl, role),
-		apikey: normalizeApiKey(value.apikey, role),
+		name: ACTIVITY_EVENT_WORKER_MODEL,
+		baseurl,
+		apikey: normalizeLiteralApiKey(value.apikey, role),
 	};
 }
 
-function normalizeModelName(value: string, role: string): string {
-	const name = value.trim();
-	if (
-		name.length === 0 ||
-		name.length > MAXIMUM_MODEL_NAME_LENGTH ||
-		Array.from(name).some((character) => /\s/u.test(character))
-	) {
-		throw new Error(role + " model name is invalid.");
+function normalizeReflectionEndpoint(value: string): string {
+	const endpoint = parseRemoteHttpsUrl(value, "reflection");
+	if (endpoint.toString() !== ACTIVITY_EVENT_WORKER_ENDPOINT) {
+		throw new Error(
+			"reflection model baseurl is not the approved activity endpoint.",
+		);
 	}
-	return name;
+	return ACTIVITY_EVENT_WORKER_ENDPOINT;
 }
 
-function normalizeModelEndpoint(value: string, role: string): string {
-	let url: URL;
+function normalizeAgentRelayBaseUrl(value: string): string {
+	const endpoint = parseRemoteHttpsUrl(value, "agent");
+	if (endpoint.pathname !== "/" && endpoint.pathname !== "") {
+		throw new Error("agent model baseurl must be the relay origin.");
+	}
+	if (endpoint.origin !== AGENT_RELAY_BASE_URL) {
+		throw new Error("agent model baseurl is not the approved relay origin.");
+	}
+	return AGENT_RELAY_BASE_URL;
+}
+
+function parseRemoteHttpsUrl(value: string, role: string): URL {
+	let endpoint: URL;
 	try {
-		url = new URL(value.trim());
+		endpoint = new URL(value.trim());
 	} catch {
-		throw new Error(role + " model baseurl is invalid.");
+		throw new Error(`${role} model baseurl is invalid.`);
 	}
 	if (
-		url.protocol !== "https:" ||
-		isLoopbackHostname(url.hostname) ||
-		url.username !== "" ||
-		url.password !== "" ||
-		url.search !== "" ||
-		url.hash !== ""
+		endpoint.protocol !== "https:" ||
+		isLoopbackHostname(endpoint.hostname) ||
+		endpoint.username !== "" ||
+		endpoint.password !== "" ||
+		endpoint.search !== "" ||
+		endpoint.hash !== ""
 	) {
-		throw new Error(role + " model baseurl must be a remote HTTPS URL.");
+		throw new Error(`${role} model baseurl must be a remote HTTPS URL.`);
 	}
-	return url.toString();
+	return endpoint;
 }
 
-function normalizeApiKey(value: string, role: string): string {
+function normalizeLiteralApiKey(value: string, role: string): string {
 	const apikey = value.trim();
 	if (
-		apikey.length === 0 ||
-		apikey.length > MAXIMUM_API_KEY_LENGTH ||
-		Array.from(apikey).some((character) => /\s/u.test(character))
+		apikey.length < 1 ||
+		apikey.length >
+			(role === "agent"
+				? MAXIMUM_PERSONAL_RELAY_KEY_LENGTH
+				: MAXIMUM_ACTIVITY_WORKER_KEY_LENGTH) ||
+		/[\p{Cc}\s]/u.test(apikey) ||
+		apikey.includes("${")
 	) {
-		throw new Error(role + " model apikey is invalid.");
-	}
-	if (apikey.startsWith("${") && !ENVIRONMENT_REFERENCE.test(apikey)) {
-		throw new Error(role + " model apikey environment reference is invalid.");
+		throw new Error(`${role} model apikey must be a literal non-empty key.`);
 	}
 	return apikey;
 }
 
-function resolveModelRuntimeConfiguration(
+function runtimeConfiguration(
 	model: ModelConfiguration,
-	environment: Readonly<Record<string, string | undefined>>,
 ): ModelRuntimeConfiguration | null {
-	const apikey = resolveApiKey(model.apikey, environment);
-	if (apikey === null) return null;
-	return {
-		name: model.name,
-		baseurl: model.baseurl,
-		apikey,
-	};
+	if (isUnprovisionedKey(model.apikey)) return null;
+	return structuredClone(model);
 }
 
-function resolveApiKey(
-	value: string,
-	environment: Readonly<Record<string, string | undefined>>,
-): string | null {
-	const reference = ENVIRONMENT_REFERENCE.exec(value);
-	const candidate =
-		reference === null ? value : environment[reference[1] ?? ""] ?? "";
-	const apikey = candidate.trim();
-	if (
-		apikey.length === 0 ||
-		Array.from(apikey).some((character) => /\s/u.test(character))
-	) {
-		return null;
-	}
-	return apikey;
+function isUnprovisionedKey(value: string): boolean {
+	return (
+		value === UNPROVISIONED_ACTIVITY_WORKER_KEY ||
+		value === UNPROVISIONED_AGENT_RELAY_KEY
+	);
+}
+
+function serializeConfiguration(configuration: ClientConfiguration): string {
+	return [
+		"reflection:",
+		`  name: ${JSON.stringify(configuration.reflection.name)}`,
+		`  baseurl: ${JSON.stringify(configuration.reflection.baseurl)}`,
+		`  apikey: ${JSON.stringify(configuration.reflection.apikey)}`,
+		"",
+		"agent:",
+		`  name: ${JSON.stringify(configuration.agent.name)}`,
+		`  baseurl: ${JSON.stringify(configuration.agent.baseurl)}`,
+		`  apikey: ${JSON.stringify(configuration.agent.apikey)}`,
+		"",
+	].join("\n");
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -347,6 +403,7 @@ function isLoopbackHostname(hostname: string): boolean {
 		normalized === "::1"
 	);
 }
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -357,6 +414,14 @@ function hasExactKeys(
 ): boolean {
 	const actual = Object.keys(value);
 	return actual.length === keys.length && keys.every((key) => key in value);
+}
+
+function hardenPath(path: string, mode: number): void {
+	try {
+		chmodSync(path, mode);
+	} catch {
+		// Some test/virtual filesystems do not implement POSIX permissions.
+	}
 }
 
 function isAlreadyExistsError(error: unknown): boolean {

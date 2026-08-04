@@ -7,7 +7,10 @@ import {
 	type AgentHostMethod,
 	type AgentRunEventFrame,
 } from "../src/agent/mastra-host/protocol";
-import { AgentRunCoordinator, type AgentSidecar } from "../src/bun/agent-run-coordinator";
+import {
+	AgentRunCoordinator,
+	type AgentSidecar,
+} from "../src/bun/agent-run-coordinator";
 import { AgentToolPolicy } from "../src/bun/agent-tool-policy";
 import {
 	CredentialHelperError,
@@ -15,8 +18,11 @@ import {
 	type CredentialKeyStore,
 } from "../src/bun/credential-helper-client";
 import { EncryptedAgentRepository } from "../src/bun/encrypted-agent-repository";
-import type { AgentRunEventEnvelope } from "../src/shared/agent-runs";
-import type { TaskPlanningDraft, TaskPlanningInput } from "../src/shared/task-planning";
+import type { InternalAgentRunEventEnvelope } from "../src/shared/agent-runs";
+import type {
+	TaskPlanningDraft,
+	TaskPlanningInput,
+} from "../src/shared/task-planning";
 
 const temporaryDirectories: string[] = [];
 const openRepositories: EncryptedAgentRepository[] = [];
@@ -29,6 +35,88 @@ afterEach(() => {
 });
 
 describe("AgentRunCoordinator", () => {
+	test("stores a no-tool activity analysis locally without exposing it through renderer APIs", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-private";
+		await harness.coordinator.startActivityAnalysis({
+			jobId: "activity-job-private",
+			runId,
+			requestId: "activity-request-private",
+			consumedScore: 0,
+			analyses: [
+				{
+					request_id: "worker-request-private",
+					score: 0,
+					score_reason: "goal-relevant activity",
+					events: [
+						{
+							source_event_ids: ["sealed-window-only"],
+							activity: "development",
+							goal_relevance: "direct",
+							confidence: 0.9,
+							reason_codes: ["worker"],
+							evidence: ["Worker summary only"],
+							started_at_ms: 1,
+							ended_at_ms: 2,
+						},
+					],
+				},
+			],
+		});
+		expect(harness.sidecar.calls).toEqual([
+			expect.objectContaining({ method: "activity.start" }),
+		]);
+		expect(JSON.stringify(harness.sidecar.calls[0]?.params)).not.toContain(
+			"raw_event",
+		);
+
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				runId,
+				2,
+				{
+					kind: "run.completed",
+					result: { summary: "开发活动与当前目标直接相关，建议继续当前任务。" },
+				},
+				"completed",
+			),
+		);
+		await waitFor(
+			async () =>
+				(await harness.repository.getRun("account-a", runId))?.status ===
+				"completed",
+		);
+		const persisted = await harness.repository.getRun("account-a", runId);
+		expect(persisted?.input).toEqual(
+			expect.objectContaining({
+				kind: "activity-analysis",
+				consumedScore: 0,
+			}),
+		);
+		expect(JSON.stringify(persisted?.input)).not.toContain("raw_event");
+		expect(JSON.stringify(persisted?.output)).toContain("建议继续当前任务");
+		await expect(
+			harness.coordinator.getAgentRunSnapshot(runId),
+		).resolves.toEqual(expect.objectContaining({ kind: "not-found" }));
+		await expect(
+			harness.coordinator.listRestorableAgentRuns({}),
+		).resolves.toEqual({
+			kind: "success",
+			data: { runs: [] },
+		});
+		expect(harness.activityTerminals).toEqual([
+			expect.objectContaining({
+				jobId: "activity-job-private",
+				runId,
+				accountId: "account-a",
+				status: "completed",
+			}),
+		]);
+	});
+
 	test("lists a still-running active turn as restorable in the same Bun process", async () => {
 		const harness = createHarness();
 		const started = await harness.coordinator.startConversationTurn({
@@ -36,21 +124,29 @@ describe("AgentRunCoordinator", () => {
 			clientMessageId: "client-active-restorable",
 			text: "保持这个运行可恢复",
 		});
-		if (started.kind !== "success") throw new Error("active run was not accepted");
+		if (started.kind !== "success")
+			throw new Error("active run was not accepted");
 
 		harness.coordinator.acceptSidecarEvent(
-			runEvent(started.data.runId, 1, {
-				kind: "run.started",
-				runKind: "conversation",
-			}, null),
+			runEvent(
+				started.data.runId,
+				1,
+				{
+					kind: "run.started",
+					runKind: "conversation",
+				},
+				null,
+			),
 		);
 		await waitFor(
 			async () =>
-				(await harness.repository.getRun("account-a", started.data.runId))?.status ===
-				"running",
+				(await harness.repository.getRun("account-a", started.data.runId))
+					?.status === "running",
 		);
 
-		const conversation = (await harness.repository.listConversations("account-a"))[0]!;
+		const conversation = (
+			await harness.repository.listConversations("account-a")
+		)[0]!;
 		const result = await harness.coordinator.listRestorableAgentRuns({
 			kind: "conversation-turn",
 			conversationId: conversation.id,
@@ -69,7 +165,9 @@ describe("AgentRunCoordinator", () => {
 			},
 		});
 		expect(harness.sidecar.tracked.has(started.data.runId)).toBe(true);
-		await expect(harness.coordinator.getAgentRunSnapshot(started.data.runId)).resolves.toEqual({
+		await expect(
+			harness.coordinator.getAgentRunSnapshot(started.data.runId),
+		).resolves.toEqual({
 			kind: "success",
 			data: expect.objectContaining({ status: "running" }),
 		});
@@ -87,38 +185,47 @@ describe("AgentRunCoordinator", () => {
 
 		harness.account.current = "account-b";
 		harness.account.generation += 1;
-		await expect(harness.coordinator.getAgentRunSnapshot(accountA.data.runId)).resolves.toEqual(
-			expect.objectContaining({ kind: "not-found" }),
-		);
+		await expect(
+			harness.coordinator.getAgentRunSnapshot(accountA.data.runId),
+		).resolves.toEqual(expect.objectContaining({ kind: "not-found" }));
 		const accountB = await harness.coordinator.startConversationTurn({
 			requestId: "request-b",
 			clientMessageId: "same-client-message",
 			text: "账号 B 的私有消息",
 		});
 		expect(accountB.kind).toBe("success");
-		if (accountB.kind !== "success") throw new Error("account B run was not accepted");
+		if (accountB.kind !== "success")
+			throw new Error("account B run was not accepted");
 		expect(accountB.data.runId).not.toBe(accountA.data.runId);
 
-		const conversationsA = await harness.repository.listConversations("account-a");
-		const conversationsB = await harness.repository.listConversations("account-b");
+		const conversationsA =
+			await harness.repository.listConversations("account-a");
+		const conversationsB =
+			await harness.repository.listConversations("account-b");
 		expect(conversationsA).toHaveLength(1);
 		expect(conversationsB).toHaveLength(1);
 		expect(
-			(await harness.repository.listMessages("account-a", conversationsA[0]!.id)).map(
-				(message) => message.content,
-			),
+			(
+				await harness.repository.listMessages(
+					"account-a",
+					conversationsA[0]!.id,
+				)
+			).map((message) => message.content),
 		).toContain("账号 A 的私有消息");
 		expect(
-			(await harness.repository.listMessages("account-b", conversationsB[0]!.id)).map(
-				(message) => message.content,
-			),
+			(
+				await harness.repository.listMessages(
+					"account-b",
+					conversationsB[0]!.id,
+				)
+			).map((message) => message.content),
 		).not.toContain("账号 A 的私有消息");
 
 		harness.account.current = "account-a";
 		harness.account.generation += 1;
-		await expect(harness.coordinator.getAgentRunSnapshot(accountB.data.runId)).resolves.toEqual(
-			expect.objectContaining({ kind: "not-found" }),
-		);
+		await expect(
+			harness.coordinator.getAgentRunSnapshot(accountB.data.runId),
+		).resolves.toEqual(expect.objectContaining({ kind: "not-found" }));
 	});
 
 	test("waits for an in-flight start during logout and never dispatches it after session invalidation", async () => {
@@ -143,20 +250,28 @@ describe("AgentRunCoordinator", () => {
 		harness.account.current = null;
 		harness.account.generation += 1;
 		let cleanupSettled = false;
-		const cleanup = harness.coordinator.cancelAllForAccount("account-a").then(() => {
-			cleanupSettled = true;
-		});
+		const cleanup = harness.coordinator
+			.cancelAllForAccount("account-a")
+			.then(() => {
+				cleanupSettled = true;
+			});
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(cleanupSettled).toBe(false);
 
 		releaseRead.resolve();
-		await expect(starting).resolves.toEqual(expect.objectContaining({ kind: "unavailable" }));
+		await expect(starting).resolves.toEqual(
+			expect.objectContaining({ kind: "unavailable" }),
+		);
 		await cleanup;
 		expect(cleanupSettled).toBe(true);
 		expect(
-			harness.sidecar.calls.filter((call) => call.method === "conversation.start"),
+			harness.sidecar.calls.filter(
+				(call) => call.method === "conversation.start",
+			),
 		).toHaveLength(0);
-		await expect(harness.repository.listRuns("account-a", 100)).resolves.toEqual([]);
+		await expect(
+			harness.repository.listRuns("account-a", 100),
+		).resolves.toEqual([]);
 	});
 
 	test("keeps reverse host calls bound to their owning session and drains them before logout", async () => {
@@ -166,7 +281,8 @@ describe("AgentRunCoordinator", () => {
 			clientMessageId: "client-host-call-race",
 			text: "验证反向调用绑定",
 		});
-		if (started.kind !== "success") throw new Error("conversation run was not accepted");
+		if (started.kind !== "success")
+			throw new Error("conversation run was not accepted");
 		const hostCallStarted = deferred();
 		const releaseHostCall = deferred();
 		const observedAccounts: string[] = [];
@@ -184,9 +300,11 @@ describe("AgentRunCoordinator", () => {
 		harness.account.current = "account-b";
 		harness.account.generation += 1;
 		let cleanupSettled = false;
-		const cleanup = harness.coordinator.cancelAllForAccount("account-a").then(() => {
-			cleanupSettled = true;
-		});
+		const cleanup = harness.coordinator
+			.cancelAllForAccount("account-a")
+			.then(() => {
+				cleanupSettled = true;
+			});
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(cleanupSettled).toBe(false);
 		expect(observedAccounts).toEqual(["account-a"]);
@@ -196,14 +314,17 @@ describe("AgentRunCoordinator", () => {
 		await cleanup;
 		expect(cleanupSettled).toBe(true);
 		await expect(
-			harness.coordinator.runBoundHostCall(started.data.runId, async () => "late"),
+			harness.coordinator.runBoundHostCall(
+				started.data.runId,
+				async () => "late",
+			),
 		).rejects.toThrow("登录会话");
 		await expect(
 			harness.repository.getRun("account-a", started.data.runId),
 		).resolves.toEqual(expect.objectContaining({ status: "cancelled" }));
-		await expect(harness.coordinator.getAgentRunSnapshot(started.data.runId)).resolves.toEqual(
-			expect.objectContaining({ kind: "not-found" }),
-		);
+		await expect(
+			harness.coordinator.getAgentRunSnapshot(started.data.runId),
+		).resolves.toEqual(expect.objectContaining({ kind: "not-found" }));
 	});
 
 	test("rejects conversation memory access outside the owning run's thread", async () => {
@@ -244,7 +365,8 @@ describe("AgentRunCoordinator", () => {
 			clientMessageId: "client-generation-owner",
 			text: "旧会话运行",
 		});
-		if (started.kind !== "success") throw new Error("conversation run was not accepted");
+		if (started.kind !== "success")
+			throw new Error("conversation run was not accepted");
 		harness.account.generation += 1;
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(
@@ -256,7 +378,10 @@ describe("AgentRunCoordinator", () => {
 		);
 
 		await expect(
-			harness.coordinator.runBoundHostCall(started.data.runId, async () => "late"),
+			harness.coordinator.runBoundHostCall(
+				started.data.runId,
+				async () => "late",
+			),
 		).rejects.toThrow("登录会话");
 		const restorable = await harness.coordinator.listRestorableAgentRuns({});
 		expect(restorable).toEqual({
@@ -283,12 +408,19 @@ describe("AgentRunCoordinator", () => {
 			clientMessageId: "client-event-chain-race",
 			text: "等待完成事件",
 		});
-		if (started.kind !== "success") throw new Error("conversation run was not accepted");
+		if (started.kind !== "success")
+			throw new Error("conversation run was not accepted");
 		const completionWriteStarted = deferred();
 		const releaseCompletionWrite = deferred();
-		const originalPutMessage = harness.repository.putMessage.bind(harness.repository);
+		const originalPutMessage = harness.repository.putMessage.bind(
+			harness.repository,
+		);
 		harness.repository.putMessage = async (record) => {
-			if (record.runId === started.data.runId && record.status === "complete" && record.role === "assistant") {
+			if (
+				record.runId === started.data.runId &&
+				record.status === "complete" &&
+				record.role === "assistant"
+			) {
 				completionWriteStarted.resolve();
 				await releaseCompletionWrite.promise;
 			}
@@ -307,16 +439,20 @@ describe("AgentRunCoordinator", () => {
 		harness.account.current = null;
 		harness.account.generation += 1;
 		let cleanupSettled = false;
-		const cleanup = harness.coordinator.cancelAllForAccount("account-a").then(() => {
-			cleanupSettled = true;
-		});
+		const cleanup = harness.coordinator
+			.cancelAllForAccount("account-a")
+			.then(() => {
+				cleanupSettled = true;
+			});
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(cleanupSettled).toBe(false);
 
 		releaseCompletionWrite.resolve();
 		await cleanup;
 		expect(cleanupSettled).toBe(true);
-		expect(JSON.stringify(harness.events)).not.toContain("conversation.message.completed");
+		expect(JSON.stringify(harness.events)).not.toContain(
+			"conversation.message.completed",
+		);
 		await expect(
 			harness.repository.getRun("account-a", started.data.runId),
 		).resolves.toEqual(expect.objectContaining({ status: "cancelled" }));
@@ -331,14 +467,19 @@ describe("AgentRunCoordinator", () => {
 		};
 		const first = await harness.coordinator.startConversationTurn(input);
 		expect(first.kind).toBe("success");
-		if (first.kind !== "success") throw new Error("initial run was not accepted");
+		if (first.kind !== "success")
+			throw new Error("initial run was not accepted");
 
 		const duplicate = await harness.coordinator.startConversationTurn(input);
 		expect(duplicate).toEqual({
 			kind: "success",
 			data: expect.objectContaining({ runId: first.data.runId }),
 		});
-		expect(harness.sidecar.calls.filter((call) => call.method === "conversation.start")).toHaveLength(1);
+		expect(
+			harness.sidecar.calls.filter(
+				(call) => call.method === "conversation.start",
+			),
+		).toHaveLength(1);
 
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(first.data.runId, 1, {
@@ -350,7 +491,11 @@ describe("AgentRunCoordinator", () => {
 				},
 			}),
 		);
-		await waitFor(async () => (await harness.repository.getRun("account-a", first.data.runId))?.status === "failed");
+		await waitFor(
+			async () =>
+				(await harness.repository.getRun("account-a", first.data.runId))
+					?.status === "failed",
+		);
 
 		const retry = await harness.coordinator.startConversationTurn({
 			...input,
@@ -361,12 +506,29 @@ describe("AgentRunCoordinator", () => {
 		if (retry.kind !== "success") throw new Error("retry run was not accepted");
 		expect(retry.data.runId).not.toBe(first.data.runId);
 
-		const conversation = (await harness.repository.listConversations("account-a"))[0]!;
-		const messages = await harness.repository.listMessages("account-a", conversation.id);
-		expect(messages.filter((message) => message.role === "user")).toHaveLength(1);
-		expect(messages.filter((message) => message.role === "assistant")).toHaveLength(2);
-		expect(messages.filter((message) => message.clientMessageId === input.clientMessageId)).toHaveLength(1);
-		expect(harness.sidecar.calls.filter((call) => call.method === "conversation.start")).toHaveLength(2);
+		const conversation = (
+			await harness.repository.listConversations("account-a")
+		)[0]!;
+		const messages = await harness.repository.listMessages(
+			"account-a",
+			conversation.id,
+		);
+		expect(messages.filter((message) => message.role === "user")).toHaveLength(
+			1,
+		);
+		expect(
+			messages.filter((message) => message.role === "assistant"),
+		).toHaveLength(2);
+		expect(
+			messages.filter(
+				(message) => message.clientMessageId === input.clientMessageId,
+			),
+		).toHaveLength(1);
+		expect(
+			harness.sidecar.calls.filter(
+				(call) => call.method === "conversation.start",
+			),
+		).toHaveLength(2);
 	});
 
 	test("aborts the model relay directly by runId before delegating normal cancellation to Sidecar", async () => {
@@ -376,7 +538,8 @@ describe("AgentRunCoordinator", () => {
 			clientMessageId: "client-direct-relay-abort",
 			text: "停止这个仍在等待模型响应头的运行",
 		});
-		if (started.kind !== "success") throw new Error("conversation run was not accepted");
+		if (started.kind !== "success")
+			throw new Error("conversation run was not accepted");
 
 		const cancelled = await harness.coordinator.cancelAgentRun({
 			requestId: "request-direct-relay-cancel",
@@ -385,10 +548,12 @@ describe("AgentRunCoordinator", () => {
 		});
 		expect(cancelled.kind).toBe("success");
 		expect(harness.relayAborts).toEqual([started.data.runId]);
-		expect(harness.sidecar.calls).toContainEqual(expect.objectContaining({
-			method: "run.cancel",
-			params: { runId: started.data.runId, reason: "user" },
-		}));
+		expect(harness.sidecar.calls).toContainEqual(
+			expect.objectContaining({
+				method: "run.cancel",
+				params: { runId: started.data.runId, reason: "user" },
+			}),
+		);
 	});
 
 	test("persists relay capability unavailability as non-retryable instead of model retry", async () => {
@@ -398,24 +563,31 @@ describe("AgentRunCoordinator", () => {
 			clientMessageId: "client-relay-unavailable",
 			text: "尝试使用当前不可用的模型能力",
 		});
-		if (started.kind !== "success") throw new Error("conversation run was not accepted");
-		harness.coordinator.acceptSidecarEvent(runEvent(
-			started.data.runId,
-			1,
-			{
-				kind: "run.failed",
-				error: {
-					code: "MODEL_RELAY_UNAVAILABLE",
-					message: "当前测试账号没有模型转发能力。",
-					retryable: false,
+		if (started.kind !== "success")
+			throw new Error("conversation run was not accepted");
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				1,
+				{
+					kind: "run.failed",
+					error: {
+						code: "MODEL_RELAY_UNAVAILABLE",
+						message: "当前测试账号没有模型转发能力。",
+						retryable: false,
+					},
 				},
-			},
-			"failed",
-		));
-		await waitFor(async () =>
-			(await harness.repository.getRun("account-a", started.data.runId))?.status === "failed"
+				"failed",
+			),
 		);
-		const snapshot = await harness.coordinator.getAgentRunSnapshot(started.data.runId);
+		await waitFor(
+			async () =>
+				(await harness.repository.getRun("account-a", started.data.runId))
+					?.status === "failed",
+		);
+		const snapshot = await harness.coordinator.getAgentRunSnapshot(
+			started.data.runId,
+		);
 		expect(snapshot).toEqual({
 			kind: "success",
 			data: expect.objectContaining({
@@ -435,7 +607,8 @@ describe("AgentRunCoordinator", () => {
 			clientMessageId: "client-tool",
 			text: "请创建日程",
 		});
-		if (started.kind !== "success") throw new Error("tool run was not accepted");
+		if (started.kind !== "success")
+			throw new Error("tool run was not accepted");
 		const argumentsValue = {
 			event: {
 				id: "event-tool-1",
@@ -470,7 +643,9 @@ describe("AgentRunCoordinator", () => {
 		};
 		expect(proposal.runVersion).toBe(2);
 		expect(proposal.runVersion).not.toBe(9_999);
-		expect(proposal.description).not.toContain(argumentsValue.event.schedule.start);
+		expect(proposal.description).not.toContain(
+			argumentsValue.event.schedule.start,
+		);
 
 		const decision = await harness.coordinator.decideAgentToolApproval({
 			requestId: "request-approval",
@@ -517,7 +692,9 @@ describe("AgentRunCoordinator", () => {
 				runVersion: proposal.runVersion,
 			}),
 		).rejects.toThrow("one-time approval binding");
-		expect(JSON.stringify(harness.events)).not.toContain(argumentsValue.event.schedule.start);
+		expect(JSON.stringify(harness.events)).not.toContain(
+			argumentsValue.event.schedule.start,
+		);
 	});
 
 	test("rechecks approval expiry immediately before execution and performs no late write", async () => {
@@ -527,7 +704,8 @@ describe("AgentRunCoordinator", () => {
 			clientMessageId: "client-expiring-tool",
 			text: "请创建一个稍后审批的日程",
 		});
-		if (started.kind !== "success") throw new Error("tool run was not accepted");
+		if (started.kind !== "success")
+			throw new Error("tool run was not accepted");
 		const argumentsValue = calendarCreateArguments("event-expired-approval");
 		const proposal = (await harness.coordinator.propose("account-a", {
 			runId: started.data.runId,
@@ -588,7 +766,10 @@ describe("AgentRunCoordinator", () => {
 				"account-a",
 				approvedPending.runId,
 			);
-			return approvedHarness.executions.length === 1 && record?.status === "completed";
+			return (
+				approvedHarness.executions.length === 1 &&
+				record?.status === "completed"
+			);
 		});
 		expect(approvedHarness.executions).toEqual([
 			expect.objectContaining({
@@ -629,8 +810,12 @@ describe("AgentRunCoordinator", () => {
 		expect(denied.kind).toBe("success");
 		await waitFor(
 			async () =>
-				(await deniedHarness.repository.getRun("account-a", deniedPending.runId))
-					?.status === "completed",
+				(
+					await deniedHarness.repository.getRun(
+						"account-a",
+						deniedPending.runId,
+					)
+				)?.status === "completed",
 		);
 		expect(deniedHarness.executions).toHaveLength(0);
 	});
@@ -671,38 +856,49 @@ describe("AgentRunCoordinator", () => {
 			expectedRevision: pending.approval.runVersion,
 			decision: "approve-once",
 		});
-		if (approved.kind !== "success") throw new Error("recovered approval was not accepted");
+		if (approved.kind !== "success")
+			throw new Error("recovered approval was not accepted");
 		await executionStarted.promise;
 
-		await expect(coordinator.cancelAgentRun({
-			requestId: "request-critical-cancel",
-			runId: pending.runId,
-			expectedRevision: approved.data.revision,
-		})).resolves.toEqual(expect.objectContaining({ kind: "conflict" }));
+		await expect(
+			coordinator.cancelAgentRun({
+				requestId: "request-critical-cancel",
+				runId: pending.runId,
+				expectedRevision: approved.data.revision,
+			}),
+		).resolves.toEqual(expect.objectContaining({ kind: "conflict" }));
 
 		let logoutSettled = false;
 		let interruptSettled = false;
 		const logout = coordinator.cancelAllForAccount("account-a").then(() => {
 			logoutSettled = true;
 		});
-		const interrupted = coordinator.interruptRuns(
-			[pending.runId],
-			"Sidecar exited during recovered Tool execution.",
-		).then(() => {
-			interruptSettled = true;
-		});
+		const interrupted = coordinator
+			.interruptRuns(
+				[pending.runId],
+				"Sidecar exited during recovered Tool execution.",
+			)
+			.then(() => {
+				interruptSettled = true;
+			});
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(logoutSettled).toBe(false);
 		expect(interruptSettled).toBe(false);
-		expect(sidecar.calls.filter((call) => call.method === "run.cancel")).toHaveLength(0);
+		expect(
+			sidecar.calls.filter((call) => call.method === "run.cancel"),
+		).toHaveLength(0);
 
 		releaseExecution.resolve();
 		await Promise.all([logout, interrupted]);
-		await waitFor(async () =>
-			(await harness.repository.getRun("account-a", pending.runId))?.status === "completed"
+		await waitFor(
+			async () =>
+				(await harness.repository.getRun("account-a", pending.runId))
+					?.status === "completed",
 		);
 		expect(harness.executions).toHaveLength(1);
-		expect(sidecar.calls.filter((call) => call.method === "run.cancel")).toHaveLength(0);
+		expect(
+			sidecar.calls.filter((call) => call.method === "run.cancel"),
+		).toHaveLength(0);
 	});
 
 	test("persists a second-pass planning conflict with the complete draft and performs no write", async () => {
@@ -714,8 +910,11 @@ describe("AgentRunCoordinator", () => {
 			requestId: "request-planning",
 			input: planningInput(),
 		});
-		if (started.kind !== "success") throw new Error("planning run was not accepted");
-		const sidecarStart = harness.sidecar.calls.find((call) => call.method === "planning.start");
+		if (started.kind !== "success")
+			throw new Error("planning run was not accepted");
+		const sidecarStart = harness.sidecar.calls.find(
+			(call) => call.method === "planning.start",
+		);
 		const sessionId = String(sidecarStart?.params.sessionId);
 		const draft = planningDraft();
 		const result = {
@@ -733,9 +932,18 @@ describe("AgentRunCoordinator", () => {
 			version: 2,
 		};
 		harness.coordinator.acceptSidecarEvent(
-			runEvent(started.data.runId, 1, { kind: "run.completed", result }, "completed"),
+			runEvent(
+				started.data.runId,
+				1,
+				{ kind: "run.completed", result },
+				"completed",
+			),
 		);
-		await waitFor(async () => (await harness.repository.getRun("account-a", started.data.runId))?.status === "completed");
+		await waitFor(
+			async () =>
+				(await harness.repository.getRun("account-a", started.data.runId))
+					?.status === "completed",
+		);
 
 		const restarted = new AgentRunCoordinator({
 			sessionIdentity: () => ({
@@ -763,11 +971,14 @@ describe("AgentRunCoordinator", () => {
 			draft,
 			validationIssues: result.validationIssues,
 		});
-		expect(restored.data.session?.status === "conflict" && restored.data.session.draft.schedule).toEqual(
-			draft.schedule,
-		);
+		expect(
+			restored.data.session?.status === "conflict" &&
+				restored.data.session.draft.schedule,
+		).toEqual(draft.schedule);
 		expect(harness.executions).toHaveLength(0);
-		await expect(harness.repository.listCalendarEvents("account-a")).resolves.toEqual([]);
+		await expect(
+			harness.repository.listCalendarEvents("account-a"),
+		).resolves.toEqual([]);
 	});
 });
 
@@ -819,7 +1030,9 @@ class MemoryKeyStore implements CredentialKeyStore {
 		return value.slice();
 	}
 
-	async deleteKey(reference: CredentialKeyReference): Promise<{ deleted: boolean }> {
+	async deleteKey(
+		reference: CredentialKeyReference,
+	): Promise<{ deleted: boolean }> {
 		return { deleted: this.keys.delete(referenceKey(reference)) };
 	}
 }
@@ -829,7 +1042,8 @@ function createHarness(): {
 	repository: EncryptedAgentRepository;
 	sidecar: RecordingSidecar;
 	coordinator: AgentRunCoordinator;
-	events: AgentRunEventEnvelope[];
+	events: InternalAgentRunEventEnvelope[];
+	activityTerminals: Array<Record<string, unknown>>;
 	executions: Record<string, unknown>[];
 	relayAborts: string[];
 	clock: () => number;
@@ -851,7 +1065,8 @@ function createHarness(): {
 	openRepositories.push(repository);
 	const account = { current: "account-a" as string | null, generation: 1 };
 	const sidecar = new RecordingSidecar();
-	const events: AgentRunEventEnvelope[] = [];
+	const events: InternalAgentRunEventEnvelope[] = [];
+	const activityTerminals: Array<Record<string, unknown>> = [];
 	const executions: Record<string, unknown>[] = [];
 	const relayAborts: string[] = [];
 	const coordinator = new AgentRunCoordinator({
@@ -870,6 +1085,9 @@ function createHarness(): {
 			},
 		},
 		onEvent: (event) => events.push(structuredClone(event)),
+		onActivityRunTerminal: (input) => {
+			activityTerminals.push(structuredClone(input));
+		},
 		now: clock,
 	});
 	return {
@@ -878,6 +1096,7 @@ function createHarness(): {
 		sidecar,
 		coordinator,
 		events,
+		activityTerminals,
 		executions,
 		relayAborts,
 		clock,
@@ -917,6 +1136,9 @@ function restartCoordinator(harness: CoordinatorHarness): AgentRunCoordinator {
 			},
 		},
 		onEvent: (event) => harness.events.push(structuredClone(event)),
+		onActivityRunTerminal: (input) => {
+			harness.activityTerminals.push(structuredClone(input));
+		},
 		now: harness.clock,
 	});
 }
@@ -956,14 +1178,17 @@ async function persistSuspendedCalendarApproval(
 		runEvent(
 			started.data.runId,
 			1,
-			{ kind: "run.suspended", suspendPayload: { approvalId: approval.approvalId } },
+			{
+				kind: "run.suspended",
+				suspendPayload: { approvalId: approval.approvalId },
+			},
 			null,
 		),
 	);
 	await waitFor(
 		async () =>
-			(await harness.repository.getRun("account-a", started.data.runId))?.status ===
-			"suspended",
+			(await harness.repository.getRun("account-a", started.data.runId))
+				?.status === "suspended",
 	);
 	return { runId: started.data.runId, toolCallId, argumentsValue, approval };
 }
@@ -1013,10 +1238,14 @@ function runEvent(
 	};
 }
 
-async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
+async function waitFor(
+	predicate: () => boolean | Promise<boolean>,
+	timeoutMs = 2_000,
+): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (!(await predicate())) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for asynchronous coordinator state.");
+		if (Date.now() >= deadline)
+			throw new Error("Timed out waiting for asynchronous coordinator state.");
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
 }
@@ -1049,12 +1278,14 @@ function planningDraft(): TaskPlanningDraft {
 		title: "本地 Agent 重构计划",
 		assumptions: ["远端只转发模型请求"],
 		calendarRevision: 7,
-		phases: [{
-			id: "phase-1",
-			title: "本地运行",
-			objective: "完成本地 Agent 链路",
-			order: 1,
-		}],
+		phases: [
+			{
+				id: "phase-1",
+				title: "本地运行",
+				objective: "完成本地 Agent 链路",
+				order: 1,
+			},
+		],
 		milestones: [
 			{
 				id: "milestone-1",

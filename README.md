@@ -51,9 +51,9 @@ progress, cancellation, and concurrency control. The local Mastra Sidecar is
 the separate interactive conversation and planning runtime; it does not absorb
 the sensor catalogue or the Reflection pipeline.
 
-Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. The remote service has no conversation, planning, history, Tool, or prompt-injection API: after formal authentication is connected, it will authenticate the bearer subject, inject only the provider credential, store relay records, and forward the already-complete OpenAI-compatible body. Browser contexts never communicate directly, never receive bearer tokens, and never supply account identity.
+Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. The remote service has no conversation, planning, history, Tool, or prompt-injection API: it authenticates a short-lived bearer plus the same account's personal relay key, stores relay records, and forwards the already-complete OpenAI-compatible body to the fixed CPU-only upstream. Browser contexts never communicate directly, never receive bearer tokens or relay keys, and never supply account identity.
 
-The current development login is deliberately local-only: the UI pre-fills `demo@whalehall.local`, displays the experience password `whalehall`, and Bun validates those fixed values without network access before binding `user-demo-wang-yiming`. The submitted password is immediately cleared from React state. This test session has no bearer, so model relay requests report unavailable until formal remote authentication is implemented; WhaleHall does not fabricate credentials or fall back to a remote Agent.
+Production login uses the configured remote email/password service. The submitted password is immediately cleared from React state; access and refresh credentials remain in Bun's secure credential storage, while the personal relay key remains only in owner-provisioned local `config.yaml`. WhaleHall does not fabricate credentials or fall back to a remote Agent.
 
 ## Development areas / 开发区域
 
@@ -193,10 +193,14 @@ The pre-build hook builds the React views, compiles `whalehall-local-server` and
 the credential helper, verifies and stages the pinned Node runtime, and bundles
 the local Mastra Sidecar. On macOS it also builds and signs the Observer and
 versioned Vault Broker before the existing post-wrap and post-package security
-checks run. Desktop authentication/model requests require
-`WHALEHALL_RELAY_URL` and `WHALEHALL_MODEL_ID`; provider keys belong only in
+checks run. Desktop authentication and model requests use the owner-provisioned
+`config.yaml` two-role configuration. The activity Worker key and personal
+relay key are literal owner-only values; upstream model credentials remain in
 the separately deployed relay process. See
-[`docs/CONVERSATION_AGENT_INTEGRATION.md`](docs/CONVERSATION_AGENT_INTEGRATION.md).
+[`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) for
+the two-role configuration and deployment boundary, and
+[`docs/CONVERSATION_AGENT_INTEGRATION.md`](docs/CONVERSATION_AGENT_INTEGRATION.md)
+for the desktop Agent lifecycle.
 
 ## Desktop pet / 桌宠
 

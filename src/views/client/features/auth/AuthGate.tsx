@@ -1,13 +1,9 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
-import type { AuthService } from "./auth-service";
 import { AuthController } from "./AuthController";
 import { AuthBootScreen, AuthPage } from "./AuthPage";
-import type {
-	AuthCredentials,
-	AuthExperienceCredentials,
-	AuthSession,
-} from "./domain";
+import type { AuthService } from "./auth-service";
+import type { AuthCredentials, AuthSession } from "./domain";
 
 export interface AuthenticatedAppContext {
 	session: AuthSession;
@@ -16,15 +12,10 @@ export interface AuthenticatedAppContext {
 
 export interface AuthGateProps {
 	service: AuthService;
-	experienceCredentials?: AuthExperienceCredentials;
 	renderAuthenticated: (context: AuthenticatedAppContext) => ReactNode;
 }
 
-export function AuthGate({
-	service,
-	experienceCredentials,
-	renderAuthenticated,
-}: AuthGateProps) {
+export function AuthGate({ service, renderAuthenticated }: AuthGateProps) {
 	const controller = useMemo(() => new AuthController(service), [service]);
 	const state = useSyncExternalStore(
 		controller.subscribe,
@@ -57,7 +48,6 @@ export function AuthGate({
 	return (
 		<AuthPage
 			state={state}
-			experienceCredentials={experienceCredentials}
 			onSubmit={handleSubmit}
 			onRetry={() => controller.retry()}
 		/>

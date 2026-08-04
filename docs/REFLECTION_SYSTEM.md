@@ -610,9 +610,11 @@ expectedArtifact, ... }` 才做一次纯元数据验证；未配置、显式关�
 训练侧 runner 在 tokenizer、配置、权重和 calibration 全部载入后重新计算
 artifact tree manifest；若加载期间目录发生替换则拒绝启动，不能以旧 digest
 身份运行新权重。
-loopback HTTP/HTTPS 默认允许；Timeline runtime 的显式 endpoint 仍要求相应的安全校验，
-不向运行时暴露 `allowInsecureRemote`。推理 URL 与 manifest URL 必须同 origin，
-禁止 credentials、query、fragment 和 redirect。
+Timeline 默认保持 cold-start，绝不自动发现或连接任何 loopback HTTP/HTTPS
+服务。仅在受信任部署显式提供完整 runtime 配置时，才可使用本机 loopback HTTP；
+跨主机部署必须使用 allowlisted HTTPS，并应使用认证传输（例如 mTLS、证书固定或
+受保护的 Unix socket/SSH 转发），不向运行时暴露 `allowInsecureRemote`。推理 URL
+与 manifest URL 必须同 origin，禁止 credentials、query、fragment 和 redirect。
 
 authorization token 只能通过 runtime options 注入，不得写入仓库、训练
 runtime/manifest 或日志。独立 v2 server 的标准入口从同名

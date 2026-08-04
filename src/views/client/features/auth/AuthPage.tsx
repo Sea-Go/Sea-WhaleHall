@@ -13,11 +13,7 @@ import {
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useState } from "react";
 import { Button } from "../../shared/ui/Button";
-import type {
-	AuthCredentials,
-	AuthExperienceCredentials,
-	AuthState,
-} from "./domain";
+import type { AuthCredentials, AuthState } from "./domain";
 
 export type LoginAuthState = Extract<
 	AuthState,
@@ -28,7 +24,6 @@ export type LoginAuthState = Extract<
 
 export interface AuthPageProps {
 	state: LoginAuthState;
-	experienceCredentials?: AuthExperienceCredentials;
 	onSubmit: (credentials: AuthCredentials) => Promise<void>;
 	onRetry: () => Promise<void>;
 }
@@ -38,16 +33,9 @@ interface FormValidation {
 	password?: string;
 }
 
-export function AuthPage({
-	state,
-	experienceCredentials,
-	onSubmit,
-	onRetry,
-}: AuthPageProps) {
+export function AuthPage({ state, onSubmit, onRetry }: AuthPageProps) {
 	const [email, setEmail] = useState(
-		state.status === "error" && state.email
-			? state.email
-			: (experienceCredentials?.email ?? ""),
+		state.status === "error" && state.email ? state.email : "",
 	);
 	const [password, setPassword] = useState("");
 	const [showPassword, setShowPassword] = useState(false);
@@ -129,7 +117,9 @@ export function AuthPage({
 					<ShieldCheck size={17} aria-hidden="true" />
 					<div>
 						<strong>登录信息由安全边界处理</strong>
-						<span>体验密码只用于本机校验，不会发送到远端。</span>
+						<span>
+							密码只用于已配置的安全登录服务，不会发送给模型或写入本地日志。
+						</span>
 					</div>
 				</div>
 			</section>
@@ -139,7 +129,7 @@ export function AuthPage({
 					<header className="auth-panel__header">
 						<p>欢迎回来</p>
 						<h2 id="auth-panel-title">登录 WhaleHall</h2>
-						<span>当前体验账号只在本机验证，正式远端账户认证将在后续提供。</span>
+						<span>使用你的 WhaleHall 账号安全登录。</span>
 					</header>
 
 					{notice ? <AuthNotice notice={notice} onRetry={onRetry} /> : null}
@@ -183,9 +173,6 @@ export function AuthPage({
 						<div className="auth-field">
 							<div className="auth-field__heading">
 								<label htmlFor="auth-password">密码</label>
-								{experienceCredentials ? (
-									<span>体验密码：{experienceCredentials.password}</span>
-								) : null}
 							</div>
 							<div className="auth-password-control">
 								<input
@@ -250,15 +237,6 @@ export function AuthPage({
 							{authenticating ? "正在登录…" : "登录"}
 						</Button>
 					</form>
-
-					{experienceCredentials ? (
-						<div className="auth-experience-note">
-							<strong>本地体验模式</strong>
-							<span>
-								体验账号已预填。邮箱和密码只提交给桌面主进程做固定值校验，不会上传。
-							</span>
-						</div>
-					) : null}
 				</div>
 
 				<footer className="auth-panel-region__footer">
@@ -285,15 +263,15 @@ export function AuthBootScreen({ operation }: AuthBootScreenProps) {
 	return (
 		<main className="auth-boot-screen">
 			<div className="auth-boot-screen__ambient" aria-hidden="true" />
-			<div className="auth-boot-screen__content" role="status" aria-live="polite">
+			<div
+				className="auth-boot-screen__content"
+				role="status"
+				aria-live="polite"
+			>
 				<span className="auth-brand__mark" aria-hidden="true">
 					<Waves size={22} strokeWidth={2} />
 				</span>
-				<LoaderCircle
-					className="auth-spinner"
-					size={20}
-					aria-hidden="true"
-				/>
+				<LoaderCircle className="auth-spinner" size={20} aria-hidden="true" />
 				<h1>{message}</h1>
 				<p>WhaleHall 不会在会话确认前显示受保护内容。</p>
 			</div>
@@ -302,7 +280,13 @@ export function AuthBootScreen({ operation }: AuthBootScreenProps) {
 }
 
 interface AuthNoticeModel {
-	kind: "success" | "invalid-credentials" | "offline" | "service" | "expired" | "unexpected";
+	kind:
+		| "success"
+		| "invalid-credentials"
+		| "offline"
+		| "service"
+		| "expired"
+		| "unexpected";
 	title: string;
 	message: string;
 	retryable: boolean;
@@ -341,7 +325,7 @@ function getAuthNotice(state: LoginAuthState): AuthNoticeModel | null {
 				state.failure.kind === "service-unavailable"
 					? "service"
 					: state.failure.kind === "invalid-credentials" ||
-						  state.failure.kind === "offline"
+							state.failure.kind === "offline"
 						? state.failure.kind
 						: "unexpected";
 			return {

@@ -1,8 +1,8 @@
 import {
-	cloneActiveGoalContext,
 	type ActiveGoalContextV1,
+	cloneActiveGoalContext,
 } from "../shared/goal-context";
-import type { LocalTestSessionIdentity } from "./local-test-auth-session";
+import type { AuthSessionIdentity } from "./auth-session";
 
 export type ActiveGoalWrite = {
 	goalId: string;
@@ -12,24 +12,26 @@ export type ActiveGoalWrite = {
 } | null;
 
 export interface AccountScopedActiveGoalStoreOptions {
-	currentSession: () => LocalTestSessionIdentity | null;
-	writeRuntimeGoal: (goal: ActiveGoalWrite) => Promise<ActiveGoalContextV1 | null>;
+	currentSession: () => AuthSessionIdentity | null;
+	writeRuntimeGoal: (
+		goal: ActiveGoalWrite,
+	) => Promise<ActiveGoalContextV1 | null>;
 }
 
 export class ActiveGoalSessionChangedError extends Error {
 	constructor() {
-		super("测试会话已在目标同步期间发生变化，旧目标未被激活。");
+		super("登录会话已在目标同步期间发生变化，旧目标未被激活。");
 		this.name = "ActiveGoalSessionChangedError";
 	}
 }
 
 interface ScopedGoal {
-	identity: LocalTestSessionIdentity;
+	identity: AuthSessionIdentity;
 	goal: ActiveGoalContextV1;
 }
 
 /**
- * Keeps the reflection runtime's process-global goal scoped to one exact local
+ * Keeps the reflection runtime's process-global goal scoped to one exact
  * session. Runtime writes are serialized, and a logout invalidates the
  * in-memory projection before any asynchronous cleanup begins.
  */
@@ -56,7 +58,9 @@ export class AccountScopedActiveGoalStore {
 		this.scoped = null;
 	}
 
-	async setForCurrentSession(goal: ActiveGoalWrite): Promise<ActiveGoalContextV1 | null> {
+	async setForCurrentSession(
+		goal: ActiveGoalWrite,
+	): Promise<ActiveGoalContextV1 | null> {
 		const expected = this.options.currentSession();
 		if (!expected) throw new ActiveGoalSessionChangedError();
 
@@ -86,12 +90,12 @@ export class AccountScopedActiveGoalStore {
 		});
 	}
 
-	private isCurrent(expected: LocalTestSessionIdentity): boolean {
+	private isCurrent(expected: AuthSessionIdentity): boolean {
 		const current = this.options.currentSession();
 		return current !== null && sameIdentity(current, expected);
 	}
 
-	private requireCurrent(expected: LocalTestSessionIdentity): void {
+	private requireCurrent(expected: AuthSessionIdentity): void {
 		if (!this.isCurrent(expected)) throw new ActiveGoalSessionChangedError();
 	}
 
@@ -108,14 +112,15 @@ export class AccountScopedActiveGoalStore {
 			return await operation();
 		} finally {
 			release();
-			if (this.transitionTail === queued) this.transitionTail = Promise.resolve();
+			if (this.transitionTail === queued)
+				this.transitionTail = Promise.resolve();
 		}
 	}
 }
 
 function sameIdentity(
-	left: LocalTestSessionIdentity,
-	right: LocalTestSessionIdentity,
+	left: AuthSessionIdentity,
+	right: AuthSessionIdentity,
 ): boolean {
 	return (
 		left.accountId === right.accountId &&

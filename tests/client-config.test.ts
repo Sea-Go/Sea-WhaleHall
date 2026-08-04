@@ -10,17 +10,23 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
 	ACTIVITY_EVENT_WORKER_ENDPOINT,
 	ACTIVITY_EVENT_WORKER_MODEL,
-	DEFAULT_CLIENT_CONFIGURATION,
+	AGENT_RELAY_BASE_URL,
 	activityEventWorkerConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
+	type ClientConfiguration,
+	DEFAULT_CLIENT_CONFIGURATION,
 	loadOrCreateClientConfiguration,
 	reflectionModelConfigurationFromConfiguration,
+	UNPROVISIONED_ACTIVITY_WORKER_KEY,
+	UNPROVISIONED_AGENT_RELAY_KEY,
+	writeProvisionedClientConfiguration,
 } from "../src/bun/client-config";
 
 const directories: string[] = [];
+const fixtureActivityWorkerKey = ["fixture", "activity", "worker"].join("-");
+const fixtureRelayKey = ["fixture", "personal", "relay"].join("-");
 
 afterEach(() => {
 	for (const directory of directories.splice(0)) {
@@ -34,28 +40,52 @@ function temporaryDirectory(): string {
 	return directory;
 }
 
-function validConfiguration(overrides = ""): string {
+function templateConfiguration(): string {
 	return [
 		"reflection:",
-		'  name: "' + ACTIVITY_EVENT_WORKER_MODEL + '"',
-		'  baseurl: "' + ACTIVITY_EVENT_WORKER_ENDPOINT + '"',
-		'  apikey: "' + ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE + '"',
+		`  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
+		`  baseurl: "${ACTIVITY_EVENT_WORKER_ENDPOINT}"`,
+		`  apikey: "${UNPROVISIONED_ACTIVITY_WORKER_KEY}"`,
+		"",
 		"agent:",
-		'  name: "' + ACTIVITY_EVENT_WORKER_MODEL + '"',
-		'  baseurl: "' + ACTIVITY_EVENT_WORKER_ENDPOINT + '"',
-		'  apikey: "' + ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE + '"',
-		overrides,
+		`  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
+		`  baseurl: "${AGENT_RELAY_BASE_URL}"`,
+		`  apikey: "${UNPROVISIONED_AGENT_RELAY_KEY}"`,
+		"",
 	].join("\n");
 }
 
-function writeTemplate(directory: string, source = validConfiguration()): string {
+function provisionedConfiguration(): ClientConfiguration {
+	return {
+		reflection: {
+			name: ACTIVITY_EVENT_WORKER_MODEL,
+			baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
+			apikey: fixtureActivityWorkerKey,
+		},
+		agent: {
+			name: ACTIVITY_EVENT_WORKER_MODEL,
+			baseurl: AGENT_RELAY_BASE_URL,
+			apikey: fixtureRelayKey,
+		},
+	};
+}
+
+function writeTemplate(
+	directory: string,
+	source = templateConfiguration(),
+): string {
 	const path = join(directory, "template.yaml");
 	writeFileSync(path, source, { mode: 0o600 });
 	return path;
 }
 
+function expectOwnerOnlyMode(path: string): void {
+	if (process.platform !== "win32")
+		expect(lstatSync(path).mode & 0o777).toBe(0o600);
+}
+
 describe("WhaleHall client config.yaml", () => {
-	test("seeds a private editable two-model user copy from the bundled template", () => {
+	test("seeds a private two-role placeholder copy without enabling either remote path", () => {
 		const directory = temporaryDirectory();
 		const templatePath = writeTemplate(directory);
 		const userDataDirectory = join(directory, "user-data");
@@ -71,20 +101,24 @@ describe("WhaleHall client config.yaml", () => {
 		expect(readFileSync(result.path, "utf8")).toBe(
 			readFileSync(templatePath, "utf8"),
 		);
-		expect(lstatSync(result.path).mode & 0o777).toBe(0o600);
+		expectOwnerOnlyMode(result.path);
+		expect(
+			reflectionModelConfigurationFromConfiguration(result.configuration),
+		).toBeNull();
+		expect(
+			agentModelConfigurationFromConfiguration(result.configuration),
+		).toBeNull();
 	});
 
-	test("loads both model roles with the owner-provided endpoint and literal apikey", () => {
+	test("loads literal Worker and personal relay keys into their separate roles", () => {
 		const directory = temporaryDirectory();
 		const userDataDirectory = join(directory, "user-data");
 		const path = join(userDataDirectory, "config.yaml");
 		mkdirSync(userDataDirectory, { mode: 0o700 });
-		writeFileSync(
+		writeProvisionedClientConfiguration({
 			path,
-			validConfiguration()
-				.replaceAll(ACTIVITY_EVENT_WORKER_MODEL, "qwen3:custom")
-				.replaceAll(ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE, "literal-key"),
-		);
+			configuration: provisionedConfiguration(),
+		});
 
 		const result = loadOrCreateClientConfiguration({
 			userDataDirectory,
@@ -92,70 +126,47 @@ describe("WhaleHall client config.yaml", () => {
 		});
 
 		expect(result.status).toBe("loaded");
-		expect(result.configuration.reflection).toEqual({
-			name: "qwen3:custom",
-			baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			apikey: "literal-key",
-		});
-		expect(result.configuration.agent).toEqual(result.configuration.reflection);
+		expect(result.configuration).toEqual(provisionedConfiguration());
 		expect(
-			reflectionModelConfigurationFromConfiguration(result.configuration, {}),
-		).toEqual({
-			name: "qwen3:custom",
-			baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			apikey: "literal-key",
-		});
-	});
-
-	test("resolves the constrained apikey environment reference for both roles", () => {
-		const configuration = structuredClone(DEFAULT_CLIENT_CONFIGURATION);
-		const environment = { WHALEHALL_ACTIVITY_WORKER_TOKEN: "worker-key" };
-
+			reflectionModelConfigurationFromConfiguration(result.configuration),
+		).toEqual(provisionedConfiguration().reflection);
 		expect(
-			reflectionModelConfigurationFromConfiguration(configuration, environment),
-		).toEqual({
-			name: ACTIVITY_EVENT_WORKER_MODEL,
-			baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			apikey: "worker-key",
-		});
+			agentModelConfigurationFromConfiguration(result.configuration),
+		).toEqual(provisionedConfiguration().agent);
 		expect(
-			agentModelConfigurationFromConfiguration(configuration, environment),
-		).toEqual({
-			name: ACTIVITY_EVENT_WORKER_MODEL,
-			baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			apikey: "worker-key",
-		});
-		expect(
-			activityEventWorkerConfigurationFromConfiguration(
-				configuration,
-				environment,
-			),
+			activityEventWorkerConfigurationFromConfiguration(result.configuration),
 		).toEqual({
 			modelName: ACTIVITY_EVENT_WORKER_MODEL,
 			endpoint: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			authorizationToken: "worker-key",
+			authorizationToken: fixtureActivityWorkerKey,
 			scoreThreshold: 1,
 		});
-		expect(
-			activityEventWorkerConfigurationFromConfiguration(configuration, {}),
-		).toBeNull();
+		expectOwnerOnlyMode(path);
 	});
 
-	test("fails closed on unknown fields, insecure URLs, and malformed key references", () => {
+	test("rejects environment references, swapped endpoints, unknown fields, and non-approved models", () => {
 		const sources = [
-			validConfiguration("unexpected: true"),
-			validConfiguration().replace(
+			templateConfiguration().replace(
+				UNPROVISIONED_ACTIVITY_WORKER_KEY,
+				"$" + "{WHALEHALL_ACTIVITY_WORKER_TOKEN}",
+			),
+			templateConfiguration().replace(
+				AGENT_RELAY_BASE_URL,
 				ACTIVITY_EVENT_WORKER_ENDPOINT,
-				"http://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze",
 			),
-			validConfiguration().replace(
-				ACTIVITY_EVENT_WORKER_ENDPOINT,
-				"https://127.0.0.1/v1/activity/analyze",
+			templateConfiguration().replace(
+				ACTIVITY_EVENT_WORKER_MODEL,
+				"qwen3:other",
 			),
-			validConfiguration().replace(
-				ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
-				"$" + "{invalid-key}",
+			templateConfiguration().replace(
+				`agent:\n  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
+				'agent:\n  name: "qwen3:other"',
 			),
+			templateConfiguration().replace(
+				UNPROVISIONED_AGENT_RELAY_KEY,
+				"a".repeat(1_025),
+			),
+			`${templateConfiguration()}unexpected: true\n`,
 		];
 		for (const source of sources) {
 			const directory = temporaryDirectory();
@@ -175,17 +186,15 @@ describe("WhaleHall client config.yaml", () => {
 		}
 	});
 
-	test("migrates the prior activity Worker shape without overwriting the user file", () => {
+	test("leaves legacy configuration untouched and disables remote work until provisioned", () => {
 		const directory = temporaryDirectory();
 		const userDataDirectory = join(directory, "user-data");
 		const path = join(userDataDirectory, "config.yaml");
 		const legacy = [
 			"schemaVersion: whalehall-client-config.v1",
 			"request:",
-			"  activityEventWorker:",
-			"    enabled: true",
-			'    endpoint: "' + ACTIVITY_EVENT_WORKER_ENDPOINT + '"',
-			"    scoreThreshold: 1",
+			"  teacherOllama:",
+			'    baseUrl: "http://127.0.0.1:11434"',
 			"",
 		].join("\n");
 		mkdirSync(userDataDirectory, { mode: 0o700 });
@@ -196,12 +205,12 @@ describe("WhaleHall client config.yaml", () => {
 			bundledTemplatePath: writeTemplate(directory),
 		});
 
-		expect(result.status).toBe("loaded");
+		expect(result.status).toBe("legacy-unprovisioned");
 		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
 		expect(readFileSync(path, "utf8")).toBe(legacy);
 	});
 
-	test("keeps the checked-in home-cloud example parseable", () => {
+	test("keeps checked-in placeholders parseable without treating them as credentials", () => {
 		const directory = temporaryDirectory();
 		const userDataDirectory = join(directory, "user-data");
 		const path = join(userDataDirectory, "config.yaml");
@@ -218,5 +227,8 @@ describe("WhaleHall client config.yaml", () => {
 
 		expect(result.status).toBe("loaded");
 		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
+		expect(
+			activityEventWorkerConfigurationFromConfiguration(result.configuration),
+		).toBeNull();
 	});
 });

@@ -1,5 +1,10 @@
 import { isRecord } from "../local-protocol";
 
+const SHA256_HEX = /^[0-9a-f]{64}$/u;
+const OLLAMA_METADATA_LABEL = /^[A-Za-z0-9._+-]{1,32}$/u;
+const OLLAMA_VERSION =
+	/^\d{1,3}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-z0-9._-]{1,32})?$/u;
+
 export type OllamaModelLock = {
 	schemaVersion: "ollama-model-lock.v1";
 	baseUrl: string;
@@ -86,8 +91,14 @@ export async function verifyOllamaModelLock(
 		}
 		const versionValue: unknown = await versionResponse.json();
 		const tagsValue: unknown = await tagsResponse.json();
-		if (!isRecord(versionValue) || typeof versionValue.version !== "string") {
-			throw new OllamaModelLockError("Ollama returned an invalid version payload.");
+		if (
+			!isRecord(versionValue) ||
+			typeof versionValue.version !== "string" ||
+			!OLLAMA_VERSION.test(versionValue.version)
+		) {
+			throw new OllamaModelLockError(
+				"Ollama returned an invalid version payload.",
+			);
 		}
 		if (versionValue.version !== lock.ollamaVersion) {
 			throw new OllamaModelLockError(
@@ -95,7 +106,9 @@ export async function verifyOllamaModelLock(
 			);
 		}
 		if (!isRecord(tagsValue) || !Array.isArray(tagsValue.models)) {
-			throw new OllamaModelLockError("Ollama returned an invalid model catalog.");
+			throw new OllamaModelLockError(
+				"Ollama returned an invalid model catalog.",
+			);
 		}
 		const model = tagsValue.models.find(
 			(candidate) => isRecord(candidate) && candidate.name === lock.model,
@@ -103,9 +116,12 @@ export async function verifyOllamaModelLock(
 		if (
 			!isRecord(model) ||
 			typeof model.digest !== "string" ||
+			!SHA256_HEX.test(model.digest) ||
 			!isRecord(model.details) ||
 			typeof model.details.parameter_size !== "string" ||
-			typeof model.details.quantization_level !== "string"
+			!OLLAMA_METADATA_LABEL.test(model.details.parameter_size) ||
+			typeof model.details.quantization_level !== "string" ||
+			!OLLAMA_METADATA_LABEL.test(model.details.quantization_level)
 		) {
 			throw new OllamaModelLockError(
 				`Pinned Ollama model ${lock.model} is not installed or has invalid metadata.`,
@@ -173,10 +189,7 @@ function normalizeOllamaBaseUrl(
 		}
 		return url.origin;
 	}
-	if (
-		url.protocol !== "https:" ||
-		!allowedRemoteOrigins.includes(url.origin)
-	) {
+	if (url.protocol !== "https:" || !allowedRemoteOrigins.includes(url.origin)) {
 		throw new OllamaModelLockError(
 			"Remote Ollama model lock requires an allowlisted HTTPS origin.",
 		);
@@ -195,7 +208,7 @@ function authorizationHeaders(
 	if (
 		authorizationToken.length < 1 ||
 		authorizationToken.length > 4_096 ||
-		/[\u0000-\u001f\u007f]/u.test(authorizationToken)
+		/\p{Cc}/u.test(authorizationToken)
 	) {
 		throw new OllamaModelLockError("Ollama authorization token is invalid.");
 	}

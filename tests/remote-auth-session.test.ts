@@ -4,6 +4,8 @@ import {
 	type SecureCredentialStore,
 } from "../src/bun/remote-auth-session";
 
+const personalRelayKey = ["whk", "remote-auth", "fixture"].join("_");
+
 class MemoryCredentials implements SecureCredentialStore {
 	readonly values = new Map<string, string>();
 	reads = 0;
@@ -37,19 +39,30 @@ function sessionPayload(suffix: string, accountId = "account-1") {
 describe("RemoteAuthSessionManager", () => {
 	test("keeps bearer credentials out of the public session and rotates refresh token", async () => {
 		const credentials = new MemoryCredentials();
-		const seen: Array<{ url: string; body: unknown }> = [];
+		const seen: Array<{
+			url: string;
+			body: unknown;
+			headers: Headers;
+			redirect: RequestRedirect | undefined;
+		}> = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
 			fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
 				seen.push({
 					url: String(input),
 					body: init?.body ? JSON.parse(String(init.body)) : null,
+					headers: new Headers(init?.headers),
+					redirect: init?.redirect,
 				});
 				return Response.json(sessionPayload("signed-in"));
 			}) as unknown as typeof fetch,
 		});
 
-		const session = await manager.signIn(" Test@Example.com ", "correct horse");
+		const session = await manager.signIn({
+			email: " Test@Example.com ",
+			password: "correct horse",
+		});
 		expect(session).toEqual({
 			id: "session-signed-in",
 			expiresAtMs: expect.any(Number),
@@ -61,6 +74,8 @@ describe("RemoteAuthSessionManager", () => {
 			email: "test@example.com",
 			password: "correct horse",
 		});
+		expect(seen[0]?.headers.get("x-whalehall-agent-key")).toBeNull();
+		expect(seen[0]?.redirect).toBe("error");
 		expect(credentials.values.get("auth.refresh-token.current")).toBe(
 			"refresh-token-signed-in-0123456789",
 		);
@@ -71,6 +86,7 @@ describe("RemoteAuthSessionManager", () => {
 		let refreshCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
 			fetch: (async (input: RequestInfo | URL) => {
 				if (new URL(String(input)).pathname === "/v1/auth/sessions") {
 					return Response.json(sessionPayload("active"));
@@ -80,7 +96,7 @@ describe("RemoteAuthSessionManager", () => {
 				return Response.json(sessionPayload("rotated"));
 			}) as unknown as typeof fetch,
 		});
-		await manager.signIn("test@example.com", "password");
+		await manager.signIn({ email: "test@example.com", password: "password" });
 
 		const [left, right] = await Promise.all([
 			manager.refreshSession(),
@@ -89,6 +105,42 @@ describe("RemoteAuthSessionManager", () => {
 		expect(left.id).toBe("session-rotated");
 		expect(right.id).toBe("session-rotated");
 		expect(refreshCalls).toBe(1);
+	});
+
+	test("adds the personal relay key only to authenticated model requests and binds identity generations", async () => {
+		const credentials = new MemoryCredentials();
+		const observed = {
+			modelHeaders: null as Headers | null,
+			modelRedirect: null as RequestRedirect | null,
+		};
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (new URL(String(input)).pathname === "/v1/auth/sessions") {
+					return Response.json(sessionPayload("active"));
+				}
+				observed.modelHeaders = new Headers(init?.headers);
+				observed.modelRedirect = init?.redirect ?? null;
+				return Response.json({ id: "model-response" });
+			}) as unknown as typeof fetch,
+		});
+
+		await manager.signIn({ email: "test@example.com", password: "password" });
+		const identity = manager.captureCurrentSession();
+		if (!identity) throw new Error("Expected a current session.");
+		await manager.authorizedFetch("/v1/chat/completions", { method: "POST" });
+
+		const headers = observed.modelHeaders;
+		if (!headers)
+			throw new Error("Expected authenticated model request headers.");
+		expect(headers.get("x-whalehall-agent-key")).toBe(personalRelayKey);
+		expect(headers.get("authorization")).toStartWith("Bearer ");
+		expect(headers.get("x-session-generation")).toBe("1");
+		expect(observed.modelRedirect).toBe("error");
+		expect(manager.isCurrentSession(identity)).toBeTrue();
+		expect(await manager.clearSessionIfCurrent(identity)).toBeTrue();
+		expect(manager.isCurrentSession(identity)).toBeFalse();
 	});
 
 	test("does not resurrect a refresh token when logout races a credential write", async () => {
@@ -110,10 +162,15 @@ describe("RemoteAuthSessionManager", () => {
 		const credentials = new BlockingCredentials();
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			fetch: (async () => Response.json(sessionPayload("racing"))) as unknown as typeof fetch,
+			agentKey: personalRelayKey,
+			fetch: (async () =>
+				Response.json(sessionPayload("racing"))) as unknown as typeof fetch,
 		});
 
-		const signingIn = manager.signIn("test@example.com", "password");
+		const signingIn = manager.signIn({
+			email: "test@example.com",
+			password: "password",
+		});
 		await writeStarted;
 		const signingOut = manager.signOut();
 		releaseWrite();
@@ -130,24 +187,29 @@ describe("RemoteAuthSessionManager", () => {
 		let signIns = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				barriers.push(accountId);
 			},
 			fetch: (async () => {
 				signIns += 1;
-				return Response.json(sessionPayload(
-					`switch-${signIns}`,
-					signIns === 1 ? "account-1" : "account-2",
-				));
+				return Response.json(
+					sessionPayload(
+						`switch-${signIns}`,
+						signIns === 1 ? "account-1" : "account-2",
+					),
+				);
 			}) as unknown as typeof fetch,
 		});
 
-		await manager.signIn("first@example.com", "password");
-		await manager.signIn("second@example.com", "password");
+		await manager.signIn({ email: "first@example.com", password: "password" });
+		await manager.signIn({ email: "second@example.com", password: "password" });
 
 		expect(barriers).toEqual(["account-1"]);
 		expect(manager.accountId).toBe("account-2");
-		expect(credentials.values.get("auth.refresh-token.current")).toContain("switch-2");
+		expect(credentials.values.get("auth.refresh-token.current")).toContain(
+			"switch-2",
+		);
 	});
 
 	test("closes local state before best-effort remote revoke", async () => {
@@ -155,6 +217,7 @@ describe("RemoteAuthSessionManager", () => {
 		const order: string[] = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
 			onBeforeSessionClear: async () => {
 				order.push("barrier");
 			},
@@ -166,7 +229,7 @@ describe("RemoteAuthSessionManager", () => {
 				return new Response(null, { status: 204 });
 			}) as unknown as typeof fetch,
 		});
-		await manager.signIn("test@example.com", "password");
+		await manager.signIn({ email: "test@example.com", password: "password" });
 		await manager.signOut();
 		await Promise.resolve();
 
@@ -180,19 +243,23 @@ describe("RemoteAuthSessionManager", () => {
 		const order: string[] = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				order.push(`barrier:${accountId}`);
 			},
 			onSessionExpired: () => order.push("expired"),
 			fetch: (async (input: RequestInfo | URL) => {
 				const path = new URL(String(input)).pathname;
-				if (path === "/v1/auth/sessions") return Response.json(sessionPayload("active"));
+				if (path === "/v1/auth/sessions")
+					return Response.json(sessionPayload("active"));
 				return new Response(null, { status: 401 });
 			}) as unknown as typeof fetch,
 		});
-		await manager.signIn("test@example.com", "password");
+		await manager.signIn({ email: "test@example.com", password: "password" });
 
-		await expect(manager.authorizedFetch("/v1/chat/completions")).rejects.toMatchObject({
+		await expect(
+			manager.authorizedFetch("/v1/chat/completions"),
+		).rejects.toMatchObject({
 			kind: "expired",
 		});
 		expect(manager.getSession()).toBeNull();

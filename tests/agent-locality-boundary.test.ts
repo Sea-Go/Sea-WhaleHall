@@ -9,32 +9,31 @@ function source(path: string): string {
 }
 
 describe("local Agent production boundary", () => {
-	test("does not assemble a separate cloud activity analyzer", () => {
+	test("keeps raw activity at the Worker boundary and internal Agent jobs normalized", () => {
 		const bunComposition = source("src/bun/index.ts");
 		const clientConfiguration = source("src/bun/client-config.ts");
+		const dispatcher = source("src/bun/activity-analysis-dispatcher.ts");
+		const activityAgent = source("src/agent/mastra-host/agents.ts");
 
-		for (const removedCapability of [
-			"ActivityEventWorkerClient",
-			"ActivityWindowDeliveryService",
-			"ActivityWindowDeliveryStore",
-			"WHALEHALL_ACTIVITY_WORKER_TOKEN",
-			"activityEventWorker",
-		]) {
-			expect(bunComposition).not.toContain(removedCapability);
-			expect(clientConfiguration).not.toContain(removedCapability);
-		}
+		expect(bunComposition).toContain("ActivityWindowDeliveryService");
+		expect(clientConfiguration).toContain("ACTIVITY_EVENT_WORKER_ENDPOINT");
 		expect(
 			existsSync(join(repositoryRoot, "src/agent/activity-event-worker.ts")),
-		).toBeFalse();
+		).toBeTrue();
 		expect(
 			existsSync(join(repositoryRoot, "src/agent/activity-window-worker.ts")),
-		).toBeFalse();
+		).toBeTrue();
+		expect(dispatcher).not.toContain("raw_event");
+		expect(dispatcher).not.toContain("EventWindowV1");
+		expect(activityAgent).toContain("tools: {}");
+		expect(activityAgent).toContain("绝不请求、推断或复述原始活动窗口");
 	});
 
 	test("keeps the remote service surface limited to identity and model relay", () => {
 		const relayServer = source("services/model-relay/server.ts");
-		const routes = [...relayServer.matchAll(/url\.pathname === "(\/v1\/[^"]+)"/gu)]
-			.map((match) => match[1]);
+		const routes = [
+			...relayServer.matchAll(/url\.pathname === "(\/v1\/[^"]+)"/gu),
+		].map((match) => match[1]);
 
 		expect(routes).toEqual([
 			"/v1/auth/sessions",

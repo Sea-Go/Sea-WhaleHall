@@ -4,12 +4,18 @@ import type {
 	AgentRunEventFrame as SidecarRunEventFrame,
 } from "../agent/mastra-host/protocol";
 import {
+	type ActivityAnalysisWorkerResult,
+	isActivityAnalysisWorkerResult,
+	MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS,
+	MAXIMUM_ACTIVITY_ANALYSIS_RESULTS,
+	serializedActivityAnalysisLength,
+} from "../shared/activity-analysis-contract";
+import {
 	AGENT_RUN_EVENT_SCHEMA_VERSION,
 	AGENT_RUN_SNAPSHOT_SCHEMA_VERSION,
 	type AgentRunAccepted,
 	type AgentRunCommandAccepted,
 	type AgentRunEvent,
-	type AgentRunEventEnvelope,
 	type AgentRunFailure,
 	type AgentRunRestorableSummary,
 	type AgentRunRpcResult,
@@ -17,6 +23,7 @@ import {
 	type AgentToolCallSummary,
 	type CancelAgentRunRequest,
 	type DecideAgentToolApprovalRequest,
+	type InternalAgentRunEventEnvelope,
 	type ListRestorableAgentRunsRequest,
 	type StartConversationTurnRequest,
 	type StartTaskPlanningRunRequest,
@@ -29,19 +36,22 @@ import type {
 } from "../shared/conversation";
 import type { TaskPlanningSession } from "../shared/task-planning";
 import {
-	AgentToolPolicy,
-	digestArguments,
 	type AgentToolName,
+	type AgentToolPolicy,
+	digestArguments,
 	type PendingToolApproval,
 } from "./agent-tool-policy";
+import type { AuthSessionIdentity } from "./auth-session";
 import type {
 	AgentConversationRecord,
 	AgentMessageRecord,
 	AgentRunRecord,
 	EncryptedAgentRepository,
 } from "./encrypted-agent-repository";
-import type { ConversationMemoryService, AgentToolHost } from "./mastra-host-services";
-import type { LocalTestSessionIdentity } from "./local-test-auth-session";
+import type {
+	AgentToolHost,
+	ConversationMemoryService,
+} from "./mastra-host-services";
 
 const DELTA_FLUSH_MS = 75;
 const PARTIAL_PERSIST_MS = 250;
@@ -65,11 +75,14 @@ export interface AgentSidecar {
 	untrackRun(runId: string): void;
 }
 
-function messageProjection(message: AgentMessageRecord): ConversationRpcMessage {
+function messageProjection(
+	message: AgentMessageRecord,
+): ConversationRpcMessage {
 	return {
-		id: message.role === "user" && message.clientMessageId
-			? message.clientMessageId
-			: message.id,
+		id:
+			message.role === "user" && message.clientMessageId
+				? message.clientMessageId
+				: message.id,
 		role: message.role as "user" | "assistant",
 		content: message.content,
 		createdAtMs: message.createdAtMs,
@@ -84,33 +97,57 @@ function messageProjection(message: AgentMessageRecord): ConversationRpcMessage 
 	};
 }
 
-function parsePlanningSession(value: unknown, fallbackId?: string): TaskPlanningSession | null {
+function parsePlanningSession(
+	value: unknown,
+	fallbackId?: string,
+): TaskPlanningSession | null {
 	if (!isRecord(value)) return null;
 	const status = value.status;
-	const id = typeof value.sessionId === "string"
-		? value.sessionId
-		: typeof value.id === "string"
-			? value.id
-			: fallbackId;
+	const id =
+		typeof value.sessionId === "string"
+			? value.sessionId
+			: typeof value.id === "string"
+				? value.id
+				: fallbackId;
 	if (!id) return null;
 	if (status === "clarifying" && Array.isArray(value.questions)) {
 		const questions = value.questions.filter(
 			(item): item is { key: never; text: string; required: boolean } =>
-				isRecord(item) && typeof item.key === "string" && typeof item.text === "string" && typeof item.required === "boolean",
+				isRecord(item) &&
+				typeof item.key === "string" &&
+				typeof item.text === "string" &&
+				typeof item.required === "boolean",
 		);
-		if (questions.length !== value.questions.length || questions.length < 1 || questions.length > 3) return null;
+		if (
+			questions.length !== value.questions.length ||
+			questions.length < 1 ||
+			questions.length > 3
+		)
+			return null;
 		return { id, status: "clarifying", questions };
 	}
-	const draft = (status === "draft" || status === "conflict") && isRecord(value.draft)
-		? value.draft
-		: isRecord(value.result) && value.result.status === "draft" && isRecord(value.result.draft)
-			? value.result.draft
-			: null;
+	const draft =
+		(status === "draft" || status === "conflict") && isRecord(value.draft)
+			? value.draft
+			: isRecord(value.result) &&
+					value.result.status === "draft" &&
+					isRecord(value.result.draft)
+				? value.result.draft
+				: null;
 	if (draft && status === "conflict") {
 		const validationIssues = Array.isArray(value.validationIssues)
 			? value.validationIssues.filter(
-					(issue): issue is { code: string; message: string; proposalId?: string; busyEventIds?: readonly string[] } =>
-						isRecord(issue) && typeof issue.code === "string" && typeof issue.message === "string",
+					(
+						issue,
+					): issue is {
+						code: string;
+						message: string;
+						proposalId?: string;
+						busyEventIds?: readonly string[];
+					} =>
+						isRecord(issue) &&
+						typeof issue.code === "string" &&
+						typeof issue.message === "string",
 				)
 			: [];
 		return {
@@ -120,7 +157,8 @@ function parsePlanningSession(value: unknown, fallbackId?: string): TaskPlanning
 			validationIssues: structuredClone(validationIssues),
 		};
 	}
-	if (draft) return { id, status: "draft", draft: structuredClone(draft) as never };
+	if (draft)
+		return { id, status: "draft", draft: structuredClone(draft) as never };
 	return null;
 }
 
@@ -129,8 +167,11 @@ function parsePersistedSnapshot(value: unknown): AgentRunSnapshot | null {
 		!isRecord(value) ||
 		value.schemaVersion !== AGENT_RUN_SNAPSHOT_SCHEMA_VERSION ||
 		typeof value.runId !== "string" ||
-		(value.kind !== "conversation-turn" && value.kind !== "task-planning")
-	) return null;
+		(value.kind !== "conversation-turn" &&
+			value.kind !== "task-planning" &&
+			value.kind !== "activity-analysis")
+	)
+		return null;
 	return structuredClone(value) as unknown as AgentRunSnapshot;
 }
 
@@ -159,12 +200,31 @@ function commandAccepted(
 
 function conversationResultText(value: unknown): string | null {
 	if (!isRecord(value)) return null;
-	if (isRecord(value.message) && typeof value.message.content === "string") return value.message.content;
+	if (isRecord(value.message) && typeof value.message.content === "string")
+		return value.message.content;
 	return typeof value.text === "string" ? value.text : null;
 }
 
+function activityResultText(value: unknown): string | null {
+	if (!isRecord(value)) return null;
+	const candidate =
+		typeof value.summary === "string"
+			? value.summary
+			: typeof value.text === "string"
+				? value.text
+				: null;
+	if (candidate === null || candidate.length > MAX_MESSAGE_CHARACTERS)
+		return null;
+	return candidate;
+}
+
 function terminal(status: AgentRunSnapshot["status"]): boolean {
-	return status === "completed" || status === "cancelled" || status === "interrupted" || status === "failed";
+	return (
+		status === "completed" ||
+		status === "cancelled" ||
+		status === "interrupted" ||
+		status === "failed"
+	);
 }
 
 function isRecoverableSuspension(snapshot: AgentRunSnapshot): boolean {
@@ -182,21 +242,34 @@ function appendRecoveryNotice(content: string, notice: string): string {
 function isRestorableRunStatus(
 	status: AgentRunSnapshot["status"],
 ): status is AgentRunRestorableSummary["status"] {
-	return ["starting", "running", "suspended", "cancelling", "interrupted"].includes(status);
+	return [
+		"starting",
+		"running",
+		"suspended",
+		"cancelling",
+		"interrupted",
+	].includes(status);
 }
 
-function conflict<T = never>(message: string, currentRevision: number): AgentRunRpcResult<T> {
+function conflict<T = never>(
+	message: string,
+	currentRevision: number,
+): AgentRunRpcResult<T> {
 	return { kind: "conflict", message, currentRevision };
 }
 
 function agentError<T = never>(error: unknown): AgentRunRpcResult<T> {
-	const message = error instanceof Error ? error.message : "本地 Agent 发生未知错误。";
+	const message =
+		error instanceof Error ? error.message : "本地 Agent 发生未知错误。";
 	if (/登录/.test(message)) return { kind: "unavailable", message };
 	return { kind: "error", message, retryable: false };
 }
 
-function conversationError<T = never>(error: unknown): ConversationRpcResult<T> {
-	const message = error instanceof Error ? error.message : "本地对话存储不可用。";
+function conversationError<T = never>(
+	error: unknown,
+): ConversationRpcResult<T> {
+	const message =
+		error instanceof Error ? error.message : "本地对话存储不可用。";
 	return /登录/.test(message)
 		? { kind: "unavailable", message }
 		: { kind: "error", message };
@@ -211,7 +284,10 @@ function modelFailure(error: unknown): AgentRunFailure {
 	) {
 		return {
 			code: "unavailable",
-			message: error instanceof Error ? error.message : "当前账号没有可用的模型转发能力。",
+			message:
+				error instanceof Error
+					? error.message
+					: "当前账号没有可用的模型转发能力。",
 			retryable: false,
 		};
 	}
@@ -225,7 +301,8 @@ function modelFailure(error: unknown): AgentRunFailure {
 function internalFailure(error: unknown): AgentRunFailure {
 	return {
 		code: "internal",
-		message: error instanceof Error ? error.message : "本地 Agent 状态处理失败。",
+		message:
+			error instanceof Error ? error.message : "本地 Agent 状态处理失败。",
 		retryable: false,
 	};
 }
@@ -233,15 +310,52 @@ function internalFailure(error: unknown): AgentRunFailure {
 function validateConversationStart(input: StartConversationTurnRequest): void {
 	validateRequestId(input.requestId);
 	requiredId(input.clientMessageId, "clientMessageId");
-	if (input.conversationId !== undefined) requiredId(input.conversationId, "conversationId");
-	if (input.retryOfRunId !== undefined) requiredId(input.retryOfRunId, "retryOfRunId");
-	if (typeof input.text !== "string" || !input.text.trim() || input.text.length > MAX_MESSAGE_CHARACTERS) {
+	if (input.conversationId !== undefined)
+		requiredId(input.conversationId, "conversationId");
+	if (input.retryOfRunId !== undefined)
+		requiredId(input.retryOfRunId, "retryOfRunId");
+	if (
+		typeof input.text !== "string" ||
+		!input.text.trim() ||
+		input.text.length > MAX_MESSAGE_CHARACTERS
+	) {
 		throw new Error("消息必须包含 1 到 65536 个字符。");
 	}
 }
 
 function validateRequestId(value: string): void {
 	requiredId(value, "requestId");
+}
+
+function validateActivityAnalysisStart(input: StartActivityAnalysisRun): void {
+	requiredId(input.jobId, "activityJobId");
+	requiredId(input.runId, "runId");
+	validateRequestId(input.requestId);
+	if (
+		!Number.isFinite(input.consumedScore) ||
+		input.consumedScore < 0 ||
+		input.consumedScore > 10_000 ||
+		!Array.isArray(input.analyses) ||
+		input.analyses.length < 1 ||
+		input.analyses.length > MAXIMUM_ACTIVITY_ANALYSIS_RESULTS
+	) {
+		throw new Error("Activity analysis job is invalid.");
+	}
+	for (const analysis of input.analyses) {
+		if (!isActivityAnalysisWorkerResult(analysis)) {
+			throw new Error(
+				"Activity analysis payload must contain Worker results only.",
+			);
+		}
+	}
+	if (
+		serializedActivityAnalysisLength(input.analyses) >
+		MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS
+	) {
+		throw new Error(
+			"Activity analysis payload exceeds the prompt safety limit.",
+		);
+	}
 }
 
 function requiredId(value: unknown, field: string): string {
@@ -251,7 +365,10 @@ function requiredId(value: unknown, field: string): string {
 	return value;
 }
 
-function requiredRecord(value: unknown, field: string): Record<string, unknown> {
+function requiredRecord(
+	value: unknown,
+	field: string,
+): Record<string, unknown> {
 	if (!isRecord(value)) throw new Error(`${field} 必须是对象。`);
 	return structuredClone(value);
 }
@@ -274,7 +391,11 @@ const writeToolNames = new Set<AgentToolName>([
 ]);
 
 function requiredToolName(value: unknown): AgentToolName {
-	if (typeof value !== "string" || (!readToolNames.has(value as AgentToolName) && !writeToolNames.has(value as AgentToolName))) {
+	if (
+		typeof value !== "string" ||
+		(!readToolNames.has(value as AgentToolName) &&
+			!writeToolNames.has(value as AgentToolName))
+	) {
 		throw new Error("Tool 不在本地 Agent allowlist 中。");
 	}
 	return value as AgentToolName;
@@ -294,7 +415,12 @@ function toolSummary(
 	status: AgentToolCallSummary["status"],
 	now: number,
 ): AgentToolCallSummary {
-	const risk = isReadToolName(name) ? "read" : name === "calendar.delete_event" || name === "calendar.commit_plan_schedule" ? "control" : "write";
+	const risk = isReadToolName(name)
+		? "read"
+		: name === "calendar.delete_event" ||
+				name === "calendar.commit_plan_schedule"
+			? "control"
+			: "write";
 	return {
 		id,
 		name,
@@ -332,19 +458,35 @@ export interface LocalAgentToolExecutor {
 }
 
 export interface AgentRunCoordinatorOptions {
-	sessionIdentity: () => LocalTestSessionIdentity | null;
+	sessionIdentity: () => AuthSessionIdentity | null;
 	repository: EncryptedAgentRepository;
 	sidecar: AgentSidecar;
 	abortModelRelay(runId: string): boolean;
 	toolPolicy: AgentToolPolicy;
 	toolExecutor: LocalAgentToolExecutor;
-	onEvent(event: AgentRunEventEnvelope): void;
+	onEvent(event: InternalAgentRunEventEnvelope): void;
+	/** Runs after an internal activity analysis has been durably persisted. */
+	onActivityRunTerminal?(input: {
+		jobId: string;
+		runId: string;
+		accountId: string;
+		status: "completed" | "failed" | "cancelled" | "interrupted";
+		failure: AgentRunFailure | null;
+	}): void | Promise<void>;
 	now?: () => number;
 }
 
+export type StartActivityAnalysisRun = {
+	jobId: string;
+	runId: string;
+	requestId: string;
+	analyses: readonly ActivityAnalysisWorkerResult[];
+	consumedScore: number;
+};
+
 interface ActiveRun {
 	accountId: string;
-	sessionIdentity: LocalTestSessionIdentity;
+	sessionIdentity: AuthSessionIdentity;
 	recordInput: Record<string, unknown>;
 	snapshot: AgentRunSnapshot;
 	assistantContent: string;
@@ -361,25 +503,33 @@ interface ActiveRun {
 }
 
 interface ActiveRunCriticalOperation {
-	kind: "approval-decision" | "recovered-approval-resolution" | "tool-execution";
+	kind:
+		| "approval-decision"
+		| "recovered-approval-resolution"
+		| "tool-execution";
 	readonly settled: Promise<void>;
 	readonly settle: () => void;
 }
 
 interface PendingStart {
-	identity: LocalTestSessionIdentity;
+	identity: AuthSessionIdentity;
 	settled: Promise<void>;
 	settle(): void;
 }
 
-export class AgentRunCoordinator implements ConversationMemoryService, AgentToolHost {
+export class AgentRunCoordinator
+	implements ConversationMemoryService, AgentToolHost
+{
 	private readonly repository: EncryptedAgentRepository;
-	private readonly sessionIdentityProvider: () => LocalTestSessionIdentity | null;
+	private readonly sessionIdentityProvider: () => AuthSessionIdentity | null;
 	private readonly sidecar: AgentSidecar;
 	private readonly abortModelRelay: (runId: string) => boolean;
 	private readonly toolPolicy: AgentToolPolicy;
 	private readonly toolExecutor: LocalAgentToolExecutor;
-	private readonly onEvent: (event: AgentRunEventEnvelope) => void;
+	private readonly onEvent: (event: InternalAgentRunEventEnvelope) => void;
+	private readonly onActivityRunTerminal: NonNullable<
+		AgentRunCoordinatorOptions["onActivityRunTerminal"]
+	>;
 	private readonly now: () => number;
 	private readonly active = new Map<string, ActiveRun>();
 	private readonly pendingStarts = new Set<PendingStart>();
@@ -393,20 +543,27 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		this.toolPolicy = options.toolPolicy;
 		this.toolExecutor = options.toolExecutor;
 		this.onEvent = options.onEvent;
+		this.onActivityRunTerminal = options.onActivityRunTerminal ?? (() => {});
 		this.now = options.now ?? Date.now;
 	}
 
-	async getActiveConversation(): Promise<ConversationRpcResult<ConversationRpcThread | null>> {
+	async getActiveConversation(): Promise<
+		ConversationRpcResult<ConversationRpcThread | null>
+	> {
 		try {
 			const identity = this.requireSession();
 			const accountId = identity.accountId;
-			const conversation = (await this.inSession(identity, () =>
-				this.repository.listConversations(accountId, 1)))[0];
+			const conversation = (
+				await this.inSession(identity, () =>
+					this.repository.listConversations(accountId, 1),
+				)
+			)[0];
 			return {
 				kind: "success",
 				data: conversation
 					? await this.inSession(identity, () =>
-						this.buildConversation(accountId, conversation))
+							this.buildConversation(accountId, conversation),
+						)
 					: null,
 			};
 		} catch (error) {
@@ -424,44 +581,76 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			pendingStart = this.beginPendingStart(identity);
 			const accountId = identity.accountId;
 			const existingMessage = await this.inSession(identity, () =>
-				this.repository.getMessageByClientMessageId(accountId, input.clientMessageId));
+				this.repository.getMessageByClientMessageId(
+					accountId,
+					input.clientMessageId,
+				),
+			);
 			if (existingMessage && !input.retryOfRunId) {
 				const existingRun = existingMessage.runId
 					? await this.inSession(identity, () =>
-						this.repository.getRun(accountId, existingMessage.runId!))
+							this.repository.getRun(accountId, existingMessage.runId!),
+						)
 					: null;
-				const snapshot = existingRun ? parsePersistedSnapshot(existingRun.output) : null;
-				if (snapshot) return { kind: "success", data: accepted(snapshot, this.now()) };
+				const snapshot = existingRun
+					? parsePersistedSnapshot(existingRun.output)
+					: null;
+				if (snapshot)
+					return { kind: "success", data: accepted(snapshot, this.now()) };
 				return conflict("该 clientMessageId 已写入，拒绝重复创建用户消息。", 0);
 			}
 			if (input.retryOfRunId) {
 				if (!existingMessage || existingMessage.runId !== input.retryOfRunId) {
-					return { kind: "not-found", message: "找不到与 retryOfRunId 对应的用户消息。" };
+					return {
+						kind: "not-found",
+						message: "找不到与 retryOfRunId 对应的用户消息。",
+					};
 				}
 				if (existingMessage.content !== input.text) {
 					return conflict("重试必须使用原始用户消息内容。", 0);
 				}
 				const previous = await this.inSession(identity, () =>
-					this.repository.getRun(accountId, input.retryOfRunId!));
-				if (!previous || !["failed", "cancelled", "interrupted"].includes(previous.status)) {
-					return conflict("只有失败、取消或中断的运行可以显式重试。", parsePersistedSnapshot(previous?.output)?.revision ?? 0);
+					this.repository.getRun(accountId, input.retryOfRunId!),
+				);
+				if (
+					!previous ||
+					!["failed", "cancelled", "interrupted"].includes(previous.status)
+				) {
+					return conflict(
+						"只有失败、取消或中断的运行可以显式重试。",
+						parsePersistedSnapshot(previous?.output)?.revision ?? 0,
+					);
 				}
 			}
 
 			const now = this.now();
 			const runId = `run-${randomUUID()}`;
 			const conversation = await this.inSession(identity, () =>
-				this.resolveConversation(accountId, input, now, existingMessage));
-			const busy = (await this.inSession(identity, () =>
-				this.repository.listRuns(accountId, 1_000))).find((record) =>
-				record.conversationId === conversation.id &&
-				["starting", "running", "suspended", "cancelling"].includes(record.status) &&
-				!this.active.has(record.id),
+				this.resolveConversation(accountId, input, now, existingMessage),
+			);
+			const busy = (
+				await this.inSession(identity, () =>
+					this.repository.listRuns(accountId, 1_000),
+				)
+			).find(
+				(record) =>
+					record.conversationId === conversation.id &&
+					["starting", "running", "suspended", "cancelling"].includes(
+						record.status,
+					) &&
+					!this.active.has(record.id),
 			);
 			const activeBusy = [...this.active.values()].find(
-				(run) => run.accountId === accountId && run.snapshot.kind === "conversation-turn" && run.snapshot.conversationId === conversation.id,
+				(run) =>
+					run.accountId === accountId &&
+					run.snapshot.kind === "conversation-turn" &&
+					run.snapshot.conversationId === conversation.id,
 			);
-			if (busy || activeBusy) return conflict("该对话已有一个进行中的 turn。", activeBusy?.snapshot.revision ?? 0);
+			if (busy || activeBusy)
+				return conflict(
+					"该对话已有一个进行中的 turn。",
+					activeBusy?.snapshot.revision ?? 0,
+				);
 
 			const userMessage: AgentMessageRecord = existingMessage ?? {
 				accountId,
@@ -476,7 +665,8 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			};
 			if (!existingMessage || existingMessage.runId !== runId) {
 				await this.inSession(identity, () =>
-					this.repository.putMessage({ ...userMessage, runId }));
+					this.repository.putMessage({ ...userMessage, runId }),
+				);
 			}
 			const assistantMessage: AgentMessageRecord = {
 				accountId,
@@ -489,12 +679,17 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				content: "",
 				createdAtMs: now + 1,
 			};
-			await this.inSession(identity, () => this.repository.putMessage(assistantMessage));
+			await this.inSession(identity, () =>
+				this.repository.putMessage(assistantMessage),
+			);
 			conversation.updatedAtMs = now;
-			await this.inSession(identity, () => this.repository.putConversation(conversation));
+			await this.inSession(identity, () =>
+				this.repository.putConversation(conversation),
+			);
 
 			const thread = await this.inSession(identity, () =>
-				this.buildConversation(accountId, conversation));
+				this.buildConversation(accountId, conversation),
+			);
 			const snapshot: AgentRunSnapshot = {
 				schemaVersion: AGENT_RUN_SNAPSHOT_SCHEMA_VERSION,
 				runId,
@@ -530,13 +725,19 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				createdAtMs: assistantMessage.createdAtMs,
 			});
 			this.assertRunSession(run);
-			void this.sidecar.request("conversation.start", {
-				runId,
-				conversationId: conversation.id,
-				resourceId: accountId,
-				message: input.text,
-				history: [],
-			}, { requestId: input.requestId }).catch((error) => this.failRun(runId, modelFailure(error)));
+			void this.sidecar
+				.request(
+					"conversation.start",
+					{
+						runId,
+						conversationId: conversation.id,
+						resourceId: accountId,
+						message: input.text,
+						history: [],
+					},
+					{ requestId: input.requestId },
+				)
+				.catch((error) => this.failRun(runId, modelFailure(error)));
 			return { kind: "success", data: accepted(snapshot, now) };
 		} catch (error) {
 			return agentError(error);
@@ -555,9 +756,14 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			pendingStart = this.beginPendingStart(identity);
 			const accountId = identity.accountId;
 			await this.inSession(identity, () =>
-				this.toolPolicy.assertReadAllowed(accountId, "calendar.list_events"));
+				this.toolPolicy.assertReadAllowed(accountId, "calendar.list_events"),
+			);
 			await this.inSession(identity, () =>
-				this.toolPolicy.assertReadAllowed(accountId, "planning.get_active_plan"));
+				this.toolPolicy.assertReadAllowed(
+					accountId,
+					"planning.get_active_plan",
+				),
+			);
 			const now = this.now();
 			const runId = `run-${randomUUID()}`;
 			const sessionId = `planning-${randomUUID()}`;
@@ -586,11 +792,17 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			this.assertRunSession(run);
 			this.sidecar.trackRun(runId);
 			this.assertRunSession(run);
-			void this.sidecar.request("planning.start", {
-				runId,
-				sessionId,
-				input: structuredClone(input.input),
-			}, { requestId: input.requestId }).catch((error) => this.failRun(runId, modelFailure(error)));
+			void this.sidecar
+				.request(
+					"planning.start",
+					{
+						runId,
+						sessionId,
+						input: structuredClone(input.input),
+					},
+					{ requestId: input.requestId },
+				)
+				.catch((error) => this.failRun(runId, modelFailure(error)));
 			return { kind: "success", data: accepted(snapshot, now) };
 		} catch (error) {
 			return agentError(error);
@@ -599,21 +811,99 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		}
 	}
 
+	/**
+	 * Starts the non-interactive activity sidecar. There is intentionally no RPC
+	 * endpoint for this method: only the durable local activity dispatcher may
+	 * invoke it after it has claimed a Worker-result job.
+	 */
+	async startActivityAnalysis(input: StartActivityAnalysisRun): Promise<void> {
+		let pendingStart: PendingStart | null = null;
+		try {
+			validateActivityAnalysisStart(input);
+			const identity = this.requireSession();
+			pendingStart = this.beginPendingStart(identity);
+			const existing = await this.inSession(identity, () =>
+				this.repository.getRun(identity.accountId, input.runId),
+			);
+			if (existing !== null) {
+				throw new Error(
+					"Activity analysis run id already exists for this account.",
+				);
+			}
+			const now = this.now();
+			const snapshot: AgentRunSnapshot = {
+				schemaVersion: AGENT_RUN_SNAPSHOT_SCHEMA_VERSION,
+				runId: input.runId,
+				requestId: input.requestId,
+				kind: "activity-analysis",
+				status: "starting",
+				revision: 1,
+				lastSequence: 0,
+				startedAtMs: now,
+				updatedAtMs: now,
+				toolCalls: [],
+				pendingApproval: null,
+				activityJobId: input.jobId,
+				analysisCount: input.analyses.length,
+				consumedScore: input.consumedScore,
+				result: null,
+			};
+			const run = this.activate(identity, snapshot, {
+				kind: "activity-analysis",
+				jobId: input.jobId,
+				requestId: input.requestId,
+				consumedScore: input.consumedScore,
+				analyses: structuredClone(input.analyses),
+			});
+			await this.persistRun(run);
+			this.assertRunSession(run);
+			this.sidecar.trackRun(input.runId);
+			void this.sidecar
+				.request(
+					"activity.start",
+					{
+						runId: input.runId,
+						activityJobId: input.jobId,
+						consumedScore: input.consumedScore,
+						analyses: structuredClone(input.analyses),
+					},
+					{ requestId: input.requestId },
+				)
+				.catch((error) => this.failRun(input.runId, modelFailure(error)));
+		} finally {
+			pendingStart?.settle();
+		}
+	}
+
 	async submitPlanningClarification(
 		input: SubmitPlanningClarificationRequest,
 	): Promise<AgentRunRpcResult<AgentRunCommandAccepted>> {
-		const run = await this.requireMutableRun(input.runId, input.expectedRevision, "task-planning");
+		const run = await this.requireMutableRun(
+			input.runId,
+			input.expectedRevision,
+			"task-planning",
+		);
 		if ("kind" in run) return run;
 		if (run.snapshot.kind !== "task-planning") {
 			return conflict("该运行不是规划运行。", run.snapshot.revision);
 		}
 		const snapshot = run.snapshot;
-		if (snapshot.status !== "suspended" || !snapshot.session || snapshot.session.status !== "clarifying") {
+		if (
+			snapshot.status !== "suspended" ||
+			!snapshot.session ||
+			snapshot.session.status !== "clarifying"
+		) {
 			return conflict("该规划运行当前不等待澄清答案。", run.snapshot.revision);
 		}
 		try {
-			await this.toolPolicy.assertReadAllowed(run.accountId, "calendar.list_events");
-			await this.toolPolicy.assertReadAllowed(run.accountId, "planning.get_active_plan");
+			await this.toolPolicy.assertReadAllowed(
+				run.accountId,
+				"calendar.list_events",
+			);
+			await this.toolPolicy.assertReadAllowed(
+				run.accountId,
+				"planning.get_active_plan",
+			);
 			this.assertRunSession(run);
 		} catch (error) {
 			return agentError(error);
@@ -622,21 +912,36 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		snapshot.status = "running";
 		await this.persistRun(run);
 		this.sidecar.trackRun(input.runId);
-		void this.sidecar.request("planning.answer", {
-			runId: input.runId,
-			sessionId: snapshot.session.id,
-			answers: input.answers,
-			...(run.sidecarPlanningVersion !== undefined ? { expectedVersion: run.sidecarPlanningVersion } : {}),
-		}, { requestId: input.requestId }).catch((error) => this.failRun(input.runId, modelFailure(error)));
-		return { kind: "success", data: commandAccepted(snapshot, input.requestId, this.now()) };
+		void this.sidecar
+			.request(
+				"planning.answer",
+				{
+					runId: input.runId,
+					sessionId: snapshot.session.id,
+					answers: input.answers,
+					...(run.sidecarPlanningVersion !== undefined
+						? { expectedVersion: run.sidecarPlanningVersion }
+						: {}),
+				},
+				{ requestId: input.requestId },
+			)
+			.catch((error) => this.failRun(input.runId, modelFailure(error)));
+		return {
+			kind: "success",
+			data: commandAccepted(snapshot, input.requestId, this.now()),
+		};
 	}
 
 	async cancelAgentRun(
 		input: CancelAgentRunRequest,
 	): Promise<AgentRunRpcResult<AgentRunCommandAccepted>> {
-		const run = await this.requireMutableRun(input.runId, input.expectedRevision);
+		const run = await this.requireMutableRun(
+			input.runId,
+			input.expectedRevision,
+		);
 		if ("kind" in run) return run;
-		if (terminal(run.snapshot.status)) return conflict("该运行已经结束。", run.snapshot.revision);
+		if (terminal(run.snapshot.status))
+			return conflict("该运行已经结束。", run.snapshot.revision);
 		if (run.criticalOperation) {
 			return conflict(
 				"审批决定或已批准的本地操作正在收敛，当前不可取消。",
@@ -648,22 +953,41 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		run.snapshot.status = "cancelling";
 		await this.emit(run, { type: "run.cancelling" });
 		this.sidecar.trackRun(input.runId);
-		void this.sidecar.request("run.cancel", { runId: input.runId, reason: "user" }, {
-			requestId: input.requestId,
-			timeoutMs: 10_000,
-		}).catch(() => this.finishCancelled(run, "已停止本地 Agent 运行。"));
-		return { kind: "success", data: commandAccepted(run.snapshot, input.requestId, this.now()) };
+		void this.sidecar
+			.request(
+				"run.cancel",
+				{ runId: input.runId, reason: "user" },
+				{
+					requestId: input.requestId,
+					timeoutMs: 10_000,
+				},
+			)
+			.catch(() => this.finishCancelled(run, "已停止本地 Agent 运行。"));
+		return {
+			kind: "success",
+			data: commandAccepted(run.snapshot, input.requestId, this.now()),
+		};
 	}
 
 	async decideAgentToolApproval(
 		input: DecideAgentToolApprovalRequest,
 	): Promise<AgentRunRpcResult<AgentRunCommandAccepted>> {
-		const run = await this.requireMutableRun(input.runId, input.expectedRevision, "conversation-turn");
+		const run = await this.requireMutableRun(
+			input.runId,
+			input.expectedRevision,
+			"conversation-turn",
+		);
 		if ("kind" in run) return run;
 		if (run.criticalOperation) {
-			return conflict("该运行已有一个审批决定正在处理。", run.snapshot.revision);
+			return conflict(
+				"该运行已有一个审批决定正在处理。",
+				run.snapshot.revision,
+			);
 		}
-		const criticalOperation = this.beginCriticalOperation(run, "approval-decision");
+		const criticalOperation = this.beginCriticalOperation(
+			run,
+			"approval-decision",
+		);
 		let handedOffToRecoveredResolution = false;
 		try {
 			const approval = await this.toolPolicy.decide({
@@ -680,7 +1004,10 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			run.snapshot.status = "running";
 			run.snapshot.pendingApproval = null;
 			if (input.decision === "approve-once" && !run.recoveredFromPersistence) {
-				this.approvedToolCalls.set(toolKey(input.runId, input.toolCallId), approval);
+				this.approvedToolCalls.set(
+					toolKey(input.runId, input.toolCallId),
+					approval,
+				);
 			}
 			await this.emit(run, {
 				type: "tool.approval.resolved",
@@ -689,23 +1016,44 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			});
 			if (run.recoveredFromPersistence) {
 				criticalOperation.kind = "recovered-approval-resolution";
-				const resolution = this.resolveRecoveredApproval(run, approval, input.decision)
-					.catch((error) => this.failRun(input.runId, internalFailure(error)));
+				const resolution = this.resolveRecoveredApproval(
+					run,
+					approval,
+					input.decision,
+				).catch((error) => this.failRun(input.runId, internalFailure(error)));
 				handedOffToRecoveredResolution = true;
 				void resolution.then(
 					() => this.endCriticalOperation(run, criticalOperation),
 					() => this.endCriticalOperation(run, criticalOperation),
 				);
-				return { kind: "success", data: commandAccepted(run.snapshot, input.requestId, this.now()) };
+				return {
+					kind: "success",
+					data: commandAccepted(run.snapshot, input.requestId, this.now()),
+				};
 			}
-			const method = input.decision === "approve-once" ? "agent.approveTool" : "agent.declineTool";
+			const method =
+				input.decision === "approve-once"
+					? "agent.approveTool"
+					: "agent.declineTool";
 			this.sidecar.trackRun(input.runId);
-			void this.sidecar.request(method, {
-				runId: input.runId,
-				toolCallId: input.toolCallId,
-				resumeData: input.decision === "approve-once" ? { approvalId: input.approvalId } : { denied: true },
-			}, { requestId: input.requestId }).catch((error) => this.failRun(input.runId, modelFailure(error)));
-			return { kind: "success", data: commandAccepted(run.snapshot, input.requestId, this.now()) };
+			void this.sidecar
+				.request(
+					method,
+					{
+						runId: input.runId,
+						toolCallId: input.toolCallId,
+						resumeData:
+							input.decision === "approve-once"
+								? { approvalId: input.approvalId }
+								: { denied: true },
+					},
+					{ requestId: input.requestId },
+				)
+				.catch((error) => this.failRun(input.runId, modelFailure(error)));
+			return {
+				kind: "success",
+				data: commandAccepted(run.snapshot, input.requestId, this.now()),
+			};
 		} catch (error) {
 			return agentError(error);
 		} finally {
@@ -715,7 +1063,9 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		}
 	}
 
-	async getAgentRunSnapshot(runId: string): Promise<AgentRunRpcResult<AgentRunSnapshot>> {
+	async getAgentRunSnapshot(
+		runId: string,
+	): Promise<AgentRunRpcResult<AgentRunSnapshot>> {
 		try {
 			const identity = this.requireSession();
 			const accountId = identity.accountId;
@@ -724,17 +1074,33 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				active?.accountId === accountId &&
 				sameSessionIdentity(active.sessionIdentity, identity)
 			) {
+				if (active.snapshot.kind === "activity-analysis") {
+					return { kind: "not-found", message: "找不到该本地 Agent 运行。" };
+				}
 				return {
 					kind: "success",
 					data: await this.hydrateSnapshot(identity, active.snapshot),
 				};
 			}
 			const record = await this.inSession(identity, () =>
-				this.repository.getRun(accountId, runId));
-			if (!record) return { kind: "not-found", message: "找不到该本地 Agent 运行。" };
+				this.repository.getRun(accountId, runId),
+			);
+			if (!record)
+				return { kind: "not-found", message: "找不到该本地 Agent 运行。" };
 			const snapshot = parsePersistedSnapshot(record.output);
-			if (!snapshot) return { kind: "error", message: "本地 Agent 运行快照损坏。", retryable: false };
-			return { kind: "success", data: await this.hydrateSnapshot(identity, snapshot) };
+			if (!snapshot)
+				return {
+					kind: "error",
+					message: "本地 Agent 运行快照损坏。",
+					retryable: false,
+				};
+			if (snapshot.kind === "activity-analysis") {
+				return { kind: "not-found", message: "找不到该本地 Agent 运行。" };
+			}
+			return {
+				kind: "success",
+				data: await this.hydrateSnapshot(identity, snapshot),
+			};
 		} catch (error) {
 			return agentError(error);
 		}
@@ -742,22 +1108,28 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 
 	async listRestorableAgentRuns(
 		input: ListRestorableAgentRunsRequest,
-	): Promise<AgentRunRpcResult<{ runs: readonly AgentRunRestorableSummary[] }>> {
+	): Promise<
+		AgentRunRpcResult<{ runs: readonly AgentRunRestorableSummary[] }>
+	> {
 		try {
 			const identity = this.requireSession();
 			const accountId = identity.accountId;
 			await this.markOrphanedRunsInterrupted(identity);
 			const records = await this.inSession(identity, () =>
-				this.repository.listRuns(accountId, 1_000));
+				this.repository.listRuns(accountId, 1_000),
+			);
 			const runs: AgentRunRestorableSummary[] = [];
 			for (const record of records) {
 				const snapshot = parsePersistedSnapshot(record.output);
 				if (!snapshot || !isRestorableRunStatus(snapshot.status)) continue;
+				if (snapshot.kind === "activity-analysis") continue;
 				if (input.kind && snapshot.kind !== input.kind) continue;
 				if (
 					input.conversationId &&
-					(snapshot.kind !== "conversation-turn" || snapshot.conversationId !== input.conversationId)
-				) continue;
+					(snapshot.kind !== "conversation-turn" ||
+						snapshot.conversationId !== input.conversationId)
+				)
+					continue;
 				runs.push({
 					runId: snapshot.runId,
 					requestId: snapshot.requestId,
@@ -767,7 +1139,10 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 					lastSequence: snapshot.lastSequence,
 					updatedAtMs: snapshot.updatedAtMs,
 					...(snapshot.kind === "conversation-turn"
-						? { conversationId: snapshot.conversationId, title: snapshot.conversation.title }
+						? {
+								conversationId: snapshot.conversationId,
+								title: snapshot.conversation.title,
+							}
 						: snapshot.session?.status === "draft"
 							? { title: snapshot.session.draft.title }
 							: {}),
@@ -782,25 +1157,37 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 	acceptSidecarEvent(frame: SidecarRunEventFrame): void {
 		const run = this.active.get(frame.runId);
 		if (!run || !this.isRunSessionCurrent(run)) return;
-		run.chain = run.chain.then(async () => {
-			if (!this.isRunSessionCurrent(run)) return;
-			if (frame.sequence !== run.lastSidecarSequence + 1) {
-				await this.interruptRun(run, "本地 Agent 协议事件出现序列缺口。", false);
-				return;
-			}
-			run.lastSidecarSequence = frame.sequence;
-			await this.applySidecarEvent(run, frame);
-		}).catch((error) => this.failRun(run.snapshot.runId, internalFailure(error)));
+		run.chain = run.chain
+			.then(async () => {
+				if (!this.isRunSessionCurrent(run)) return;
+				if (frame.sequence !== run.lastSidecarSequence + 1) {
+					await this.interruptRun(
+						run,
+						"本地 Agent 协议事件出现序列缺口。",
+						false,
+					);
+					return;
+				}
+				run.lastSidecarSequence = frame.sequence;
+				await this.applySidecarEvent(run, frame);
+			})
+			.catch((error) =>
+				this.failRun(run.snapshot.runId, internalFailure(error)),
+			);
 	}
 
-	async interruptRuns(runIds: readonly string[], reason: string): Promise<void> {
+	async interruptRuns(
+		runIds: readonly string[],
+		reason: string,
+	): Promise<void> {
 		await Promise.all(
 			runIds.map(async (runId) => {
 				const run = this.active.get(runId);
 				if (!run) return;
 				if (run.criticalOperation) {
 					await run.criticalOperation.settled;
-					if (this.active.get(runId) !== run || terminal(run.snapshot.status)) return;
+					if (this.active.get(runId) !== run || terminal(run.snapshot.status))
+						return;
 				}
 				if (isRecoverableSuspension(run.snapshot)) {
 					run.lastSidecarSequence = 0;
@@ -821,35 +1208,57 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			if (starts.length === 0) break;
 			await Promise.allSettled(starts);
 		}
-		const runs = [...this.active.values()].filter((run) => run.accountId === accountId);
-		await Promise.all(runs.map(async (run) => {
-			await run.chain.catch(() => undefined);
-			if (this.active.get(run.snapshot.runId) !== run) return;
-			for (;;) {
-				const hostCalls = [...run.hostCalls];
-				if (hostCalls.length === 0) break;
-				await Promise.allSettled(hostCalls);
-			}
-			if (run.criticalOperation) {
-				await run.criticalOperation.settled;
-				if (this.active.get(run.snapshot.runId) !== run || terminal(run.snapshot.status)) return;
-			}
-			if (terminal(run.snapshot.status)) {
-				await this.finishRun(run, run.snapshot.failure ?? null, true);
-				return;
-			}
-			this.abortRelayForRun(run.snapshot.runId);
-			await Promise.all(
-				run.snapshot.toolCalls
-					.filter((toolCall) => toolCall.status === "running" || toolCall.status === "awaiting-approval")
-					.map((toolCall) => this.toolExecutor.cancel?.(accountId, toolCall.id).catch(() => false)),
-			);
-			await this.sidecar.request("run.cancel", { runId: run.snapshot.runId, reason: "logout" }, {
-				requestId: `logout-${randomUUID()}`,
-				timeoutMs: 3_000,
-			}).catch(() => undefined);
-			await this.finishCancelledForLogout(run);
-		}));
+		const runs = [...this.active.values()].filter(
+			(run) => run.accountId === accountId,
+		);
+		await Promise.all(
+			runs.map(async (run) => {
+				await run.chain.catch(() => undefined);
+				if (this.active.get(run.snapshot.runId) !== run) return;
+				for (;;) {
+					const hostCalls = [...run.hostCalls];
+					if (hostCalls.length === 0) break;
+					await Promise.allSettled(hostCalls);
+				}
+				if (run.criticalOperation) {
+					await run.criticalOperation.settled;
+					if (
+						this.active.get(run.snapshot.runId) !== run ||
+						terminal(run.snapshot.status)
+					)
+						return;
+				}
+				if (terminal(run.snapshot.status)) {
+					await this.finishRun(run, run.snapshot.failure ?? null, true);
+					return;
+				}
+				this.abortRelayForRun(run.snapshot.runId);
+				await Promise.all(
+					run.snapshot.toolCalls
+						.filter(
+							(toolCall) =>
+								toolCall.status === "running" ||
+								toolCall.status === "awaiting-approval",
+						)
+						.map((toolCall) =>
+							this.toolExecutor
+								.cancel?.(accountId, toolCall.id)
+								.catch(() => false),
+						),
+				);
+				await this.sidecar
+					.request(
+						"run.cancel",
+						{ runId: run.snapshot.runId, reason: "logout" },
+						{
+							requestId: `logout-${randomUUID()}`,
+							timeoutMs: 3_000,
+						},
+					)
+					.catch(() => undefined);
+				await this.finishCancelledForLogout(run);
+			}),
+		);
 	}
 
 	async runBoundHostCall<TResult>(
@@ -873,7 +1282,11 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		}
 	}
 
-	async load(accountId: string, ownerRunId: string, conversationId: string): Promise<{
+	async load(
+		accountId: string,
+		ownerRunId: string,
+		conversationId: string,
+	): Promise<{
 		messages: readonly { role: "user" | "assistant"; content: string }[];
 		version: number;
 	}> {
@@ -884,20 +1297,37 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			owner.snapshot.kind !== "conversation-turn" ||
 			owner.snapshot.conversationId !== conversationId
 		) {
-			throw new Error("Conversation memory does not belong to its owning Agent run.");
+			throw new Error(
+				"Conversation memory does not belong to its owning Agent run.",
+			);
 		}
 		const activeClientMessageIds = new Set(
 			[...this.active.values()]
-				.filter((run) => run.accountId === accountId && run.snapshot.kind === "conversation-turn" && run.snapshot.conversationId === conversationId)
-				.map((run) => run.snapshot.kind === "conversation-turn" ? run.snapshot.clientMessageId : ""),
+				.filter(
+					(run) =>
+						run.accountId === accountId &&
+						run.snapshot.kind === "conversation-turn" &&
+						run.snapshot.conversationId === conversationId,
+				)
+				.map((run) =>
+					run.snapshot.kind === "conversation-turn"
+						? run.snapshot.clientMessageId
+						: "",
+				),
 		);
-		const completed = (await this.inRunSession(owner, () =>
-			this.repository.listMessages(accountId, conversationId, 1_000)))
-			.filter((message) =>
+		const completed = (
+			await this.inRunSession(owner, () =>
+				this.repository.listMessages(accountId, conversationId, 1_000),
+			)
+		).filter(
+			(message) =>
 				(message.role === "user" || message.role === "assistant") &&
 				message.status === "complete" &&
-				!(message.clientMessageId && activeClientMessageIds.has(message.clientMessageId)),
-			);
+				!(
+					message.clientMessageId &&
+					activeClientMessageIds.has(message.clientMessageId)
+				),
+		);
 		const recent = completed.slice(-24).map((message) => ({
 			role: message.role as "user" | "assistant",
 			content: message.content,
@@ -919,7 +1349,9 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			run.snapshot.kind !== "conversation-turn" ||
 			run.snapshot.conversationId !== input.conversationId
 		) {
-			throw new Error("Conversation memory does not belong to its owning Agent run.");
+			throw new Error(
+				"Conversation memory does not belong to its owning Agent run.",
+			);
 		}
 		const snapshot = run.snapshot;
 		const before = await this.load(
@@ -927,10 +1359,15 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			input.ownerRunId,
 			input.conversationId,
 		);
-		if (before.version !== input.expectedVersion) throw new Error("Conversation memory version conflict.");
-		const assistant = input.messages.findLast((message) => message.role === "assistant");
+		if (before.version !== input.expectedVersion)
+			throw new Error("Conversation memory version conflict.");
+		const assistant = input.messages.findLast(
+			(message) => message.role === "assistant",
+		);
 		if (!assistant || assistant.content !== run.assistantContent) {
-			throw new Error("Sidecar assistant memory does not match the streamed response.");
+			throw new Error(
+				"Sidecar assistant memory does not match the streamed response.",
+			);
 		}
 		await this.inRunSession(run, () =>
 			this.repository.putMessage({
@@ -943,18 +1380,33 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				status: "complete",
 				content: assistant.content,
 				createdAtMs: run.snapshot.startedAtMs + 1,
-			}));
-		const complete = (await this.inRunSession(run, () =>
-			this.repository.listMessages(input.accountId, input.conversationId, 1_000)))
-			.filter((message) => message.status === "complete" && (message.role === "user" || message.role === "assistant"));
+			}),
+		);
+		const complete = (
+			await this.inRunSession(run, () =>
+				this.repository.listMessages(
+					input.accountId,
+					input.conversationId,
+					1_000,
+				),
+			)
+		).filter(
+			(message) =>
+				message.status === "complete" &&
+				(message.role === "user" || message.role === "assistant"),
+		);
 		return { version: complete.length };
 	}
 
-	async propose(accountId: string, params: Record<string, unknown>): Promise<unknown> {
+	async propose(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
 		this.assertCurrentAccount(accountId);
 		const run = this.requireActiveToolRun(params, accountId);
 		const name = requiredToolName(params.name);
-		if (!isWriteToolName(name)) throw new Error("Only write tools require approval proposals.");
+		if (!isWriteToolName(name))
+			throw new Error("Only write tools require approval proposals.");
 		run.snapshot.revision += 1;
 		const argumentsValue = requiredRecord(params.arguments, "arguments");
 		const approval = await this.toolPolicy.proposeWrite({
@@ -966,7 +1418,12 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			runRevision: run.snapshot.revision,
 		});
 		this.assertRunSession(run);
-		const toolCall = toolSummary(name, approval.toolCallId, "awaiting-approval", this.now());
+		const toolCall = toolSummary(
+			name,
+			approval.toolCallId,
+			"awaiting-approval",
+			this.now(),
+		);
 		run.snapshot.toolCalls = [...run.snapshot.toolCalls, toolCall];
 		run.snapshot.pendingApproval = {
 			approvalId: approval.approvalId,
@@ -978,11 +1435,17 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			requestedAtMs: approval.requestedAtMs,
 		};
 		await this.emit(run, { type: "tool.call.proposed", toolCall });
-		await this.emit(run, { type: "tool.approval.requested", approval: run.snapshot.pendingApproval });
+		await this.emit(run, {
+			type: "tool.approval.requested",
+			approval: run.snapshot.pendingApproval,
+		});
 		return { ...approval, runVersion: run.snapshot.revision };
 	}
 
-	async call(accountId: string, params: Record<string, unknown>): Promise<unknown> {
+	async call(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
 		this.assertCurrentAccount(accountId);
 		const run = this.requireActiveToolRun(params, accountId);
 		const name = requiredToolName(params.name);
@@ -1002,13 +1465,19 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				approved.argumentsDigest !== params.inputDigest ||
 				approved.argumentsDigest !== digestArguments(argumentsValue) ||
 				params.runVersion !== approved.runRevision
-			) throw new Error("Tool execution does not match its one-time approval binding.");
+			)
+				throw new Error(
+					"Tool execution does not match its one-time approval binding.",
+				);
 			approvalForExecution = approved;
 		}
 		const started = toolSummary(name, toolCallId, "running", this.now());
 		this.replaceToolCall(run, started);
 		await this.emit(run, { type: "tool.call.started", toolCall: started });
-		const criticalOperation = this.beginCriticalOperation(run, "tool-execution");
+		const criticalOperation = this.beginCriticalOperation(
+			run,
+			"tool-execution",
+		);
 		try {
 			if (approvalForExecution) {
 				await this.toolPolicy.assertApprovedForExecution(approvalForExecution);
@@ -1022,18 +1491,32 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				arguments: argumentsValue,
 			});
 			this.assertRunSession(run);
-			const completed = { ...started, status: "succeeded" as const, completedAtMs: this.now(), summary: "本地操作已完成。" };
+			const completed = {
+				...started,
+				status: "succeeded" as const,
+				completedAtMs: this.now(),
+				summary: "本地操作已完成。",
+			};
 			this.replaceToolCall(run, completed);
-			await this.emit(run, { type: "tool.call.completed", toolCall: completed });
+			await this.emit(run, {
+				type: "tool.call.completed",
+				toolCall: completed,
+			});
 			return result;
 		} catch (error) {
 			if (error instanceof AgentSessionChangedError) throw error;
-			const failed = { ...started, status: "failed" as const, completedAtMs: this.now(), summary: "本地操作未完成。" };
+			const failed = {
+				...started,
+				status: "failed" as const,
+				completedAtMs: this.now(),
+				summary: "本地操作未完成。",
+			};
 			this.replaceToolCall(run, failed);
 			await this.emit(run, {
 				type: "tool.call.failed",
 				toolCall: failed,
-				message: error instanceof Error ? error.message : "本地 Tool 执行失败。",
+				message:
+					error instanceof Error ? error.message : "本地 Tool 执行失败。",
 			});
 			throw error;
 		} finally {
@@ -1041,29 +1524,48 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		}
 	}
 
-	async cancel(accountId: string, params: Record<string, unknown>): Promise<unknown> {
+	async cancel(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
 		this.assertCurrentAccount(accountId);
 		const run = this.requireHostRun(requiredId(params.runId, "runId"));
-		if (run.accountId !== accountId) throw new Error("Tool cancellation account mismatch.");
+		if (run.accountId !== accountId)
+			throw new Error("Tool cancellation account mismatch.");
 		const toolCallId = requiredId(params.toolCallId, "toolCallId");
-		const cancelled = await this.toolExecutor.cancel?.(accountId, toolCallId) ?? false;
+		const cancelled =
+			(await this.toolExecutor.cancel?.(accountId, toolCallId)) ?? false;
 		this.assertRunSession(run);
 		return { cancelled };
 	}
 
-	private async applySidecarEvent(run: ActiveRun, frame: SidecarRunEventFrame): Promise<void> {
+	private async applySidecarEvent(
+		run: ActiveRun,
+		frame: SidecarRunEventFrame,
+	): Promise<void> {
 		if (terminal(run.snapshot.status)) return;
 		const event = frame.event;
 		switch (event.kind) {
 			case "run.started":
 			case "run.resumed":
 				run.snapshot.status = "running";
-				await this.emit(run, event.kind === "run.started"
-					? { type: "run.started", startedAtMs: run.snapshot.startedAtMs }
-					: { type: "run.progress", phase: "thinking", message: "本地 Agent 已继续运行。" });
+				await this.emit(
+					run,
+					event.kind === "run.started"
+						? { type: "run.started", startedAtMs: run.snapshot.startedAtMs }
+						: {
+								type: "run.progress",
+								phase: "thinking",
+								message: "本地 Agent 已继续运行。",
+							},
+				);
 				return;
 			case "conversation.text.delta":
-				if (run.snapshot.kind !== "conversation-turn" || run.snapshot.status === "cancelling") return;
+				if (
+					run.snapshot.kind !== "conversation-turn" ||
+					run.snapshot.status === "cancelling"
+				)
+					return;
 				run.assistantContent = event.text;
 				run.pendingDelta += event.delta;
 				this.scheduleDeltaFlush(run);
@@ -1071,7 +1573,10 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				return;
 			case "planning.object.delta":
 				if (run.snapshot.kind === "task-planning") {
-					run.snapshot.session = parsePlanningSession(event.object, run.snapshot.session?.id);
+					run.snapshot.session = parsePlanningSession(
+						event.object,
+						run.snapshot.session?.id,
+					);
 				}
 				return;
 			case "run.suspended":
@@ -1085,26 +1590,39 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				return;
 			case "run.failed":
 				await this.failRun(run.snapshot.runId, {
-					code: event.error.code === "MODEL_RELAY_UNAVAILABLE"
-						? "unavailable"
-						: event.error.code === "MODEL_RELAY_ERROR"
-							? "model-failed"
-							: "internal",
+					code:
+						event.error.code === "MODEL_RELAY_UNAVAILABLE"
+							? "unavailable"
+							: event.error.code === "MODEL_RELAY_ERROR"
+								? "model-failed"
+								: "internal",
 					message: event.error.message,
-					retryable: event.error.code === "MODEL_RELAY_UNAVAILABLE"
-						? false
-						: event.error.retryable,
+					retryable:
+						event.error.code === "MODEL_RELAY_UNAVAILABLE"
+							? false
+							: event.error.retryable,
 				});
 		}
 	}
 
-	private async handleSuspended(run: ActiveRun, payload: unknown): Promise<void> {
+	private async handleSuspended(
+		run: ActiveRun,
+		payload: unknown,
+	): Promise<void> {
+		if (run.snapshot.kind === "activity-analysis") {
+			throw new Error(
+				"Activity analysis Agent must not suspend for tools or input.",
+			);
+		}
 		run.snapshot.status = "suspended";
-		let reason: "approval-required" | "clarification-required" = run.snapshot.pendingApproval
+		const reason: "approval-required" | "clarification-required" = run.snapshot
+			.pendingApproval
 			? "approval-required"
 			: "clarification-required";
 		if (run.snapshot.kind === "task-planning") {
-			const session = parsePlanningSession(payload, run.snapshot.session?.id) ?? run.snapshot.session;
+			const session =
+				parsePlanningSession(payload, run.snapshot.session?.id) ??
+				run.snapshot.session;
 			if (session) {
 				run.snapshot.session = session;
 				if (session.status === "clarifying") {
@@ -1120,7 +1638,10 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		await this.emit(run, { type: "run.suspended", reason });
 	}
 
-	private async handleCompleted(run: ActiveRun, result: unknown): Promise<void> {
+	private async handleCompleted(
+		run: ActiveRun,
+		result: unknown,
+	): Promise<void> {
 		if (run.snapshot.kind === "conversation-turn") {
 			const snapshot = run.snapshot;
 			await this.flushDelta(run);
@@ -1138,13 +1659,17 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 						status: "complete",
 						content,
 						createdAtMs: snapshot.startedAtMs + 1,
-					}));
+					}),
+				);
 			}
 			const conversation = await this.inRunSession(run, () =>
-				this.repository.getConversation(run.accountId, snapshot.conversationId));
-			if (!conversation) throw new Error("Conversation disappeared during Agent completion.");
+				this.repository.getConversation(run.accountId, snapshot.conversationId),
+			);
+			if (!conversation)
+				throw new Error("Conversation disappeared during Agent completion.");
 			snapshot.conversation = await this.inRunSession(run, () =>
-				this.buildConversation(run.accountId, conversation));
+				this.buildConversation(run.accountId, conversation),
+			);
 			await this.emit(run, {
 				type: "conversation.message.completed",
 				conversationId: snapshot.conversationId,
@@ -1152,9 +1677,10 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				content,
 				createdAtMs: snapshot.startedAtMs + 1,
 			});
-		} else {
+		} else if (run.snapshot.kind === "task-planning") {
 			const session = parsePlanningSession(result, run.snapshot.session?.id);
-			if (!session) throw new Error("Planning sidecar completed without a valid session.");
+			if (!session)
+				throw new Error("Planning sidecar completed without a valid session.");
 			run.snapshot.session = session;
 			if (isRecord(result) && Number.isSafeInteger(result.version)) {
 				run.sidecarPlanningVersion = result.version as number;
@@ -1165,6 +1691,14 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			}
 			await this.emit(run, { type: "planning.draft.ready", session });
 			await this.emit(run, { type: "planning.completed", session });
+		} else {
+			const summary = activityResultText(result);
+			if (summary === null) {
+				throw new Error(
+					"Activity analysis sidecar completed without a valid summary.",
+				);
+			}
+			run.snapshot.result = summary;
 		}
 		run.snapshot.status = "completed";
 		await this.emit(run, { type: "run.completed", completedAtMs: this.now() });
@@ -1183,22 +1717,32 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		if (!run.pendingDelta || run.snapshot.kind !== "conversation-turn") return;
 		const delta = run.pendingDelta;
 		run.pendingDelta = "";
-		await this.emit(run, {
-			type: "conversation.message.delta",
-			conversationId: run.snapshot.conversationId,
-			messageId: run.snapshot.assistantMessageId!,
-			delta,
-		}, false);
+		await this.emit(
+			run,
+			{
+				type: "conversation.message.delta",
+				conversationId: run.snapshot.conversationId,
+				messageId: run.snapshot.assistantMessageId!,
+				delta,
+			},
+			false,
+		);
 	}
 
 	private async persistPartialIfDue(run: ActiveRun): Promise<void> {
-		if (run.snapshot.kind !== "conversation-turn" || !run.snapshot.assistantMessageId) return;
+		if (
+			run.snapshot.kind !== "conversation-turn" ||
+			!run.snapshot.assistantMessageId
+		)
+			return;
 		const snapshot = run.snapshot;
 		const now = this.now();
 		if (
 			now - run.lastPartialPersistAtMs < PARTIAL_PERSIST_MS &&
-			run.assistantContent.length - run.lastPartialPersistLength < PARTIAL_PERSIST_CHARACTERS
-		) return;
+			run.assistantContent.length - run.lastPartialPersistLength <
+				PARTIAL_PERSIST_CHARACTERS
+		)
+			return;
 		await this.inRunSession(run, () =>
 			this.repository.putMessage({
 				accountId: run.accountId,
@@ -1210,19 +1754,27 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				status: "partial",
 				content: run.assistantContent,
 				createdAtMs: snapshot.startedAtMs + 1,
-			}));
+			}),
+		);
 		run.lastPartialPersistAtMs = now;
 		run.lastPartialPersistLength = run.assistantContent.length;
 		await this.persistRun(run);
 	}
 
-	private async failRun(runId: string, failure: AgentRunFailure): Promise<void> {
+	private async failRun(
+		runId: string,
+		failure: AgentRunFailure,
+	): Promise<void> {
 		const run = this.active.get(runId);
-		if (!run || terminal(run.snapshot.status) || !this.isRunSessionCurrent(run)) return;
+		if (!run || terminal(run.snapshot.status) || !this.isRunSessionCurrent(run))
+			return;
 		await this.flushDelta(run);
 		run.snapshot.status = "failed";
 		run.snapshot.failure = failure;
-		if (run.snapshot.kind === "conversation-turn" && run.snapshot.assistantMessageId) {
+		if (
+			run.snapshot.kind === "conversation-turn" &&
+			run.snapshot.assistantMessageId
+		) {
 			const snapshot = run.snapshot;
 			await this.inRunSession(run, () =>
 				this.repository.putMessage({
@@ -1235,17 +1787,28 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 					status: "failed",
 					content: run.assistantContent,
 					createdAtMs: snapshot.startedAtMs + 1,
-				}));
+				}),
+			);
 		}
-		await this.emit(run, { type: "run.failed", failedAtMs: this.now(), failure });
+		await this.emit(run, {
+			type: "run.failed",
+			failedAtMs: this.now(),
+			failure,
+		});
 		await this.finishRun(run, failure);
 	}
 
-	private async finishCancelled(run: ActiveRun, message: string): Promise<void> {
+	private async finishCancelled(
+		run: ActiveRun,
+		message: string,
+	): Promise<void> {
 		if (terminal(run.snapshot.status)) return;
 		await this.flushDelta(run);
 		run.snapshot.status = "cancelled";
-		if (run.snapshot.kind === "conversation-turn" && run.snapshot.assistantMessageId) {
+		if (
+			run.snapshot.kind === "conversation-turn" &&
+			run.snapshot.assistantMessageId
+		) {
 			const snapshot = run.snapshot;
 			await this.inRunSession(run, () =>
 				this.repository.putMessage({
@@ -1258,9 +1821,14 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 					status: "cancelled",
 					content: run.assistantContent,
 					createdAtMs: snapshot.startedAtMs + 1,
-				}));
+				}),
+			);
 		}
-		await this.emit(run, { type: "run.cancelled", cancelledAtMs: this.now(), message });
+		await this.emit(run, {
+			type: "run.cancelled",
+			cancelledAtMs: this.now(),
+			message,
+		});
 		await this.finishRun(run, null);
 	}
 
@@ -1273,7 +1841,10 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		run.snapshot.updatedAtMs = this.now();
 		let failure: unknown = null;
 		try {
-			if (run.snapshot.kind === "conversation-turn" && run.snapshot.assistantMessageId) {
+			if (
+				run.snapshot.kind === "conversation-turn" &&
+				run.snapshot.assistantMessageId
+			) {
 				await this.repository.putMessage({
 					accountId: run.accountId,
 					id: run.snapshot.assistantMessageId,
@@ -1297,13 +1868,20 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		if (failure) throw failure;
 	}
 
-	private async interruptRun(run: ActiveRun, message: string, restorable: boolean): Promise<void> {
+	private async interruptRun(
+		run: ActiveRun,
+		message: string,
+		restorable: boolean,
+	): Promise<void> {
 		if (terminal(run.snapshot.status)) return;
 		this.abortRelayForRun(run.snapshot.runId);
 		await this.flushDelta(run);
 		run.snapshot.status = "interrupted";
 		run.snapshot.revision += 1;
-		if (run.snapshot.kind === "conversation-turn" && run.snapshot.assistantMessageId) {
+		if (
+			run.snapshot.kind === "conversation-turn" &&
+			run.snapshot.assistantMessageId
+		) {
 			const snapshot = run.snapshot;
 			await this.inRunSession(run, () =>
 				this.repository.putMessage({
@@ -1316,7 +1894,8 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 					status: "interrupted",
 					content: run.assistantContent,
 					createdAtMs: snapshot.startedAtMs + 1,
-				}));
+				}),
+			);
 		}
 		await this.emit(run, {
 			type: "run.interrupted",
@@ -1334,13 +1913,33 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 	): Promise<void> {
 		if (run.deltaTimer) clearTimeout(run.deltaTimer);
 		run.deltaTimer = null;
+		let persisted = false;
 		try {
 			await this.persistRun(run, failure, allowInvalidatedSession);
+			persisted = true;
 		} finally {
 			this.sidecar.untrackRun(run.snapshot.runId);
 			this.active.delete(run.snapshot.runId);
 			for (const key of [...this.approvedToolCalls.keys()]) {
-				if (key.startsWith(`${run.snapshot.runId}:`)) this.approvedToolCalls.delete(key);
+				if (key.startsWith(`${run.snapshot.runId}:`))
+					this.approvedToolCalls.delete(key);
+			}
+		}
+		if (persisted && run.snapshot.kind === "activity-analysis") {
+			try {
+				await this.onActivityRunTerminal({
+					jobId: run.snapshot.activityJobId,
+					runId: run.snapshot.runId,
+					accountId: run.accountId,
+					status: run.snapshot.status as
+						| "completed"
+						| "failed"
+						| "cancelled"
+						| "interrupted",
+					failure: failure ?? run.snapshot.failure ?? null,
+				});
+			} catch {
+				// The durable activity ledger will recover a running job next launch.
 			}
 		}
 	}
@@ -1358,7 +1957,12 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			await this.handleCompleted(run, { text: run.assistantContent });
 			return;
 		}
-		const started = toolSummary(approval.toolName, approval.toolCallId, "running", this.now());
+		const started = toolSummary(
+			approval.toolName,
+			approval.toolCallId,
+			"running",
+			this.now(),
+		);
 		this.replaceToolCall(run, started);
 		await this.emit(run, { type: "tool.call.started", toolCall: started });
 		try {
@@ -1379,7 +1983,10 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 				summary: "本地操作已完成。",
 			};
 			this.replaceToolCall(run, completed);
-			await this.emit(run, { type: "tool.call.completed", toolCall: completed });
+			await this.emit(run, {
+				type: "tool.call.completed",
+				toolCall: completed,
+			});
 			run.assistantContent = appendRecoveryNotice(
 				run.assistantContent,
 				"已按你的本次确认完成本地操作。Agent 进程曾中断，本轮不再自动继续生成，以免重复执行。",
@@ -1397,14 +2004,15 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			await this.emit(run, {
 				type: "tool.call.failed",
 				toolCall: failed,
-				message: error instanceof Error ? error.message : "本地 Tool 执行失败。",
+				message:
+					error instanceof Error ? error.message : "本地 Tool 执行失败。",
 			});
 			throw error;
 		}
 	}
 
 	private activate(
-		sessionIdentity: LocalTestSessionIdentity,
+		sessionIdentity: AuthSessionIdentity,
 		snapshot: AgentRunSnapshot,
 		recordInput: Record<string, unknown>,
 	): ActiveRun {
@@ -1432,7 +2040,8 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		run: ActiveRun,
 		kind: ActiveRunCriticalOperation["kind"],
 	): ActiveRunCriticalOperation {
-		if (run.criticalOperation) throw new Error("Agent run already has a critical operation.");
+		if (run.criticalOperation)
+			throw new Error("Agent run already has a critical operation.");
 		let settle!: () => void;
 		const settled = new Promise<void>((resolve) => {
 			settle = resolve;
@@ -1468,7 +2077,7 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		this.assertRunSession(run);
 		run.snapshot.lastSequence += 1;
 		run.snapshot.updatedAtMs = this.now();
-		const envelope: AgentRunEventEnvelope = {
+		const envelope: InternalAgentRunEventEnvelope = {
 			schemaVersion: AGENT_RUN_EVENT_SCHEMA_VERSION,
 			runId: run.snapshot.runId,
 			requestId: run.snapshot.requestId,
@@ -1491,15 +2100,25 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		await this.repository.putRun({
 			accountId: run.accountId,
 			id: run.snapshot.runId,
-			conversationId: run.snapshot.kind === "conversation-turn" ? run.snapshot.conversationId : null,
-			workflowId: run.snapshot.kind === "task-planning" ? run.snapshot.session?.id ?? null : null,
+			conversationId:
+				run.snapshot.kind === "conversation-turn"
+					? run.snapshot.conversationId
+					: null,
+			workflowId:
+				run.snapshot.kind === "task-planning"
+					? (run.snapshot.session?.id ?? null)
+					: run.snapshot.kind === "activity-analysis"
+						? run.snapshot.activityJobId
+						: null,
 			status: run.snapshot.status,
 			input: run.recordInput,
 			output: structuredClone(run.snapshot),
 			error: failure,
 			createdAtMs: run.snapshot.startedAtMs,
 			updatedAtMs: run.snapshot.updatedAtMs,
-			completedAtMs: terminal(run.snapshot.status) ? run.snapshot.updatedAtMs : null,
+			completedAtMs: terminal(run.snapshot.status)
+				? run.snapshot.updatedAtMs
+				: null,
 		});
 		if (!allowInvalidatedSession) this.assertRunSession(run);
 	}
@@ -1512,7 +2131,10 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 	): Promise<AgentConversationRecord> {
 		const requestedId = input.conversationId ?? existingMessage?.conversationId;
 		if (requestedId) {
-			const existing = await this.repository.getConversation(accountId, requestedId);
+			const existing = await this.repository.getConversation(
+				accountId,
+				requestedId,
+			);
 			if (!existing) throw new Error("找不到当前账号的本地对话。");
 			return existing;
 		}
@@ -1531,19 +2153,25 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		accountId: string,
 		conversation: AgentConversationRecord,
 	): Promise<ConversationRpcThread> {
-		const messages = await this.repository.listMessages(accountId, conversation.id, 1_000);
+		const messages = await this.repository.listMessages(
+			accountId,
+			conversation.id,
+			1_000,
+		);
 		return {
 			id: conversation.id,
 			title: conversation.title,
 			updatedAtMs: conversation.updatedAtMs,
 			messages: messages
-				.filter((message) => message.role === "user" || message.role === "assistant")
+				.filter(
+					(message) => message.role === "user" || message.role === "assistant",
+				)
 				.map(messageProjection),
 		};
 	}
 
 	private async hydrateSnapshot(
-		identity: LocalTestSessionIdentity,
+		identity: AuthSessionIdentity,
 		snapshot: AgentRunSnapshot,
 	): Promise<AgentRunSnapshot> {
 		if (snapshot.kind !== "conversation-turn") return structuredClone(snapshot);
@@ -1551,12 +2179,14 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			this.repository.getConversation(
 				identity.accountId,
 				snapshot.conversationId,
-			));
+			),
+		);
 		return {
 			...structuredClone(snapshot),
 			conversation: conversation
 				? await this.inSession(identity, () =>
-					this.buildConversation(conversation.accountId, conversation))
+						this.buildConversation(conversation.accountId, conversation),
+					)
 				: snapshot.conversation,
 		};
 	}
@@ -1575,18 +2205,29 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			}
 			if (!run || run.accountId !== accountId) {
 				const record = await this.inSession(identity, () =>
-					this.repository.getRun(accountId, runId));
+					this.repository.getRun(accountId, runId),
+				);
 				const snapshot = record ? parsePersistedSnapshot(record.output) : null;
 				if (!record || !snapshot || snapshot.status !== "suspended") {
-					return { kind: "not-found", message: "找不到当前账号可恢复的 Agent 运行。" };
+					return {
+						kind: "not-found",
+						message: "找不到当前账号可恢复的 Agent 运行。",
+					};
 				}
 				run = await this.reactivateSuspendedRun(identity, record, snapshot);
 			}
 			if (kind && run.snapshot.kind !== kind) {
-				return { kind: "error", message: "Agent 运行类型不匹配。", retryable: false };
+				return {
+					kind: "error",
+					message: "Agent 运行类型不匹配。",
+					retryable: false,
+				};
 			}
 			if (run.snapshot.revision !== expectedRevision) {
-				return conflict("Agent 运行版本已变化，请先恢复最新快照。", run.snapshot.revision);
+				return conflict(
+					"Agent 运行版本已变化，请先恢复最新快照。",
+					run.snapshot.revision,
+				);
 			}
 			return run;
 		} catch (error) {
@@ -1595,24 +2236,32 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 	}
 
 	private async reactivateSuspendedRun(
-		identity: LocalTestSessionIdentity,
+		identity: AuthSessionIdentity,
 		record: AgentRunRecord,
 		snapshot: AgentRunSnapshot,
 	): Promise<ActiveRun> {
 		const accountId = identity.accountId;
-		const recordInput = isRecord(record.input) ? structuredClone(record.input) : {};
+		const recordInput = isRecord(record.input)
+			? structuredClone(record.input)
+			: {};
 		const run = this.activate(identity, snapshot, recordInput);
 		run.recoveredFromPersistence = true;
 		if (snapshot.kind === "conversation-turn" && snapshot.assistantMessageId) {
 			const message = await this.inSession(identity, () =>
-				this.repository.getMessage(accountId, snapshot.assistantMessageId!));
+				this.repository.getMessage(accountId, snapshot.assistantMessageId!),
+			);
 			run.assistantContent = message?.content ?? "";
 			run.lastPartialPersistLength = run.assistantContent.length;
 		}
 		if (snapshot.kind === "task-planning" && snapshot.session) {
 			const workflow = await this.inSession(identity, () =>
-				this.repository.getWorkflow(accountId, snapshot.session!.id));
-			if (workflow && isRecord(workflow.definition) && Number.isSafeInteger(workflow.definition.version)) {
+				this.repository.getWorkflow(accountId, snapshot.session!.id),
+			);
+			if (
+				workflow &&
+				isRecord(workflow.definition) &&
+				Number.isSafeInteger(workflow.definition.version)
+			) {
 				run.sidecarPlanningVersion = workflow.definition.version as number;
 			}
 		}
@@ -1633,42 +2282,58 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 			run.snapshot.kind !== "conversation-turn" ||
 			terminal(run.snapshot.status)
 		) {
-			throw new Error("Tool call does not belong to an active conversation run.");
+			throw new Error(
+				"Tool call does not belong to an active conversation run.",
+			);
 		}
 		this.assertRunSession(run);
 		return run;
 	}
 
-	private replaceToolCall(run: ActiveRun, toolCall: AgentToolCallSummary): void {
-		const existing = run.snapshot.toolCalls.some((item) => item.id === toolCall.id);
+	private replaceToolCall(
+		run: ActiveRun,
+		toolCall: AgentToolCallSummary,
+	): void {
+		const existing = run.snapshot.toolCalls.some(
+			(item) => item.id === toolCall.id,
+		);
 		run.snapshot.toolCalls = existing
-			? run.snapshot.toolCalls.map((item) => item.id === toolCall.id ? toolCall : item)
+			? run.snapshot.toolCalls.map((item) =>
+					item.id === toolCall.id ? toolCall : item,
+				)
 			: [...run.snapshot.toolCalls, toolCall];
 	}
 
 	private async markOrphanedRunsInterrupted(
-		identity: LocalTestSessionIdentity,
+		identity: AuthSessionIdentity,
 	): Promise<void> {
 		const accountId = identity.accountId;
 		const records = await this.inSession(identity, () =>
-			this.repository.listRuns(accountId, 1_000));
+			this.repository.listRuns(accountId, 1_000),
+		);
 		for (const record of records) {
 			const active = this.active.get(record.id);
 			if (
 				(active && sameSessionIdentity(active.sessionIdentity, identity)) ||
 				!["starting", "running", "cancelling"].includes(record.status)
-			) continue;
+			)
+				continue;
 			const snapshot = parsePersistedSnapshot(record.output);
 			if (!snapshot) continue;
 			snapshot.status = "interrupted";
 			snapshot.revision += 1;
 			snapshot.updatedAtMs = this.now();
-			if (snapshot.kind === "conversation-turn" && snapshot.assistantMessageId) {
+			if (
+				snapshot.kind === "conversation-turn" &&
+				snapshot.assistantMessageId
+			) {
 				const message = await this.inSession(identity, () =>
-					this.repository.getMessage(accountId, snapshot.assistantMessageId!));
+					this.repository.getMessage(accountId, snapshot.assistantMessageId!),
+				);
 				if (message && message.status === "partial") {
 					await this.inSession(identity, () =>
-						this.repository.putMessage({ ...message, status: "interrupted" }));
+						this.repository.putMessage({ ...message, status: "interrupted" }),
+					);
 				}
 			}
 			await this.inSession(identity, () =>
@@ -1678,7 +2343,8 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 					output: snapshot,
 					updatedAtMs: snapshot.updatedAtMs,
 					completedAtMs: snapshot.updatedAtMs,
-				}));
+				}),
+			);
 		}
 	}
 
@@ -1688,13 +2354,13 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		}
 	}
 
-	private requireSession(): LocalTestSessionIdentity {
+	private requireSession(): AuthSessionIdentity {
 		const identity = this.sessionIdentityProvider();
 		if (!identity) throw new Error("请先登录后再使用本地 Agent。");
 		return { ...identity };
 	}
 
-	private assertSession(identity: LocalTestSessionIdentity): void {
+	private assertSession(identity: AuthSessionIdentity): void {
 		const current = this.sessionIdentityProvider();
 		if (!current || !sameSessionIdentity(current, identity)) {
 			throw new AgentSessionChangedError();
@@ -1703,7 +2369,9 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 
 	private assertRunSession(run: ActiveRun): void {
 		if (this.active.get(run.snapshot.runId) !== run) {
-			throw new AgentSessionChangedError("登录会话对应的本地 Agent 运行已结束。");
+			throw new AgentSessionChangedError(
+				"登录会话对应的本地 Agent 运行已结束。",
+			);
 		}
 		this.assertSession(run.sessionIdentity);
 	}
@@ -1720,14 +2388,16 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 	private requireHostRun(runId: string): ActiveRun {
 		const run = this.active.get(requiredId(runId, "ownerRunId"));
 		if (!run || terminal(run.snapshot.status)) {
-			throw new AgentSessionChangedError("登录会话对应的本地 Agent 运行不存在。");
+			throw new AgentSessionChangedError(
+				"登录会话对应的本地 Agent 运行不存在。",
+			);
 		}
 		this.assertRunSession(run);
 		return run;
 	}
 
 	private async inSession<TResult>(
-		identity: LocalTestSessionIdentity,
+		identity: AuthSessionIdentity,
 		operation: () => Promise<TResult>,
 	): Promise<TResult> {
 		this.assertSession(identity);
@@ -1746,7 +2416,7 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 		return result;
 	}
 
-	private beginPendingStart(identity: LocalTestSessionIdentity): PendingStart {
+	private beginPendingStart(identity: AuthSessionIdentity): PendingStart {
 		let settlePromise!: () => void;
 		const settled = new Promise<void>((resolve) => {
 			settlePromise = resolve;
@@ -1765,8 +2435,8 @@ export class AgentRunCoordinator implements ConversationMemoryService, AgentTool
 }
 
 function sameSessionIdentity(
-	left: LocalTestSessionIdentity,
-	right: LocalTestSessionIdentity,
+	left: AuthSessionIdentity,
+	right: AuthSessionIdentity,
 ): boolean {
 	return (
 		left.accountId === right.accountId &&

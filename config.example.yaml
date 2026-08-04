@@ -1,13 +1,11 @@
-# WhaleHall 家里云配置示例。
-# 两个角色都使用已部署的 CPU 优先 Qwen 1.7B 活动分析 Worker。
-# apikey 可直接填入 owner-only user-data/config.yaml，也可保留下面的
-# 环境变量引用；不要将真实密钥提交到 Git。
+# Copy this shape only through the owner provisioning command. These values are
+# intentional non-credentials and keep the checked-in example unusable.
 reflection:
   name: "qwen3:1.7b"
   baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+  apikey: "REPLACE_WITH_ACTIVITY_WORKER_KEY"
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"

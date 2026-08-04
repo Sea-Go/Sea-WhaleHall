@@ -127,7 +127,10 @@ export class OllamaJsonClient {
 				if (!(lastError instanceof OllamaSchemaError)) throw lastError;
 			}
 		}
-		throw lastError ?? new OllamaSchemaError("Ollama returned invalid structured output.");
+		throw (
+			lastError ??
+			new OllamaSchemaError("Ollama returned invalid structured output.")
+		);
 	}
 
 	private async execute<T>(
@@ -311,7 +314,9 @@ function normalizeOllamaBaseUrl(
 		url.search !== "" ||
 		url.hash !== ""
 	) {
-		throw new Error("The Ollama client URL contains disallowed URL components.");
+		throw new Error(
+			"The Ollama client URL contains disallowed URL components.",
+		);
 	}
 	if (isLoopbackHostname(url.hostname)) {
 		if (url.protocol !== "http:") {
@@ -319,10 +324,7 @@ function normalizeOllamaBaseUrl(
 		}
 		return url.origin;
 	}
-	if (
-		url.protocol !== "https:" ||
-		!allowedRemoteOrigins.includes(url.origin)
-	) {
+	if (url.protocol !== "https:" || !allowedRemoteOrigins.includes(url.origin)) {
 		throw new Error(
 			"The remote Ollama client requires an allowlisted HTTPS origin.",
 		);
@@ -336,11 +338,7 @@ function isLoopbackHostname(hostname: string): boolean {
 
 function normalizeAuthorizationToken(value: string | undefined): string | null {
 	if (value === undefined) return null;
-	if (
-		value.length < 1 ||
-		value.length > 4_096 ||
-		/[\u0000-\u001f\u007f]/u.test(value)
-	) {
+	if (value.length < 1 || value.length > 4_096 || /\p{Cc}/u.test(value)) {
 		throw new Error("The Ollama authorization token is invalid.");
 	}
 	return value;

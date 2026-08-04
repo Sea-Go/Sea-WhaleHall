@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-	mkdtempSync,
 	mkdirSync,
+	mkdtempSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -31,9 +31,7 @@ afterEach(() => {
 });
 
 function temporaryDirectory(): string {
-	const directory = mkdtempSync(
-		join(tmpdir(), "whalehall-modernbert-config-"),
-	);
+	const directory = mkdtempSync(join(tmpdir(), "whalehall-modernbert-config-"));
 	directories.push(directory);
 	return directory;
 }
@@ -68,12 +66,9 @@ function manifest(): ModernBertArtifactManifestV1 {
 			taxonomy: {
 				version: "activity-taxonomy.v2",
 				activities: [...MODERNBERT_ACTIVITY_LABELS],
-				goalRelevance: [
-					...MODERNBERT_GOAL_RELEVANCE_LABELS,
-				],
+				goalRelevance: [...MODERNBERT_GOAL_RELEVANCE_LABELS],
 			},
-			oodScoring:
-				"calibrated-energy-plus-cluster-distance.v1",
+			oodScoring: "calibrated-energy-plus-cluster-distance.v1",
 			calibrationVersion: "temperature-scaling.v1",
 		},
 		requestSchemaVersion: MODERNBERT_REQUEST_SCHEMA_VERSION,
@@ -84,19 +79,30 @@ function manifest(): ModernBertArtifactManifestV1 {
 	};
 }
 
-function completeEnvironment(path: string): Record<string, string> {
+function completeEnvironment(manifestFileName: string): Record<string, string> {
 	return {
 		WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
 			"http://127.0.0.1:8766/v2/episodes:classify",
 		WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT:
 			"http://127.0.0.1:8766/v2/manifest",
-		WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST: path,
+		WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST: manifestFileName,
 	};
+}
+
+function loadConfiguration(
+	environment: Record<string, string>,
+	manifestDirectory: string,
+) {
+	return loadTimelineModernBertConfiguration(environment, {
+		manifestDirectory,
+	});
 }
 
 describe("Timeline v2 ModernBERT Bun configuration", () => {
 	test("stays explicitly disabled when configuration is absent", () => {
-		expect(loadTimelineModernBertConfiguration({})).toEqual({
+		expect(
+			loadTimelineModernBertConfiguration({}, { manifestDirectory: "/unused" }),
+		).toEqual({
 			modernBert: { enabled: false },
 			code: "disabled",
 		});
@@ -104,95 +110,107 @@ describe("Timeline v2 ModernBERT Bun configuration", () => {
 
 	test("fails closed for partial, relative, symlink, and invalid manifests", () => {
 		expect(
-			loadTimelineModernBertConfiguration({
-				WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
-					"http://127.0.0.1:8766/v2/episodes:classify",
-			}),
+			loadConfiguration(
+				{
+					WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
+						"http://127.0.0.1:8766/v2/episodes:classify",
+				},
+				"/unused",
+			),
 		).toEqual({
 			modernBert: { enabled: false },
 			code: "invalid_config",
 		});
 		expect(
-			loadTimelineModernBertConfiguration(
-				completeEnvironment("manifest.json"),
-			),
+			loadConfiguration(completeEnvironment("manifest.json"), "/unused"),
 		).toMatchObject({ code: "invalid_config" });
 
 		const directory = temporaryDirectory();
 		const targetDirectory = join(directory, "manifest-target");
-		const linkedDirectory = join(directory, "manifest-link");
+		const manifestDirectory = join(directory, "manifests");
+		const linkedManifest = join(manifestDirectory, "linked-manifest.json");
 		mkdirSync(targetDirectory);
+		mkdirSync(manifestDirectory);
 		const target = join(targetDirectory, "manifest.json");
-		const link = join(linkedDirectory, "manifest.json");
 		writeFileSync(target, JSON.stringify(manifest()));
 		symlinkSync(
-			targetDirectory,
-			linkedDirectory,
-			process.platform === "win32" ? "junction" : "dir",
+			target,
+			linkedManifest,
+			process.platform === "win32" ? "file" : "file",
 		);
 		expect(
-			loadTimelineModernBertConfiguration(
-				completeEnvironment(link),
+			loadConfiguration(
+				completeEnvironment("linked-manifest.json"),
+				manifestDirectory,
 			),
 		).toMatchObject({ code: "invalid_config" });
 
-		writeFileSync(target, '{"schemaVersion":"wrong"}');
+		writeFileSync(
+			join(manifestDirectory, "manifest.json"),
+			'{"schemaVersion":"wrong"}',
+		);
 		expect(
-			loadTimelineModernBertConfiguration(
-				completeEnvironment(target),
+			loadConfiguration(
+				completeEnvironment("manifest.json"),
+				manifestDirectory,
+			),
+		).toMatchObject({ code: "invalid_config" });
+		expect(
+			loadConfiguration(
+				completeEnvironment("../manifest.json"),
+				manifestDirectory,
 			),
 		).toMatchObject({ code: "invalid_config" });
 	});
 
 	test("propagates YAML-owned remote origins while keeping the token environment-only", () => {
 		const directory = temporaryDirectory();
-		const path = join(directory, "manifest.json");
-		writeFileSync(path, JSON.stringify(manifest()));
-		const result = loadTimelineModernBertConfiguration({
-			...completeEnvironment(path),
-			WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "local-token",
-			WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS:
-				"https://model.example",
-			WHALEHALL_TIMELINE_MODERNBERT_ALLOW_INSECURE_REMOTE: "1",
-		});
+		writeFileSync(join(directory, "manifest.json"), JSON.stringify(manifest()));
+		const result = loadConfiguration(
+			{
+				...completeEnvironment("manifest.json"),
+				WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "local-token",
+				WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS: "https://model.example",
+				WHALEHALL_TIMELINE_MODERNBERT_ALLOW_INSECURE_REMOTE: "1",
+			},
+			directory,
+		);
 		expect(result.code).toBe("enabled");
 		expect(result.modernBert).toMatchObject({
 			enabled: true,
-			endpoint:
-				"http://127.0.0.1:8766/v2/episodes:classify",
-			manifestEndpoint:
-				"http://127.0.0.1:8766/v2/manifest",
+			endpoint: "http://127.0.0.1:8766/v2/episodes:classify",
+			manifestEndpoint: "http://127.0.0.1:8766/v2/manifest",
 			expectedArtifact: manifest(),
 			authorizationToken: "local-token",
 			allowedRemoteOrigins: ["https://model.example"],
 		});
-		expect(result.modernBert).not.toHaveProperty(
-			"allowInsecureRemote",
-		);
+		expect(result.modernBert).not.toHaveProperty("allowInsecureRemote");
 	});
 
 	test("enables a complete remote configuration only with its exact HTTPS origin", () => {
 		const directory = temporaryDirectory();
-		const path = join(directory, "manifest.json");
-		writeFileSync(path, JSON.stringify(manifest()));
+		writeFileSync(join(directory, "manifest.json"), JSON.stringify(manifest()));
 		const remoteEnvironment = {
 			WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
 				"https://models.example.test/v2/episodes:classify",
 			WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT:
 				"https://models.example.test/v2/manifest",
-			WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST: path,
+			WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST: "manifest.json",
 		};
 
-		expect(loadTimelineModernBertConfiguration(remoteEnvironment)).toEqual({
+		expect(loadConfiguration(remoteEnvironment, directory)).toEqual({
 			modernBert: { enabled: false },
 			code: "invalid_config",
 		});
 		expect(
-			loadTimelineModernBertConfiguration({
-				...remoteEnvironment,
-				WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS:
-					"https://models.example.test",
-			}),
+			loadConfiguration(
+				{
+					...remoteEnvironment,
+					WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS:
+						"https://models.example.test",
+				},
+				directory,
+			),
 		).toMatchObject({
 			code: "enabled",
 			modernBert: {

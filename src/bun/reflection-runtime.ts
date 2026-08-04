@@ -2,22 +2,22 @@ import { join } from "node:path";
 import type { AgentRuntime } from "../agent/agent-runtime";
 import { OllamaJsonClient } from "../agent/model/ollama-json-client";
 import {
-	WHALEHALL_TEACHER_MODEL_LOCK,
-	verifyOllamaModelLock,
 	type OllamaModelLock,
+	verifyOllamaModelLock,
+	WHALEHALL_TEACHER_MODEL_LOCK,
 } from "../agent/model/ollama-model-lock";
 import {
+	type ActiveGoalContextV1,
 	DesktopReflectionService,
+	type EventWindowV1,
+	loadOrCreateReflectionIdentity,
 	ModernBertHttpClient,
 	ReflectionInference,
 	SqliteReflectionRepository,
-	loadOrCreateReflectionIdentity,
-	type ActiveGoalContextV1,
-	type EventWindowV1,
 } from "../agent/reflection";
 import {
-	ReflectionFeedbackSink,
 	type ActiveReflectionFeedbackCode,
+	ReflectionFeedbackSink,
 } from "./reflection-feedback";
 
 export type WhaleHallReflectionRuntime = {
@@ -51,7 +51,8 @@ export async function createWhaleHallReflectionRuntime(
 ): Promise<WhaleHallReflectionRuntime> {
 	const environment = options.environment ?? process.env;
 	const onError =
-		options.onError ?? ((error: unknown) => console.error("[reflection]", error));
+		options.onError ??
+		((error: unknown) => console.error("[reflection]", error));
 	const identity = loadOrCreateReflectionIdentity(
 		join(options.dataDirectory, "reflection-identity.v1.json"),
 	);
@@ -60,8 +61,7 @@ export async function createWhaleHallReflectionRuntime(
 	);
 	const teacherLock: OllamaModelLock = {
 		...WHALEHALL_TEACHER_MODEL_LOCK,
-		baseUrl:
-			options.teacherBaseUrl ?? WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
+		baseUrl: options.teacherBaseUrl ?? WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
 	};
 
 	let teacherVerified = false;
