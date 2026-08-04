@@ -1,0 +1,44 @@
+name: "❓ Question / consultation | 使用咨询"
+description: Ask a question about usage, compatibility, or integration | 使用、兼容性或集成咨询
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, tokens, or real local user data.
+        Security vulnerabilities must not be reported in a public issue.
+  - type: dropdown
+    id: question_type
+    attributes:
+      label: Question category | 问题类别
+      description: Select the category that best describes the question.
+      options:
+        - Usage / how-to | 使用方式
+        - Compatibility / integration | 兼容性或集成
+        - Build, packaging, or development | 构建、打包或开发
+        - Community / contribution | 社区或贡献
+        - Other | 其他
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question | 你的问题
+      description: Describe the question clearly and include the expected outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / background | 背景信息
+      description: Optional. Include environment, use case, relevant links, and what you already tried.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks | 提交前确认
+      options:
+        - label: I searched for an existing issue, discussion, or documentation.
+          required: true
+        - label: I did not include credentials or real sensitive local data.
+          required: true
