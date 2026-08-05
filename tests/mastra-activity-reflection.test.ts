@@ -4,10 +4,10 @@ import { resolve } from "node:path";
 import type { ActivityEventWorkerRequest } from "../src/agent/activity-event-worker";
 import {
 	ACTIVITY_REFLECTION_SYSTEM_PROMPT,
+	type ActivityReflectionModelOutput,
 	activityReflectionModelOutputSchema,
 	activityReflectionOutputToWorkerResponse,
 	createActivityReflectionPrompt,
-	type ActivityReflectionModelOutput,
 } from "../src/agent/activity-reflection-prompt";
 import { ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES } from "../src/agent/activity-reflection-skill-names";
 import { loadActivityReflectionNativeSkillContext } from "../src/agent/mastra-host/activity-reflection-skills";
@@ -459,18 +459,101 @@ describe("MastraActivityReflectionAnalyzer", () => {
 					requestId: rawRequest.request_id,
 					signalSegmentIds: ["segment-1"],
 					candidateActivities: ["development"],
-					userPrompt: expect.stringContaining("RAW_EVENT_JSON="),
+					userPrompt: expect.stringContaining(
+						"COMPRESSED_ACTIVITY_EVENTS_JSON=",
+					),
 				}),
 			}),
 		]);
 		const localPrompt = String(sidecarCalls[0]?.params.userPrompt);
 		expect(localPrompt).toContain("LOCAL_STATE_HINTS_JSON=");
 		expect(localPrompt).toContain("LOCAL_SIGNAL_INDEX_JSON=");
+		expect(localPrompt).toContain("ACTIVITY_CONTEXT_JSON=");
 		expect(localPrompt).toContain("private source text");
 		expect(localPrompt).toContain("private goal text");
 		expect(localPrompt).toContain("【最终输出合同】");
 		expect(localPrompt).toContain("analysis_summary、context_details");
 		expect(analyzer.hasPendingInvocation("not-a-real-invocation")).toBeFalse();
+	});
+
+	test("compresses every model-bound observation to time, tools, and message", () => {
+		const prompt = createActivityReflectionPrompt(requestFixture()).userPrompt;
+		const compressedLine = prompt
+			.split("\n")
+			.find((line) => line.startsWith("COMPRESSED_ACTIVITY_EVENTS_JSON="));
+		const contextLine = prompt
+			.split("\n")
+			.find((line) => line.startsWith("ACTIVITY_CONTEXT_JSON="));
+		expect(compressedLine).toBeDefined();
+		expect(contextLine).toBeDefined();
+		if (!compressedLine || !contextLine) {
+			throw new Error("Compressed activity prompt is incomplete.");
+		}
+		const compressed = JSON.parse(
+			compressedLine.slice("COMPRESSED_ACTIVITY_EVENTS_JSON=".length),
+		) as Array<Record<string, unknown>>;
+		expect(compressed).toHaveLength(3);
+		for (const event of compressed) {
+			expect(Object.keys(event).sort()).toEqual(["message", "time", "tools"]);
+		}
+		expect(compressed).toEqual([
+			{
+				time: "00:00:01-00:00:01",
+				tools: "WhaleHall 原生桌面观察器（application.foregroundChanged）",
+				message: null,
+			},
+			{
+				time: "00:00:01-00:00:01",
+				tools: "WhaleHall 编辑器观察器（editor.documentChanged）",
+				message: { language: "TypeScript", text: "private source text" },
+			},
+			{
+				time: "00:00:02-00:00:02",
+				tools: "WhaleHall 输入观察器（input.activityAggregated）",
+				message: null,
+			},
+		]);
+		expect(
+			JSON.parse(contextLine.slice("ACTIVITY_CONTEXT_JSON=".length)),
+		).toEqual({ active_goal: "private goal text" });
+		expect(prompt).not.toContain("RAW_EVENT_JSON=");
+		expect(prompt).not.toContain('"windowId":"sealed-window-1"');
+		expect(prompt).not.toContain('"source_window_id"');
+	});
+
+	test("uses a collector-provided observation range in compressed time", () => {
+		const request = requestFixture("compressed-range-window");
+		const rawWindow = request.raw_event as {
+			events: Array<Record<string, unknown>>;
+		};
+		rawWindow.events[2] = {
+			kind: "input.activityAggregated",
+			occurredAtMs: 9_999,
+			payload: {
+				bucketStartedAtMs: 1_200,
+				bucketEndedAtMs: 2_300,
+				keyCount: 13,
+			},
+		};
+		const compressedLine = createActivityReflectionPrompt(request)
+			.userPrompt.split("\n")
+			.find((line) => line.startsWith("COMPRESSED_ACTIVITY_EVENTS_JSON="));
+		expect(compressedLine).toBeDefined();
+		if (!compressedLine) {
+			throw new Error("Compressed activity prompt is incomplete.");
+		}
+		const compressed = JSON.parse(
+			compressedLine.slice("COMPRESSED_ACTIVITY_EVENTS_JSON=".length),
+		) as Array<Record<string, unknown>>;
+		expect(compressed[2]).toEqual({
+			time: "00:00:01-00:00:02",
+			tools: "WhaleHall 输入观察器（input.activityAggregated）",
+			message: {
+				bucketStartedAtMs: 1_200,
+				bucketEndedAtMs: 2_300,
+				keyCount: 13,
+			},
+		});
 	});
 
 	test("adds a local factual signal index without copying private payload values", () => {

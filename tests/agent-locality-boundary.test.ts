@@ -21,7 +21,9 @@ describe("local Agent production boundary", () => {
 		expect(clientConfiguration).toContain("REFLECTION_RELAY_COMPLETIONS_PATH");
 		expect(clientConfiguration).not.toContain("/v1/activity/analyze");
 		expect(activityPrompt).toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
-		expect(activityPrompt).toContain("RAW_EVENT_JSON");
+		expect(activityPrompt).toContain("COMPRESSED_ACTIVITY_EVENTS_JSON");
+		expect(activityPrompt).toContain("time、tools、message");
+		expect(activityPrompt).not.toContain("RAW_EVENT_JSON");
 		expect(
 			existsSync(join(repositoryRoot, "src/agent/activity-event-worker.ts")),
 		).toBeTrue();
@@ -57,7 +59,7 @@ describe("local Agent production boundary", () => {
 			"/v1/chat/completions",
 		]);
 		expect(relayServer).not.toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
-		expect(relayServer).not.toContain("RAW_EVENT_JSON");
+		expect(relayServer).not.toContain("COMPRESSED_ACTIVITY_EVENTS_JSON");
 		expect(relayServer).not.toContain(
 			"activityReflectionOutputToWorkerResponse",
 		);

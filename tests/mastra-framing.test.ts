@@ -113,7 +113,7 @@ describe("Mastra sidecar Content-Length framing", () => {
 					requestId: "activity-window-request-1",
 					signalSegmentIds: ["segment-1"],
 					candidateActivities: ["development"],
-					userPrompt: "RAW_EVENT_JSON={}",
+					userPrompt: "COMPRESSED_ACTIVITY_EVENTS_JSON=[]",
 				},
 			}),
 		).toBe(true);

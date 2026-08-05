@@ -180,7 +180,8 @@ describe("Mastra Node sidecar", () => {
 			requestId: "activity-window-without-skills",
 			signalSegmentIds: ["segment-1"],
 			candidateActivities: ["development"],
-			userPrompt: 'RAW_EVENT_JSON={"events":["synthetic only"]}',
+			userPrompt:
+				'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"synthetic only"}]',
 		});
 		expect(response).toMatchObject({
 			ok: true,
@@ -253,7 +254,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("runs client-owned raw activity reflection through a non-persistent Mastra workflow", async () => {
+	test("runs client-owned compressed activity reflection through a non-persistent Mastra workflow", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -266,7 +267,7 @@ describe("Mastra Node sidecar", () => {
 			signalSegmentIds: ["segment-1"],
 			candidateActivities: ["development"],
 			userPrompt:
-				'RAW_EVENT_JSON={"events":["private raw activity"]}\nOPTIONAL_CONTEXT_JSON={}',
+				'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"private raw activity"}]\nACTIVITY_CONTEXT_JSON={}',
 		});
 		expect(response).toMatchObject({
 			ok: true,

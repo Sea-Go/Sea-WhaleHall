@@ -390,7 +390,7 @@ describe("model relay forwarding", () => {
 				});
 			}) as unknown as typeof fetch,
 		});
-		const raw = ` {"model":"approved-model","messages":[{"role":"system","content":"客户端反思规则"},{"role":"user","content":"RAW_EVENT_JSON={\\"private\\":\\"raw activity\\"}"}],"stream":false}`;
+		const raw = ` {"model":"approved-model","messages":[{"role":"system","content":"客户端反思规则"},{"role":"user","content":"COMPRESSED_ACTIVITY_EVENTS_JSON=[{\\"time\\":\\"时间未知\\",\\"tools\\":\\"synthetic\\",\\"message\\":\\"raw activity\\"}]"}],"stream":false}`;
 
 		const first = await fixture.handler(
 			reflectionRequest(raw, "reflection-same-key"),
