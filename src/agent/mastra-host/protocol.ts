@@ -50,14 +50,14 @@ export interface RuntimeInitializeParams {
 }
 
 export interface RuntimeModelConfiguration {
-		provider: string;
-		modelId: string;
-		/**
-		 * A logical OpenAI-compatible base URL. The sidecar never opens this URL;
-		 * every request is relayed to the host through `model/relay.open`.
-		 */
-		baseUrl?: string;
-		supportsStructuredOutputs?: boolean;
+	provider: string;
+	modelId: string;
+	/**
+	 * A logical OpenAI-compatible base URL. The sidecar never opens this URL;
+	 * every request is relayed to the host through `model/relay.open`.
+	 */
+	baseUrl?: string;
+	supportsStructuredOutputs?: boolean;
 }
 
 export interface RuntimeInitializeResult {
@@ -143,6 +143,13 @@ export interface ActivityAnalysisStartParams {
 export interface ActivityReflectionAnalyzeParams {
 	invocationId: string;
 	requestId: string;
+	/** Client-derived IDs from the prompt's local signal index. They let the
+	 * structured schema forbid invented time segments without sending raw data
+	 * over a separate channel. */
+	signalSegmentIds: readonly string[];
+	/** Union of the candidate activities from this local signal index. The
+	 * per-window response schema uses it to rule out unrelated categories. */
+	candidateActivities: readonly string[];
 	/** Complete client-owned prompt. It may contain raw activity and never leaves
 	 * the local Bun/Sidecar process except inside the resulting model request. */
 	userPrompt: string;
@@ -299,10 +306,7 @@ export type SidecarHostRequest =
 	| RequestEnvelope<"model/relay.open", ModelRelayOpenParams>
 	| RequestEnvelope<"model/relay.abort", ModelRelayAbortParams>
 	| RequestEnvelope<
-			Exclude<
-				SidecarHostMethod,
-				"model/relay.open" | "model/relay.abort"
-			>,
+			Exclude<SidecarHostMethod, "model/relay.open" | "model/relay.abort">,
 			Record<string, unknown>
 	  >;
 

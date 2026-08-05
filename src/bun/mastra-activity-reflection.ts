@@ -44,7 +44,9 @@ export class MastraActivityReflectionAnalyzer implements ActivityEventAnalyzer {
 	private readonly timeoutMs: number;
 	private readonly pending = new Map<string, PendingActivityReflection>();
 
-	constructor(private readonly options: MastraActivityReflectionAnalyzerOptions) {
+	constructor(
+		private readonly options: MastraActivityReflectionAnalyzerOptions,
+	) {
 		this.timeoutMs = positiveSafeInteger(
 			options.timeoutMs ?? DEFAULT_MASTRA_ACTIVITY_REFLECTION_TIMEOUT_MS,
 		);
@@ -68,7 +70,10 @@ export class MastraActivityReflectionAnalyzer implements ActivityEventAnalyzer {
 			options.signal?.removeEventListener("abort", abort);
 			throw new ActivityEventWorkerClientError("request_timeout", true);
 		}
-		this.pending.set(invocationId, { request: structuredClone(request), controller });
+		this.pending.set(invocationId, {
+			request: structuredClone(request),
+			controller,
+		});
 		try {
 			const modelOutput = await this.options.sidecar.request<unknown>(
 				"reflection.analyze",
@@ -76,6 +81,8 @@ export class MastraActivityReflectionAnalyzer implements ActivityEventAnalyzer {
 					invocationId,
 					requestId: prompt.requestId,
 					userPrompt: prompt.userPrompt,
+					signalSegmentIds: prompt.signalSegmentIds,
+					candidateActivities: prompt.candidateActivities,
 				},
 				{
 					requestId: `reflection:${request.request_id}`,

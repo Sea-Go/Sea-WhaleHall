@@ -15,6 +15,7 @@ describe("local Agent production boundary", () => {
 		const activityPrompt = source("src/agent/activity-reflection-prompt.ts");
 		const dispatcher = source("src/bun/activity-analysis-dispatcher.ts");
 		const activityAgent = source("src/agent/mastra-host/agents.ts");
+		const activityRuntime = source("src/agent/mastra-host/runtime.ts");
 
 		expect(bunComposition).toContain("ActivityWindowDeliveryService");
 		expect(clientConfiguration).toContain("REFLECTION_RELAY_COMPLETIONS_PATH");
@@ -30,7 +31,14 @@ describe("local Agent production boundary", () => {
 		expect(dispatcher).not.toContain("raw_event");
 		expect(dispatcher).not.toContain("EventWindowV1");
 		expect(activityAgent).toContain("tools: {}");
-		expect(activityAgent).toContain("skills: activityReflectionNativeSkillPaths");
+		expect(activityAgent).toContain(
+			"skills: activityReflectionNativeSkillPaths",
+		);
+		expect(activityAgent).toContain("activityReflectionSkillCatalog");
+		expect(activityRuntime).toContain(
+			"loadActivityReflectionNativeSkillContext",
+		);
+		expect(activityRuntime).toContain('toolChoice: "none"');
 		expect(activityAgent).toContain("绝不请求、推断或复述原始活动窗口");
 	});
 
@@ -50,6 +58,8 @@ describe("local Agent production boundary", () => {
 		]);
 		expect(relayServer).not.toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
 		expect(relayServer).not.toContain("RAW_EVENT_JSON");
-		expect(relayServer).not.toContain("activityReflectionOutputToWorkerResponse");
+		expect(relayServer).not.toContain(
+			"activityReflectionOutputToWorkerResponse",
+		);
 	});
 });

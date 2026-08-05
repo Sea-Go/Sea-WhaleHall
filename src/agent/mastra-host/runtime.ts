@@ -8,6 +8,17 @@ import {
 	MAXIMUM_ACTIVITY_ANALYSIS_RESULTS,
 	serializedActivityAnalysisLength,
 } from "../../shared/activity-analysis-contract";
+import {
+	createActivityReflectionRuntimeOutputSchema,
+	activityReflectionModelOutputSchema,
+	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
+} from "../activity-reflection-prompt";
+import { loadActivityReflectionNativeSkillContext } from "./activity-reflection-skills";
+import {
+	activityReflectionWorkflowInputSchema,
+	type ActivityReflectionWorkflowDriverInput,
+	activityReflectionWorkflowOutcomeSchema,
+} from "./activity-reflection-workflow";
 import { createMastraAgentSet, type MastraAgentSet } from "./agents";
 import {
 	type CalendarSnapshot,
@@ -20,18 +31,6 @@ import {
 	HostMastraStorage,
 } from "./mastra-storage";
 import { ModelRelay } from "./model-relay";
-import {
-	type ActivityReflectionWorkflowDriverInput,
-	activityReflectionWorkflowOutcomeSchema,
-} from "./activity-reflection-workflow";
-import {
-	activityReflectionModelOutputSchema,
-	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
-} from "../activity-reflection-prompt";
-import {
-	ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES,
-	ACTIVITY_REFLECTION_NATIVE_SKILL_TOOL_NAMES,
-} from "../activity-reflection-skill-names";
 import {
 	type PlanningWorkflowClarification,
 	type PlanningWorkflowCompletion,
@@ -94,15 +93,6 @@ const defaultReflectionRelayBaseUrl =
 const maxConversationCharacters = 64 * 1024;
 const maxRetainedRuns = 256;
 const maxClarificationRounds = 3;
-const activityReflectionNativeSkillToolNames = new Set<string>(
-	ACTIVITY_REFLECTION_NATIVE_SKILL_TOOL_NAMES,
-);
-
-function activityReflectionSkillActivationName(args: unknown): string | null {
-	if (!isRecord(args) || typeof args.name !== "string") return null;
-	return args.name;
-}
-
 interface ConversationRunContext {
 	conversationId: string;
 	resourceId: string;
@@ -453,6 +443,13 @@ export class AgentHostRuntime {
 			"userPrompt",
 			MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
 		);
+		const workflowInput = activityReflectionWorkflowInputSchema.parse({
+			invocationId,
+			requestId,
+			userPrompt,
+			signalSegmentIds: params.signalSegmentIds,
+			candidateActivities: params.candidateActivities,
+		});
 		const workflow = this.requireAgents().activityReflectionWorkflow;
 		// Deliberately omit `runId`: in Mastra 1.55 a caller-supplied run ID
 		// asks storage to look for a durable snapshot even when persistence is
@@ -460,7 +457,7 @@ export class AgentHostRuntime {
 		const run = await workflow.createRun({ disableScorers: true });
 		const result = await this.hostRunContext.run(invocationId, () =>
 			run.start({
-				inputData: { invocationId, requestId, userPrompt },
+				inputData: workflowInput,
 				requestContext: new RequestContext(),
 			}),
 		);
@@ -1090,6 +1087,8 @@ export class AgentHostRuntime {
 		invocationId,
 		requestId,
 		userPrompt,
+		signalSegmentIds,
+		candidateActivities,
 		abortSignal,
 	}: ActivityReflectionWorkflowDriverInput) {
 		const agents = this.requireAgents();
@@ -1097,49 +1096,38 @@ export class AgentHostRuntime {
 		return relay.runInContext(
 			{ runId: invocationId, originatingRequestId: requestId },
 			async () => {
+				const runtimeOutputSchema = createActivityReflectionRuntimeOutputSchema(
+					signalSegmentIds,
+					candidateActivities,
+				);
+				const nativeSkillContext =
+					await loadActivityReflectionNativeSkillContext(
+						agents.activityReflectionSkillCatalog,
+					);
 				const result = await agents.activityReflection.generate(userPrompt, {
 					runId: invocationId,
 					abortSignal,
 					requestContext: new RequestContext(),
-					// Two local Skills may each require one agent-loop turn before
-					// the final structured result. Keep this finite for a small CPU
-					// model and leave no room for unrelated Tool use.
-					maxSteps: 5,
+					// Qwen's CPU Ollama endpoint does not honor the native Skill tool
+					// calls reliably. The rules above were already loaded locally via
+					// Mastra's `getSkill()` API, so make exactly one no-Tool model call.
+					maxSteps: 1,
+					toolChoice: "none",
+					// Reflection is a deterministic classification/aggregation task.
+					// Keep CPU Qwen sampling stable across retryable sealed windows.
+					modelSettings: { temperature: 0 },
+					context: [nativeSkillContext],
 					structuredOutput: {
-						schema: activityReflectionModelOutputSchema,
+						schema: runtimeOutputSchema,
 						errorStrategy: "strict",
-						// Qwen-compatible OpenAI endpoints commonly support function
-						// calls and JSON text independently, but not necessarily a
-						// native response_format together with tools. Mastra injects
-						// the schema locally while retaining its native Skill loop.
-						jsonPromptInjection: "system",
+						// This one-step call has no Tools, so native structured output
+						// can constrain CPU Ollama without the former tool/schema conflict.
+						jsonPromptInjection: false,
 					},
 				});
-				const skillCalls = result.steps.flatMap((step) => step.toolCalls);
-				const unexpectedToolCall = skillCalls.find(
-					(call) =>
-						!activityReflectionNativeSkillToolNames.has(call.payload.toolName),
+				return activityReflectionModelOutputSchema.parse(
+					runtimeOutputSchema.parse(result.object),
 				);
-				if (unexpectedToolCall) {
-					throw runtimeError(
-						"INTERNAL_ERROR",
-						`Activity reflection attempted to use forbidden Tool ${unexpectedToolCall.payload.toolName}.`,
-					);
-				}
-				for (const skillName of ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES) {
-					const wasActivated = skillCalls.some(
-						(call) =>
-							call.payload.toolName === "skill" &&
-							activityReflectionSkillActivationName(call.payload.args) === skillName,
-					);
-					if (!wasActivated) {
-						throw runtimeError(
-							"INTERNAL_ERROR",
-							`Activity reflection did not activate required Mastra Skill ${skillName}.`,
-						);
-					}
-				}
-				return activityReflectionModelOutputSchema.parse(result.object);
 			},
 		);
 	}

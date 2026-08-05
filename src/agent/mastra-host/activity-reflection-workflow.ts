@@ -1,5 +1,6 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import {
+	activityReflectionActivitySchema,
 	activityReflectionModelOutputSchema,
 	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
 	type ActivityReflectionModelOutput,
@@ -19,6 +20,14 @@ export const activityReflectionWorkflowInputSchema = z
 			.string()
 			.min(1)
 			.max(MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS),
+		signalSegmentIds: z
+			.array(z.string().regex(/^segment-[1-9][0-9]*$/u))
+			.min(1)
+			.max(64),
+		candidateActivities: z
+			.array(activityReflectionActivitySchema)
+			.min(1)
+			.max(12),
 	})
 	.strict();
 
