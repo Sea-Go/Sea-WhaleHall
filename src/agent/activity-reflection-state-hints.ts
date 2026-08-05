@@ -108,7 +108,7 @@ export function deriveActivityReflectionStateMarkers(
 	const rawEvents = rawActivityEvents(rawEvent);
 	// A presence boundary only annotates an already non-empty sealed window. It
 	// must never turn a standalone state signal into a model request/result.
-	if (!rawEvents.some((event) => presenceBoundary(event) === null)) return [];
+	if (!rawEvents.some(isOrdinaryActivityEvent)) return [];
 	const deduplicated = new Map<string, ActivityReflectionStateMarker>();
 	for (const event of rawEvents) {
 		const boundary = presenceBoundary(event);
@@ -131,6 +131,10 @@ export function deriveActivityReflectionStateMarkers(
 			left.started_at_ms - right.started_at_ms ||
 			left.action.localeCompare(right.action, "zh-CN"),
 	);
+}
+
+function isOrdinaryActivityEvent(event: RawActivityEvent): boolean {
+	return presenceBoundary(event) === null;
 }
 
 function rawActivityEvents(rawEvent: unknown): RawActivityEvent[] {

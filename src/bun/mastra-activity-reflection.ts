@@ -30,7 +30,6 @@ export interface MastraActivityReflectionAnalyzerOptions {
 }
 
 interface PendingActivityReflection {
-	request: ActivityEventWorkerRequest;
 	controller: AbortController;
 }
 
@@ -71,7 +70,6 @@ export class MastraActivityReflectionAnalyzer implements ActivityEventAnalyzer {
 			throw new ActivityEventWorkerClientError("request_timeout", true);
 		}
 		this.pending.set(invocationId, {
-			request: structuredClone(request),
 			controller,
 		});
 		const timeout = setTimeout(abort, this.timeoutMs);

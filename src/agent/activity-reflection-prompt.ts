@@ -242,19 +242,16 @@ export type ActivityReflectionPrompt = {
 export function createActivityReflectionPrompt(
 	request: ActivityEventWorkerRequest,
 ): ActivityReflectionPrompt {
-	const requestId = requireBoundedString(request.request_id, 128, "request ID");
+	const requestId = requireBoundedString(request.request_id, 128);
 	const promptContext = responseContext(request);
 	const compressedEvents = serializePromptJson(
 		compressActivityReflectionEvents(request.raw_event, promptContext.timeZone),
-		"compressed activity events",
 	);
 	const context = serializePromptJson(
 		compressActivityReflectionContext(request.context),
-		"activity context",
 	);
 	const stateHints = serializePromptJson(
 		deriveActivityReflectionStateHints(request.raw_event),
-		"local activity state hints",
 	);
 	const signalIndexValue = deriveActivityReflectionSignalIndex(
 		request.raw_event,
@@ -270,19 +267,12 @@ export function createActivityReflectionPrompt(
 		),
 	];
 	if (signalSegmentIds.length === 0) {
-		throw invalidRequest(
-			"Activity reflection window has no usable signal segment.",
-		);
+		throw invalidRequest();
 	}
 	if (candidateActivities.length === 0) {
-		throw invalidRequest(
-			"Activity reflection window has no candidate activity.",
-		);
+		throw invalidRequest();
 	}
-	const signalIndex = serializePromptJson(
-		signalIndexValue,
-		"local activity signal index",
-	);
+	const signalIndex = serializePromptJson(signalIndexValue);
 	const aggregation = clientAggregationInstruction(request.raw_event);
 	const userPrompt = [
 		`本次请求 ID：${requestId}`,
@@ -296,7 +286,7 @@ export function createActivityReflectionPrompt(
 		activityReflectionFinalOutputContract,
 	].join("\n");
 	if (userPrompt.length > MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS) {
-		throw invalidRequest("Activity reflection prompt exceeds its local limit.");
+		throw invalidRequest();
 	}
 	return { requestId, userPrompt, signalSegmentIds, candidateActivities };
 }
@@ -330,7 +320,7 @@ export function activityReflectionOutputToWorkerResponse(
 	const events = [...semanticEvents, ...stateEvents].sort(compareWorkerEvents);
 	return {
 		schema_version: "activity-event-analysis-response.v1",
-		request_id: requireBoundedString(request.request_id, 128, "request ID"),
+		request_id: requireBoundedString(request.request_id, 128),
 		events,
 		score: output.data.score,
 		score_reason: sanitizeScoreReason(
@@ -525,7 +515,7 @@ function responseContext(request: ActivityEventWorkerRequest): ResponseContext {
 					: undefined,
 				160,
 			) ??
-			requireBoundedString(request.request_id, 128, "request ID"),
+			requireBoundedString(request.request_id, 128),
 		windowStartedAtMs: nullableTimestamp(contract.window_started_at_ms),
 		windowEndedAtMs: nullableTimestamp(contract.window_ended_at_ms),
 		timeZone: validTimeZone(contract.time_zone),
@@ -1345,23 +1335,19 @@ function genericActionDescription(
 	}
 }
 
-function serializePromptJson(value: unknown, subject: string): string {
+function serializePromptJson(value: unknown): string {
 	try {
 		const serialized = JSON.stringify(value);
 		if (typeof serialized !== "string") throw new Error("not serializable");
 		return serialized;
 	} catch {
-		throw invalidRequest(`Activity reflection ${subject} is not serializable.`);
+		throw invalidRequest();
 	}
 }
 
-function requireBoundedString(
-	value: unknown,
-	maximum: number,
-	name: string,
-): string {
+function requireBoundedString(value: unknown, maximum: number): string {
 	if (typeof value !== "string" || value.length < 1 || value.length > maximum) {
-		throw invalidRequest(`Activity reflection ${name} is invalid.`);
+		throw invalidRequest();
 	}
 	return value;
 }
@@ -1396,7 +1382,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function invalidRequest(_message: string): ActivityEventWorkerClientError {
+function invalidRequest(): ActivityEventWorkerClientError {
 	return new ActivityEventWorkerClientError("invalid_request", false);
 }
 
