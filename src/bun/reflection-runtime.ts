@@ -72,6 +72,9 @@ export async function createWhaleHallReflectionRuntime(
 			authorizationToken: options.teacherAuthorizationToken,
 		});
 		teacherVerified = true;
+		// @whalehall-model-boundary-exception local-model-lock
+		// This pre-existing, lock-pinned fallback is not a configurable model
+		// role. Do not add new callers here; configured desktop calls use Mastra.
 		fallback = new OllamaJsonClient({
 			baseUrl: teacherLock.baseUrl,
 			allowedRemoteOrigins: options.teacherAllowedRemoteOrigins,

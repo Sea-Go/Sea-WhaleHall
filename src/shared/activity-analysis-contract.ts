@@ -8,6 +8,16 @@ export const MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS = 48 * 1024;
 export const MAXIMUM_ACTIVITY_ANALYSIS_RESULT_CHARACTERS = 16 * 1024;
 
 export type ActivityAnalysisWorkerEvent = {
+	/**
+	 * Client-derived human-readable time range. Legacy receipts may omit this
+	 * field; every new client-owned reflection result includes it.
+	 */
+	time?: string;
+	/**
+	 * Chinese, reviewable aggregation statement such as “推测：正在进行编程”.
+	 * Legacy receipts may omit this field during the one-way migration.
+	 */
+	action?: string;
 	source_event_ids: string[];
 	activity: string;
 	goal_relevance: string;
@@ -52,16 +62,9 @@ function isActivityAnalysisWorkerEvent(
 ): value is ActivityAnalysisWorkerEvent {
 	return (
 		isRecord(value) &&
-		hasExactKeys(value, [
-			"source_event_ids",
-			"activity",
-			"goal_relevance",
-			"confidence",
-			"reason_codes",
-			"evidence",
-			"started_at_ms",
-			"ended_at_ms",
-		]) &&
+		hasActivityAnalysisWorkerEventKeys(value) &&
+		(value.time === undefined || isBoundedString(value.time, 96, false)) &&
+		(value.action === undefined || isReviewableChineseAction(value.action)) &&
 		Array.isArray(value.source_event_ids) &&
 		value.source_event_ids.length >= 1 &&
 		value.source_event_ids.length <= 32 &&
@@ -78,6 +81,34 @@ function isActivityAnalysisWorkerEvent(
 		value.evidence.every((item) => isBoundedString(item, 240, true)) &&
 		isNullableTimestamp(value.started_at_ms) &&
 		isNullableTimestamp(value.ended_at_ms)
+	);
+}
+
+function hasActivityAnalysisWorkerEventKeys(
+	value: Record<string, unknown>,
+): boolean {
+	const required = [
+		"source_event_ids",
+		"activity",
+		"goal_relevance",
+		"confidence",
+		"reason_codes",
+		"evidence",
+		"started_at_ms",
+		"ended_at_ms",
+	];
+	const keys = Object.keys(value);
+	return (
+		required.every((key) => key in value) &&
+		keys.every((key) => required.includes(key) || key === "time" || key === "action")
+	);
+}
+
+function isReviewableChineseAction(value: unknown): value is string {
+	return (
+		isBoundedString(value, 80, false) &&
+		/^(确定：|推测：|不确定：)/u.test(value) &&
+		/[\u3400-\u9fff]/u.test(value.slice(3))
 	);
 }
 

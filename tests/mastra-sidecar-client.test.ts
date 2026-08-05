@@ -128,6 +128,10 @@ function createHarness(behaviors: readonly FakeBehavior[]): {
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
 			client: { name: "sidecar-client-test", version: "1" },
 			model: { provider: "test", modelId: "test-model" },
+			reflectionModel: {
+				provider: "test-reflection",
+				modelId: "test-reflection-model",
+			},
 		},
 		onHostCall: async () => ({}),
 		onRunEvent: () => {},

@@ -41,7 +41,15 @@ export interface RuntimeInitializeParams {
 		name: string;
 		version: string;
 	};
-	model: {
+	model: RuntimeModelConfiguration;
+	/**
+	 * Separate logical provider for the sealed-window reflection role. Its key
+	 * remains in Bun; the Sidecar only creates the already-complete model body.
+	 */
+	reflectionModel: RuntimeModelConfiguration;
+}
+
+export interface RuntimeModelConfiguration {
 		provider: string;
 		modelId: string;
 		/**
@@ -50,7 +58,6 @@ export interface RuntimeInitializeParams {
 		 */
 		baseUrl?: string;
 		supportsStructuredOutputs?: boolean;
-	};
 }
 
 export interface RuntimeInitializeResult {
@@ -132,6 +139,15 @@ export interface ActivityAnalysisStartParams {
 	analyses: readonly ActivityAnalysisWorkerResult[];
 }
 
+/** A local, no-persistence model invocation for one sealed activity window. */
+export interface ActivityReflectionAnalyzeParams {
+	invocationId: string;
+	requestId: string;
+	/** Complete client-owned prompt. It may contain raw activity and never leaves
+	 * the local Bun/Sidecar process except inside the resulting model request. */
+	userPrompt: string;
+}
+
 export interface RunTargetParams {
 	runId: string;
 }
@@ -193,6 +209,7 @@ export type AgentHostMethod =
 	| "conversation.start"
 	| "planning.start"
 	| "activity.start"
+	| "reflection.analyze"
 	| "planning.answer"
 	| "agent.approveTool"
 	| "agent.declineTool"
@@ -240,6 +257,7 @@ export type AgentHostRequest =
 	| RequestEnvelope<"conversation.start", ConversationStartParams>
 	| RequestEnvelope<"planning.start", PlanningStartParams>
 	| RequestEnvelope<"activity.start", ActivityAnalysisStartParams>
+	| RequestEnvelope<"reflection.analyze", ActivityReflectionAnalyzeParams>
 	| RequestEnvelope<"planning.answer", PlanningAnswerParams>
 	| RequestEnvelope<"agent.approveTool", AgentToolDecisionParams>
 	| RequestEnvelope<"agent.declineTool", AgentToolDecisionParams>
@@ -281,7 +299,10 @@ export type SidecarHostRequest =
 	| RequestEnvelope<"model/relay.open", ModelRelayOpenParams>
 	| RequestEnvelope<"model/relay.abort", ModelRelayAbortParams>
 	| RequestEnvelope<
-			Exclude<SidecarHostMethod, "model/relay.open" | "model/relay.abort">,
+			Exclude<
+				SidecarHostMethod,
+				"model/relay.open" | "model/relay.abort"
+			>,
 			Record<string, unknown>
 	  >;
 
@@ -384,6 +405,7 @@ export const AGENT_HOST_METHODS: readonly AgentHostMethod[] = [
 	"conversation.start",
 	"planning.start",
 	"activity.start",
+	"reflection.analyze",
 	"planning.answer",
 	"agent.approveTool",
 	"agent.declineTool",

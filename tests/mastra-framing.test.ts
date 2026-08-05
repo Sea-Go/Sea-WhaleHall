@@ -7,6 +7,7 @@ import {
 } from "../src/agent/mastra-host/framing";
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
+	isAgentHostRequest,
 	isAgentRunEventFrame,
 	isSidecarHostRequest,
 } from "../src/agent/mastra-host/protocol";
@@ -76,6 +77,27 @@ describe("Mastra sidecar Content-Length framing", () => {
 			method: "system/open-shell",
 			params: {},
 		})).toBe(false);
+		expect(isSidecarHostRequest({
+			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+			type: "request",
+			requestId: "host-3",
+			method: "reflection/worker.analyze",
+			params: {
+				invocationId: "activity-reflection-window-1",
+				ownerRunId: "activity-reflection-window-1",
+			},
+		})).toBe(false);
+		expect(isAgentHostRequest({
+			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+			type: "request",
+			requestId: "reflection-1",
+			method: "reflection.analyze",
+			params: {
+				invocationId: "activity-reflection-window-1",
+				requestId: "activity-window-request-1",
+				userPrompt: "RAW_EVENT_JSON={}",
+			},
+		})).toBe(true);
 
 		const completed = {
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,

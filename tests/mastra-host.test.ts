@@ -168,6 +168,31 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
+	test("rejects a reflection result that bypasses either required native Skill", async () => {
+		const host = new FakeHost({ reflectionSkipsRequiredSkills: true });
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+
+		const response = await harness.request("reflection.analyze", {
+			invocationId: "activity-reflection-without-skills",
+			requestId: "activity-window-without-skills",
+			userPrompt: 'RAW_EVENT_JSON={"events":["synthetic only"]}',
+		});
+		expect(response).toMatchObject({
+			ok: false,
+			error: {
+				code: "INTERNAL_ERROR",
+				message: expect.stringContaining(
+					"Activity reflection did not activate required Mastra Skill",
+				),
+			},
+		});
+		expect(host.modelBodies).toHaveLength(1);
+		await harness.shutdown();
+	}, 30_000);
+
 	test("runs activity analysis with Worker results only and never calls a local Tool", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
@@ -219,6 +244,54 @@ describe("Mastra Node sidecar", () => {
 		const modelInput = JSON.stringify(host.modelBodies[0]?.messages);
 		expect(modelInput).toContain("Worker-produced evidence");
 		expect(modelInput).not.toContain("raw_event");
+		await harness.shutdown();
+	}, 30_000);
+
+	test("runs client-owned raw activity reflection through a non-persistent Mastra workflow", async () => {
+		const host = new FakeHost();
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+
+		const response = await harness.request("reflection.analyze", {
+			invocationId: "activity-reflection-window-1",
+			requestId: "activity-window-request-1",
+			userPrompt:
+				'RAW_EVENT_JSON={"events":["private raw activity"]}\nOPTIONAL_CONTEXT_JSON={}',
+		});
+		expect(response).toMatchObject({
+			ok: true,
+			result: {
+				events: [
+					{ action: "推测：正在进行编程", activity: "development" },
+				],
+				score: 0.7,
+			},
+		});
+		expect(host.calls).toContain("model/relay.open");
+		const reflectionBodies = host.modelBodies;
+		expect(reflectionBodies).toHaveLength(2);
+		const initialReflectionBody = reflectionBodies[0];
+		const reflectionBody = reflectionBodies.at(-1);
+		expect(JSON.stringify(initialReflectionBody?.messages)).toContain(
+			"# Available Skills",
+		);
+		expect(JSON.stringify(initialReflectionBody?.messages)).toContain(
+			"activity-reflection-analysis",
+		);
+		expect(JSON.stringify(initialReflectionBody?.messages)).toContain(
+			"activity-reflection-scoring",
+		);
+		expect(JSON.stringify(initialReflectionBody?.tools)).toContain('"name":"skill"');
+		expect(JSON.stringify(reflectionBody?.messages)).toContain(
+			"private raw activity",
+		);
+		expect(JSON.stringify(reflectionBody?.messages)).toContain("# 活动反思分析");
+		expect(JSON.stringify(reflectionBody?.messages)).toContain("# 活动反思评分");
+		expect(reflectionBody?.stream).not.toBe(true);
+		expect(host.workflowSnapshotCalls).toEqual([]);
+
 		await harness.shutdown();
 	}, 30_000);
 
@@ -654,11 +727,16 @@ class SidecarHarness {
 		const response = await this.request("runtime.initialize", {
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
 			client: { name: "mastra-host-test", version: "1" },
-			model: {
+		model: {
 				provider: "whalehall-test",
 				modelId: "test-chat-model",
-				supportsStructuredOutputs: true,
-			},
+			supportsStructuredOutputs: true,
+		},
+		reflectionModel: {
+			provider: "whalehall-activity-reflection",
+			modelId: "test-reflection-model",
+			supportsStructuredOutputs: true,
+		},
 		});
 		expect(response).toMatchObject({
 			ok: true,
@@ -820,6 +898,7 @@ class FakeHost {
 	lastPlanningSave: Record<string, unknown> | null = null;
 	lastMemoryAppend: Record<string, unknown> | null = null;
 	private planningModelCalls = 0;
+	private reflectionModelCalls = 0;
 	private toolModelCalls = 0;
 	private calendarQueryCalls = 0;
 	private planningValidationCalls = 0;
@@ -842,6 +921,7 @@ class FakeHost {
 			toolApprovalScenario?: boolean;
 			readToolScenario?: boolean;
 			planningConflictScenario?: boolean;
+			reflectionSkipsRequiredSkills?: boolean;
 			memoryMessages?: readonly {
 				role: "user" | "assistant";
 				content: string;
@@ -1099,6 +1179,102 @@ class FakeHost {
 			Buffer.from(params.request.bodyBase64 ?? "", "base64").toString("utf8"),
 		) as Record<string, unknown>;
 		this.modelBodies.push(body);
+		if (params.provider === "whalehall-activity-reflection") {
+			this.reflectionModelCalls += 1;
+			if (
+				this.reflectionModelCalls === 1 &&
+				!this.options.reflectionSkipsRequiredSkills
+			) {
+				await send(
+					successResponse(request.requestId, {
+						relayId: params.relayId,
+						status: 200,
+						headers: { "content-type": "application/json" },
+						completed: true,
+						bodyBase64: Buffer.from(
+							JSON.stringify({
+								id: "chatcmpl-reflection-skills",
+								object: "chat.completion",
+								created: 1,
+								model: params.modelId,
+								choices: [
+									{
+										index: 0,
+										message: {
+											role: "assistant",
+											tool_calls: [
+												{
+													id: "reflection-analysis-skill",
+													type: "function",
+													function: {
+														name: "skill",
+														arguments: JSON.stringify({
+															name: "activity-reflection-analysis",
+														}),
+													},
+												},
+												{
+													id: "reflection-scoring-skill",
+													type: "function",
+													function: {
+														name: "skill",
+														arguments: JSON.stringify({
+															name: "activity-reflection-scoring",
+														}),
+													},
+												},
+											],
+										},
+										finish_reason: "tool_calls",
+									},
+								],
+							}),
+						).toString("base64"),
+					}),
+				);
+				return;
+			}
+			const content = JSON.stringify({
+				events: [
+					{
+						action: "推测：正在进行编程",
+						activity: "development",
+						goal_relevance: "direct",
+						confidence: 0.7,
+						reason_codes: ["fixture"],
+						evidence: ["测试证据"],
+						started_at_ms: null,
+						ended_at_ms: null,
+					},
+				],
+				score: 0.7,
+				score_reason: "测试反思",
+			});
+			await send(
+				successResponse(request.requestId, {
+					relayId: params.relayId,
+					status: 200,
+					headers: { "content-type": "application/json" },
+					completed: true,
+					bodyBase64: Buffer.from(
+						JSON.stringify({
+							id: "chatcmpl-reflection",
+							object: "chat.completion",
+							created: 1,
+							model: params.modelId,
+							choices: [
+								{
+									index: 0,
+									message: { role: "assistant", content },
+									finish_reason: "stop",
+								},
+							],
+						}),
+					).toString("base64"),
+				}),
+			);
+			return;
+		}
 		await send(
 			successResponse(request.requestId, {
 				relayId: params.relayId,

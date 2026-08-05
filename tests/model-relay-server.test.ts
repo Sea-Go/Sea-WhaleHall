@@ -21,8 +21,11 @@ import {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const personalRelayKey = ["whk", "fixture", "relay"].join("_");
+const reflectionKeyId = "whref_0123456789abcdef0123456789abcdef";
+const reflectionRelayKey = `${reflectionKeyId}.fixture_reflection_secret_0123456789`;
 let passwordHash = "";
 let agentKeyHash = "";
+let reflectionKeyHash = "";
 
 beforeAll(async () => {
 	passwordHash = await createScryptPasswordHash(
@@ -33,6 +36,9 @@ beforeAll(async () => {
 	);
 	agentKeyHash = await createScryptPasswordHash(personalRelayKey, {
 		salt: new Uint8Array(16).fill(9),
+	});
+	reflectionKeyHash = await createScryptPasswordHash(reflectionRelayKey, {
+		salt: new Uint8Array(16).fill(10),
 	});
 });
 
@@ -69,6 +75,8 @@ function createFixture(
 			initials: "测试",
 			passwordHash,
 			agentKeyHash,
+			reflectionKeyId,
+			reflectionKeyHash,
 		},
 	]);
 	const sessions = new InMemorySessionStore();
@@ -114,6 +122,23 @@ function chatRequest(
 		headers: {
 			authorization: `Bearer ${accessToken}`,
 			"x-whalehall-agent-key": personalRelayKey,
+			"content-type": "application/json",
+			"idempotency-key": idempotencyKey,
+			...extraHeaders,
+		},
+		body,
+	});
+}
+
+function reflectionRequest(
+	body: string,
+	idempotencyKey = "reflection-1",
+	extraHeaders: Record<string, string> = {},
+): Request {
+	return new Request("https://relay.example.test/v1/activity/completions", {
+		method: "POST",
+		headers: {
+			"x-whalehall-reflection-key": reflectionRelayKey,
 			"content-type": "application/json",
 			"idempotency-key": idempotencyKey,
 			...extraHeaders,
@@ -241,6 +266,8 @@ describe("model relay forwarding", () => {
 				initials: "测试",
 				passwordHash,
 				agentKeyHash,
+				reflectionKeyId,
+				reflectionKeyHash,
 			},
 			{
 				id: "account-2",
@@ -249,6 +276,8 @@ describe("model relay forwarding", () => {
 				initials: "二",
 				passwordHash,
 				agentKeyHash: secondAgentKeyHash,
+				reflectionKeyId: "whref_11111111111111111111111111111111",
+				reflectionKeyHash,
 			},
 		]);
 		const handler = createModelRelayHandler(baseConfig(), {
@@ -342,6 +371,89 @@ describe("model relay forwarding", () => {
 		expect(records[0]?.responseBody).toEqual(received);
 		expect(records[0]?.subject).toBe("account-1");
 		expect(records[0]?.state).toBe("completed");
+	});
+
+	test("forwards a reflection model request transiently without storing or interpreting activity data", async () => {
+		let upstreamCalls = 0;
+		const seen: { body?: string; headers?: Headers } = {};
+		const fixture = createFixture({
+			fetch: (async (
+				_input: Parameters<typeof fetch>[0],
+				init?: Parameters<typeof fetch>[1],
+			) => {
+				upstreamCalls += 1;
+				seen.body = await new Response(init?.body).text();
+				seen.headers = new Headers(init?.headers);
+				return Response.json({
+					id: "activity-model-result",
+					choices: [{ message: { content: "{}" } }],
+				});
+			}) as unknown as typeof fetch,
+		});
+		const raw = ` {"model":"approved-model","messages":[{"role":"system","content":"客户端反思规则"},{"role":"user","content":"RAW_EVENT_JSON={\\"private\\":\\"raw activity\\"}"}],"stream":false}`;
+
+		const first = await fixture.handler(
+			reflectionRequest(raw, "reflection-same-key"),
+		);
+		const second = await fixture.handler(
+			reflectionRequest(raw, "reflection-same-key"),
+		);
+
+		expect(first.status).toBe(200);
+		expect(second.status).toBe(200);
+		expect(seen.body).toBe(raw);
+		expect(seen.headers?.get("authorization")).toBe(
+			"Bearer provider-secret-key-for-tests",
+		);
+		expect(seen.headers?.has("x-whalehall-reflection-key")).toBeFalse();
+		expect(seen.headers?.has("x-whalehall-agent-key")).toBeFalse();
+		expect(seen.headers?.get("idempotency-key")).toBe("reflection-same-key");
+		expect(upstreamCalls).toBe(2);
+		expect(fixture.records.snapshot()).toEqual([]);
+		expect(first.headers.get("cache-control")).toBe("no-store");
+	});
+
+	test("requires only the provisioned reflection key and rejects streaming or chat credentials", async () => {
+		let upstreamCalls = 0;
+		const fixture = createFixture({
+			fetch: (async () => {
+				upstreamCalls += 1;
+				return Response.json({ ok: true });
+			}) as unknown as typeof fetch,
+		});
+		const body = JSON.stringify({ model: "approved-model", messages: [] });
+		const missing = await fixture.handler(
+			new Request("https://relay.example.test/v1/activity/completions", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"idempotency-key": "missing-reflection-key",
+				},
+				body,
+			}),
+		);
+		const bearer = await fixture.handler(
+			reflectionRequest(body, "reflection-with-bearer", {
+				authorization: "Bearer not-a-session-token",
+			}),
+		);
+		const agentKey = await fixture.handler(
+			reflectionRequest(body, "reflection-with-agent-key", {
+				"x-whalehall-agent-key": personalRelayKey,
+			}),
+		);
+		const streaming = await fixture.handler(
+			reflectionRequest(
+				JSON.stringify({ model: "approved-model", messages: [], stream: true }),
+				"reflection-streaming",
+			),
+		);
+
+		expect(missing.status).toBe(401);
+		expect(bearer.status).toBe(401);
+		expect(agentKey.status).toBe(401);
+		expect(streaming.status).toBe(400);
+		expect(upstreamCalls).toBe(0);
 	});
 
 	test("replays a completed non-stream response by subject and key without a second provider request", async () => {

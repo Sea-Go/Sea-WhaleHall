@@ -13,12 +13,14 @@ import type {
 export class InMemoryUserStore implements UserStore {
 	private readonly byId = new Map<string, RelayUser>();
 	private readonly byEmail = new Map<string, RelayUser>();
+	private readonly byReflectionKeyId = new Map<string, RelayUser>();
 
 	constructor(users: readonly RelayUser[]) {
 		for (const user of users) {
 			const value = cloneUser(user);
 			this.byId.set(value.id, value);
 			this.byEmail.set(value.email.trim().toLowerCase(), value);
+			this.byReflectionKeyId.set(value.reflectionKeyId, value);
 		}
 	}
 
@@ -29,6 +31,11 @@ export class InMemoryUserStore implements UserStore {
 
 	async findById(id: string): Promise<RelayUser | null> {
 		const user = this.byId.get(id);
+		return user ? cloneUser(user) : null;
+	}
+
+	async findByReflectionKeyId(reflectionKeyId: string): Promise<RelayUser | null> {
+		const user = this.byReflectionKeyId.get(reflectionKeyId);
 		return user ? cloneUser(user) : null;
 	}
 }

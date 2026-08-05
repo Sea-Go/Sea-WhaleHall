@@ -15,12 +15,34 @@ flowchart LR
 
 ## 与 Reflection / Timeline v2 的关系
 
-本地 Mastra 是用户主动发起的对话与规划编排层，不替代现有的行为采集、
-Reflection 或 Timeline v2。`LocalToolClient` 继续通过 JSONL 驱动 Rust Local
-Tool Host；EventJournal 继续提供 durable cursor replay；Timeline v2 继续使用
-deterministic cold start、经 manifest 校验的 ModernBERT 分类以及本地固定
-`qwen3:4b` 生成带引用的 hypothesis。它们都不是远端 Agent，也不会通过
-model relay 恢复对话或计划。
+Mastra 不接管行为采集、自然窗口封闭或 Timeline v2 的确定性规则，但它现在是
+两个可配置模型角色的唯一编排边界。`agent` 继续由 Mastra Agent 通过 model relay
+调用；`reflection` 则由无持久化的 `activity-reflection` Workflow 和仅含 Mastra 原生本地
+Skill 元工具的 Agent 使用客户端构造的完整 prompt 调用通用 relay。
+
+```mermaid
+flowchart LR
+  Window["已封闭活动窗口"] --> Bridge["Bun: 完整 prompt、时间片/分数校验"]
+  Bridge -->|"完整本地 prompt"| Sidecar["Mastra Workflow + 原生本地 Skills"]
+  Sidecar -->|"OpenAI-compatible body"| Bridge
+  Bridge -->|"reflection key"| Relay["通用 CPU model relay"]
+  Relay -->|"原样转发"| Qwen["CPU qwen3:1.7b"]
+  Qwen --> Relay --> Bridge
+```
+
+Sidecar 是客户端的一部分：它会在一次调用的内存中看到完整 `userPrompt`，并用
+Mastra 生成 OpenAI-compatible body；它不接触 relay key、bearer、上游凭据或 Renderer。
+Workflow 不创建可恢复 Agent run、不注册产品 Tool，也不保存 snapshot；reflection Agent
+仅允许 Mastra 为两个打包 `SKILL.md` 提供的本地只读 `skill`、`skill_read`、`skill_search` 元工具，
+并保持未注册，避免 Mastra durable agent-loop 写入原始 prompt。Bun 将模型 JSON 本地转换为
+可核对的中文 `time + action` 事件、校验分数后，才写入 durable score ledger 并触发后台
+activity Agent。
+
+`LocalToolClient` 继续通过 JSONL 驱动 Rust Local Tool Host；EventJournal 继续
+提供 durable cursor replay；Timeline v2 继续使用 deterministic cold start、经
+manifest 校验的 ModernBERT 分类以及本地固定 `qwen3:4b` 生成带引用的 hypothesis。
+这些本地、锁定版本的旧推理组件不是 `config.yaml` 模型角色，不能作为新模型调用的
+入口；其单独的迁移边界见 `docs/MODEL_CALL_BOUNDARY.md`。
 
 两条本地流水线共享 Bun 的生命周期和账号清理屏障，但状态所有权彼此隔离：
 Mastra 的 conversation、workflow、审批与权威日历进入字段加密的 Agent
@@ -38,8 +60,9 @@ Vault Broker 负责敏感 observation content；新增的 credential helper 只�
 
 - React 不导入 Mastra、AI SDK、数据库、Rust 协议或 native API；Renderer 不提交 `userId`。
 - Sidecar 不接触 access token、refresh token、厂商 API Key或 OS 凭据库，不监听 HTTP 端口，也不启用 Mastra Server、Studio、Cloud 或遥测。
-- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。模型 relay 只接受同一账号的短期 bearer 加个人 relay key。
-- 远端不添加 system prompt、不拼接历史、不保存可恢复会话状态、不执行 Tool，也没有读取历史的接口。
+- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。聊天/下一步 Agent relay 要求同一账号的短期 bearer 加个人 relay key；独立 reflection route 只接受 owner-provisioned reflection key。
+- `reflection.analyze` 协议包含由 Bun 生成的完整 `userPrompt` 和 opaque invocation ID；它只在本地 Bun/Sidecar 内存中流转。原始窗口、模型输出、事件和分数都不得回传 Renderer 或 Agent Tool。
+- 远端 relay 不添加 system prompt、不聚合事件、不格式化时间/action、不计算分数、不保存反思请求/响应、不执行 Tool，也没有读取历史的接口。
 - Rust Local Tool Host 继续拥有传感器和本地能力。首版 Mastra Agent 不注册 browser、accessibility、activity、cleanup 或完整 Rust Tool catalogue。
 
 ## 本地运行时
@@ -49,11 +72,11 @@ Vault Broker 负责敏感 observation content；新增的 credential helper 只�
 - `@mastra/core@1.55.0`
 - `@mastra/memory@1.24.0`
 - `@ai-sdk/openai-compatible@3.0.20`
-- `zod@4.1.12`
+- `zod@4.4.3`
 
 打包使用 Node `22.18.0`。`scripts/node-runtime-manifest.ts` 固定官方归档 URL 和 SHA-256；缓存命中仍重新校验，随后只提取 `node[.exe]`。`scripts/build-agent-host.ts` 使用这个二进制检查生成的 Sidecar，而不是依赖用户 PATH 中的 Node。
 
-Sidecar 与 Bun 使用双向 `Content-Length` JSON framing：单帧上限 16 MiB，模型响应块上限 64 KiB。每个运行事件带严格递增 sequence 和版本；未知消息、重复终态、倒序事件或超限帧都会 fail closed。正常取消由 Bun 先按 `runId` 直接中止模型 relay，再通知 Sidecar；这条路径不等待 provider 响应头。Sidecar 崩溃或协议失败时，Bun 先中止全部 relay，再把相关运行标记为中断，并按 1/5/15 秒退避重启。已持久化的澄清 Workflow 和待审批状态仍可恢复。恢复审批时只有用户再次明确批准，Bun 才发起一次绑定参数的本地执行尝试；审批经原子消费后不自动重放，因此这是防重复的 at-most-once 语义，不是跨崩溃 exactly-once。
+Sidecar 与 Bun 使用双向 `Content-Length` JSON framing：单帧上限 16 MiB，模型响应块上限 64 KiB。每个运行事件带严格递增 sequence 和版本；未知消息、重复终态、倒序事件或超限帧都会 fail closed。入站 host request 保持有序，但 reverse response 与 relay frame 会立即处理，避免 Workflow 在等待 Bun 回执时发生协议死锁。正常取消由 Bun 先按 `runId` 直接中止模型 relay，再通知 Sidecar；这条路径不等待 provider 响应头。Sidecar 崩溃或协议失败时，Bun 先中止全部 relay，再把相关运行标记为中断，并按 1/5/15 秒退避重启。已持久化的澄清 Workflow 和待审批状态仍可恢复。恢复审批时只有用户再次明确批准，Bun 才发起一次绑定参数的本地执行尝试；审批经原子消费后不自动重放，因此这是防重复的 at-most-once 语义，不是跨崩溃 exactly-once。
 
 ## 本地状态和加密
 
@@ -98,6 +121,7 @@ Bun 在模型后验证 schema、引用、日期、IANA 时区、时长、截止�
 - `POST /v1/auth/sessions/refresh`
 - `DELETE /v1/auth/sessions/current`
 - `GET /v1/auth/me`
+- `POST /v1/activity/completions`
 - `POST /v1/chat/completions`
 
 Chat endpoint 同时验证 bearer subject 和该 subject 的 scrypt `agentKeyHash`，拒绝
@@ -106,6 +130,10 @@ body/header 中的自报身份与供应商凭据，执行 16 MiB 大小限制、
 loopback。SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，
 流式中断不会续传。部署、数据保留与多实例存储说明见
 `deploy/home-cloud/model-relay/README.md`。
+
+Reflection endpoint 只接受 `X-WhaleHall-Reflection-Key`，拒绝 bearer 与 agent key，
+只允许非流式请求。它验证 key 的 scrypt hash、执行模型 allowlist 和限流后，原样转发到
+相同 CPU-only loopback；不创建 request/response record，也不理解 prompt、事件或分数。
 
 ## 本地联调和验证
 

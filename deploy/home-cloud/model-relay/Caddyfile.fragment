@@ -4,10 +4,11 @@
 #
 # The exact route split is intentional:
 #   /v1/activity/analyze  -> existing activity Worker (unchanged)
+#   /v1/activity/completions -> this native relay; client-owned prompt/output
 #   /v1/auth/...          -> this native relay
 #   /v1/chat/completions  -> this native relay
 
-@whalehall_model_relay path /v1/auth/* /v1/chat/completions
+@whalehall_model_relay path /v1/auth/* /v1/activity/completions /v1/chat/completions
 handle @whalehall_model_relay {
 	reverse_proxy 127.0.0.1:8787
 }

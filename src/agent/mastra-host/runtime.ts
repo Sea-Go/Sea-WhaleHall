@@ -21,6 +21,18 @@ import {
 } from "./mastra-storage";
 import { ModelRelay } from "./model-relay";
 import {
+	type ActivityReflectionWorkflowDriverInput,
+	activityReflectionWorkflowOutcomeSchema,
+} from "./activity-reflection-workflow";
+import {
+	activityReflectionModelOutputSchema,
+	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
+} from "../activity-reflection-prompt";
+import {
+	ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES,
+	ACTIVITY_REFLECTION_NATIVE_SKILL_TOOL_NAMES,
+} from "../activity-reflection-skill-names";
+import {
 	type PlanningWorkflowClarification,
 	type PlanningWorkflowCompletion,
 	type PlanningWorkflowDriverInput,
@@ -34,6 +46,7 @@ import {
 import {
 	type ActivityAnalysisStartParams,
 	type ActivityAnalysisWorkerResult,
+	type ActivityReflectionAnalyzeParams,
 	AGENT_HOST_METHODS,
 	AGENT_HOST_PROTOCOL_VERSION,
 	AGENT_HOST_SERVICE,
@@ -76,9 +89,19 @@ import {
 } from "./transport";
 
 const defaultRelayBaseUrl = "https://model-relay.whalehall.invalid/v1";
+const defaultReflectionRelayBaseUrl =
+	"https://activity-relay.whalehall.invalid/v1";
 const maxConversationCharacters = 64 * 1024;
 const maxRetainedRuns = 256;
 const maxClarificationRounds = 3;
+const activityReflectionNativeSkillToolNames = new Set<string>(
+	ACTIVITY_REFLECTION_NATIVE_SKILL_TOOL_NAMES,
+);
+
+function activityReflectionSkillActivationName(args: unknown): string | null {
+	if (!isRecord(args) || typeof args.name !== "string") return null;
+	return args.name;
+}
 
 interface ConversationRunContext {
 	conversationId: string;
@@ -124,6 +147,7 @@ export class AgentHostRuntime {
 	private readonly onShutdownRequested: () => void;
 	private readonly onBackgroundError: (error: Error) => void;
 	private relay: ModelRelay | null = null;
+	private reflectionRelay: ModelRelay | null = null;
 	private storage: HostMastraStorage | null = null;
 	private agents: MastraAgentSet | null = null;
 	private initialized: RuntimeInitializeResult | null = null;
@@ -190,6 +214,8 @@ export class AgentHostRuntime {
 				return this.startPlanning(request.requestId, request.params);
 			case "activity.start":
 				return this.startActivityAnalysis(request.requestId, request.params);
+			case "reflection.analyze":
+				return this.analyzeActivityReflection(request.params);
 			case "planning.answer":
 				return this.answerPlanning(request.requestId, request.params);
 			case "run.cancel":
@@ -246,11 +272,27 @@ export class AgentHostRuntime {
 		const baseUrl = params.model.baseUrl ?? defaultRelayBaseUrl;
 		const supportsStructuredOutputs =
 			params.model.supportsStructuredOutputs ?? true;
+		const reflectionProvider = requiredString(
+			params.reflectionModel?.provider,
+			"reflectionModel.provider",
+		);
+		const reflectionModelId = requiredString(
+			params.reflectionModel?.modelId,
+			"reflectionModel.modelId",
+		);
+		const reflectionBaseUrl =
+			params.reflectionModel.baseUrl ?? defaultReflectionRelayBaseUrl;
+		const reflectionSupportsStructuredOutputs =
+			params.reflectionModel.supportsStructuredOutputs ?? true;
 		const initializationKey = JSON.stringify({
 			provider,
 			modelId,
 			baseUrl,
 			supportsStructuredOutputs,
+			reflectionProvider,
+			reflectionModelId,
+			reflectionBaseUrl,
+			reflectionSupportsStructuredOutputs,
 		});
 		if (this.initialized) {
 			if (this.initializationKey !== initializationKey) {
@@ -263,17 +305,29 @@ export class AgentHostRuntime {
 		}
 
 		this.relay = new ModelRelay(this.runBoundPeer, provider, modelId);
+		this.reflectionRelay = new ModelRelay(
+			this.runBoundPeer,
+			reflectionProvider,
+			reflectionModelId,
+		);
 		this.storage = new HostMastraStorage(this.runBoundPeer);
 		this.agents = createMastraAgentSet({
 			provider,
 			modelId,
 			baseUrl,
 			supportsStructuredOutputs,
+			reflectionProvider,
+			reflectionModelId,
+			reflectionBaseUrl,
+			reflectionSupportsStructuredOutputs,
 			storage: this.storage,
 			relay: this.relay,
+			reflectionRelay: this.reflectionRelay,
 			executeTool: (input) => this.executeTool(input),
 			executePlanningWorkflow: (input) =>
 				this.executePlanningWorkflowCycle(input),
+			executeActivityReflectionWorkflow: (input) =>
+				this.executeActivityReflectionWorkflow(input),
 		});
 		this.initialized = {
 			service: AGENT_HOST_SERVICE,
@@ -382,6 +436,43 @@ export class AgentHostRuntime {
 		record.snapshot.activityJobId = activityJobId;
 		this.schedule(record, () => this.executeActivityAnalysis(record));
 		return accepted(record);
+	}
+
+	/**
+	 * Runs one client-owned reflection prompt through a no-persistence Mastra
+	 * workflow. It intentionally creates no Agent run or durable snapshot.
+	 */
+	private async analyzeActivityReflection(
+		params: ActivityReflectionAnalyzeParams,
+	): Promise<unknown> {
+		this.ensureReady();
+		const invocationId = requiredString(params.invocationId, "invocationId");
+		const requestId = requiredString(params.requestId, "requestId");
+		const userPrompt = requiredString(
+			params.userPrompt,
+			"userPrompt",
+			MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
+		);
+		const workflow = this.requireAgents().activityReflectionWorkflow;
+		// Deliberately omit `runId`: in Mastra 1.55 a caller-supplied run ID
+		// asks storage to look for a durable snapshot even when persistence is
+		// disabled. This live privacy boundary must remain entirely in-memory.
+		const run = await workflow.createRun({ disableScorers: true });
+		const result = await this.hostRunContext.run(invocationId, () =>
+			run.start({
+				inputData: { invocationId, requestId, userPrompt },
+				requestContext: new RequestContext(),
+			}),
+		);
+		if (result.status === "success") {
+			return activityReflectionWorkflowOutcomeSchema.parse(result.result)
+				.modelOutput;
+		}
+		if (result.status === "failed") throw asError(result.error);
+		throw runtimeError(
+			"INTERNAL_ERROR",
+			`Activity reflection Workflow stopped with unsupported status ${result.status}.`,
+		);
 	}
 
 	private answerPlanning(
@@ -995,6 +1086,64 @@ export class AgentHostRuntime {
 		return this.executePlanningModel(record, calendar, abortSignal);
 	}
 
+	private async executeActivityReflectionWorkflow({
+		invocationId,
+		requestId,
+		userPrompt,
+		abortSignal,
+	}: ActivityReflectionWorkflowDriverInput) {
+		const agents = this.requireAgents();
+		const relay = this.requireReflectionRelay();
+		return relay.runInContext(
+			{ runId: invocationId, originatingRequestId: requestId },
+			async () => {
+				const result = await agents.activityReflection.generate(userPrompt, {
+					runId: invocationId,
+					abortSignal,
+					requestContext: new RequestContext(),
+					// Two local Skills may each require one agent-loop turn before
+					// the final structured result. Keep this finite for a small CPU
+					// model and leave no room for unrelated Tool use.
+					maxSteps: 5,
+					structuredOutput: {
+						schema: activityReflectionModelOutputSchema,
+						errorStrategy: "strict",
+						// Qwen-compatible OpenAI endpoints commonly support function
+						// calls and JSON text independently, but not necessarily a
+						// native response_format together with tools. Mastra injects
+						// the schema locally while retaining its native Skill loop.
+						jsonPromptInjection: "system",
+					},
+				});
+				const skillCalls = result.steps.flatMap((step) => step.toolCalls);
+				const unexpectedToolCall = skillCalls.find(
+					(call) =>
+						!activityReflectionNativeSkillToolNames.has(call.payload.toolName),
+				);
+				if (unexpectedToolCall) {
+					throw runtimeError(
+						"INTERNAL_ERROR",
+						`Activity reflection attempted to use forbidden Tool ${unexpectedToolCall.payload.toolName}.`,
+					);
+				}
+				for (const skillName of ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES) {
+					const wasActivated = skillCalls.some(
+						(call) =>
+							call.payload.toolName === "skill" &&
+							activityReflectionSkillActivationName(call.payload.args) === skillName,
+					);
+					if (!wasActivated) {
+						throw runtimeError(
+							"INTERNAL_ERROR",
+							`Activity reflection did not activate required Mastra Skill ${skillName}.`,
+						);
+					}
+				}
+				return activityReflectionModelOutputSchema.parse(result.object);
+			},
+		);
+	}
+
 	private async executePlanningModel(
 		record: RunRecord,
 		calendar: CalendarSnapshot,
@@ -1364,7 +1513,12 @@ export class AgentHostRuntime {
 	}
 
 	private ensureReady(): void {
-		if (!this.initialized || !this.agents || !this.relay) {
+		if (
+			!this.initialized ||
+			!this.agents ||
+			!this.relay ||
+			!this.reflectionRelay
+		) {
 			throw runtimeError(
 				"NOT_INITIALIZED",
 				"Call runtime.initialize before starting a run.",
@@ -1384,6 +1538,11 @@ export class AgentHostRuntime {
 	private requireRelay(): ModelRelay {
 		this.ensureReady();
 		return this.relay as ModelRelay;
+	}
+
+	private requireReflectionRelay(): ModelRelay {
+		this.ensureReady();
+		return this.reflectionRelay as ModelRelay;
 	}
 
 	private requireStorage(): HostMastraStorage {
@@ -1793,5 +1952,13 @@ function runtimeError(
 }
 
 function asError(error: unknown): Error {
-	return error instanceof Error ? error : new Error(String(error));
+	if (error instanceof Error) return error;
+	if (typeof error === "string" && error) return new Error(error);
+	try {
+		const serialized = JSON.stringify(error);
+		if (serialized && serialized !== "{}") return new Error(serialized);
+	} catch {
+		// Preserve the safe generic fallback below for non-serializable errors.
+	}
+	return new Error("Unknown runtime failure.");
 }

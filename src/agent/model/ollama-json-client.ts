@@ -63,6 +63,14 @@ export type OllamaFailureDiagnostic = {
 	httpStatus: number | null;
 };
 
+/**
+ * @whalehall-model-boundary-exception local-model-lock
+ *
+ * This is a legacy, model-lock-bound local inference transport for the
+ * deterministic Reflection/Timeline pipeline. It is not a `config.yaml` role
+ * and must not be used for a new desktop model endpoint. New client model
+ * calls use the Mastra Sidecar; see docs/MODEL_CALL_BOUNDARY.md.
+ */
 export class OllamaJsonClient {
 	private readonly baseUrl: string;
 	private readonly model: string;

@@ -2,6 +2,7 @@ import process from "node:process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ContentLengthFrameParser } from "./framing";
+import { isModelRelayEventFrame, isProtocolResponse } from "./protocol";
 import { AgentHostRuntime } from "./runtime";
 import { DuplexProtocolPeer, NodeProtocolWriter } from "./transport";
 
@@ -19,19 +20,33 @@ export function startAgentHost(): void {
 	});
 	peer.setRequestHandler((request) => runtime.dispatch(request));
 
-	let inputTail = Promise.resolve();
+	// Requests from Bun remain ordered, but responses to a Sidecar-initiated
+	// host call must bypass that queue. A workflow can legitimately make such a
+	// call before its originating request has completed; queueing its response
+	// behind the originating request would deadlock this duplex protocol.
+	let requestTail = Promise.resolve();
 	process.stdin.on("data", (chunk: Buffer) => {
-		inputTail = inputTail
-			.then(async () => {
-				for (const message of parser.push(chunk)) await peer.accept(message);
-			})
-			.catch((error) => stopWithFailure(peer, error));
+		let messages: unknown[];
+		try {
+			messages = parser.push(chunk);
+		} catch (error) {
+			stopWithFailure(peer, error);
+			return;
+		}
+		for (const message of messages) {
+			if (isProtocolResponse(message) || isModelRelayEventFrame(message)) {
+				void peer.accept(message).catch((error) => stopWithFailure(peer, error));
+				continue;
+			}
+			requestTail = requestTail.then(() => peer.accept(message));
+			void requestTail.catch((error) => stopWithFailure(peer, error));
+		}
 	});
 	process.stdin.on("end", () => {
-		inputTail = inputTail
+		requestTail = requestTail
 			.then(() => parser.finish())
-			.catch((error) => stopWithFailure(peer, error))
 			.finally(() => peer.close(new Error("Agent host input closed.")));
+		void requestTail.catch((error) => stopWithFailure(peer, error));
 	});
 	process.stdin.on("error", (error) => stopWithFailure(peer, error));
 	process.stdin.resume();

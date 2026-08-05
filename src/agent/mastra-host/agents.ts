@@ -2,6 +2,13 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
 import { Memory } from "@mastra/memory";
+import { ACTIVITY_REFLECTION_SYSTEM_PROMPT } from "../activity-reflection-prompt";
+import { activityReflectionNativeSkillPaths } from "./activity-reflection-skills";
+import {
+	createActivityReflectionWorkflow,
+	type ActivityReflectionWorkflow,
+	type ActivityReflectionWorkflowDriver,
+} from "./activity-reflection-workflow";
 import type { HostMastraStorage } from "./mastra-storage";
 import type { ModelRelay } from "./model-relay";
 import {
@@ -16,7 +23,9 @@ export interface MastraAgentSet {
 	conversation: Agent<"whalehall-conversation">;
 	planning: Agent<"whalehall-planning">;
 	activity: Agent<"whalehall-activity-analysis">;
+	activityReflection: Agent<"whalehall-activity-reflection">;
 	planningWorkflow: TaskPlanningWorkflow;
+	activityReflectionWorkflow: ActivityReflectionWorkflow;
 }
 
 export interface MastraAgentSetOptions {
@@ -24,10 +33,16 @@ export interface MastraAgentSetOptions {
 	modelId: string;
 	baseUrl: string;
 	supportsStructuredOutputs: boolean;
+	reflectionProvider: string;
+	reflectionModelId: string;
+	reflectionBaseUrl: string;
+	reflectionSupportsStructuredOutputs: boolean;
 	storage: HostMastraStorage;
 	relay: ModelRelay;
+	reflectionRelay: ModelRelay;
 	executeTool: AgentToolExecutor;
 	executePlanningWorkflow: PlanningWorkflowDriver;
+	executeActivityReflectionWorkflow: ActivityReflectionWorkflowDriver;
 }
 
 export function createMastraAgentSet(
@@ -40,6 +55,13 @@ export function createMastraAgentSet(
 		supportsStructuredOutputs: options.supportsStructuredOutputs,
 	});
 	const model = provider.chatModel(options.modelId);
+	const reflectionProvider = createOpenAICompatible({
+		name: options.reflectionProvider,
+		baseURL: normalizeBaseUrl(options.reflectionBaseUrl),
+		fetch: options.reflectionRelay.fetch,
+		supportsStructuredOutputs: options.reflectionSupportsStructuredOutputs,
+	});
+	const reflectionModel = reflectionProvider.chatModel(options.reflectionModelId);
 	const tools = createWhaleHallAgentTools(options.executeTool);
 	const memory = new Memory({
 		storage: options.storage.composite,
@@ -94,16 +116,48 @@ export function createMastraAgentSet(
 		tools: {},
 		maxRetries: 0,
 	});
+	const activityReflection = new Agent({
+		id: "whalehall-activity-reflection",
+		name: "WhaleHall 活动反思模型",
+		description: "对一个本地封闭活动窗口生成可核对的结构化中文事件。",
+		instructions: ACTIVITY_REFLECTION_SYSTEM_PROMPT,
+		model: reflectionModel,
+		// No product Tools are registered for raw activity windows. Mastra adds
+		// only its read-only local Skill meta-tools for these two filesystem Skills.
+		skills: activityReflectionNativeSkillPaths,
+		skillsFormat: "markdown",
+		tools: {},
+		maxRetries: 0,
+	});
 	const planningWorkflow = createTaskPlanningWorkflow(
 		options.executePlanningWorkflow,
 	);
+	const activityReflectionWorkflow = createActivityReflectionWorkflow(
+		options.executeActivityReflectionWorkflow,
+	);
 	const mastra = new Mastra({
 		storage: options.storage.composite,
+		// The reflection Agent deliberately remains unregistered. Mastra 1.55
+		// makes registered Agents durable and persists their internal agent-loop
+		// snapshots even when the enclosing Workflow opts out. A standalone Agent
+		// uses Mastra's ephemeral in-memory host, which keeps this raw-window
+		// prompt/output out of the desktop database and reverse storage protocol.
 		agents: { conversation, planning, activity },
-		workflows: { planning: planningWorkflow },
+		workflows: {
+			planning: planningWorkflow,
+			activityReflection: activityReflectionWorkflow,
+		},
 		logger: false,
 	});
-	return { mastra, conversation, planning, activity, planningWorkflow };
+	return {
+		mastra,
+		conversation,
+		planning,
+		activity,
+		activityReflection,
+		planningWorkflow,
+		activityReflectionWorkflow,
+	};
 }
 
 function normalizeBaseUrl(value: string): string {

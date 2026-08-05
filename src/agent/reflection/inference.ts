@@ -120,6 +120,11 @@ type ModernBertRequestV1 = {
  * A narrow HTTP adapter for a separately deployed ModernBERT inference service.
  * Constructing this client configures an endpoint; it does not imply that a
  * trained model or service is present.
+ *
+ * @whalehall-model-boundary-exception verified-classifier
+ * This calibrated classifier is a pre-existing, non-`config.yaml` inference
+ * component with its own artifact and origin checks. It must not become a
+ * general model transport; new client model calls use the Mastra Sidecar.
  */
 export class ModernBertHttpClient implements ModernBertInferenceProvider {
 	private readonly endpoint: string;

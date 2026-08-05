@@ -8,7 +8,6 @@ import {
 	Updater,
 	Utils,
 } from "electrobun/bun";
-import { ActivityEventWorkerClient } from "../agent/activity-event-worker";
 import {
 	ActivityWindowDeliveryService,
 	ActivityWindowDeliveryStore,
@@ -49,8 +48,9 @@ import { AgentToolPolicy } from "./agent-tool-policy";
 import { BackgroundAppLifecycle } from "./app-lifecycle";
 import { CalendarRepository } from "./calendar-repository";
 import {
-	ACTIVITY_EVENT_WORKER_MODEL,
-	activityEventWorkerConfigurationFromConfiguration,
+	REFLECTION_RELAY_COMPLETIONS_PATH,
+	WHALEHALL_RELAY_MODEL,
+	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
 } from "./client-config";
@@ -69,6 +69,7 @@ import { loadOrCreateInstallationId } from "./installation-id";
 import { WhaleHallAgentToolExecutor } from "./local-agent-tool-executor";
 import { LocalAgentHostServices } from "./mastra-host-services";
 import { MastraSidecarClient } from "./mastra-sidecar-client";
+import { MastraActivityReflectionAnalyzer } from "./mastra-activity-reflection";
 import { ModelRelayTransport } from "./model-relay-transport";
 import { monitoringPermissionSettingsUrl } from "./monitoring-permission-settings";
 import {
@@ -89,6 +90,7 @@ import {
 	RemoteAuthError,
 	RemoteAuthSessionManager,
 } from "./remote-auth-session";
+import { ReflectionModelRelayAuthorization } from "./reflection-model-relay-authorization";
 import { SidecarModelRelayBridge } from "./sidecar-model-relay-bridge";
 import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import {
@@ -170,16 +172,16 @@ const calendarRepository = new CalendarRepository(agentRepository, {
 	timeZone: () =>
 		Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
 });
-const activityEventWorkerConfiguration =
-	activityEventWorkerConfigurationFromConfiguration(
+const activityReflectionConfiguration =
+	activityReflectionConfigurationFromConfiguration(
 		clientConfiguration.configuration,
 	);
 const agentModelConfiguration = agentModelConfigurationFromConfiguration(
 	clientConfiguration.configuration,
 );
-if (activityEventWorkerConfiguration === null) {
+if (activityReflectionConfiguration === null) {
 	console.warn(
-		"WhaleHall cloud reflection is inactive until the literal activity Worker key is provisioned.",
+		"WhaleHall cloud reflection is inactive until the literal reflection relay key is provisioned.",
 	);
 }
 if (agentModelConfiguration === null) {
@@ -188,12 +190,20 @@ if (agentModelConfiguration === null) {
 	);
 }
 const configuredModelId =
-	agentModelConfiguration?.name ?? ACTIVITY_EVENT_WORKER_MODEL;
+	agentModelConfiguration?.name ??
+	activityReflectionConfiguration?.modelName ??
+	WHALEHALL_RELAY_MODEL;
+const reflectionModelId =
+	activityReflectionConfiguration?.modelName ?? WHALEHALL_RELAY_MODEL;
+const agentModelRelayProvider = "whalehall-relay";
+const reflectionModelRelayProvider = "whalehall-activity-reflection";
 let activeGoalStore!: AccountScopedActiveGoalStore;
 let coordinator!: AgentRunCoordinator;
 let hostServices!: LocalAgentHostServices;
 let relayBridge!: SidecarModelRelayBridge;
+let activityReflectionRelayBridge: SidecarModelRelayBridge | null = null;
 let activityAnalysisDispatcher: ActivityAnalysisDispatcher | null = null;
+let activityReflectionAnalyzer: MastraActivityReflectionAnalyzer | null = null;
 
 const authSession = new RemoteAuthSessionManager(credentialStore, {
 	baseUrl: agentModelConfiguration?.baseurl,
@@ -251,6 +261,15 @@ const planningAuthority = new PlanningAuthorityService({
 	},
 });
 const modelRelay = new ModelRelayTransport(authSession);
+const activityReflectionModelRelay = activityReflectionConfiguration
+	? new ModelRelayTransport(
+			new ReflectionModelRelayAuthorization({
+				baseUrl: activityReflectionConfiguration.relayBaseUrl,
+				reflectionKey: activityReflectionConfiguration.reflectionKey,
+			}),
+			{ endpointPath: REFLECTION_RELAY_COMPLETIONS_PATH },
+		)
+	: null;
 const sidecar = new MastraSidecarClient({
 	nodePath,
 	entryPath: sidecarEntryPath,
@@ -258,8 +277,14 @@ const sidecar = new MastraSidecarClient({
 		protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
 		client: { name: "whalehall-desktop", version: "0.1.0" },
 		model: {
-			provider: "whalehall-relay",
+			provider: agentModelRelayProvider,
 			modelId: configuredModelId,
+			supportsStructuredOutputs: true,
+		},
+		reflectionModel: {
+			provider: reflectionModelRelayProvider,
+			modelId: reflectionModelId,
+			baseUrl: "https://model.sea-ridethewindbreakthewaves.xyz/v1",
 			supportsStructuredOutputs: true,
 		},
 	},
@@ -273,6 +298,17 @@ const sidecar = new MastraSidecarClient({
 			}
 			const params = { ...call.params };
 			delete params.ownerRunId;
+			if (params.provider === reflectionModelRelayProvider) {
+				const analyzer = activityReflectionAnalyzer;
+				const bridge = activityReflectionRelayBridge;
+				if (!analyzer?.hasPendingInvocation(ownerRunId) || !bridge) {
+					throw new Error("Reflection model relay call is not locally authorized.");
+				}
+				return bridge.open(call.requestId, params);
+			}
+			if (params.provider !== agentModelRelayProvider) {
+				throw new Error("Model relay provider is not approved.");
+			}
 			return coordinator.runBoundHostCall(ownerRunId, () =>
 				relayBridge.open(call.requestId, params),
 			);
@@ -286,6 +322,11 @@ const sidecar = new MastraSidecarClient({
 			}
 			const params = { ...call.params };
 			delete params.ownerRunId;
+			// Abort frames intentionally contain only the relay/run IDs. Pending
+			// reflection invocation ownership is therefore the capability check.
+			if (activityReflectionAnalyzer?.hasPendingInvocation(ownerRunId)) {
+				return activityReflectionRelayBridge?.abort(params) ?? { aborted: false };
+			}
 			return coordinator.runBoundHostCall(ownerRunId, async () =>
 				relayBridge.abort(params),
 			);
@@ -295,6 +336,7 @@ const sidecar = new MastraSidecarClient({
 	onRunEvent: (event) => coordinator.acceptSidecarEvent(event),
 	onInterrupted: (runIds, reason) => {
 		relayBridge.abortAll();
+		activityReflectionRelayBridge?.abortAll();
 		void coordinator.interruptRuns(runIds, reason);
 	},
 });
@@ -303,6 +345,13 @@ relayBridge = new SidecarModelRelayBridge({
 	modelId: configuredModelId,
 	send: (event) => sidecar.sendRelayEvent(event),
 });
+if (activityReflectionModelRelay !== null) {
+	activityReflectionRelayBridge = new SidecarModelRelayBridge({
+		transport: activityReflectionModelRelay,
+		modelId: reflectionModelId,
+		send: (event) => sidecar.sendRelayEvent(event),
+	});
+}
 const agentToolPolicy = new AgentToolPolicy(agentRepository);
 const agentToolExecutor = new WhaleHallAgentToolExecutor({
 	calendar: calendarRepository,
@@ -1196,7 +1245,8 @@ async function startActivityWindowDelivery(
 	source: WhaleHallReflectionRuntime["repository"],
 ): Promise<void> {
 	if (
-		activityEventWorkerConfiguration === null ||
+		activityReflectionConfiguration === null ||
+		activityReflectionRelayBridge === null ||
 		activityWindowDelivery !== null ||
 		shutdownPromise !== null
 	) {
@@ -1207,7 +1257,7 @@ async function startActivityWindowDelivery(
 	);
 	const dispatcher = new ActivityAnalysisDispatcher({
 		store,
-		scoreThreshold: activityEventWorkerConfiguration.scoreThreshold,
+		scoreThreshold: activityReflectionConfiguration.scoreThreshold,
 		auth: authSession,
 		coordinator,
 		onError: (error) => {
@@ -1217,14 +1267,19 @@ async function startActivityWindowDelivery(
 			);
 		},
 	});
+	// Policy: Bun constructs the complete raw-window prompt and normalizes the
+	// response. The no-persistence Mastra workflow calls the host-only generic
+	// relay, which only authenticates and forwards to the CPU model.
+	const analyzer = new MastraActivityReflectionAnalyzer({
+		sidecar,
+		onInvocationAbort: (invocationId) =>
+			activityReflectionRelayBridge?.abortRun(invocationId),
+	});
 	const delivery = new ActivityWindowDeliveryService({
 		source,
-		analyzer: new ActivityEventWorkerClient({
-			endpoint: activityEventWorkerConfiguration.endpoint,
-			authorizationToken: activityEventWorkerConfiguration.authorizationToken,
-		}),
+		analyzer,
 		store,
-		scoreThreshold: activityEventWorkerConfiguration.scoreThreshold,
+		scoreThreshold: activityReflectionConfiguration.scoreThreshold,
 		onAgentTriggerRequired: () => dispatcher.wake(),
 		onError: (error) => {
 			const diagnostic = activityWindowWorkerDiagnostic(error);
@@ -1253,6 +1308,7 @@ async function startActivityWindowDelivery(
 	activityWindowDeliveryStore = store;
 	activityAnalysisDispatcher = dispatcher;
 	activityWindowDelivery = delivery;
+	activityReflectionAnalyzer = analyzer;
 	try {
 		dispatcher.start();
 		await delivery.start();
@@ -1260,6 +1316,10 @@ async function startActivityWindowDelivery(
 		activityWindowDelivery = null;
 		activityAnalysisDispatcher = null;
 		activityWindowDeliveryStore = null;
+		if (activityReflectionAnalyzer === analyzer) {
+			activityReflectionAnalyzer = null;
+		}
+		analyzer.close();
 		await releaseActivityWindowDeliveryResources(delivery, dispatcher, store);
 		throw error;
 	}
@@ -1269,10 +1329,13 @@ async function stopActivityWindowDelivery(): Promise<void> {
 	const delivery = activityWindowDelivery;
 	const dispatcher = activityAnalysisDispatcher;
 	const store = activityWindowDeliveryStore;
+	const analyzer = activityReflectionAnalyzer;
 	activityWindowDelivery = null;
 	activityAnalysisDispatcher = null;
 	activityWindowDeliveryStore = null;
 	await releaseActivityWindowDeliveryResources(delivery, dispatcher, store);
+	analyzer?.close();
+	activityReflectionAnalyzer = null;
 }
 
 async function releaseActivityWindowDeliveryResources(

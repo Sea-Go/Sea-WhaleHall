@@ -13,27 +13,36 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-export const ACTIVITY_EVENT_WORKER_ENDPOINT =
-	"https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze";
-export const AGENT_RELAY_BASE_URL =
+/** Both desktop roles use WhaleHall's remote relay origin.  Endpoint selection
+ * is fixed in Bun, never user-controlled YAML. */
+export const WHALEHALL_RELAY_BASE_URL =
 	"https://model.sea-ridethewindbreakthewaves.xyz";
-export const ACTIVITY_EVENT_WORKER_MODEL = "qwen3:1.7b";
-export const UNPROVISIONED_ACTIVITY_WORKER_KEY =
-	"REPLACE_WITH_ACTIVITY_WORKER_KEY";
+export const REFLECTION_RELAY_COMPLETIONS_PATH = "/v1/activity/completions";
+export const WHALEHALL_RELAY_MODEL = "qwen3:1.7b";
+export const UNPROVISIONED_REFLECTION_RELAY_KEY =
+	"REPLACE_WITH_REFLECTION_RELAY_KEY";
 export const UNPROVISIONED_AGENT_RELAY_KEY = "REPLACE_WITH_PERSONAL_RELAY_KEY";
 
 const LEGACY_CONFIGURATION_SCHEMA_VERSION = "whalehall-client-config.v1";
 const MAXIMUM_CONFIGURATION_BYTES = 64 * 1024;
-const MAXIMUM_ACTIVITY_WORKER_KEY_LENGTH = 4 * 1024;
+const MAXIMUM_REFLECTION_RELAY_KEY_LENGTH = 1_024;
 const MAXIMUM_PERSONAL_RELAY_KEY_LENGTH = 1_024;
 
 export type ModelConfiguration = {
-	name: typeof ACTIVITY_EVENT_WORKER_MODEL;
+	name: typeof WHALEHALL_RELAY_MODEL;
 	baseurl: string;
 	apikey: string;
 };
 
-/** The editable desktop configuration intentionally contains only these roles. */
+/**
+ * The editable desktop configuration intentionally contains only these roles.
+ *
+ * Model-call policy: every `config.yaml` role is a desktop model entry point
+ * and must be invoked through the bundled Mastra Sidecar boundary. `agent`
+ * uses a Mastra Agent and `reflection` uses the no-persistence
+ * `activity-reflection` workflow; do not add a direct HTTP client for either
+ * role in Bun or a Renderer.
+ */
 export type ClientConfiguration = {
 	reflection: ModelConfiguration;
 	agent: ModelConfiguration;
@@ -41,13 +50,13 @@ export type ClientConfiguration = {
 
 export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 	reflection: {
-		name: ACTIVITY_EVENT_WORKER_MODEL,
-		baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-		apikey: UNPROVISIONED_ACTIVITY_WORKER_KEY,
+		name: WHALEHALL_RELAY_MODEL,
+		baseurl: WHALEHALL_RELAY_BASE_URL,
+		apikey: UNPROVISIONED_REFLECTION_RELAY_KEY,
 	},
 	agent: {
-		name: ACTIVITY_EVENT_WORKER_MODEL,
-		baseurl: AGENT_RELAY_BASE_URL,
+		name: WHALEHALL_RELAY_MODEL,
+		baseurl: WHALEHALL_RELAY_BASE_URL,
 		apikey: UNPROVISIONED_AGENT_RELAY_KEY,
 	},
 };
@@ -71,15 +80,15 @@ export type LoadOrCreateClientConfigurationOptions = {
 };
 
 export type ModelRuntimeConfiguration = {
-	name: typeof ACTIVITY_EVENT_WORKER_MODEL;
+	name: typeof WHALEHALL_RELAY_MODEL;
 	baseurl: string;
 	apikey: string;
 };
 
-export type ActivityEventWorkerRuntimeConfiguration = {
-	modelName: typeof ACTIVITY_EVENT_WORKER_MODEL;
-	endpoint: string;
-	authorizationToken: string;
+export type ActivityReflectionRuntimeConfiguration = {
+	modelName: typeof WHALEHALL_RELAY_MODEL;
+	relayBaseUrl: string;
+	reflectionKey: string;
 	scoreThreshold: number;
 };
 
@@ -171,7 +180,7 @@ export function writeProvisionedClientConfiguration(
 	}
 }
 
-/** Returns null until the reflection Worker key is provisioned literally. */
+/** Returns null until the reflection relay key is provisioned literally. */
 export function reflectionModelConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
 ): ModelRuntimeConfiguration | null {
@@ -186,19 +195,21 @@ export function agentModelConfigurationFromConfiguration(
 }
 
 /**
- * The reflection role is the sole sender of sealed raw activity windows. The
- * score threshold remains deterministic local policy, not editable YAML.
+ * The reflection role is the sole sender of sealed raw activity windows through
+ * the generic model relay. Prompt construction, raw-window aggregation and
+ * result normalization stay on the desktop; the remote route only forwards
+ * this OpenAI-compatible request to the approved CPU model.
  */
-export function activityEventWorkerConfigurationFromConfiguration(
+export function activityReflectionConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
-): ActivityEventWorkerRuntimeConfiguration | null {
+): ActivityReflectionRuntimeConfiguration | null {
 	const reflection =
 		reflectionModelConfigurationFromConfiguration(configuration);
 	if (!reflection) return null;
 	return {
 		modelName: reflection.name,
-		endpoint: reflection.baseurl,
-		authorizationToken: reflection.apikey,
+		relayBaseUrl: reflection.baseurl,
+		reflectionKey: reflection.apikey,
 		scoreThreshold: 1,
 	};
 }
@@ -292,39 +303,29 @@ function normalizeModelConfiguration(
 	) {
 		throw new Error(`${role} model configuration is invalid.`);
 	}
-	if (value.name.trim() !== ACTIVITY_EVENT_WORKER_MODEL) {
+	if (value.name.trim() !== WHALEHALL_RELAY_MODEL) {
 		throw new Error(`${role} model name is not approved.`);
 	}
-	const baseurl =
-		role === "reflection"
-			? normalizeReflectionEndpoint(value.baseurl)
-			: normalizeAgentRelayBaseUrl(value.baseurl);
+	const baseurl = normalizeRelayBaseUrl(value.baseurl, role);
 	return {
-		name: ACTIVITY_EVENT_WORKER_MODEL,
+		name: WHALEHALL_RELAY_MODEL,
 		baseurl,
 		apikey: normalizeLiteralApiKey(value.apikey, role),
 	};
 }
 
-function normalizeReflectionEndpoint(value: string): string {
-	const endpoint = parseRemoteHttpsUrl(value, "reflection");
-	if (endpoint.toString() !== ACTIVITY_EVENT_WORKER_ENDPOINT) {
-		throw new Error(
-			"reflection model baseurl is not the approved activity endpoint.",
-		);
-	}
-	return ACTIVITY_EVENT_WORKER_ENDPOINT;
-}
-
-function normalizeAgentRelayBaseUrl(value: string): string {
-	const endpoint = parseRemoteHttpsUrl(value, "agent");
+function normalizeRelayBaseUrl(
+	value: string,
+	role: "reflection" | "agent",
+): string {
+	const endpoint = parseRemoteHttpsUrl(value, role);
 	if (endpoint.pathname !== "/" && endpoint.pathname !== "") {
-		throw new Error("agent model baseurl must be the relay origin.");
+		throw new Error(`${role} model baseurl must be the relay origin.`);
 	}
-	if (endpoint.origin !== AGENT_RELAY_BASE_URL) {
-		throw new Error("agent model baseurl is not the approved relay origin.");
+	if (endpoint.origin !== WHALEHALL_RELAY_BASE_URL) {
+		throw new Error(`${role} model baseurl is not the approved relay origin.`);
 	}
-	return AGENT_RELAY_BASE_URL;
+	return WHALEHALL_RELAY_BASE_URL;
 }
 
 function parseRemoteHttpsUrl(value: string, role: string): URL {
@@ -354,7 +355,7 @@ function normalizeLiteralApiKey(value: string, role: string): string {
 		apikey.length >
 			(role === "agent"
 				? MAXIMUM_PERSONAL_RELAY_KEY_LENGTH
-				: MAXIMUM_ACTIVITY_WORKER_KEY_LENGTH) ||
+				: MAXIMUM_REFLECTION_RELAY_KEY_LENGTH) ||
 		/[\p{Cc}\s]/u.test(apikey) ||
 		apikey.includes("${")
 	) {
@@ -372,7 +373,7 @@ function runtimeConfiguration(
 
 function isUnprovisionedKey(value: string): boolean {
 	return (
-		value === UNPROVISIONED_ACTIVITY_WORKER_KEY ||
+		value === UNPROVISIONED_REFLECTION_RELAY_KEY ||
 		value === UNPROVISIONED_AGENT_RELAY_KEY
 	);
 }

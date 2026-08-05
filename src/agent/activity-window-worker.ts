@@ -1240,6 +1240,10 @@ function responseContextFor(
 			window_trigger_reason: window.triggerReason,
 			window_started_at_ms: window.startedAtMs,
 			window_ended_at_ms: window.endedAtMs,
+			// The client owns human-readable review time. It is included in the
+			// local prompt/context, never delegated to the remote relay.
+			time_zone:
+				Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
 		},
 	};
 }

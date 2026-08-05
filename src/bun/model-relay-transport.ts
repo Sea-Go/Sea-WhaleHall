@@ -6,6 +6,10 @@ export interface ModelRelayAuthorization {
 
 const MAX_RELAY_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_STREAM_CHUNK_BYTES = 64 * 1024;
+const RELAY_COMPLETION_PATHS = new Set([
+	"/v1/chat/completions",
+	"/v1/activity/completions",
+]);
 
 export interface ModelRelayRequest {
 	runId: string;
@@ -21,6 +25,11 @@ export interface ModelRelayResponseMetadata {
 export interface ModelRelaySink {
 	onResponse(metadata: ModelRelayResponseMetadata): Promise<void> | void;
 	onChunk(chunk: Uint8Array): Promise<void> | void;
+}
+
+export interface ModelRelayTransportOptions {
+	/** A code-owned relay endpoint; never a model-configurable URL. */
+	endpointPath?: "/v1/chat/completions" | "/v1/activity/completions";
 }
 
 export class ModelRelayError extends Error {
@@ -43,8 +52,18 @@ export class ModelRelayError extends Error {
  * the local sidecar. The sidecar never receives the bearer token. */
 export class ModelRelayTransport {
 	private readonly active = new Map<string, AbortController>();
+	private readonly endpointPath: "/v1/chat/completions" | "/v1/activity/completions";
 
-	constructor(private readonly auth: ModelRelayAuthorization) {}
+	constructor(
+		private readonly auth: ModelRelayAuthorization,
+		options: ModelRelayTransportOptions = {},
+	) {
+		const endpointPath = options.endpointPath ?? "/v1/chat/completions";
+		if (!RELAY_COMPLETION_PATHS.has(endpointPath)) {
+			throw new Error("Model relay endpoint path is not approved.");
+		}
+		this.endpointPath = endpointPath;
+	}
 
 	async open(request: ModelRelayRequest, sink: ModelRelaySink): Promise<void> {
 		assertRelayRequest(request);
@@ -58,7 +77,7 @@ export class ModelRelayTransport {
 		const controller = new AbortController();
 		this.active.set(request.runId, controller);
 		try {
-			const response = await this.auth.authorizedFetch("/v1/chat/completions", {
+			const response = await this.auth.authorizedFetch(this.endpointPath, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",

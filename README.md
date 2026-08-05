@@ -22,6 +22,13 @@ flowchart TB
     Bun --> Agent["TypeScript reflection boundary"]
     Agent --> LocalClient["LocalToolClient"]
     Agent --> Reflection["64-event / 5-minute Timeline v2 runtime"]
+    Reflection --> SealedWindow["sealed-window outbox"]
+    SealedWindow -->|"complete client-owned prompt / Mastra Workflow"| Mastra
+    Mastra -->|"complete OpenAI-compatible request"| Bun
+    Bun -->|"reflection relay key + HTTPS"| Relay
+    Relay -->|"CPU-only forward"| LLM
+    LLM -->|"model JSON"| Relay
+    Relay -->|"model JSON"| Bun
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
     Observer["Signed macOS Observer"] --> Server
     Server --> EventJournal["EventJournal · SQLite WAL"]
@@ -45,11 +52,14 @@ flowchart TB
 ```
 
 The TypeScript reflection boundary continues to own deterministic Reflection
-and Timeline v2 windowing/model orchestration, while Rust owns Tool
-registration, native sensing, event journaling, validation, execution,
-progress, cancellation, and concurrency control. The local Mastra Sidecar is
-the separate interactive conversation and planning runtime; it does not absorb
-the sensor catalogue or the Reflection pipeline.
+and Timeline v2 windowing, while Rust owns Tool registration, native sensing,
+event journaling, validation, execution, progress, cancellation, and
+concurrency control. Every configurable desktop model role uses the local
+Mastra Sidecar: chat/activity Agent calls use Mastra Agents and sealed-window
+reflection uses a no-persistence Mastra Workflow. Bun builds its full Chinese
+prompt from a sealed window, and normalizes the model JSON into reviewable
+time/action events plus a local score receipt. Mastra does not absorb the
+sensor catalogue or the deterministic Reflection pipeline.
 
 Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. The remote service has no conversation, planning, history, Tool, or prompt-injection API: it authenticates a short-lived bearer plus the same account's personal relay key, stores relay records, and forwards the already-complete OpenAI-compatible body to the fixed CPU-only upstream. Browser contexts never communicate directly, never receive bearer tokens or relay keys, and never supply account identity.
 
@@ -61,7 +71,7 @@ Production login uses the configured remote email/password service. The submitte
 | --- | --- | --- |
 | Client frontend | [`src/views/client`](src/views/client) | Authentication gate, planning, calendar, reports, settings, and client-side service adapters |
 | Pet frontend | [`src/views/pet`](src/views/pet) | Transparent Canvas companion, interaction, and replaceable `PetRenderer` interface |
-| Local Mastra Agent | [`src/agent/mastra-host`](src/agent/mastra-host) | Bundled Node ESM Sidecar, conversation Agent, planning workflow, and private stdio protocol |
+| Local Mastra Agent | [`src/agent/mastra-host`](src/agent/mastra-host) | Bundled Node ESM Sidecar, conversation/activity Agents, planning/reflection Workflows, and private stdio protocol |
 | TypeScript local runtimes | [`src/agent`](src/agent) | Mastra boundary, Local Tool client, Reflection/Timeline v2, and handwritten protocol mirrors |
 | Electrobun main process | [`src/bun`](src/bun) | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition |
 | Shared frontend contracts | [`src/shared`](src/shared) | Electrobun Typed RPC schemas shared with both WebViews |
@@ -80,6 +90,7 @@ Project contribution and frontend implementation rules:
 - [`docs/frontend/CALENDAR_STANDARD.md`](docs/frontend/CALENDAR_STANDARD.md) — calendar domain, adapter, interaction, timezone, and QA rules.
 - [`docs/REFLECTION_SYSTEM.md`](docs/REFLECTION_SYSTEM.md) — behavior events, 64/5-minute windows, persistence, model locks, privacy, and training/runtime operations.
 - [`config.example.yaml`](config.example.yaml) and [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) — the two-role home-cloud model configuration and API-key guide.
+- [`docs/MODEL_CALL_BOUNDARY.md`](docs/MODEL_CALL_BOUNDARY.md) — Mastra-only configurable model-call policy and audited local-inference exceptions.
 
 Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. The first Agent release exposes only three read Tools and five approval-bound planning/calendar writes; it does not register the sensor, accessibility, browser, activity, or cleanup catalogue.
 
@@ -194,7 +205,7 @@ the credential helper, verifies and stages the pinned Node runtime, and bundles
 the local Mastra Sidecar. On macOS it also builds and signs the Observer and
 versioned Vault Broker before the existing post-wrap and post-package security
 checks run. Desktop authentication and model requests use the owner-provisioned
-`config.yaml` two-role configuration. The activity Worker key and personal
+`config.yaml` two-role configuration. The reflection relay key and personal
 relay key are literal owner-only values; upstream model credentials remain in
 the separately deployed relay process. See
 [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) for
@@ -300,7 +311,7 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 - `browser.history`, `browser.searches`, and `browser.downloads` query the local `browser.sqlite3` import. All browser Tools require the high-impact `browser.read` permission.
 - `editor.status` reports explicit VS Code bridge enablement, spool health, quarantine state, open edit bursts, and durable outbox backlog without returning document content. It requires `editor.metadata`.
 
-Timeline v2 classifies with the explicit `deterministic-cold-start.v2` implementation by default. Its ModernBERT episode adapter is a separate opt-in runtime boundary: it sends facts only after a caller-pinned v2 artifact manifest matches field-for-field. The editable two-role `config.yaml` is reserved for the home-cloud reflection and Agent Worker; it does not turn an arbitrary endpoint into a Timeline model. The reviewed local `qwen3:4b` Teacher remains an internal fallback and never receives or supplies ModernBERT class probabilities. Serving code or an endpoint address alone is never treated as proof that a trained, calibrated artifact is ready. WhaleHall still does not control a browser.
+Timeline v2 classifies with the explicit `deterministic-cold-start.v2` implementation by default. Its ModernBERT episode adapter is a separate opt-in runtime boundary: it sends facts only after a caller-pinned v2 artifact manifest matches field-for-field. The editable two-role `config.yaml` is reserved for the home-cloud reflection and Agent relay; it does not turn an arbitrary endpoint into a Timeline model. The reviewed local `qwen3:4b` Teacher remains an internal fallback and never receives or supplies ModernBERT class probabilities. Serving code or an endpoint address alone is never treated as proof that a trained, calibrated artifact is ready. WhaleHall still does not control a browser.
 
 ## Foreground application usage and SQLite
 
