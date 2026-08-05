@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-	spawn,
-	type ChildProcessWithoutNullStreams,
-} from "node:child_process";
+import type { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import {
@@ -18,7 +15,11 @@ import {
 	type MastraSidecarClientOptions,
 } from "../src/bun/mastra-sidecar-client";
 
-type FakeBehavior = "hang-initialize" | "reject-initialize" | "succeed";
+type FakeBehavior =
+	| "hang-initialize"
+	| "hang-request"
+	| "reject-initialize"
+	| "succeed";
 
 describe("MastraSidecarClient initialization recovery", () => {
 	test("kills a timed-out initializer and permits a clean immediate restart", async () => {
@@ -35,14 +36,18 @@ describe("MastraSidecarClient initialization recovery", () => {
 			starting,
 			pendingDuringInitialize,
 		]);
-		expect(outcomes[0]).toEqual(expect.objectContaining({
-			status: "rejected",
-			reason: expect.objectContaining({ code: "TIMEOUT" }),
-		}));
-		expect(outcomes[1]).toEqual(expect.objectContaining({
-			status: "rejected",
-			reason: expect.objectContaining({ code: "INTERRUPTED" }),
-		}));
+		expect(outcomes[0]).toEqual(
+			expect.objectContaining({
+				status: "rejected",
+				reason: expect.objectContaining({ code: "TIMEOUT" }),
+			}),
+		);
+		expect(outcomes[1]).toEqual(
+			expect.objectContaining({
+				status: "rejected",
+				reason: expect.objectContaining({ code: "INTERRUPTED" }),
+			}),
+		);
 		expect(harness.children[0]?.killed).toBe(true);
 		expect(harness.interruptions).toEqual([["run-before-initialize"]]);
 
@@ -102,6 +107,33 @@ describe("MastraSidecarClient initialization recovery", () => {
 		).resolves.toEqual({ accepted: true });
 		await harness.client.stop();
 	});
+
+	test("rejects an in-flight request on abort and releases its request ID", async () => {
+		const harness = createHarness(["hang-request"]);
+		await harness.client.start();
+		const controller = new AbortController();
+		const pending = harness.client.request(
+			"run.resume",
+			{ runId: "abortable-run" },
+			{
+				requestId: "abortable-request",
+				timeoutMs: 5_000,
+				signal: controller.signal,
+			},
+		);
+		controller.abort();
+		await expect(pending).rejects.toEqual(
+			expect.objectContaining({ code: "CANCELLED", retryable: true }),
+		);
+		await expect(
+			harness.client.request(
+				"run.resume",
+				{ runId: "retry-run" },
+				{ requestId: "abortable-request" },
+			),
+		).resolves.toEqual({ accepted: true });
+		await harness.client.stop();
+	});
 });
 
 function createHarness(behaviors: readonly FakeBehavior[]): {
@@ -113,13 +145,11 @@ function createHarness(behaviors: readonly FakeBehavior[]): {
 	const children: FakeSidecarChild[] = [];
 	const interruptions: string[][] = [];
 	const restarts = { count: 0 };
-	const spawnProcess = ((() => {
-		const child = new FakeSidecarChild(
-			behaviors[children.length] ?? "succeed",
-		);
+	const spawnProcess = (() => {
+		const child = new FakeSidecarChild(behaviors[children.length] ?? "succeed");
 		children.push(child);
 		return child as unknown as ChildProcessWithoutNullStreams;
-	}) as unknown) as typeof spawn;
+	}) as unknown as typeof spawn;
 	const options: MastraSidecarClientOptions = {
 		nodePath: "unused-node",
 		entryPath: "unused-entry",
@@ -157,6 +187,7 @@ class FakeSidecarChild extends EventEmitter {
 	signalCode: NodeJS.Signals | null = null;
 	killed = false;
 	private readonly parser = new ContentLengthFrameParser();
+	private hungRequest = false;
 
 	constructor(private readonly behavior: FakeBehavior) {
 		super();
@@ -181,7 +212,11 @@ class FakeSidecarChild extends EventEmitter {
 	}
 
 	private accept(value: unknown): void {
-		if (!isRecord(value) || value.type !== "request" || typeof value.requestId !== "string") {
+		if (
+			!isRecord(value) ||
+			value.type !== "request" ||
+			typeof value.requestId !== "string"
+		) {
 			return;
 		}
 		if (this.behavior === "hang-initialize") return;
@@ -220,6 +255,10 @@ class FakeSidecarChild extends EventEmitter {
 			});
 			return;
 		}
+		if (this.behavior === "hang-request" && !this.hungRequest) {
+			this.hungRequest = true;
+			return;
+		}
 
 		this.respond({
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
@@ -245,7 +284,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function waitFor(predicate: () => boolean): Promise<void> {
 	const deadline = Date.now() + 2_000;
 	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for Sidecar restart.");
+		if (Date.now() >= deadline)
+			throw new Error("Timed out waiting for Sidecar restart.");
 		await Bun.sleep(10);
 	}
 }

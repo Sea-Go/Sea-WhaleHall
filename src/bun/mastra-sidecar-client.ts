@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
 	ContentLengthFrameParser,
@@ -6,12 +6,12 @@ import {
 } from "../agent/mastra-host/framing";
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
-	isAgentRunEventFrame,
-	isProtocolResponse,
-	isSidecarHostRequest,
 	type AgentHostErrorPayload,
 	type AgentHostMethod,
 	type AgentRunEventFrame,
+	isAgentRunEventFrame,
+	isProtocolResponse,
+	isSidecarHostRequest,
 	type ModelRelayEventFrame,
 	type ProtocolMessage,
 	type RuntimeInitializeParams,
@@ -28,6 +28,7 @@ interface PendingRequest {
 	resolve(value: unknown): void;
 	reject(error: Error): void;
 	timer: ReturnType<typeof setTimeout>;
+	removeAbortListener(): void;
 }
 
 export interface SidecarHostCall {
@@ -102,7 +103,11 @@ export class MastraSidecarClient {
 		try {
 			await this.request("runtime.shutdown", {});
 		} catch {}
-		if (this.child !== child || child.exitCode !== null || child.signalCode !== null) {
+		if (
+			this.child !== child ||
+			child.exitCode !== null ||
+			child.signalCode !== null
+		) {
 			this.startPromise = null;
 			return;
 		}
@@ -122,24 +127,57 @@ export class MastraSidecarClient {
 	async request<TResult = unknown>(
 		method: AgentHostMethod,
 		params: Record<string, unknown>,
-		options: { requestId?: string; timeoutMs?: number } = {},
+		options: {
+			requestId?: string;
+			timeoutMs?: number;
+			signal?: AbortSignal;
+		} = {},
 	): Promise<TResult> {
-		if (!this.child) await this.start();
+		if (options.signal?.aborted) throw cancelledRequestError();
+		if (!this.child) await awaitAbortable(this.start(), options.signal);
+		if (options.signal?.aborted) throw cancelledRequestError();
 		const requestId = options.requestId ?? `bun:${randomUUID()}`;
 		if (this.pending.has(requestId)) {
-			throw new MastraSidecarError("DUPLICATE_REQUEST", "重复的 Sidecar requestId。", false);
+			throw new MastraSidecarError(
+				"DUPLICATE_REQUEST",
+				"重复的 Sidecar requestId。",
+				false,
+			);
 		}
 		const result = new Promise<TResult>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				this.pending.delete(requestId);
-				reject(new MastraSidecarError("TIMEOUT", "本地 Agent Sidecar 响应超时。", true));
-			}, options.timeoutMs ?? this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
-			this.pending.set(requestId, {
+			const timer = setTimeout(
+				() => {
+					this.rejectPending(
+						requestId,
+						new MastraSidecarError(
+							"TIMEOUT",
+							"本地 Agent Sidecar 响应超时。",
+							true,
+						),
+					);
+				},
+				options.timeoutMs ??
+					this.options.requestTimeoutMs ??
+					DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+			let removeAbortListener = () => {};
+			const pending: PendingRequest = {
 				resolve: (value) => resolve(value as TResult),
 				reject,
 				timer,
-			});
+				removeAbortListener: () => removeAbortListener(),
+			};
+			this.pending.set(requestId, pending);
+			if (options.signal) {
+				const onAbort = () =>
+					this.rejectPending(requestId, cancelledRequestError());
+				removeAbortListener = () =>
+					options.signal?.removeEventListener("abort", onAbort);
+				options.signal.addEventListener("abort", onAbort, { once: true });
+				if (options.signal.aborted) onAbort();
+			}
 		});
+		if (!this.pending.has(requestId)) return result;
 		try {
 			await this.write({
 				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
@@ -167,15 +205,20 @@ export class MastraSidecarClient {
 	}
 
 	private async spawnAndInitialize(): Promise<RuntimeInitializeResult> {
-		if (this.child) throw new MastraSidecarError("ALREADY_RUNNING", "Agent Sidecar 已启动。");
+		if (this.child)
+			throw new MastraSidecarError("ALREADY_RUNNING", "Agent Sidecar 已启动。");
 		this.parser = new ContentLengthFrameParser(MAX_FRAME_BYTES);
 		this.acceptTail = Promise.resolve();
 		const spawnProcess = this.options.spawnProcess ?? spawn;
-		const child = spawnProcess(this.options.nodePath, [this.options.entryPath], {
-			stdio: ["pipe", "pipe", "pipe"],
-			windowsHide: true,
-			env: safeSidecarEnvironment(),
-		});
+		const child = spawnProcess(
+			this.options.nodePath,
+			[this.options.entryPath],
+			{
+				stdio: ["pipe", "pipe", "pipe"],
+				windowsHide: true,
+				env: safeSidecarEnvironment(),
+			},
+		);
 		this.child = child;
 		child.stdout.on("data", (chunk: Buffer) => this.acceptBytes(child, chunk));
 		// Consume stderr to avoid a blocked pipe, but never copy potentially
@@ -183,7 +226,10 @@ export class MastraSidecarClient {
 		child.stderr.on("data", () => {});
 		child.once("error", (error) => this.handleExit(child, error.message));
 		child.once("close", (code, signal) => {
-			this.handleExit(child, `Agent Sidecar exited (${signal ?? code ?? "unknown"}).`);
+			this.handleExit(
+				child,
+				`Agent Sidecar exited (${signal ?? code ?? "unknown"}).`,
+			);
 		});
 
 		try {
@@ -214,7 +260,10 @@ export class MastraSidecarClient {
 		}
 	}
 
-	private acceptBytes(child: ChildProcessWithoutNullStreams, chunk: Uint8Array): void {
+	private acceptBytes(
+		child: ChildProcessWithoutNullStreams,
+		chunk: Uint8Array,
+	): void {
 		if (this.child !== child) return;
 		try {
 			const messages = this.parser.push(chunk);
@@ -234,19 +283,31 @@ export class MastraSidecarClient {
 		message: unknown,
 	): Promise<void> {
 		if (this.child !== child) return;
-		if (!isRecord(message) || message.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION) {
-			throw new MastraSidecarError("INVALID_FRAME", "Sidecar 返回了无效协议帧。");
+		if (
+			!isRecord(message) ||
+			message.protocolVersion !== AGENT_HOST_PROTOCOL_VERSION
+		) {
+			throw new MastraSidecarError(
+				"INVALID_FRAME",
+				"Sidecar 返回了无效协议帧。",
+			);
 		}
 		if (message.type === "response") {
 			if (!isProtocolResponse(message)) {
-				throw new MastraSidecarError("INVALID_RESPONSE", "Sidecar response shape 无效。");
+				throw new MastraSidecarError(
+					"INVALID_RESPONSE",
+					"Sidecar response shape 无效。",
+				);
 			}
 			this.acceptResponse(message);
 			return;
 		}
 		if (message.type === "event") {
 			if (!isAgentRunEventFrame(message)) {
-				throw new MastraSidecarError("INVALID_EVENT", "Sidecar event shape 无效。");
+				throw new MastraSidecarError(
+					"INVALID_EVENT",
+					"Sidecar event shape 无效。",
+				);
 			}
 			this.options.onRunEvent(message);
 			if (message.terminalState) this.untrackRun(message.runId);
@@ -254,22 +315,35 @@ export class MastraSidecarClient {
 		}
 		if (message.type === "request") {
 			if (!isSidecarHostRequest(message)) {
-				throw new MastraSidecarError("INVALID_REQUEST", "Sidecar host call shape 无效。");
+				throw new MastraSidecarError(
+					"INVALID_REQUEST",
+					"Sidecar host call shape 无效。",
+				);
 			}
 			await this.acceptHostCall(child, message);
 			return;
 		}
-		throw new MastraSidecarError("INVALID_FRAME", "Sidecar 返回了未知协议消息。");
+		throw new MastraSidecarError(
+			"INVALID_FRAME",
+			"Sidecar 返回了未知协议消息。",
+		);
 	}
 
 	private acceptResponse(message: Record<string, unknown>): void {
-		if (typeof message.requestId !== "string" || typeof message.ok !== "boolean") {
-			throw new MastraSidecarError("INVALID_RESPONSE", "Sidecar response shape 无效。");
+		if (
+			typeof message.requestId !== "string" ||
+			typeof message.ok !== "boolean"
+		) {
+			throw new MastraSidecarError(
+				"INVALID_RESPONSE",
+				"Sidecar response shape 无效。",
+			);
 		}
 		const pending = this.pending.get(message.requestId);
 		if (!pending) return;
 		this.pending.delete(message.requestId);
 		clearTimeout(pending.timer);
+		pending.removeAbortListener();
 		if (message.ok) pending.resolve(message.result);
 		else pending.reject(protocolError(message.error));
 	}
@@ -279,7 +353,8 @@ export class MastraSidecarClient {
 		error: unknown,
 	): void {
 		if (this.child !== child) return;
-		const reason = error instanceof Error ? error.message : "Sidecar 协议错误。";
+		const reason =
+			error instanceof Error ? error.message : "Sidecar 协议错误。";
 		this.handleExit(child, reason);
 	}
 
@@ -287,10 +362,16 @@ export class MastraSidecarClient {
 		child: ChildProcessWithoutNullStreams,
 		message: Record<string, unknown>,
 	): Promise<void> {
-		const requestId = typeof message.requestId === "string" ? message.requestId : "invalid-request";
+		const requestId =
+			typeof message.requestId === "string"
+				? message.requestId
+				: "invalid-request";
 		try {
 			if (typeof message.method !== "string" || !isRecord(message.params)) {
-				throw new MastraSidecarError("INVALID_REQUEST", "Sidecar host call shape 无效。");
+				throw new MastraSidecarError(
+					"INVALID_REQUEST",
+					"Sidecar host call shape 无效。",
+				);
 			}
 			const result = await this.options.onHostCall({
 				requestId,
@@ -298,23 +379,29 @@ export class MastraSidecarClient {
 				params: message.params,
 			});
 			if (this.child !== child) return;
-			await this.write({
-				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
-				type: "response",
-				requestId,
-				ok: true,
-				result,
-			} as ProtocolMessage, child);
+			await this.write(
+				{
+					protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+					type: "response",
+					requestId,
+					ok: true,
+					result,
+				} as ProtocolMessage,
+				child,
+			);
 		} catch (error) {
 			if (this.child !== child) return;
 			const failure = errorPayload(error);
-			await this.write({
-				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
-				type: "response",
-				requestId,
-				ok: false,
-				error: failure,
-			} as ProtocolMessage, child);
+			await this.write(
+				{
+					protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+					type: "response",
+					requestId,
+					ok: false,
+					error: failure,
+				} as ProtocolMessage,
+				child,
+			);
 		}
 	}
 
@@ -324,28 +411,49 @@ export class MastraSidecarClient {
 	): Promise<void> {
 		const child = expectedChild ?? this.child;
 		if (!child || this.child !== child || child.stdin.destroyed) {
-			return Promise.reject(new MastraSidecarError("NOT_RUNNING", "Agent Sidecar 未运行。", true));
+			return Promise.reject(
+				new MastraSidecarError("NOT_RUNNING", "Agent Sidecar 未运行。", true),
+			);
 		}
 		const frame = encodeContentLengthFrame(message);
-		const operation = this.writerTail.catch(() => undefined).then(
-			() => new Promise<void>((resolve, reject) => {
-				if (this.child !== child || child.stdin.destroyed) {
-					reject(new MastraSidecarError("NOT_RUNNING", "Agent Sidecar 未运行。", true));
-					return;
-				}
-				child.stdin.write(frame, (error) => error ? reject(error) : resolve());
-			}),
-		);
+		const operation = this.writerTail
+			.catch(() => undefined)
+			.then(
+				() =>
+					new Promise<void>((resolve, reject) => {
+						if (this.child !== child || child.stdin.destroyed) {
+							reject(
+								new MastraSidecarError(
+									"NOT_RUNNING",
+									"Agent Sidecar 未运行。",
+									true,
+								),
+							);
+							return;
+						}
+						child.stdin.write(frame, (error) =>
+							error ? reject(error) : resolve(),
+						);
+					}),
+			);
 		this.writerTail = operation;
 		return operation;
 	}
 
-	private handleExit(child: ChildProcessWithoutNullStreams, reason: string): void {
+	private handleExit(
+		child: ChildProcessWithoutNullStreams,
+		reason: string,
+	): void {
 		if (this.child !== child) return;
 		this.child = null;
 		this.startPromise = null;
-		const error = new MastraSidecarError("INTERRUPTED", "本地 Agent 进程已中断。", true);
-		for (const requestId of [...this.pending.keys()]) this.rejectPending(requestId, error);
+		const error = new MastraSidecarError(
+			"INTERRUPTED",
+			"本地 Agent 进程已中断。",
+			true,
+		);
+		for (const requestId of [...this.pending.keys()])
+			this.rejectPending(requestId, error);
 		this.resetTransportState();
 		child.stdin.destroy();
 		child.stdout.destroy();
@@ -371,7 +479,10 @@ export class MastraSidecarClient {
 
 	private scheduleRestart(): void {
 		if (this.stopping || this.restartTimer || this.child) return;
-		const delay = RESTART_DELAYS_MS[Math.min(this.restartAttempt, RESTART_DELAYS_MS.length - 1)]!;
+		const delay =
+			RESTART_DELAYS_MS[
+				Math.min(this.restartAttempt, RESTART_DELAYS_MS.length - 1)
+			]!;
 		this.restartAttempt += 1;
 		this.restartTimer = setTimeout(() => {
 			this.restartTimer = null;
@@ -386,6 +497,7 @@ export class MastraSidecarClient {
 		if (!pending) return;
 		this.pending.delete(requestId);
 		clearTimeout(pending.timer);
+		pending.removeAbortListener();
 		pending.reject(error);
 	}
 }
@@ -419,7 +531,12 @@ export function safeSidecarEnvironment(): NodeJS.ProcessEnv {
 }
 
 function protocolError(value: unknown): MastraSidecarError {
-	if (!isRecord(value)) return new MastraSidecarError("INTERNAL_ERROR", "Sidecar 返回了无效错误。", false);
+	if (!isRecord(value))
+		return new MastraSidecarError(
+			"INTERNAL_ERROR",
+			"Sidecar 返回了无效错误。",
+			false,
+		);
 	return new MastraSidecarError(
 		typeof value.code === "string" ? value.code : "INTERNAL_ERROR",
 		typeof value.message === "string" ? value.message : "Sidecar 请求失败。",
@@ -430,11 +547,12 @@ function protocolError(value: unknown): MastraSidecarError {
 function errorPayload(error: unknown): AgentHostErrorPayload {
 	if (error instanceof ModelRelayError) {
 		return {
-			code: error.code === "cancelled"
-				? "CANCELLED"
-				: error.code === "service-unavailable"
-					? "MODEL_RELAY_UNAVAILABLE"
-					: "MODEL_RELAY_ERROR",
+			code:
+				error.code === "cancelled"
+					? "CANCELLED"
+					: error.code === "service-unavailable"
+						? "MODEL_RELAY_UNAVAILABLE"
+						: "MODEL_RELAY_ERROR",
 			message: error.message,
 			retryable: error.code === "remote-failure" || error.code === "cancelled",
 		};
@@ -459,4 +577,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
+}
+
+function cancelledRequestError(): MastraSidecarError {
+	return new MastraSidecarError(
+		"CANCELLED",
+		"本地 Agent Sidecar 请求已取消。",
+		true,
+	);
+}
+
+function awaitAbortable<TResult>(
+	operation: Promise<TResult>,
+	signal: AbortSignal | undefined,
+): Promise<TResult> {
+	if (!signal) return operation;
+	if (signal.aborted) return Promise.reject(cancelledRequestError());
+	return new Promise<TResult>((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const onAbort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(cancelledRequestError());
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		void operation.then(
+			(value) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve(value);
+			},
+			(error: unknown) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(error);
+			},
+		);
+		if (signal.aborted) onAbort();
+	});
 }

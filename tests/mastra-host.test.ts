@@ -195,7 +195,9 @@ describe("Mastra Node sidecar", () => {
 		expect(JSON.stringify(body?.messages)).toContain(
 			"# 已加载的活动反思评分 Skill",
 		);
-		expect(JSON.stringify(body?.messages)).not.toContain("/Users/");
+		expect(JSON.stringify(body?.messages)).not.toContain(
+			resolve(import.meta.dir, ".."),
+		);
 		expect(body?.tools).toBeUndefined();
 		await harness.shutdown();
 	}, 30_000);
@@ -698,6 +700,30 @@ describe("Mastra Node sidecar", () => {
 		expect(host.calls).toContain("model/relay.abort");
 		await harness.shutdown();
 	}, 30_000);
+
+	test("closes the Sidecar when a host response frame is malformed", async () => {
+		const host = new FakeHost();
+		const harness = new SidecarHarness(sidecarPath, async (request) => {
+			if (request.method === "model/relay.open") {
+				await harness.send({
+					protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+					type: "response",
+					requestId: request.requestId,
+					ok: true,
+				} as unknown as ProtocolMessage);
+				return;
+			}
+			await host.handle(request, (message) => harness.send(message));
+		});
+		await harness.initialize();
+		await harness.request("conversation.start", {
+			runId: "malformed-response-run",
+			conversationId: "malformed-response-conversation",
+			message: "触发模型调用",
+			expectedVersion: 0,
+		});
+		expect(await harness.waitForExit()).toBe(1);
+	}, 30_000);
 });
 
 type HostHandler = (request: SidecarHostRequest) => Promise<void>;
@@ -858,6 +884,21 @@ class SidecarHarness {
 			throw new Error(`Node sidecar exited with ${exitCode}: ${stderr}`);
 		}
 		await this.readTask;
+	}
+
+	async waitForExit(): Promise<number> {
+		return await Promise.race([
+			this.child.exited,
+			new Promise<never>((_, reject) =>
+				setTimeout(
+					() =>
+						reject(
+							new Error("Node sidecar did not exit after a protocol failure."),
+						),
+					5_000,
+				),
+			),
+		]);
 	}
 
 	private async readLoop(): Promise<void> {

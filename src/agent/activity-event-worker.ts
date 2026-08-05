@@ -74,8 +74,9 @@ export type ActivityAgentTriggerClaim = {
 
 /**
  * Validates the exact Worker response contract at every trust boundary. The
- * Mastra bridge calls this again after the private Sidecar round-trip so a
- * malformed Sidecar response can never enter the durable score ledger.
+ * Mastra bridge converts its structured workflow output through
+ * `activityReflectionOutputToWorkerResponse`, which enforces the same result
+ * contract before a malformed Sidecar response can enter the durable ledger.
  */
 export function validateActivityEventWorkerResponse(
 	value: unknown,

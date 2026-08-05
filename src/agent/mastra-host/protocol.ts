@@ -484,7 +484,9 @@ export function isProtocolResponse(value: unknown): value is ProtocolResponse {
 		)
 	)
 		return false;
-	return value.ok ? true : isAgentHostErrorPayload(value.error);
+	return value.ok
+		? Object.hasOwn(value, "result")
+		: isAgentHostErrorPayload(value.error);
 }
 
 export function isAgentHostRequest(value: unknown): value is AgentHostRequest {

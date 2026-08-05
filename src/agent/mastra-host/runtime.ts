@@ -9,14 +9,14 @@ import {
 	serializedActivityAnalysisLength,
 } from "../../shared/activity-analysis-contract";
 import {
-	createActivityReflectionRuntimeOutputSchema,
 	activityReflectionModelOutputSchema,
+	createActivityReflectionRuntimeOutputSchema,
 	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
 } from "../activity-reflection-prompt";
 import { loadActivityReflectionNativeSkillContext } from "./activity-reflection-skills";
 import {
-	activityReflectionWorkflowInputSchema,
 	type ActivityReflectionWorkflowDriverInput,
+	activityReflectionWorkflowInputSchema,
 	activityReflectionWorkflowOutcomeSchema,
 } from "./activity-reflection-workflow";
 import { createMastraAgentSet, type MastraAgentSet } from "./agents";
@@ -93,6 +93,8 @@ const defaultReflectionRelayBaseUrl =
 const maxConversationCharacters = 64 * 1024;
 const maxRetainedRuns = 256;
 const maxClarificationRounds = 3;
+/** Must finish before the Bun-side 210-second reflection deadline. */
+export const DEFAULT_ACTIVITY_REFLECTION_WORKFLOW_TIMEOUT_MS = 195_000;
 interface ConversationRunContext {
 	conversationId: string;
 	resourceId: string;
@@ -455,12 +457,30 @@ export class AgentHostRuntime {
 		// asks storage to look for a durable snapshot even when persistence is
 		// disabled. This live privacy boundary must remain entirely in-memory.
 		const run = await workflow.createRun({ disableScorers: true });
-		const result = await this.hostRunContext.run(invocationId, () =>
-			run.start({
-				inputData: workflowInput,
-				requestContext: new RequestContext(),
-			}),
-		);
+		let result: Awaited<ReturnType<typeof run.start>>;
+		try {
+			result = await runActivityReflectionWithDeadline(
+				() =>
+					this.hostRunContext.run(invocationId, () =>
+						run.start({
+							inputData: workflowInput,
+							requestContext: new RequestContext(),
+						}),
+					),
+				() => run.cancel(),
+				DEFAULT_ACTIVITY_REFLECTION_WORKFLOW_TIMEOUT_MS,
+				(error) => this.onBackgroundError(asError(error)),
+			);
+		} catch (error) {
+			if (error instanceof ActivityReflectionWorkflowDeadlineError) {
+				throw runtimeError(
+					"MODEL_RELAY_UNAVAILABLE",
+					"Activity reflection timed out.",
+					true,
+				);
+			}
+			throw error;
+		}
 		if (result.status === "success") {
 			return activityReflectionWorkflowOutcomeSchema.parse(result.result)
 				.modelOutput;
@@ -1939,14 +1959,57 @@ function runtimeError(
 	return new AgentHostRuntimeError({ code, message, retryable });
 }
 
-function asError(error: unknown): Error {
-	if (error instanceof Error) return error;
-	if (typeof error === "string" && error) return new Error(error);
-	try {
-		const serialized = JSON.stringify(error);
-		if (serialized && serialized !== "{}") return new Error(serialized);
-	} catch {
-		// Preserve the safe generic fallback below for non-serializable errors.
+class ActivityReflectionWorkflowDeadlineError extends Error {
+	constructor() {
+		super("Activity reflection workflow timed out.");
+		this.name = "ActivityReflectionWorkflowDeadlineError";
 	}
-	return new Error("Unknown runtime failure.");
+}
+
+/**
+ * Makes the no-persistence workflow cancellable even when an upstream model
+ * implementation never settles. The losing operation remains observed, so a
+ * late resolution/rejection cannot become an unhandled promise rejection.
+ */
+export function runActivityReflectionWithDeadline<TResult>(
+	operation: () => Promise<TResult>,
+	cancel: () => Promise<void>,
+	timeoutMs: number,
+	onCancelError: (error: unknown) => void = () => undefined,
+): Promise<TResult> {
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+		return Promise.reject(new Error("Activity reflection timeout is invalid."));
+	}
+	return new Promise<TResult>((resolve, reject) => {
+		let settled = false;
+		const finish = (settle: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			settle();
+		};
+		const timer = setTimeout(() => {
+			finish(() => {
+				void cancel().catch(onCancelError);
+				reject(new ActivityReflectionWorkflowDeadlineError());
+			});
+		}, timeoutMs);
+		void Promise.resolve()
+			.then(operation)
+			.then(
+				(value) => finish(() => resolve(value)),
+				(error: unknown) => finish(() => reject(error)),
+			);
+	});
+}
+
+function asError(error: unknown): Error {
+	// Only locally constructed protocol errors can cross the private-stdio
+	// boundary verbatim. Model/provider objects can contain arbitrary prompts,
+	// outputs or huge serialized payloads, so they deliberately become generic.
+	if (error instanceof AgentHostRuntimeError) return error;
+	if (isRecord(error) && typeof error.diagnostic === "string") {
+		return new Error(error.diagnostic.replace(/[\r\n]+/g, " ").slice(0, 1_000));
+	}
+	return new Error("Agent runtime operation failed.");
 }

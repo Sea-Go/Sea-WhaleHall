@@ -21,6 +21,10 @@ const DEFAULT_ACCESS_TTL_MS = 15 * 60_000;
 const DEFAULT_REFRESH_TTL_MS = 30 * 24 * 60 * 60_000;
 const DEFAULT_RECORD_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const DEFAULT_REFLECTION_REQUESTS_PER_MINUTE = 20;
+const DEFAULT_REFLECTION_AUTHENTICATION_ATTEMPTS_PER_MINUTE = 20;
+// The desktop keeps a 210-second end-to-end deadline. Leave a small margin so
+// the relay can return a deterministic error before the local Sidecar gives up.
+const DEFAULT_REFLECTION_UPSTREAM_TIMEOUT_MS = 195_000;
 export const CPU_ONLY_OLLAMA_CHAT_COMPLETIONS_URL =
 	"http://127.0.0.1:11437/v1/chat/completions";
 const AUTH_BODY_LIMIT = 64 * 1024;
@@ -61,6 +65,10 @@ export interface ModelRelayServerConfig {
 	chatRequestsPerMinute?: number;
 	/** Bounded non-streaming reflection calls per provisioned reflection key. */
 	reflectionRequestsPerMinute?: number;
+	/** Limits unauthenticated reflection-key verification by trusted client IP. */
+	reflectionAuthenticationAttemptsPerMinute?: number;
+	/** Covers both the upstream request and its complete non-streaming response. */
+	reflectionUpstreamTimeoutMs?: number;
 	loginAttemptsPerMinute?: number;
 	/** Enables only the fixed CPU-only loopback Ollama endpoint below. */
 	allowInsecureLoopbackProvider?: boolean;
@@ -74,6 +82,7 @@ export interface ModelRelayDependencies {
 	clock?: RelayClock;
 	chatRateLimiter?: RateLimiter;
 	reflectionRateLimiter?: RateLimiter;
+	reflectionAuthenticationRateLimiter?: RateLimiter;
 	loginRateLimiter?: RateLimiter;
 	passwordVerifier?: (password: string, encoded: string) => Promise<boolean>;
 }
@@ -99,6 +108,8 @@ interface ValidatedConfig {
 	maxResponseBytes: number;
 	chatRequestsPerMinute: number;
 	reflectionRequestsPerMinute: number;
+	reflectionAuthenticationAttemptsPerMinute: number;
+	reflectionUpstreamTimeoutMs: number;
 	loginAttemptsPerMinute: number;
 }
 
@@ -121,6 +132,12 @@ export function createModelRelayHandler(
 	const reflectionRateLimiter =
 		dependencies.reflectionRateLimiter ??
 		new FixedWindowRateLimiter(config.reflectionRequestsPerMinute, 60_000);
+	const reflectionAuthenticationRateLimiter =
+		dependencies.reflectionAuthenticationRateLimiter ??
+		new FixedWindowRateLimiter(
+			config.reflectionAuthenticationAttemptsPerMinute,
+			60_000,
+		);
 	const loginRateLimiter =
 		dependencies.loginRateLimiter ??
 		new FixedWindowRateLimiter(config.loginAttemptsPerMinute, 60_000);
@@ -154,7 +171,7 @@ export function createModelRelayHandler(
 				request.method === "POST" &&
 				url.pathname === "/v1/activity/completions"
 			) {
-				return await relayActivityCompletion(request);
+				return await relayActivityCompletion(request, context);
 			}
 			if (
 				request.method === "POST" &&
@@ -507,7 +524,20 @@ export function createModelRelayHandler(
 	 * it never stores, parses or interprets the prompt/output beyond generic
 	 * OpenAI request safety checks.
 	 */
-	async function relayActivityCompletion(request: Request): Promise<Response> {
+	async function relayActivityCompletion(
+		request: Request,
+		context: ModelRelayRequestContext,
+	): Promise<Response> {
+		// This intentionally precedes scrypt-based key verification. `clientAddress`
+		// comes only from the Node socket adapter, never a forwarded request header.
+		const authenticationRate =
+			await reflectionAuthenticationRateLimiter.consume(
+				`reflection-auth:${trustedClientAddress(context)}`,
+				clock.now(),
+			);
+		if (!authenticationRate.allowed) {
+			throw rateLimitError(authenticationRate.retryAfterSeconds);
+		}
 		const user = await authenticateReflectionKey(request);
 		const rate = await reflectionRateLimiter.consume(
 			`reflection:${user.id}`,
@@ -558,6 +588,13 @@ export function createModelRelayHandler(
 		idempotencyKey: string,
 	): Promise<Response> {
 		const relayAbort = new AbortController();
+		let upstreamTimedOut = false;
+		const upstreamTimeout = setTimeout(() => {
+			upstreamTimedOut = true;
+			relayAbort.abort(
+				new DOMException("Model provider timed out.", "TimeoutError"),
+			);
+		}, config.reflectionUpstreamTimeoutMs);
 		const abortFromClient = () => relayAbort.abort(request.signal.reason);
 		if (request.signal.aborted) abortFromClient();
 		else
@@ -571,17 +608,23 @@ export function createModelRelayHandler(
 			if (config.providerApiKey !== null) {
 				upstreamHeaders.authorization = `Bearer ${config.providerApiKey}`;
 			}
-			const upstream = await fetchImpl(config.providerUrl, {
-				method: "POST",
-				headers: upstreamHeaders,
-				body: Buffer.from(rawBody),
-				signal: relayAbort.signal,
-			});
+			const upstream = await awaitAbortable(
+				fetchImpl(config.providerUrl, {
+					method: "POST",
+					headers: upstreamHeaders,
+					body: Buffer.from(rawBody),
+					signal: relayAbort.signal,
+				}),
+				relayAbort.signal,
+			);
 			const responseHeaders = forwardedResponseHeaders(upstream.headers);
 			responseHeaders["cache-control"] = "no-store";
 			if (!upstream.body) {
 				return withSecurityHeaders(
-					new Response(null, { status: upstream.status, headers: responseHeaders }),
+					new Response(null, {
+						status: upstream.status,
+						headers: responseHeaders,
+					}),
 				);
 			}
 			const responseBody = await readBoundedResponse(
@@ -603,12 +646,20 @@ export function createModelRelayHandler(
 					"The model response could not be relayed.",
 				);
 			}
+			if (upstreamTimedOut) {
+				throw new HttpError(
+					504,
+					"upstream-timeout",
+					"The model provider did not respond before the relay deadline.",
+				);
+			}
 			throw new HttpError(
 				502,
 				"upstream-unavailable",
 				"The model provider is unavailable.",
 			);
 		} finally {
+			clearTimeout(upstreamTimeout);
 			request.signal.removeEventListener("abort", abortFromClient);
 		}
 	}
@@ -639,7 +690,9 @@ export function createModelRelayHandler(
 		if (!valid) throw unauthorized();
 	}
 
-	async function authenticateReflectionKey(request: Request): Promise<RelayUser> {
+	async function authenticateReflectionKey(
+		request: Request,
+	): Promise<RelayUser> {
 		rejectIdentityHeaders(request.headers);
 		if (
 			request.headers.has("authorization") ||
@@ -811,10 +864,25 @@ function validateConfig(config: ModelRelayServerConfig): ValidatedConfig {
 			"chatRequestsPerMinute",
 		),
 		reflectionRequestsPerMinute: boundedInteger(
-			config.reflectionRequestsPerMinute ?? DEFAULT_REFLECTION_REQUESTS_PER_MINUTE,
+			config.reflectionRequestsPerMinute ??
+				DEFAULT_REFLECTION_REQUESTS_PER_MINUTE,
 			1,
 			10_000,
 			"reflectionRequestsPerMinute",
+		),
+		reflectionAuthenticationAttemptsPerMinute: boundedInteger(
+			config.reflectionAuthenticationAttemptsPerMinute ??
+				DEFAULT_REFLECTION_AUTHENTICATION_ATTEMPTS_PER_MINUTE,
+			1,
+			10_000,
+			"reflectionAuthenticationAttemptsPerMinute",
+		),
+		reflectionUpstreamTimeoutMs: boundedInteger(
+			config.reflectionUpstreamTimeoutMs ??
+				DEFAULT_REFLECTION_UPSTREAM_TIMEOUT_MS,
+			1,
+			10 * 60_000,
+			"reflectionUpstreamTimeoutMs",
 		),
 		loginAttemptsPerMinute: boundedInteger(
 			config.loginAttemptsPerMinute ?? 10,
@@ -878,9 +946,13 @@ async function readBoundedResponse(
 	const reader = body.getReader();
 	const chunks: Uint8Array[] = [];
 	let size = 0;
+	const cancelReader = () => {
+		void reader.cancel().catch(() => {});
+	};
+	abort.signal.addEventListener("abort", cancelReader, { once: true });
 	try {
 		while (true) {
-			const item = await reader.read();
+			const item = await awaitAbortable(reader.read(), abort.signal);
 			if (item.done) break;
 			size += item.value.byteLength;
 			if (size > maxBytes) {
@@ -891,9 +963,48 @@ async function readBoundedResponse(
 			chunks.push(item.value);
 		}
 	} finally {
+		abort.signal.removeEventListener("abort", cancelReader);
 		reader.releaseLock();
 	}
 	return concatenate(chunks, size);
+}
+
+/** Resolves promptly when a fetch implementation ignores an aborted signal. */
+function awaitAbortable<TResult>(
+	operation: Promise<TResult>,
+	signal: AbortSignal,
+): Promise<TResult> {
+	if (signal.aborted) return Promise.reject(abortedUpstreamError());
+	return new Promise<TResult>((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const onAbort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(abortedUpstreamError());
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		void operation.then(
+			(value) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve(value);
+			},
+			(error: unknown) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(error);
+			},
+		);
+		if (signal.aborted) onAbort();
+	});
+}
+
+function abortedUpstreamError(): DOMException {
+	return new DOMException("Model provider request was aborted.", "AbortError");
 }
 
 function concatenate(chunks: readonly Uint8Array[], size: number): Uint8Array {
@@ -978,6 +1089,11 @@ function isReflectionRelayKey(value: string): boolean {
 function reflectionKeyId(value: string): string | null {
 	const match = /^(whref_[a-f0-9]{32})\.[A-Za-z0-9_-]{16,512}$/u.exec(value);
 	return match?.[1] ?? null;
+}
+
+function trustedClientAddress(context: ModelRelayRequestContext): string {
+	const address = context.clientAddress?.trim();
+	return address && address.length <= 256 ? address : "unknown";
 }
 
 function rejectIdentityHeaders(headers: Headers): void {

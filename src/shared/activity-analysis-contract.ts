@@ -100,15 +100,17 @@ function hasActivityAnalysisWorkerEventKeys(
 	const keys = Object.keys(value);
 	return (
 		required.every((key) => key in value) &&
-		keys.every((key) => required.includes(key) || key === "time" || key === "action")
+		keys.every(
+			(key) => required.includes(key) || key === "time" || key === "action",
+		)
 	);
 }
 
 function isReviewableChineseAction(value: unknown): value is string {
+	if (!isBoundedString(value, 80, false)) return false;
+	const prefix = /^(?:确定：|推测：|不确定：)/u.exec(value);
 	return (
-		isBoundedString(value, 80, false) &&
-		/^(确定：|推测：|不确定：)/u.test(value) &&
-		/[\u3400-\u9fff]/u.test(value.slice(3))
+		prefix !== null && /[\u3400-\u9fff]/u.test(value.slice(prefix[0].length))
 	);
 }
 

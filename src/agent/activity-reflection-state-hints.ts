@@ -79,15 +79,21 @@ export function deriveActivityReflectionStateHints(
 	const presenceBoundaries = events
 		.map((event) => presenceBoundary(event))
 		.filter((event): event is NonNullable<typeof event> => event !== null)
-		.map((event) => ({ state: event.definition.state, at_ms: event.occurredAtMs }));
-	const kinds = events.map((event) => stringValue(event.kind)).filter((kind): kind is string => kind !== null);
+		.map((event) => ({
+			state: event.definition.state,
+			at_ms: event.occurredAtMs,
+		}));
+	const kinds = events
+		.map((event) => stringValue(event.kind))
+		.filter((kind): kind is string => kind !== null);
 	return {
 		observation_quality: observationQuality(events),
 		interaction_density: interactionDensity(kinds),
 		continuity:
 			presenceBoundaries.length > 0
 				? "被在场状态边界中断"
-				: kinds.filter((kind) => kind === "application.foregroundChanged").length > 1
+				: kinds.filter((kind) => kind === "application.foregroundChanged")
+							.length > 1
 					? "存在应用切换，需区分短暂辅助切换与真实主题切换"
 					: "未发现确定的状态中断",
 		presence_boundaries: presenceBoundaries,
@@ -121,7 +127,9 @@ export function deriveActivityReflectionStateMarkers(
 		deduplicated.set(`${boundary.kind}:${timestamp}`, marker);
 	}
 	return [...deduplicated.values()].sort(
-		(left, right) => left.started_at_ms - right.started_at_ms || left.action.localeCompare(right.action, "zh-CN"),
+		(left, right) =>
+			left.started_at_ms - right.started_at_ms ||
+			left.action.localeCompare(right.action, "zh-CN"),
 	);
 }
 
@@ -134,8 +142,11 @@ function observationQuality(
 	events: readonly RawActivityEvent[],
 ): ActivityReflectionStateHints["observation_quality"] {
 	if (events.length === 0) return "信息缺失";
-	if (events.some((event) => event.sensitivity === "content")) return "存在可用内容证据";
-	const kinds = events.map((event) => stringValue(event.kind)).filter((kind): kind is string => kind !== null);
+	if (events.some((event) => event.sensitivity === "content"))
+		return "存在可用内容证据";
+	const kinds = events
+		.map((event) => stringValue(event.kind))
+		.filter((kind): kind is string => kind !== null);
 	if (
 		kinds.length === 0 ||
 		kinds.every((kind) =>
@@ -158,13 +169,21 @@ function interactionDensity(
 	if (kinds.length === 0) return "无可用交互";
 	if (
 		kinds.some((kind) =>
-			["editor.documentChanged", "accessibility.documentChanged", "accessibility.valueChanged"].includes(kind),
+			[
+				"editor.documentChanged",
+				"accessibility.documentChanged",
+				"accessibility.valueChanged",
+			].includes(kind),
 		)
 	) {
 		return "连续创建或编辑";
 	}
 	if (kinds.includes("input.activityAggregated")) return "连续操作";
-	if (kinds.some((kind) => ["browser.tabOpened", "browser.tabNavigated"].includes(kind))) {
+	if (
+		kinds.some((kind) =>
+			["browser.tabOpened", "browser.tabNavigated"].includes(kind),
+		)
+	) {
 		return "轻度导航";
 	}
 	return "低交互";
@@ -176,7 +195,7 @@ function presenceBoundary(event: RawActivityEvent): {
 	occurredAtMs: number | null;
 } | null {
 	const kind = stringValue(event.kind);
-	if (!kind || !(kind in presenceBoundaryDefinitions)) return null;
+	if (!kind || !Object.hasOwn(presenceBoundaryDefinitions, kind)) return null;
 	const typedKind = kind as PresenceBoundaryKind;
 	return {
 		kind: typedKind,
@@ -189,12 +208,15 @@ function clampToWindow(
 	timestamp: number,
 	window: { startedAtMs: number | null; endedAtMs: number | null },
 ): number {
-	if (window.startedAtMs === null || window.endedAtMs === null) return timestamp;
+	if (window.startedAtMs === null || window.endedAtMs === null)
+		return timestamp;
 	return Math.max(window.startedAtMs, Math.min(window.endedAtMs, timestamp));
 }
 
 function nonNegativeTimestamp(value: unknown): number | null {
-	return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : null;
+	return Number.isSafeInteger(value) && (value as number) >= 0
+		? (value as number)
+		: null;
 }
 
 function stringValue(value: unknown): string | null {

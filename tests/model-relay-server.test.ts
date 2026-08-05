@@ -13,6 +13,7 @@ import {
 	InMemoryRelayRecordStore,
 	InMemorySessionStore,
 	InMemoryUserStore,
+	type ModelRelayDependencies,
 	type ModelRelayHandler,
 	type ModelRelayServerConfig,
 	type RelayClock,
@@ -65,6 +66,12 @@ function createFixture(
 	options: {
 		fetch?: typeof fetch;
 		config?: Partial<ModelRelayServerConfig>;
+		dependencies?: Partial<
+			Pick<
+				ModelRelayDependencies,
+				"passwordVerifier" | "reflectionAuthenticationRateLimiter"
+			>
+		>;
 	} = {},
 ) {
 	const users = new InMemoryUserStore([
@@ -90,6 +97,7 @@ function createFixture(
 		fetch:
 			options.fetch ??
 			((async () => Response.json({ ok: true })) as unknown as typeof fetch),
+		...options.dependencies,
 	});
 	return { handler, users, sessions, records, clock };
 }
@@ -454,6 +462,113 @@ describe("model relay forwarding", () => {
 		expect(agentKey.status).toBe(401);
 		expect(streaming.status).toBe(400);
 		expect(upstreamCalls).toBe(0);
+	});
+
+	test("limits invalid reflection-key verification before scrypt authentication", async () => {
+		let verificationCalls = 0;
+		const fixture = createFixture({
+			config: { reflectionAuthenticationAttemptsPerMinute: 1 },
+			dependencies: {
+				passwordVerifier: async () => {
+					verificationCalls += 1;
+					return false;
+				},
+			},
+		});
+		const body = JSON.stringify({ model: "approved-model", messages: [] });
+		const invalidRequest = () =>
+			new Request("https://relay.example.test/v1/activity/completions", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"idempotency-key": "invalid-reflection-key",
+					"x-whalehall-reflection-key": "invalid-key",
+				},
+				body,
+			});
+
+		expect(
+			(
+				await fixture.handler(invalidRequest(), {
+					clientAddress: "198.51.100.9",
+				})
+			).status,
+		).toBe(401);
+		expect(
+			(
+				await fixture.handler(invalidRequest(), {
+					clientAddress: "198.51.100.9",
+				})
+			).status,
+		).toBe(429);
+		expect(verificationCalls).toBe(1);
+	});
+
+	test("bounds a non-settling reflection provider request and aborts it", async () => {
+		let upstreamSignal: AbortSignal | undefined;
+		const fixture = createFixture({
+			config: { reflectionUpstreamTimeoutMs: 25 },
+			fetch: ((
+				_input: Parameters<typeof fetch>[0],
+				init?: Parameters<typeof fetch>[1],
+			) => {
+				upstreamSignal = init?.signal ?? undefined;
+				return new Promise<Response>(() => {});
+			}) as unknown as typeof fetch,
+		});
+		const response = await fixture.handler(
+			reflectionRequest(
+				JSON.stringify({
+					model: "approved-model",
+					messages: [],
+					stream: false,
+				}),
+				"reflection-provider-timeout",
+			),
+		);
+		expect(response.status).toBe(504);
+		expect(await response.json()).toEqual(
+			expect.objectContaining({
+				error: expect.objectContaining({ code: "upstream-timeout" }),
+			}),
+		);
+		expect(upstreamSignal?.aborted).toBeTrue();
+	});
+
+	test("bounds a reflection response body that never produces a chunk", async () => {
+		let upstreamSignal: AbortSignal | undefined;
+		let bodyCancelled = false;
+		const fixture = createFixture({
+			config: { reflectionUpstreamTimeoutMs: 25 },
+			fetch: ((
+				_input: Parameters<typeof fetch>[0],
+				init?: Parameters<typeof fetch>[1],
+			) => {
+				upstreamSignal = init?.signal ?? undefined;
+				return Promise.resolve(
+					new Response(
+						new ReadableStream<Uint8Array>({
+							cancel() {
+								bodyCancelled = true;
+							},
+						}),
+					),
+				);
+			}) as unknown as typeof fetch,
+		});
+		const response = await fixture.handler(
+			reflectionRequest(
+				JSON.stringify({
+					model: "approved-model",
+					messages: [],
+					stream: false,
+				}),
+				"reflection-body-timeout",
+			),
+		);
+		expect(response.status).toBe(504);
+		expect(upstreamSignal?.aborted).toBeTrue();
+		expect(bodyCancelled).toBeTrue();
 	});
 
 	test("replays a completed non-stream response by subject and key without a second provider request", async () => {

@@ -10,12 +10,18 @@ import {
 	createActivityReflectionPrompt,
 } from "../src/agent/activity-reflection-prompt";
 import { ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES } from "../src/agent/activity-reflection-skill-names";
+import {
+	deriveActivityReflectionStateHints,
+	deriveActivityReflectionStateMarkers,
+} from "../src/agent/activity-reflection-state-hints";
 import { loadActivityReflectionNativeSkillContext } from "../src/agent/mastra-host/activity-reflection-skills";
 import type { AgentHostMethod } from "../src/agent/mastra-host/protocol";
+import { runActivityReflectionWithDeadline } from "../src/agent/mastra-host/runtime";
 import {
 	type ActivityReflectionSidecar,
 	MastraActivityReflectionAnalyzer,
 } from "../src/bun/mastra-activity-reflection";
+import { isActivityAnalysisWorkerResult } from "../src/shared/activity-analysis-contract";
 
 function requestFixture(
 	requestId = "activity-window-request-1",
@@ -112,6 +118,62 @@ describe("MastraActivityReflectionAnalyzer", () => {
 		expect(
 			activityReflectionModelOutputSchema.safeParse(output).success,
 		).toBeFalse();
+	});
+
+	test("rejects an uncertainty prefix without a concrete Chinese action", () => {
+		const receipt = {
+			request_id: "empty-uncertain-action",
+			events: [
+				{
+					time: "00:00:01-00:00:02",
+					action: "不确定：",
+					source_event_ids: ["source-1"],
+					activity: "other_unknown",
+					goal_relevance: "uncertain",
+					confidence: 0,
+					reason_codes: ["evidence_limited"],
+					evidence: ["证据有限"],
+					started_at_ms: 1_000,
+					ended_at_ms: 2_000,
+				},
+			],
+			score: 0,
+			score_reason: "证据不足，计 0 分",
+		};
+		expect(isActivityAnalysisWorkerResult(receipt)).toBeFalse();
+	});
+
+	test("ignores prototype property names as presence boundaries", () => {
+		const rawEvent = {
+			events: [
+				{ kind: "editor.documentChanged", occurredAtMs: 1_000 },
+				{ kind: "constructor", occurredAtMs: 1_500 },
+				{ kind: "toString", occurredAtMs: 1_600 },
+			],
+		};
+		expect(
+			deriveActivityReflectionStateHints(rawEvent).presence_boundaries,
+		).toEqual([]);
+		expect(
+			deriveActivityReflectionStateMarkers(rawEvent, {
+				startedAtMs: 1_000,
+				endedAtMs: 2_000,
+			}),
+		).toEqual([]);
+	});
+
+	test("cancels a non-settling Mastra reflection workflow at its deadline", async () => {
+		let cancellationCount = 0;
+		await expect(
+			runActivityReflectionWithDeadline(
+				() => new Promise<never>(() => {}),
+				async () => {
+					cancellationCount += 1;
+				},
+				20,
+			),
+		).rejects.toThrow("Activity reflection workflow timed out.");
+		expect(cancellationCount).toBe(1);
 	});
 
 	test("rejects an observation label masquerading as a human activity", () => {
@@ -418,7 +480,11 @@ describe("MastraActivityReflectionAnalyzer", () => {
 			async request<TResult = unknown>(
 				method: AgentHostMethod,
 				params: Record<string, unknown>,
-				options?: { requestId?: string; timeoutMs?: number },
+				options?: {
+					requestId?: string;
+					timeoutMs?: number;
+					signal?: AbortSignal;
+				},
 			): Promise<TResult> {
 				sidecarCalls.push({
 					method,
@@ -454,6 +520,7 @@ describe("MastraActivityReflectionAnalyzer", () => {
 			expect.objectContaining({
 				method: "reflection.analyze",
 				requestId: `reflection:${rawRequest.request_id}`,
+				signal: expect.any(AbortSignal),
 				params: expect.objectContaining({
 					invocationId: expect.stringMatching(/^activity-reflection-/u),
 					requestId: rawRequest.request_id,

@@ -7,7 +7,9 @@ const repositoryRoot = join(import.meta.dir, "..");
 describe("desktop model-call boundary", () => {
 	test("keeps configurable model clients behind the Mastra boundary", async () => {
 		const sources = await sourceFiles();
-		expect(findContaining(sources, "new ActivityEventWorkerClient(")).toEqual([]);
+		expect(findContaining(sources, "new ActivityEventWorkerClient(")).toEqual(
+			[],
+		);
 		expect(findContaining(sources, "createOpenAICompatible(")).toEqual([
 			"src/agent/mastra-host/agents.ts",
 		]);
@@ -24,7 +26,9 @@ describe("desktop model-call boundary", () => {
 		const relayAuthorization =
 			sources.get("src/bun/reflection-model-relay-authorization.ts") ?? "";
 		expect(relayAuthorization).toContain('"/v1/activity/completions"');
-		expect(relayAuthorization).not.toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
+		expect(relayAuthorization).not.toContain(
+			"ACTIVITY_REFLECTION_SYSTEM_PROMPT",
+		);
 	});
 
 	test("requires explicit local annotations for audited legacy inference", async () => {
@@ -43,7 +47,7 @@ describe("desktop model-call boundary", () => {
 			);
 		}
 		expect(sources.get("src/agent/reflection/inference.ts")).toContain(
-			"@whalehall-model-boundary-exception",
+			"@whalehall-model-boundary-exception verified-classifier",
 		);
 	});
 });
@@ -51,10 +55,10 @@ describe("desktop model-call boundary", () => {
 async function sourceFiles(): Promise<Map<string, string>> {
 	const paths = await listTypeScriptFiles(join(repositoryRoot, "src"));
 	const files = await Promise.all(
-		paths.map(async (path) => [
-			relative(repositoryRoot, path),
-			await readFile(path, "utf8"),
-		] as const),
+		paths.map(
+			async (path) =>
+				[relative(repositoryRoot, path), await readFile(path, "utf8")] as const,
+		),
 	);
 	return new Map(files);
 }
@@ -71,7 +75,10 @@ async function listTypeScriptFiles(directory: string): Promise<string[]> {
 	return nested.flat();
 }
 
-function findContaining(sources: ReadonlyMap<string, string>, token: string): string[] {
+function findContaining(
+	sources: ReadonlyMap<string, string>,
+	token: string,
+): string[] {
 	return [...sources]
 		.filter(([, source]) => source.includes(token))
 		.map(([path]) => path)

@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import {
-	activityReflectionOutputToWorkerResponse,
-	createActivityReflectionPrompt,
-} from "../agent/activity-reflection-prompt";
-import {
-	ActivityEventWorkerClientError,
 	type ActivityEventAnalyzer,
+	ActivityEventWorkerClientError,
 	type ActivityEventWorkerRequest,
 	type ActivityEventWorkerResponse,
 } from "../agent/activity-event-worker";
+import {
+	activityReflectionOutputToWorkerResponse,
+	createActivityReflectionPrompt,
+} from "../agent/activity-reflection-prompt";
 import type { AgentHostMethod } from "../agent/mastra-host/protocol";
 
 /** The model timeout plus bounded private-stdio and workflow overhead. */
@@ -18,7 +18,7 @@ export interface ActivityReflectionSidecar {
 	request<TResult = unknown>(
 		method: AgentHostMethod,
 		params: Record<string, unknown>,
-		options?: { requestId?: string; timeoutMs?: number },
+		options?: { requestId?: string; timeoutMs?: number; signal?: AbortSignal },
 	): Promise<TResult>;
 }
 
@@ -74,6 +74,7 @@ export class MastraActivityReflectionAnalyzer implements ActivityEventAnalyzer {
 			request: structuredClone(request),
 			controller,
 		});
+		const timeout = setTimeout(abort, this.timeoutMs);
 		try {
 			const modelOutput = await this.options.sidecar.request<unknown>(
 				"reflection.analyze",
@@ -87,6 +88,7 @@ export class MastraActivityReflectionAnalyzer implements ActivityEventAnalyzer {
 				{
 					requestId: `reflection:${request.request_id}`,
 					timeoutMs: this.timeoutMs,
+					signal: controller.signal,
 				},
 			);
 			if (controller.signal.aborted) {
@@ -94,6 +96,7 @@ export class MastraActivityReflectionAnalyzer implements ActivityEventAnalyzer {
 			}
 			return activityReflectionOutputToWorkerResponse(modelOutput, request);
 		} finally {
+			clearTimeout(timeout);
 			this.pending.delete(invocationId);
 			controller.abort();
 			options.signal?.removeEventListener("abort", abort);
