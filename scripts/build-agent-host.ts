@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -76,6 +76,10 @@ export async function buildAgentHost(): Promise<string> {
 	// Agent-level filesystem Skills are evaluated by the Node Sidecar at runtime.
 	// Stage the canonical project directories next to the generated host so the
 	// packaged app never relies on its launch working directory or source tree.
+	// A copy-only update leaves removed or renamed Skill assets in a previously
+	// staged app. Recreate this generated directory so packages always reflect
+	// precisely the canonical Skill tree.
+	rmSync(stagedSkillsDirectory, { recursive: true, force: true });
 	cpSync(skillsSource, stagedSkillsDirectory, { recursive: true, force: true });
 	const check = Bun.spawnSync([nodeRuntime.executablePath, "--check", output], {
 		cwd: projectRoot,

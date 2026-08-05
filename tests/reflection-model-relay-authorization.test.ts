@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { WHALEHALL_RELAY_BASE_URL } from "../src/bun/client-config";
 import { ReflectionModelRelayAuthorization } from "../src/bun/reflection-model-relay-authorization";
 
-const reflectionKey =
-	"whref_0123456789abcdef0123456789abcdef.fixture_reflection_secret_0123456789";
+// Intentionally human-readable fixture, not a credential-shaped token.  The
+// authorization boundary only requires a non-empty host-owned value here.
+const reflectionKey = "fixture-reflection-key";
 
 describe("ReflectionModelRelayAuthorization", () => {
 	test("uses only the fixed transient reflection endpoint and host-owned key", async () => {
