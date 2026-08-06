@@ -6,8 +6,8 @@
 ```yaml
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "REPLACE_WITH_ACTIVITY_WORKER_KEY"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  apikey: "REPLACE_WITH_REFLECTION_RELAY_KEY"
 
 agent:
   name: "qwen3:1.7b"
@@ -17,7 +17,7 @@ agent:
 
 | 角色 | 用途 | 凭据边界 |
 | --- | --- | --- |
-| `reflection` | 将已封闭的完整原始活动窗口投给活动 Worker，获得事件列表和分数 | 活动 Worker key |
+| `reflection` | 在客户端构造完整活动反思 prompt，经通用 relay 调用模型并在本机整理事件列表和分数 | 独立 reflection relay key |
 | `agent` | 远端账号密码登录后，将聊天与后台活动分析经 relay 转到 Qwen | 仅属于该账号的 personal relay key |
 
 两个 checked-in 示例文件只含 `REPLACE_WITH_*` 不可用占位符。它们不会启用远端
@@ -35,25 +35,29 @@ bun run provision:relay-owner -- \
   --users /absolute/local/model-relay-users.json
 ```
 
-该命令询问账号资料、密码和活动 Worker key，生成 personal relay key，并将两个真实
+该命令询问账号资料和密码，生成 reflection relay key 与 personal relay key，并将两个真实
 字面量 key 写入 owner-only 本机 `config.yaml`。生成的 `model-relay-users.json` 只含
-`passwordHash` 与 `agentKeyHash`，可部署到 relay；它不含 personal relay key，也不应
-打印、上传或提交本机 `config.yaml`。
+`passwordHash`、`reflectionKeyId`、`reflectionKeyHash` 与 `agentKeyHash`，可部署到 relay；
+它不含任何明文 key，也不应打印、上传或提交本机 `config.yaml`。
 
 ## 自动活动链路
 
-1. Reflection 仅在自然封闭的 `EventWindowV1` 后提交一次完整 `raw_event` 给
-   `/v1/activity/analyze`，不会逐条原始事件请求模型。
-2. Worker 返回严格校验的事件列表、分数和原因。本机持久化 receipt、重试 outbox 和
-   分数账本；请求 ID 使重复投递幂等。
-3. 累积分数达到固定阈值 `1` 时，所有尚未处理的 Worker 事件/分数会合并成一个串行
+1. Reflection 仅在自然封闭的 `EventWindowV1` 后排入本地 outbox。Bun 生成完整原始窗口
+   prompt，交给本地 Mastra `activity-reflection` Workflow；其 Agent 通过框架原生的本地
+   `skill` 元工具加载打包的分析与评分 `SKILL.md`，不注册产品 Tool。随后它经 host-owned
+   `ModelRelayTransport` 请求固定 `/v1/activity/completions`。因此不会逐条原始事件请求模型。
+2. relay 仅以 reflection key 鉴权、限流、allowlist 并原样转发非流式 OpenAI body 到 CPU
+   Qwen；它不含反思 prompt、聚合、时间/action 格式化、分数计算或反思记录逻辑。模型 JSON
+   返回客户端后，由 Bun 严格校验并生成中文事件列表、receipt、重试 outbox 和分数账本。
+3. 累积分数达到固定阈值 `1` 时，所有尚未处理的本地事件/分数会合并成一个串行
    后台 job。该 job 不包含原始活动窗口，不注册 Tool，也不会向 renderer 广播结果。
 4. 该 job 只在已登录的同一账号下运行；登录切换不会跨账号重放。完成结果加密保存到
    本机 Agent 数据库。断电、模型失败和退出会保留可恢复 job，并在原账号恢复后重试。
 
-活动 Worker 固定走其部署的 CPU 优先服务。正式 chat/activity-analysis relay 则只允许
-家里云的 CPU loopback `127.0.0.1:11437` 和 `qwen3:1.7b`；它不会回退到 GPU，因此
-既有 GPU 训练 Worker 不会被这个 relay 占用。
+reflection 与正式 chat/activity-analysis relay 都只允许家里云的 CPU loopback
+`127.0.0.1:11437` 和 `qwen3:1.7b`；不会回退到 GPU，因此既有 GPU 训练 Worker 不会被
+这个 relay 占用。新 `/v1/activity/completions` 路由须随本仓库 relay 部署后才会生效；旧
+`/v1/activity/analyze` Worker 不会被这项改动修改或重启。
 
 ## 远端认证与聊天
 

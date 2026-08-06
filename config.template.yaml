@@ -2,8 +2,8 @@
 # keys to the private user-data/config.yaml file; do not put usable keys here.
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "REPLACE_WITH_ACTIVITY_WORKER_KEY"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  apikey: "REPLACE_WITH_REFLECTION_RELAY_KEY"
 
 agent:
   name: "qwen3:1.7b"

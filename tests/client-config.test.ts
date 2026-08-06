@@ -10,22 +10,25 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	ACTIVITY_EVENT_WORKER_ENDPOINT,
-	ACTIVITY_EVENT_WORKER_MODEL,
-	AGENT_RELAY_BASE_URL,
-	activityEventWorkerConfigurationFromConfiguration,
+	REFLECTION_RELAY_COMPLETIONS_PATH,
+	WHALEHALL_RELAY_BASE_URL,
+	WHALEHALL_RELAY_MODEL,
+	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	type ClientConfiguration,
 	DEFAULT_CLIENT_CONFIGURATION,
 	loadOrCreateClientConfiguration,
 	reflectionModelConfigurationFromConfiguration,
-	UNPROVISIONED_ACTIVITY_WORKER_KEY,
+	UNPROVISIONED_REFLECTION_RELAY_KEY,
 	UNPROVISIONED_AGENT_RELAY_KEY,
 	writeProvisionedClientConfiguration,
 } from "../src/bun/client-config";
 
 const directories: string[] = [];
-const fixtureActivityWorkerKey = ["fixture", "activity", "worker"].join("-");
+const fixtureReflectionRelayKey = [
+	"whref_0123456789abcdef0123456789abcdef",
+	"fixture-reflection-secret-0123456789",
+].join(".");
 const fixtureRelayKey = ["fixture", "personal", "relay"].join("-");
 
 afterEach(() => {
@@ -43,13 +46,13 @@ function temporaryDirectory(): string {
 function templateConfiguration(): string {
 	return [
 		"reflection:",
-		`  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
-		`  baseurl: "${ACTIVITY_EVENT_WORKER_ENDPOINT}"`,
-		`  apikey: "${UNPROVISIONED_ACTIVITY_WORKER_KEY}"`,
+		`  name: "${WHALEHALL_RELAY_MODEL}"`,
+		`  baseurl: "${WHALEHALL_RELAY_BASE_URL}"`,
+		`  apikey: "${UNPROVISIONED_REFLECTION_RELAY_KEY}"`,
 		"",
 		"agent:",
-		`  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
-		`  baseurl: "${AGENT_RELAY_BASE_URL}"`,
+		`  name: "${WHALEHALL_RELAY_MODEL}"`,
+		`  baseurl: "${WHALEHALL_RELAY_BASE_URL}"`,
 		`  apikey: "${UNPROVISIONED_AGENT_RELAY_KEY}"`,
 		"",
 	].join("\n");
@@ -58,13 +61,13 @@ function templateConfiguration(): string {
 function provisionedConfiguration(): ClientConfiguration {
 	return {
 		reflection: {
-			name: ACTIVITY_EVENT_WORKER_MODEL,
-			baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			apikey: fixtureActivityWorkerKey,
+			name: WHALEHALL_RELAY_MODEL,
+			baseurl: WHALEHALL_RELAY_BASE_URL,
+			apikey: fixtureReflectionRelayKey,
 		},
 		agent: {
-			name: ACTIVITY_EVENT_WORKER_MODEL,
-			baseurl: AGENT_RELAY_BASE_URL,
+			name: WHALEHALL_RELAY_MODEL,
+			baseurl: WHALEHALL_RELAY_BASE_URL,
 			apikey: fixtureRelayKey,
 		},
 	};
@@ -110,7 +113,7 @@ describe("WhaleHall client config.yaml", () => {
 		).toBeNull();
 	});
 
-	test("loads literal Worker and personal relay keys into their separate roles", () => {
+	test("loads literal reflection and personal relay keys into their separate roles", () => {
 		const directory = temporaryDirectory();
 		const userDataDirectory = join(directory, "user-data");
 		const path = join(userDataDirectory, "config.yaml");
@@ -134,11 +137,11 @@ describe("WhaleHall client config.yaml", () => {
 			agentModelConfigurationFromConfiguration(result.configuration),
 		).toEqual(provisionedConfiguration().agent);
 		expect(
-			activityEventWorkerConfigurationFromConfiguration(result.configuration),
+			activityReflectionConfigurationFromConfiguration(result.configuration),
 		).toEqual({
-			modelName: ACTIVITY_EVENT_WORKER_MODEL,
-			endpoint: ACTIVITY_EVENT_WORKER_ENDPOINT,
-			authorizationToken: fixtureActivityWorkerKey,
+			modelName: WHALEHALL_RELAY_MODEL,
+			relayBaseUrl: WHALEHALL_RELAY_BASE_URL,
+			reflectionKey: fixtureReflectionRelayKey,
 			scoreThreshold: 1,
 		});
 		expectOwnerOnlyMode(path);
@@ -147,19 +150,19 @@ describe("WhaleHall client config.yaml", () => {
 	test("rejects environment references, swapped endpoints, unknown fields, and non-approved models", () => {
 		const sources = [
 			templateConfiguration().replace(
-				UNPROVISIONED_ACTIVITY_WORKER_KEY,
-				"$" + "{WHALEHALL_ACTIVITY_WORKER_TOKEN}",
+				UNPROVISIONED_REFLECTION_RELAY_KEY,
+				"$" + "{WHALEHALL_REFLECTION_RELAY_KEY}",
 			),
 			templateConfiguration().replace(
-				AGENT_RELAY_BASE_URL,
-				ACTIVITY_EVENT_WORKER_ENDPOINT,
+				WHALEHALL_RELAY_BASE_URL,
+				`${WHALEHALL_RELAY_BASE_URL}${REFLECTION_RELAY_COMPLETIONS_PATH}`,
 			),
 			templateConfiguration().replace(
-				ACTIVITY_EVENT_WORKER_MODEL,
+				WHALEHALL_RELAY_MODEL,
 				"qwen3:other",
 			),
 			templateConfiguration().replace(
-				`agent:\n  name: "${ACTIVITY_EVENT_WORKER_MODEL}"`,
+				`agent:\n  name: "${WHALEHALL_RELAY_MODEL}"`,
 				'agent:\n  name: "qwen3:other"',
 			),
 			templateConfiguration().replace(
@@ -228,7 +231,7 @@ describe("WhaleHall client config.yaml", () => {
 		expect(result.status).toBe("loaded");
 		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
 		expect(
-			activityEventWorkerConfigurationFromConfiguration(result.configuration),
+			activityReflectionConfigurationFromConfiguration(result.configuration),
 		).toBeNull();
 	});
 });

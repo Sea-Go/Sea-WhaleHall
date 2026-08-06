@@ -8,6 +8,17 @@ import {
 	MAXIMUM_ACTIVITY_ANALYSIS_RESULTS,
 	serializedActivityAnalysisLength,
 } from "../../shared/activity-analysis-contract";
+import {
+	activityReflectionModelOutputSchema,
+	createActivityReflectionRuntimeOutputSchema,
+	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
+} from "../activity-reflection-prompt";
+import { loadActivityReflectionNativeSkillContext } from "./activity-reflection-skills";
+import {
+	type ActivityReflectionWorkflowDriverInput,
+	activityReflectionWorkflowInputSchema,
+	activityReflectionWorkflowOutcomeSchema,
+} from "./activity-reflection-workflow";
 import { createMastraAgentSet, type MastraAgentSet } from "./agents";
 import {
 	type CalendarSnapshot,
@@ -34,6 +45,7 @@ import {
 import {
 	type ActivityAnalysisStartParams,
 	type ActivityAnalysisWorkerResult,
+	type ActivityReflectionAnalyzeParams,
 	AGENT_HOST_METHODS,
 	AGENT_HOST_PROTOCOL_VERSION,
 	AGENT_HOST_SERVICE,
@@ -76,10 +88,13 @@ import {
 } from "./transport";
 
 const defaultRelayBaseUrl = "https://model-relay.whalehall.invalid/v1";
+const defaultReflectionRelayBaseUrl =
+	"https://activity-relay.whalehall.invalid/v1";
 const maxConversationCharacters = 64 * 1024;
 const maxRetainedRuns = 256;
 const maxClarificationRounds = 3;
-
+/** Must finish before the Bun-side 210-second reflection deadline. */
+export const DEFAULT_ACTIVITY_REFLECTION_WORKFLOW_TIMEOUT_MS = 195_000;
 interface ConversationRunContext {
 	conversationId: string;
 	resourceId: string;
@@ -124,6 +139,7 @@ export class AgentHostRuntime {
 	private readonly onShutdownRequested: () => void;
 	private readonly onBackgroundError: (error: Error) => void;
 	private relay: ModelRelay | null = null;
+	private reflectionRelay: ModelRelay | null = null;
 	private storage: HostMastraStorage | null = null;
 	private agents: MastraAgentSet | null = null;
 	private initialized: RuntimeInitializeResult | null = null;
@@ -190,6 +206,8 @@ export class AgentHostRuntime {
 				return this.startPlanning(request.requestId, request.params);
 			case "activity.start":
 				return this.startActivityAnalysis(request.requestId, request.params);
+			case "reflection.analyze":
+				return this.analyzeActivityReflection(request.params);
 			case "planning.answer":
 				return this.answerPlanning(request.requestId, request.params);
 			case "run.cancel":
@@ -246,11 +264,27 @@ export class AgentHostRuntime {
 		const baseUrl = params.model.baseUrl ?? defaultRelayBaseUrl;
 		const supportsStructuredOutputs =
 			params.model.supportsStructuredOutputs ?? true;
+		const reflectionProvider = requiredString(
+			params.reflectionModel?.provider,
+			"reflectionModel.provider",
+		);
+		const reflectionModelId = requiredString(
+			params.reflectionModel?.modelId,
+			"reflectionModel.modelId",
+		);
+		const reflectionBaseUrl =
+			params.reflectionModel.baseUrl ?? defaultReflectionRelayBaseUrl;
+		const reflectionSupportsStructuredOutputs =
+			params.reflectionModel.supportsStructuredOutputs ?? true;
 		const initializationKey = JSON.stringify({
 			provider,
 			modelId,
 			baseUrl,
 			supportsStructuredOutputs,
+			reflectionProvider,
+			reflectionModelId,
+			reflectionBaseUrl,
+			reflectionSupportsStructuredOutputs,
 		});
 		if (this.initialized) {
 			if (this.initializationKey !== initializationKey) {
@@ -263,17 +297,29 @@ export class AgentHostRuntime {
 		}
 
 		this.relay = new ModelRelay(this.runBoundPeer, provider, modelId);
+		this.reflectionRelay = new ModelRelay(
+			this.runBoundPeer,
+			reflectionProvider,
+			reflectionModelId,
+		);
 		this.storage = new HostMastraStorage(this.runBoundPeer);
 		this.agents = createMastraAgentSet({
 			provider,
 			modelId,
 			baseUrl,
 			supportsStructuredOutputs,
+			reflectionProvider,
+			reflectionModelId,
+			reflectionBaseUrl,
+			reflectionSupportsStructuredOutputs,
 			storage: this.storage,
 			relay: this.relay,
+			reflectionRelay: this.reflectionRelay,
 			executeTool: (input) => this.executeTool(input),
 			executePlanningWorkflow: (input) =>
 				this.executePlanningWorkflowCycle(input),
+			executeActivityReflectionWorkflow: (input) =>
+				this.executeActivityReflectionWorkflow(input),
 		});
 		this.initialized = {
 			service: AGENT_HOST_SERVICE,
@@ -382,6 +428,68 @@ export class AgentHostRuntime {
 		record.snapshot.activityJobId = activityJobId;
 		this.schedule(record, () => this.executeActivityAnalysis(record));
 		return accepted(record);
+	}
+
+	/**
+	 * Runs one client-owned reflection prompt through a no-persistence Mastra
+	 * workflow. It intentionally creates no Agent run or durable snapshot.
+	 */
+	private async analyzeActivityReflection(
+		params: ActivityReflectionAnalyzeParams,
+	): Promise<unknown> {
+		this.ensureReady();
+		const invocationId = requiredString(params.invocationId, "invocationId");
+		const requestId = requiredString(params.requestId, "requestId");
+		const userPrompt = requiredString(
+			params.userPrompt,
+			"userPrompt",
+			MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
+		);
+		const workflowInput = activityReflectionWorkflowInputSchema.parse({
+			invocationId,
+			requestId,
+			userPrompt,
+			signalSegmentIds: params.signalSegmentIds,
+			candidateActivities: params.candidateActivities,
+		});
+		const workflow = this.requireAgents().activityReflectionWorkflow;
+		// Deliberately omit `runId`: in Mastra 1.55 a caller-supplied run ID
+		// asks storage to look for a durable snapshot even when persistence is
+		// disabled. This live privacy boundary must remain entirely in-memory.
+		const run = await workflow.createRun({ disableScorers: true });
+		let result: Awaited<ReturnType<typeof run.start>>;
+		try {
+			result = await runActivityReflectionWithDeadline(
+				() =>
+					this.hostRunContext.run(invocationId, () =>
+						run.start({
+							inputData: workflowInput,
+							requestContext: new RequestContext(),
+						}),
+					),
+				() => run.cancel(),
+				DEFAULT_ACTIVITY_REFLECTION_WORKFLOW_TIMEOUT_MS,
+				(error) => this.onBackgroundError(asError(error)),
+			);
+		} catch (error) {
+			if (error instanceof ActivityReflectionWorkflowDeadlineError) {
+				throw runtimeError(
+					"MODEL_RELAY_UNAVAILABLE",
+					"Activity reflection timed out.",
+					true,
+				);
+			}
+			throw error;
+		}
+		if (result.status === "success") {
+			return activityReflectionWorkflowOutcomeSchema.parse(result.result)
+				.modelOutput;
+		}
+		if (result.status === "failed") throw asError(result.error);
+		throw runtimeError(
+			"INTERNAL_ERROR",
+			`Activity reflection Workflow stopped with unsupported status ${result.status}.`,
+		);
 	}
 
 	private answerPlanning(
@@ -995,6 +1103,55 @@ export class AgentHostRuntime {
 		return this.executePlanningModel(record, calendar, abortSignal);
 	}
 
+	private async executeActivityReflectionWorkflow({
+		invocationId,
+		requestId,
+		userPrompt,
+		signalSegmentIds,
+		candidateActivities,
+		abortSignal,
+	}: ActivityReflectionWorkflowDriverInput) {
+		const agents = this.requireAgents();
+		const relay = this.requireReflectionRelay();
+		return relay.runInContext(
+			{ runId: invocationId, originatingRequestId: requestId },
+			async () => {
+				const runtimeOutputSchema = createActivityReflectionRuntimeOutputSchema(
+					signalSegmentIds,
+					candidateActivities,
+				);
+				const nativeSkillContext =
+					await loadActivityReflectionNativeSkillContext(
+						agents.activityReflectionSkillCatalog,
+					);
+				const result = await agents.activityReflection.generate(userPrompt, {
+					runId: invocationId,
+					abortSignal,
+					requestContext: new RequestContext(),
+					// Qwen's CPU Ollama endpoint does not honor the native Skill tool
+					// calls reliably. The rules above were already loaded locally via
+					// Mastra's `getSkill()` API, so make exactly one no-Tool model call.
+					maxSteps: 1,
+					toolChoice: "none",
+					// Reflection is a deterministic classification/aggregation task.
+					// Keep CPU Qwen sampling stable across retryable sealed windows.
+					modelSettings: { temperature: 0 },
+					context: [nativeSkillContext],
+					structuredOutput: {
+						schema: runtimeOutputSchema,
+						errorStrategy: "strict",
+						// This one-step call has no Tools, so native structured output
+						// can constrain CPU Ollama without the former tool/schema conflict.
+						jsonPromptInjection: false,
+					},
+				});
+				return activityReflectionModelOutputSchema.parse(
+					runtimeOutputSchema.parse(result.object),
+				);
+			},
+		);
+	}
+
 	private async executePlanningModel(
 		record: RunRecord,
 		calendar: CalendarSnapshot,
@@ -1364,7 +1521,12 @@ export class AgentHostRuntime {
 	}
 
 	private ensureReady(): void {
-		if (!this.initialized || !this.agents || !this.relay) {
+		if (
+			!this.initialized ||
+			!this.agents ||
+			!this.relay ||
+			!this.reflectionRelay
+		) {
 			throw runtimeError(
 				"NOT_INITIALIZED",
 				"Call runtime.initialize before starting a run.",
@@ -1384,6 +1546,11 @@ export class AgentHostRuntime {
 	private requireRelay(): ModelRelay {
 		this.ensureReady();
 		return this.relay as ModelRelay;
+	}
+
+	private requireReflectionRelay(): ModelRelay {
+		this.ensureReady();
+		return this.reflectionRelay as ModelRelay;
 	}
 
 	private requireStorage(): HostMastraStorage {
@@ -1792,6 +1959,57 @@ function runtimeError(
 	return new AgentHostRuntimeError({ code, message, retryable });
 }
 
+class ActivityReflectionWorkflowDeadlineError extends Error {
+	constructor() {
+		super("Activity reflection workflow timed out.");
+		this.name = "ActivityReflectionWorkflowDeadlineError";
+	}
+}
+
+/**
+ * Makes the no-persistence workflow cancellable even when an upstream model
+ * implementation never settles. The losing operation remains observed, so a
+ * late resolution/rejection cannot become an unhandled promise rejection.
+ */
+export function runActivityReflectionWithDeadline<TResult>(
+	operation: () => Promise<TResult>,
+	cancel: () => Promise<void>,
+	timeoutMs: number,
+	onCancelError: (error: unknown) => void = () => undefined,
+): Promise<TResult> {
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+		return Promise.reject(new Error("Activity reflection timeout is invalid."));
+	}
+	return new Promise<TResult>((resolve, reject) => {
+		let settled = false;
+		const finish = (settle: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			settle();
+		};
+		const timer = setTimeout(() => {
+			finish(() => {
+				void cancel().catch(onCancelError);
+				reject(new ActivityReflectionWorkflowDeadlineError());
+			});
+		}, timeoutMs);
+		void Promise.resolve()
+			.then(operation)
+			.then(
+				(value) => finish(() => resolve(value)),
+				(error: unknown) => finish(() => reject(error)),
+			);
+	});
+}
+
 function asError(error: unknown): Error {
-	return error instanceof Error ? error : new Error(String(error));
+	// Only locally constructed protocol errors can cross the private-stdio
+	// boundary verbatim. Model/provider objects can contain arbitrary prompts,
+	// outputs or huge serialized payloads, so they deliberately become generic.
+	if (error instanceof AgentHostRuntimeError) return error;
+	if (isRecord(error) && typeof error.diagnostic === "string") {
+		return new Error(error.diagnostic.replace(/[\r\n]+/g, " ").slice(0, 1_000));
+	}
+	return new Error("Agent runtime operation failed.");
 }

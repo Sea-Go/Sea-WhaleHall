@@ -543,22 +543,21 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 ```yaml
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  apikey: "REPLACE_WITH_REFLECTION_RELAY_KEY"
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
-  apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
 ```
 
-两个 `baseurl` 都必须是无 credentials、query 或 fragment 的远端 HTTPS URL。`apikey` 可以是
-owner-only user-data 文件中的直接密钥，或受限的环境变量引用；示例引用
-`WHALEHALL_ACTIVITY_WORKER_TOKEN`。无效、部分、symlink 或超大的配置会回退到安全默认值，
-且不会覆盖用户原文件。
+两个 `baseurl` 都必须是无 credentials、query 或 fragment 的远端 HTTPS relay origin。
+`apikey` 必须是 owner-only user-data 文件中的直接字面量密钥；不支持环境变量引用。无效、
+部分、symlink 或超大的配置会回退到安全默认值，且不会覆盖用户原文件。
 
-这份 YAML 仅配置家里云的 Qwen 1.7B 活动 Worker。内部 Teacher 和可选 ModernBERT 仍是独立的
-runtime trust boundary：Teacher lock 与 Timeline artifact pin 不会因为填写一个 URL 而被放宽；
+这份 YAML 配置家里云 Qwen 1.7B 的两个固定 relay 能力：reflection 及 Agent。内部 Teacher
+和可选 ModernBERT 仍是独立的 runtime trust boundary：Teacher lock 与 Timeline artifact pin 不会因为填写一个 URL 而被放宽；
 Timeline 未显式通过 runtime 环境与 manifest 校验时保持 deterministic cold-start。真实密钥禁止写入
 Git、日志、SQLite 收据或示例文件。
 
@@ -567,24 +566,34 @@ Git、日志、SQLite 收据或示例文件。
 Reflection 原语义：64 条有效语义事件、第一条有效事件后的 5 分钟，或目标切换、AFK/锁屏/睡眠等
 存在状态边界提前封闭一个非空窗口；进程扫描、心跳、工具和反思自身事件不计入 64 条。
 
-每个封闭窗口只产生一次请求，完整且未裁剪的 `EventWindowV1`（包含原始 `events` 数组、目标快照、
-时间范围和封窗原因）直接放在 `raw_event` 并请求 Qwen 1.7B。`context.response_contract` 只锚定
-request ID、window ID、唯一稳定的 window source anchor、完整 source cursor 清单、封窗原因和时间范围，
-不替换或裁剪原始窗口。小模型只需回传 window anchor（也可回传窗口内任一 eventId 或 cursor），不能引用
-窗口外事件。若 1.7B 仍生成无法映射的子事件 ID，客户端会将该输出项的来源安全归一化为本次 window
-anchor；分类、证据和分数保持不变，且不会形成窗口外引用。
+每个封闭窗口只产生一次投递任务；一次模型反思可有有限的本地 Mastra Skill 加载轮次。完整且未裁剪的
+`EventWindowV1`（包含原始 `events` 数组、目标快照、时间范围和封窗原因）由 Bun 构造成中文反思 prompt。
+Sidecar 把随应用打包的 `skills/activity-reflection-analysis/` 和
+`skills/activity-reflection-scoring/` 作为 Mastra Agent 的原生文件型 Skills：模型必须通过框架的本地
+`skill` 元工具分别加载它们，必要时通过 `skill_read` 读取参考资料。前者负责六维状态判断、活动聚合、中文
+action、短时间片与隐私边界，后者负责目标相关有效投入的评分公式、零分条件、累计语义和校准示例。已确认的
+暂离、恢复、锁屏、解锁、睡眠、唤醒由客户端从原始窗口确定性追加为零分 `idle_transition`，模型不猜测或生成它。
+两个 Skill 的文件和执行结果只存在于本地 Sidecar，不属于远端 relay，也不会成为产品 Tool。`context.response_contract` 锚定 request ID、
+window ID、唯一稳定的 window source anchor、完整 source cursor 清单、封窗原因、时间范围和时区，
+不替换或裁剪原始窗口。这个 prompt 只在客户端 Bun/Sidecar 的单次调用中存在；Sidecar 经 Mastra
+生成 OpenAI-compatible body，再由 Bun 使用 reflection key 请求固定 `/v1/activity/completions`。
 
-云端响应必须是 `activity-event-analysis-response.v1`：事件列表仅保留在 Bun 主进程及 owner-only
-`activity-window-worker.sqlite3` 收据/出站库，`score` 才进入本地累加器。窗口先写入本地出站库，
+远端 relay 只验证 reflection key、模型 allowlist、大小、限流与 CPU loopback 转发；它不含 system
+prompt、事件聚合、时间/action 格式化、分数计算或反思记录逻辑。模型 JSON 回到客户端后，Bun 才将它
+严格校验并映射为 `activity-event-analysis-response.v1`：每项可含中文 `time` 和 `action`，来源安全
+归一化为本次 window anchor，不能形成窗口外引用。有效的模型短时间片会保留，客户端只补齐缺失端点；
+`score_reason` 必须为不含原始敏感信息的简短中文。事件列表仅保留在 Bun 主进程及 owner-only
+`activity-window-worker.sqlite3` 收据/出站库，模型返回的 `[0,1]` `score` 通过范围、空事件为零等契约校验后
+直接进入本地累加器，客户端不会重算、平均或改写它。窗口先写入本地出站库，
 成功响应和分数在同一 SQLite 事务中落收据；因此重启、重复封窗通知或“远端已响应但进程尚未落库”的
 情况都不会重复加分。首次启用时会在 Reflection 启动前建立本地 cutover，先前已经封闭的窗口不会被
 补传；之后若进程恰好在封窗与通知之间崩溃，下一次启动会从 Reflection 的窗口索引补入尚未处理的窗口。
-累计值达到固定阈值 `1` 后只持久化 `agentTriggerPending`，由本地下一步 Agent 执行器显式
-claim 后才扣除一个阈值并保留超额分数；模型和投递器都不会自行调用未定义的 Agent。`agent`
-角色已经加载相同的模型、地址和密钥，但当前 Worker 仍是活动分析协议，不能被错误地当作通用聊天接口。
-网络、超时或服务端暂不可用时窗口停留在出站库并按退避重试，不会阻塞 Reflection 的 native cursor。
-密钥绝不交给 Rust 传感器、SQLite 收据、日志或 renderer；若不使用环境变量引用，只能保存在
-owner-only user-data YAML。
+累计值达到固定阈值 `1` 后，账本会将全部尚未消费的回执合并为一个串行后台 Agent job；只有该 job 成功后才
+扣除它精确的 `consumedScore`，失败、退出、断电或账号不匹配均不扣分且可恢复。模型和投递器都不会自行调用
+未定义的 Agent。`agent`
+角色独立使用个人 relay key 和 bearer 的聊天路径，不能用于 reflection。网络、超时或服务端暂不可用时
+窗口停留在出站库并按退避重试，不会阻塞 Reflection 的 native cursor。密钥绝不交给 Rust 传感器、
+SQLite 收据、日志或 renderer，只能保存在 owner-only user-data YAML。
 
 本机 Qwen Teacher lock：
 

@@ -33,6 +33,7 @@ const credentialHelperSource = `.native/${target.os}-${target.arch}/${credential
 const nodeBinary = target.os === "win" ? "node.exe" : "node";
 const nodeSource = `.native/${target.os}-${target.arch}/${nodeBinary}`;
 const agentHostSource = `.native/${target.os}-${target.arch}/whalehall-agent-host.mjs`;
+const agentSkillsSource = `.native/${target.os}-${target.arch}/skills`;
 const buildEnvironment =
 	process.argv
 		.find((argument) => argument.startsWith("--env="))
@@ -71,6 +72,7 @@ const nativeCopies: Record<string, string> = {
 	[credentialHelperSource]: `native/${credentialHelperBinary}`,
 	[nodeSource]: `node/${nodeBinary}`,
 	[agentHostSource]: "agent/whalehall-agent-host.mjs",
+	[agentSkillsSource]: "agent/skills",
 };
 if (target.os === "macos") {
 	nativeCopies[`.native/macos-${target.arch}/WhaleHall Observer.app`] =
@@ -101,6 +103,7 @@ export default {
 			"config.template.yaml",
 			"src/views",
 			"src/agent",
+			"skills",
 			"whalehall-local/protocol/src",
 			"whalehall-local/core/src",
 			"whalehall-local/server/src",

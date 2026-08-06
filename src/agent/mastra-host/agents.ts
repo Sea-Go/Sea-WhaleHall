@@ -2,6 +2,13 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
 import { Memory } from "@mastra/memory";
+import { ACTIVITY_REFLECTION_SYSTEM_PROMPT } from "../activity-reflection-prompt";
+import { activityReflectionNativeSkillPaths } from "./activity-reflection-skills";
+import {
+	type ActivityReflectionWorkflow,
+	type ActivityReflectionWorkflowDriver,
+	createActivityReflectionWorkflow,
+} from "./activity-reflection-workflow";
 import type { HostMastraStorage } from "./mastra-storage";
 import type { ModelRelay } from "./model-relay";
 import {
@@ -16,7 +23,10 @@ export interface MastraAgentSet {
 	conversation: Agent<"whalehall-conversation">;
 	planning: Agent<"whalehall-planning">;
 	activity: Agent<"whalehall-activity-analysis">;
+	activityReflectionSkillCatalog: Agent<"whalehall-activity-reflection-skills">;
+	activityReflection: Agent<"whalehall-activity-reflection">;
 	planningWorkflow: TaskPlanningWorkflow;
+	activityReflectionWorkflow: ActivityReflectionWorkflow;
 }
 
 export interface MastraAgentSetOptions {
@@ -24,10 +34,16 @@ export interface MastraAgentSetOptions {
 	modelId: string;
 	baseUrl: string;
 	supportsStructuredOutputs: boolean;
+	reflectionProvider: string;
+	reflectionModelId: string;
+	reflectionBaseUrl: string;
+	reflectionSupportsStructuredOutputs: boolean;
 	storage: HostMastraStorage;
 	relay: ModelRelay;
+	reflectionRelay: ModelRelay;
 	executeTool: AgentToolExecutor;
 	executePlanningWorkflow: PlanningWorkflowDriver;
+	executeActivityReflectionWorkflow: ActivityReflectionWorkflowDriver;
 }
 
 export function createMastraAgentSet(
@@ -40,6 +56,15 @@ export function createMastraAgentSet(
 		supportsStructuredOutputs: options.supportsStructuredOutputs,
 	});
 	const model = provider.chatModel(options.modelId);
+	const reflectionProvider = createOpenAICompatible({
+		name: options.reflectionProvider,
+		baseURL: normalizeBaseUrl(options.reflectionBaseUrl),
+		fetch: options.reflectionRelay.fetch,
+		supportsStructuredOutputs: options.reflectionSupportsStructuredOutputs,
+	});
+	const reflectionModel = reflectionProvider.chatModel(
+		options.reflectionModelId,
+	);
 	const tools = createWhaleHallAgentTools(options.executeTool);
 	const memory = new Memory({
 		storage: options.storage.composite,
@@ -94,16 +119,58 @@ export function createMastraAgentSet(
 		tools: {},
 		maxRetries: 0,
 	});
+	const activityReflectionSkillCatalog = new Agent({
+		id: "whalehall-activity-reflection-skills",
+		name: "WhaleHall 活动反思 Skill 目录",
+		description: "仅在本地加载活动反思规则；从不向模型或界面运行。",
+		instructions: "仅供本地 Mastra Skill 读取；不得运行模型或调用工具。",
+		model: reflectionModel,
+		skills: activityReflectionNativeSkillPaths,
+		skillsFormat: "markdown",
+		tools: {},
+		maxRetries: 0,
+	});
+	const activityReflection = new Agent({
+		id: "whalehall-activity-reflection",
+		name: "WhaleHall 活动反思模型",
+		description: "对一个本地封闭活动窗口生成可核对的结构化中文事件。",
+		instructions: ACTIVITY_REFLECTION_SYSTEM_PROMPT,
+		model: reflectionModel,
+		// Raw-window calls use no Tools. The local Skill catalog above loads the
+		// framework-native rules deterministically before this single model call.
+		tools: {},
+		maxRetries: 0,
+	});
 	const planningWorkflow = createTaskPlanningWorkflow(
 		options.executePlanningWorkflow,
 	);
+	const activityReflectionWorkflow = createActivityReflectionWorkflow(
+		options.executeActivityReflectionWorkflow,
+	);
 	const mastra = new Mastra({
 		storage: options.storage.composite,
+		// The reflection Agent deliberately remains unregistered. Mastra 1.55
+		// makes registered Agents durable and persists their internal agent-loop
+		// snapshots even when the enclosing Workflow opts out. A standalone Agent
+		// uses Mastra's ephemeral in-memory host, which keeps this raw-window
+		// prompt/output out of the desktop database and reverse storage protocol.
 		agents: { conversation, planning, activity },
-		workflows: { planning: planningWorkflow },
+		workflows: {
+			planning: planningWorkflow,
+			activityReflection: activityReflectionWorkflow,
+		},
 		logger: false,
 	});
-	return { mastra, conversation, planning, activity, planningWorkflow };
+	return {
+		mastra,
+		conversation,
+		planning,
+		activity,
+		activityReflectionSkillCatalog,
+		activityReflection,
+		planningWorkflow,
+		activityReflectionWorkflow,
+	};
 }
 
 function normalizeBaseUrl(value: string): string {

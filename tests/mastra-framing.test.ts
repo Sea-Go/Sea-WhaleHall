@@ -7,6 +7,7 @@ import {
 } from "../src/agent/mastra-host/framing";
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
+	isAgentHostRequest,
 	isAgentRunEventFrame,
 	isSidecarHostRequest,
 } from "../src/agent/mastra-host/protocol";
@@ -14,15 +15,22 @@ import { safeSidecarEnvironment } from "../src/bun/mastra-sidecar-client";
 
 describe("Mastra sidecar Content-Length framing", () => {
 	test("uses UTF-8 byte lengths and accepts arbitrarily fragmented input", () => {
-		const value = { text: "鲸落，让每个字节都被准确计数。", nested: { ok: true } };
+		const value = {
+			text: "鲸落，让每个字节都被准确计数。",
+			nested: { ok: true },
+		};
 		const frame = encodeContentLengthFrame(value);
 		const parser = new ContentLengthFrameParser();
 		const decoded: unknown[] = [];
 		for (const byte of frame) decoded.push(...parser.push(Uint8Array.of(byte)));
 		parser.finish();
 		expect(decoded).toEqual([value]);
-		const header = frame.subarray(0, frame.indexOf("\r\n\r\n")).toString("ascii");
-		expect(header).toBe(`Content-Length: ${Buffer.byteLength(JSON.stringify(value))}`);
+		const header = frame
+			.subarray(0, frame.indexOf("\r\n\r\n"))
+			.toString("ascii");
+		expect(header).toBe(
+			`Content-Length: ${Buffer.byteLength(JSON.stringify(value))}`,
+		);
 	});
 
 	test("parses multiple coalesced frames in order", () => {
@@ -51,7 +59,9 @@ describe("Mastra sidecar Content-Length framing", () => {
 			),
 		).toThrow("exceeds 4 bytes");
 		expect(() =>
-			new ContentLengthFrameParser().push(Buffer.from("X-Test: 1\r\n\r\n{}", "ascii")),
+			new ContentLengthFrameParser().push(
+				Buffer.from("X-Test: 1\r\n\r\n{}", "ascii"),
+			),
 		).toThrow("missing a Content-Length");
 	});
 
@@ -62,20 +72,51 @@ describe("Mastra sidecar Content-Length framing", () => {
 	});
 
 	test("validates Sidecar host methods and complete run-event envelopes", () => {
-		expect(isSidecarHostRequest({
-			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
-			type: "request",
-			requestId: "host-1",
-			method: "workflow/snapshot.update-state",
-			params: { workflowName: "task-planning" },
-		})).toBe(true);
-		expect(isSidecarHostRequest({
-			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
-			type: "request",
-			requestId: "host-2",
-			method: "system/open-shell",
-			params: {},
-		})).toBe(false);
+		expect(
+			isSidecarHostRequest({
+				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				type: "request",
+				requestId: "host-1",
+				method: "workflow/snapshot.update-state",
+				params: { workflowName: "task-planning" },
+			}),
+		).toBe(true);
+		expect(
+			isSidecarHostRequest({
+				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				type: "request",
+				requestId: "host-2",
+				method: "system/open-shell",
+				params: {},
+			}),
+		).toBe(false);
+		expect(
+			isSidecarHostRequest({
+				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				type: "request",
+				requestId: "host-3",
+				method: "reflection/worker.analyze",
+				params: {
+					invocationId: "activity-reflection-window-1",
+					ownerRunId: "activity-reflection-window-1",
+				},
+			}),
+		).toBe(false);
+		expect(
+			isAgentHostRequest({
+				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				type: "request",
+				requestId: "reflection-1",
+				method: "reflection.analyze",
+				params: {
+					invocationId: "activity-reflection-window-1",
+					requestId: "activity-window-request-1",
+					signalSegmentIds: ["segment-1"],
+					candidateActivities: ["development"],
+					userPrompt: "COMPRESSED_ACTIVITY_EVENTS_JSON=[]",
+				},
+			}),
+		).toBe(true);
 
 		const completed = {
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
@@ -90,12 +131,16 @@ describe("Mastra sidecar Content-Length framing", () => {
 		};
 		expect(isAgentRunEventFrame(completed)).toBe(true);
 		expect(isAgentRunEventFrame({ ...completed, sequence: 0 })).toBe(false);
-		expect(isAgentRunEventFrame({ ...completed, terminalState: null })).toBe(false);
-		expect(isAgentRunEventFrame({
-			...completed,
-			terminalState: null,
-			event: { kind: "agent.tool.call", toolCallId: "tool-1" },
-		})).toBe(false);
+		expect(isAgentRunEventFrame({ ...completed, terminalState: null })).toBe(
+			false,
+		);
+		expect(
+			isAgentRunEventFrame({
+				...completed,
+				terminalState: null,
+				event: { kind: "agent.tool.call", toolCallId: "tool-1" },
+			}),
+		).toBe(false);
 	});
 
 	test("disables Mastra telemetry and does not pass provider credentials to the Sidecar", () => {

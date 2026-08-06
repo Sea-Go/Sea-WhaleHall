@@ -312,6 +312,9 @@ export async function createTimelineV2Runtime(
 				fetch: options.teacherFetch,
 			});
 			modelLockVerified = true;
+			// @whalehall-model-boundary-exception local-model-lock
+			// This cited-hypothesis helper is a verified legacy local component,
+			// not a configurable desktop model role. New model calls use Mastra.
 			const client = new OllamaJsonClient({
 				baseUrl: teacherLock.baseUrl,
 				model: teacherLock.model,

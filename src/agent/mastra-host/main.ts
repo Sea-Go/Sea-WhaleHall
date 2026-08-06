@@ -1,7 +1,12 @@
-import process from "node:process";
 import { resolve } from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { ContentLengthFrameParser } from "./framing";
+import {
+	isModelRelayEventFrame,
+	isProtocolResponse,
+	isRecord,
+} from "./protocol";
 import { AgentHostRuntime } from "./runtime";
 import { DuplexProtocolPeer, NodeProtocolWriter } from "./transport";
 
@@ -14,24 +19,55 @@ export function startAgentHost(): void {
 			process.stdin.destroy();
 		},
 		onBackgroundError: (error) => {
-			process.stderr.write(`[agent-host] background failure: ${safeMessage(error)}\n`);
+			process.stderr.write(
+				`[agent-host] background failure: ${safeMessage(error)}\n`,
+			);
 		},
 	});
 	peer.setRequestHandler((request) => runtime.dispatch(request));
 
-	let inputTail = Promise.resolve();
+	// Requests from Bun remain ordered, but responses to a Sidecar-initiated
+	// host call must bypass that queue. A workflow can legitimately make such a
+	// call before its originating request has completed; queueing its response
+	// behind the originating request would deadlock this duplex protocol.
+	let requestTail = Promise.resolve();
 	process.stdin.on("data", (chunk: Buffer) => {
-		inputTail = inputTail
-			.then(async () => {
-				for (const message of parser.push(chunk)) await peer.accept(message);
-			})
-			.catch((error) => stopWithFailure(peer, error));
+		let messages: unknown[];
+		try {
+			messages = parser.push(chunk);
+		} catch (error) {
+			stopWithFailure(peer, error);
+			return;
+		}
+		for (const message of messages) {
+			if (isProtocolResponse(message) || isModelRelayEventFrame(message)) {
+				void peer
+					.accept(message)
+					.catch((error) => stopWithFailure(peer, error));
+				continue;
+			}
+			// A response bypasses the ordered request queue. Never let a malformed
+			// response fall through to that queue: it would be treated as a request
+			// and could leave the matching Sidecar pending forever.
+			if (
+				isRecord(message) &&
+				(message.type === "response" || message.type === "event")
+			) {
+				stopWithFailure(
+					peer,
+					new Error("Agent host received an invalid protocol frame."),
+				);
+				return;
+			}
+			requestTail = requestTail.then(() => peer.accept(message));
+			void requestTail.catch((error) => stopWithFailure(peer, error));
+		}
 	});
 	process.stdin.on("end", () => {
-		inputTail = inputTail
+		requestTail = requestTail
 			.then(() => parser.finish())
-			.catch((error) => stopWithFailure(peer, error))
 			.finally(() => peer.close(new Error("Agent host input closed.")));
+		void requestTail.catch((error) => stopWithFailure(peer, error));
 	});
 	process.stdin.on("error", (error) => stopWithFailure(peer, error));
 	process.stdin.resume();
@@ -40,9 +76,12 @@ export function startAgentHost(): void {
 function stopWithFailure(peer: DuplexProtocolPeer, error: unknown): void {
 	const failure = error instanceof Error ? error : new Error(String(error));
 	peer.close(failure);
-	process.stderr.write(`[agent-host] protocol failure: ${safeMessage(failure)}\n`);
+	process.stderr.write(
+		`[agent-host] protocol failure: ${safeMessage(failure)}\n`,
+	);
 	process.exitCode = 1;
-	process.stdin.pause();
+	process.stdin.destroy();
+	setImmediate(() => process.exit(1));
 }
 
 function safeMessage(error: Error): string {
@@ -50,4 +89,5 @@ function safeMessage(error: Error): string {
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
-if (invokedPath && fileURLToPath(import.meta.url) === invokedPath) startAgentHost();
+if (invokedPath && fileURLToPath(import.meta.url) === invokedPath)
+	startAgentHost();

@@ -12,9 +12,8 @@ import { dirname, resolve } from "node:path";
 import { createScryptPasswordHash } from "../services/model-relay/password";
 import type { RelayUser } from "../services/model-relay/types";
 import {
-	ACTIVITY_EVENT_WORKER_ENDPOINT,
-	ACTIVITY_EVENT_WORKER_MODEL,
-	AGENT_RELAY_BASE_URL,
+	WHALEHALL_RELAY_BASE_URL,
+	WHALEHALL_RELAY_MODEL,
 	writeProvisionedClientConfiguration,
 } from "../src/bun/client-config";
 
@@ -33,19 +32,13 @@ async function main(): Promise<void> {
 	const passwordConfirmation = await prompt("再次输入登录密码: ", true);
 	if (password !== passwordConfirmation)
 		throw new Error("两次输入的登录密码不一致。");
-	const activityWorkerKey = await prompt("活动 Worker key: ", true);
-	if (
-		!activityWorkerKey ||
-		activityWorkerKey.length > 4_096 ||
-		/\s/u.test(activityWorkerKey)
-	) {
-		throw new Error("活动 Worker key 必须是不含空白的字面量密钥。");
-	}
-
 	const personalRelayKey = `whk_${randomBytes(32).toString("base64url")}`;
-	const [passwordHash, agentKeyHash] = await Promise.all([
+	const reflectionKeyId = `whref_${randomUUID().replaceAll("-", "")}`;
+	const reflectionRelayKey = `${reflectionKeyId}.${randomBytes(32).toString("base64url")}`;
+	const [passwordHash, agentKeyHash, reflectionKeyHash] = await Promise.all([
 		createScryptPasswordHash(password),
 		createScryptPasswordHash(personalRelayKey),
+		createScryptPasswordHash(reflectionRelayKey),
 	]);
 	const user: RelayUser = {
 		id: `user-${randomUUID()}`,
@@ -54,6 +47,8 @@ async function main(): Promise<void> {
 		initials,
 		passwordHash,
 		agentKeyHash,
+		reflectionKeyId,
+		reflectionKeyHash,
 	};
 
 	writeRelayUsersFile(args.usersPath, user, args.replace);
@@ -61,13 +56,13 @@ async function main(): Promise<void> {
 		path: args.configPath,
 		configuration: {
 			reflection: {
-				name: ACTIVITY_EVENT_WORKER_MODEL,
-				baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
-				apikey: activityWorkerKey,
+				name: WHALEHALL_RELAY_MODEL,
+				baseurl: WHALEHALL_RELAY_BASE_URL,
+				apikey: reflectionRelayKey,
 			},
 			agent: {
-				name: ACTIVITY_EVENT_WORKER_MODEL,
-				baseurl: AGENT_RELAY_BASE_URL,
+				name: WHALEHALL_RELAY_MODEL,
+				baseurl: WHALEHALL_RELAY_BASE_URL,
 				apikey: personalRelayKey,
 			},
 		},
@@ -78,7 +73,7 @@ async function main(): Promise<void> {
 			"已写入 owner-only 本机 config.yaml 与仅含哈希的 relay 用户文件。",
 			`本机配置：${args.configPath}`,
 			`待部署用户文件：${args.usersPath}`,
-			"个人 relay key 仅保存在本机 config.yaml，未打印、未写入用户文件。",
+			"反思 relay key 与个人 relay key 仅保存在本机 config.yaml，未打印、未写入用户文件。",
 		].join("\n")}\n`,
 	);
 }

@@ -6,6 +6,9 @@ export interface RelayUser {
 	passwordHash: string;
 	/** scrypt hash of the owner's personal desktop relay key. */
 	agentKeyHash: string;
+	/** Public lookup ID plus scrypt hash for the non-interactive reflection key. */
+	reflectionKeyId: string;
+	reflectionKeyHash: string;
 	disabled?: boolean;
 }
 
@@ -19,6 +22,7 @@ export interface RelayPublicUser {
 export interface UserStore {
 	findByEmail(normalizedEmail: string): Promise<RelayUser | null>;
 	findById(id: string): Promise<RelayUser | null>;
+	findByReflectionKeyId(reflectionKeyId: string): Promise<RelayUser | null>;
 }
 
 export interface StoredSession {

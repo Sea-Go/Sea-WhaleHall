@@ -41,16 +41,23 @@ export interface RuntimeInitializeParams {
 		name: string;
 		version: string;
 	};
-	model: {
-		provider: string;
-		modelId: string;
-		/**
-		 * A logical OpenAI-compatible base URL. The sidecar never opens this URL;
-		 * every request is relayed to the host through `model/relay.open`.
-		 */
-		baseUrl?: string;
-		supportsStructuredOutputs?: boolean;
-	};
+	model: RuntimeModelConfiguration;
+	/**
+	 * Separate logical provider for the sealed-window reflection role. Its key
+	 * remains in Bun; the Sidecar only creates the already-complete model body.
+	 */
+	reflectionModel: RuntimeModelConfiguration;
+}
+
+export interface RuntimeModelConfiguration {
+	provider: string;
+	modelId: string;
+	/**
+	 * A logical OpenAI-compatible base URL. The sidecar never opens this URL;
+	 * every request is relayed to the host through `model/relay.open`.
+	 */
+	baseUrl?: string;
+	supportsStructuredOutputs?: boolean;
 }
 
 export interface RuntimeInitializeResult {
@@ -132,6 +139,22 @@ export interface ActivityAnalysisStartParams {
 	analyses: readonly ActivityAnalysisWorkerResult[];
 }
 
+/** A local, no-persistence model invocation for one sealed activity window. */
+export interface ActivityReflectionAnalyzeParams {
+	invocationId: string;
+	requestId: string;
+	/** Client-derived IDs from the prompt's local signal index. They let the
+	 * structured schema forbid invented time segments without sending raw data
+	 * over a separate channel. */
+	signalSegmentIds: readonly string[];
+	/** Union of the candidate activities from this local signal index. The
+	 * per-window response schema uses it to rule out unrelated categories. */
+	candidateActivities: readonly string[];
+	/** Complete client-owned prompt. It may contain raw activity and never leaves
+	 * the local Bun/Sidecar process except inside the resulting model request. */
+	userPrompt: string;
+}
+
 export interface RunTargetParams {
 	runId: string;
 }
@@ -193,6 +216,7 @@ export type AgentHostMethod =
 	| "conversation.start"
 	| "planning.start"
 	| "activity.start"
+	| "reflection.analyze"
 	| "planning.answer"
 	| "agent.approveTool"
 	| "agent.declineTool"
@@ -240,6 +264,7 @@ export type AgentHostRequest =
 	| RequestEnvelope<"conversation.start", ConversationStartParams>
 	| RequestEnvelope<"planning.start", PlanningStartParams>
 	| RequestEnvelope<"activity.start", ActivityAnalysisStartParams>
+	| RequestEnvelope<"reflection.analyze", ActivityReflectionAnalyzeParams>
 	| RequestEnvelope<"planning.answer", PlanningAnswerParams>
 	| RequestEnvelope<"agent.approveTool", AgentToolDecisionParams>
 	| RequestEnvelope<"agent.declineTool", AgentToolDecisionParams>
@@ -384,6 +409,7 @@ export const AGENT_HOST_METHODS: readonly AgentHostMethod[] = [
 	"conversation.start",
 	"planning.start",
 	"activity.start",
+	"reflection.analyze",
 	"planning.answer",
 	"agent.approveTool",
 	"agent.declineTool",
@@ -458,7 +484,9 @@ export function isProtocolResponse(value: unknown): value is ProtocolResponse {
 		)
 	)
 		return false;
-	return value.ok ? true : isAgentHostErrorPayload(value.error);
+	return value.ok
+		? Object.hasOwn(value, "result")
+		: isAgentHostErrorPayload(value.error);
 }
 
 export function isAgentHostRequest(value: unknown): value is AgentHostRequest {

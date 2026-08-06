@@ -117,6 +117,32 @@ function workerResponse(
 	};
 }
 
+function stateOnlyWorkerResponse(
+	requestId: string,
+	sourceEventId: string,
+): ActivityEventWorkerResponse {
+	return {
+		schema_version: "activity-event-analysis-response.v1",
+		request_id: requestId,
+		events: [
+			{
+				time: "00:00:01-00:00:01",
+				action: "确定：电脑已锁屏",
+				source_event_ids: [sourceEventId],
+				activity: "idle_transition",
+				goal_relevance: "uncertain",
+				confidence: 1,
+				reason_codes: ["客户端状态边界"],
+				evidence: ["检测到已确认的锁屏状态边界"],
+				started_at_ms: 1_800,
+				ended_at_ms: 1_800,
+			},
+		],
+		score: 0,
+		score_reason: "状态事件不计分，计 0 分",
+	};
+}
+
 class MutableWindowSource implements ActivityWindowSource {
 	constructor(readonly windows: EventWindowV1[]) {}
 
@@ -196,6 +222,35 @@ async function eventually(
 }
 
 describe("ActivityWindowDeliveryService", () => {
+	test("persists a deterministic zero-score state receipt without scheduling an Agent job", () => {
+		const directory = temporaryDirectory();
+		const store = new ActivityWindowDeliveryStore(
+			join(directory, "activity-window-worker.sqlite3"),
+		);
+		const window = sealedWindow("window-state-only", 2);
+		const requestId = "request-state-only";
+		try {
+			store.initializeBaseline([]);
+			store.enqueue(window, requestId, 1);
+			const result = store.apply(
+				window.windowId,
+				stateOnlyWorkerResponse(requestId, window.windowId),
+				1,
+				2,
+			);
+			expect(result).toMatchObject({
+				accepted: true,
+				triggerBecamePending: false,
+				status: { accumulatedScore: 0, agentTriggerPending: false },
+			});
+			expect(store.nextActivityAnalysisJob(1, "account-state", 3)).toEqual({
+				kind: "none",
+			});
+		} finally {
+			store.close();
+		}
+	});
+
 	test("sends one complete sealed window, not one request per raw event", async () => {
 		const directory = temporaryDirectory();
 		const source = new MutableWindowSource([]);

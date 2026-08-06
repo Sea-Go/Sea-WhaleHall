@@ -29,11 +29,12 @@ bun run provision:relay-owner -- \
   --users /absolute/local/model-relay-users.json
 ```
 
-This writes literal Worker and personal relay keys to the local owner-only
-`config.yaml`, but writes only `passwordHash` and `agentKeyHash` to
-`model-relay-users.json`. Copy only the latter to the server; never copy the
-desktop `config.yaml` or print either key. Existing users require the explicit
-`--replace` flag to avoid accidental overwrite.
+This writes literal reflection and personal relay keys to the local owner-only
+`config.yaml`, but writes only `passwordHash`, `reflectionKeyId`,
+`reflectionKeyHash` and `agentKeyHash` to `model-relay-users.json`. Copy only
+the latter to the server; never copy the desktop `config.yaml` or print either
+key. Existing users require the explicit `--replace` flag to avoid accidental
+overwrite.
 
 ## Install after merge
 
@@ -65,16 +66,19 @@ sudo systemctl reload caddy
 ```
 
 The relay binds only to `127.0.0.1:8787`; Caddy is the public TLS boundary.
-It retains encrypted-on-disk relay request/response records for 30 days.
+It retains encrypted-on-disk chat request/response records for 30 days, while
+reflection bodies are forwarded transiently and never written to relay storage.
 
 ## Verification and rollback
 
 Use a scrubbed fixture account to verify `POST /v1/auth/sessions`, refresh,
 logout, and `POST /v1/chat/completions` with both a bearer token and matching
-`X-WhaleHall-Agent-Key`. Confirm the existing activity endpoint still answers
-through its previous handler. Check `systemctl status` and relay logs only for
-status/error metadata; neither should contain bearer tokens, personal keys, or
-raw activity windows.
+`X-WhaleHall-Agent-Key`. Also verify `/v1/activity/completions` with only the
+provisioned `X-WhaleHall-Reflection-Key`, a non-streaming scrubbed body, and
+an empty relay record directory. Confirm the existing `/v1/activity/analyze`
+endpoint still answers through its previous handler. Check `systemctl status`
+and relay logs only for status/error metadata; neither should contain bearer
+tokens, reflection/personal keys, or raw activity windows.
 
 If the relay cannot start or verification fails, remove only the new Caddy
 relay handler, reload Caddy, then stop and disable
