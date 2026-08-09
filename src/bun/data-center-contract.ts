@@ -5,31 +5,28 @@ import {
 	randomBytes,
 	sign,
 } from "node:crypto";
+import { canonicalJson } from "../agent/reflection/hash";
 import type {
 	DesktopEventKind,
 	DesktopEventV1,
 } from "../agent/reflection/types";
-import { canonicalJson } from "../agent/reflection/hash";
 import type {
 	CloudSyncConfiguration,
 	CloudSyncConsentLevel,
 } from "./client-config";
+import type { DataCenterClientEncryptionEnvelope } from "./data-center-crypto";
 import type {
 	DataCenterAgentCredentialsRecord,
 	DataCenterConsumerAuditRecord,
 	DataCenterPendingAdvanceRecord,
 	DataCenterPendingBatchRecord,
 } from "./encrypted-agent-repository";
-import type { DataCenterClientEncryptionEnvelope } from "./data-center-crypto";
 
 export const DATA_CENTER_CONSUMER_ID = "whalehall.datacenter.v1";
 export const DATA_CENTER_REGISTER_PATH = "/v1/agent/register";
-export const DATA_CENTER_BATCH_PATH =
-	"/api/v1/agent/events/desktop/batch";
-export const DATA_CENTER_CURSOR_PATH =
-	"/api/v1/agent/events/desktop/cursor";
-export const DATA_CENTER_ADVANCE_PATH =
-	"/api/v1/agent/events/desktop/advance";
+export const DATA_CENTER_BATCH_PATH = "/api/v1/agent/events/desktop/batch";
+export const DATA_CENTER_CURSOR_PATH = "/api/v1/agent/events/desktop/cursor";
+export const DATA_CENTER_ADVANCE_PATH = "/api/v1/agent/events/desktop/advance";
 export const DATA_CENTER_SIGNATURE_VERSION = "2";
 export const DATA_CENTER_MAX_BATCH_EVENTS = 500;
 export const DATA_CENTER_MAX_BATCH_BODY_BYTES = 15 * 1024 * 1024;
@@ -316,7 +313,8 @@ export function createPendingDataCenterBatch(
 	}
 	const firstCursor = events[0]?.cursor;
 	const lastCursor = events.at(-1)?.cursor;
-	if (!firstCursor || !lastCursor) throw new Error("DataCenter batch is empty.");
+	if (!firstCursor || !lastCursor)
+		throw new Error("DataCenter batch is empty.");
 	const material = JSON.stringify({ firstCursor, lastCursor, events });
 	const batchKey = `dcb1_${sha256Hex(material)}`;
 	const body: DataCenterBatchBody = {
@@ -386,8 +384,7 @@ export function dataCenterPendingBatchReplacementReason(options: {
 		if (consent === "off") return "consent-revoked";
 		if (
 			event.sensitivity === "content" &&
-			(consent !== "content" ||
-				!options.configuration.contentEncryptionEnabled)
+			(consent !== "content" || !options.configuration.contentEncryptionEnabled)
 		) {
 			return "content-not-consented";
 		}
@@ -398,7 +395,9 @@ export function dataCenterPendingBatchReplacementReason(options: {
 	return expired ? "retention-expired" : null;
 }
 
-export function dataCenterWireEventByteLength(event: DataCenterWireEvent): number {
+export function dataCenterWireEventByteLength(
+	event: DataCenterWireEvent,
+): number {
 	return Buffer.byteLength(JSON.stringify(event), "utf8");
 }
 
@@ -502,9 +501,7 @@ export function signDataCenterRequestV2(options: {
 			"X-Agent-Timestamp": timestamp,
 			"X-Agent-Nonce": nonce,
 			"X-Agent-Signature-Version": DATA_CENTER_SIGNATURE_VERSION,
-			"X-Agent-Signature": sign(null, canonical, privateKey).toString(
-				"base64",
-			),
+			"X-Agent-Signature": sign(null, canonical, privateKey).toString("base64"),
 		};
 	} finally {
 		privateDer.fill(0);
@@ -743,10 +740,9 @@ function metadataWireEvent(
 	return { ...eventIdentity(event), sensitivity: "metadata", payload };
 }
 
-function eventIdentity(event: DesktopEventV1): Omit<
-	DataCenterMetadataEvent,
-	"sensitivity" | "payload"
-> {
+function eventIdentity(
+	event: DesktopEventV1,
+): Omit<DataCenterMetadataEvent, "sensitivity" | "payload"> {
 	return {
 		schemaVersion: "desktop-event.v1",
 		eventId: event.eventId,
@@ -798,9 +794,7 @@ function metadataPayloadForEvent(
 			return {
 				editorId: event.payload.editorId,
 				documentId: event.payload.documentId,
-				...(event.payload.language
-					? { language: event.payload.language }
-					: {}),
+				...(event.payload.language ? { language: event.payload.language } : {}),
 				insertedChars: event.payload.insertedChars,
 				deletedChars: event.payload.deletedChars,
 				burstStartedAtMs: event.payload.burstStartedAtMs,
@@ -909,8 +903,7 @@ export function dataCenterCursorDistance(
 	fromCursor: string | null,
 	toCursor: string,
 ): number {
-	const from =
-		fromCursor === null ? 0n : dataCenterCursorSequence(fromCursor);
+	const from = fromCursor === null ? 0n : dataCenterCursorSequence(fromCursor);
 	const distance = dataCenterCursorSequence(toCursor) - from;
 	if (distance < 1n || distance > BigInt(Number.MAX_SAFE_INTEGER)) {
 		throw new Error("DataCenter cursor advance distance is invalid.");
@@ -930,8 +923,9 @@ function compareCanonicalComponent(left: string, right: string): number {
 }
 
 function rfc3986Encode(value: string): string {
-	return encodeURIComponent(value).replace(/[!'()*]/gu, (character) =>
-		`%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+	return encodeURIComponent(value).replace(
+		/[!'()*]/gu,
+		(character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
 	);
 }
 

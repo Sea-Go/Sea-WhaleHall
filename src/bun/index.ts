@@ -48,15 +48,15 @@ import { AgentToolPolicy } from "./agent-tool-policy";
 import { BackgroundAppLifecycle } from "./app-lifecycle";
 import { CalendarRepository } from "./calendar-repository";
 import {
-	REFLECTION_RELAY_COMPLETIONS_PATH,
-	WHALEHALL_RELAY_MODEL,
 	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
+	REFLECTION_RELAY_COMPLETIONS_PATH,
+	WHALEHALL_RELAY_MODEL,
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
-import { DataCenterSyncService } from "./data-center-sync";
 import { DataCenterContentCrypto } from "./data-center-crypto";
+import { DataCenterSyncService } from "./data-center-sync";
 import {
 	AgentPermissionRevisionConflictError,
 	EncryptedAgentRepository,
@@ -69,9 +69,9 @@ import {
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
 import { loadOrCreateInstallationId } from "./installation-id";
 import { WhaleHallAgentToolExecutor } from "./local-agent-tool-executor";
+import { MastraActivityReflectionAnalyzer } from "./mastra-activity-reflection";
 import { LocalAgentHostServices } from "./mastra-host-services";
 import { MastraSidecarClient } from "./mastra-sidecar-client";
-import { MastraActivityReflectionAnalyzer } from "./mastra-activity-reflection";
 import { ModelRelayTransport } from "./model-relay-transport";
 import { monitoringPermissionSettingsUrl } from "./monitoring-permission-settings";
 import {
@@ -83,6 +83,7 @@ import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { PlanningAuthorityService } from "./planning-authority-service";
 import { PrivateTrainingWindowExportCoordinator } from "./private-training-window-export";
+import { ReflectionModelRelayAuthorization } from "./reflection-model-relay-authorization";
 import {
 	createWhaleHallReflectionRuntime,
 	setRuntimeGoal,
@@ -92,7 +93,6 @@ import {
 	RemoteAuthError,
 	RemoteAuthSessionManager,
 } from "./remote-auth-session";
-import { ReflectionModelRelayAuthorization } from "./reflection-model-relay-authorization";
 import { SidecarModelRelayBridge } from "./sidecar-model-relay-bridge";
 import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import {
@@ -306,7 +306,9 @@ const sidecar = new MastraSidecarClient({
 				const analyzer = activityReflectionAnalyzer;
 				const bridge = activityReflectionRelayBridge;
 				if (!analyzer?.hasPendingInvocation(ownerRunId) || !bridge) {
-					throw new Error("Reflection model relay call is not locally authorized.");
+					throw new Error(
+						"Reflection model relay call is not locally authorized.",
+					);
 				}
 				return bridge.open(call.requestId, params);
 			}
@@ -329,7 +331,9 @@ const sidecar = new MastraSidecarClient({
 			// Abort frames intentionally contain only the relay/run IDs. Pending
 			// reflection invocation ownership is therefore the capability check.
 			if (activityReflectionAnalyzer?.hasPendingInvocation(ownerRunId)) {
-				return activityReflectionRelayBridge?.abort(params) ?? { aborted: false };
+				return (
+					activityReflectionRelayBridge?.abort(params) ?? { aborted: false }
+				);
 			}
 			return coordinator.runBoundHostCall(ownerRunId, async () =>
 				relayBridge.abort(params),

@@ -53,10 +53,7 @@ describe("desktop model-call boundary", () => {
 
 	test("routes only reflection completions through the production model origin", async () => {
 		const fragment = await readFile(
-			join(
-				repositoryRoot,
-				"deploy/home-cloud/model-relay/Caddyfile.fragment",
-			),
+			join(repositoryRoot, "deploy/home-cloud/model-relay/Caddyfile.fragment"),
 			"utf8",
 		);
 		const matcher = fragment

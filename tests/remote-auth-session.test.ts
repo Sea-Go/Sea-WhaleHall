@@ -143,12 +143,8 @@ describe("RemoteAuthSessionManager", () => {
 		expect(headers.get("x-whalehall-agent-key")).toBe(personalRelayKey);
 		expect(headers.get("authorization")).toStartWith("Bearer ");
 		expect(headers.get("x-session-generation")).toBe("1");
-		expect(observed.bearerHeaders?.get("authorization")).toStartWith(
-			"Bearer ",
-		);
-		expect(
-			observed.bearerHeaders?.get("x-whalehall-agent-key"),
-		).toBeNull();
+		expect(observed.bearerHeaders?.get("authorization")).toStartWith("Bearer ");
+		expect(observed.bearerHeaders?.get("x-whalehall-agent-key")).toBeNull();
 		expect(observed.modelRedirect).toBe("error");
 		expect(manager.isCurrentSession(identity)).toBeTrue();
 		expect(await manager.clearSessionIfCurrent(identity)).toBeTrue();

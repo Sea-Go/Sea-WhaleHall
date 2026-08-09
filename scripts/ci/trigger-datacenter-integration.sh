@@ -27,6 +27,8 @@ if [[ ! "$DATACENTER_GITLAB_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] ||
 fi
 
 work_dir=$(mktemp -d)
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2317
 cleanup() {
 	rm -f "$work_dir/trigger.json" "$work_dir/pipeline.json"
 	rmdir "$work_dir"

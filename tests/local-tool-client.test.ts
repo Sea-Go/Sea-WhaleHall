@@ -1,19 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import {
-	JsonlParser,
-	JsonlProtocolError,
-	LocalClientError,
-	LocalToolClient,
-	STARTUP_GOAL_CHANGE_ENV,
-	createLocalToolProcessEnvironment,
-	type ChildTransport,
-} from "../src/agent/local-tool-client";
 import type {
 	LocalEventGoalChange,
 	LocalMonitoringStatus,
 	LocalToolDescriptor,
 } from "../src/agent/local-protocol";
 import { parseLocalMessage } from "../src/agent/local-protocol";
+import {
+	type ChildTransport,
+	createLocalToolProcessEnvironment,
+	JsonlParser,
+	JsonlProtocolError,
+	LocalClientError,
+	LocalToolClient,
+	STARTUP_GOAL_CHANGE_ENV,
+} from "../src/agent/local-tool-client";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
 
 class FakeChild implements ChildTransport {
@@ -29,7 +29,12 @@ class FakeChild implements ChildTransport {
 	endCalled = false;
 	killCalled = false;
 
-	constructor(private readonly onWrite: (value: string, child: FakeChild) => void = () => {}) {
+	constructor(
+		private readonly onWrite: (
+			value: string,
+			child: FakeChild,
+		) => void = () => {},
+	) {
 		this.stdout = new ReadableStream({
 			start: (controller) => {
 				this.stdoutController = controller;
@@ -45,7 +50,8 @@ class FakeChild implements ChildTransport {
 		});
 		this.stdin = {
 			write: (value) => {
-				const text = typeof value === "string" ? value : new TextDecoder().decode(value);
+				const text =
+					typeof value === "string" ? value : new TextDecoder().decode(value);
 				for (const line of text.trim().split("\n")) this.onWrite(line, this);
 				return text.length;
 			},
@@ -59,11 +65,14 @@ class FakeChild implements ChildTransport {
 	}
 
 	respond(value: unknown): void {
-		this.stdoutController.enqueue(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+		this.stdoutController.enqueue(
+			new TextEncoder().encode(`${JSON.stringify(value)}\n`),
+		);
 	}
 
 	emitChunks(...values: string[]): void {
-		for (const value of values) this.stdoutController.enqueue(new TextEncoder().encode(value));
+		for (const value of values)
+			this.stdoutController.enqueue(new TextEncoder().encode(value));
 	}
 
 	exit(code: number): void {
@@ -102,7 +111,9 @@ describe("JsonlParser", () => {
 
 	test("rejects an oversized line", () => {
 		const parser = new JsonlParser(() => {}, 4);
-		expect(() => parser.feed(encoder.encode("12345"))).toThrow(JsonlProtocolError);
+		expect(() => parser.feed(encoder.encode("12345"))).toThrow(
+			JsonlProtocolError,
+		);
 	});
 
 	test("rejects raw key fields and content hidden in metadata events", () => {
@@ -314,7 +325,8 @@ describe("LocalToolClient", () => {
 	test("replays the exact prepared JSON when the child exits before startup acknowledgement", async () => {
 		const first = new FakeChild();
 		const second = new FakeChild();
-		const environments: Array<Readonly<Record<string, string>> | undefined> = [];
+		const environments: Array<Readonly<Record<string, string>> | undefined> =
+			[];
 		let spawnIndex = 0;
 		const change: LocalEventGoalChange = {
 			previous: null,
@@ -370,7 +382,8 @@ describe("LocalToolClient", () => {
 			}),
 			new FakeChild(),
 		];
-		const environments: Array<Readonly<Record<string, string>> | undefined> = [];
+		const environments: Array<Readonly<Record<string, string>> | undefined> =
+			[];
 		let spawnIndex = 0;
 		const client = new LocalToolClient("fake", {
 			spawn: (_binaryPath, environment) => {
@@ -408,10 +421,19 @@ describe("LocalToolClient", () => {
 				process.respond({
 					id: request.id,
 					ok: true,
-					result: { service: "whalehall-local", version: "0.1.0", pid: 4242, status: "ok" },
+					result: {
+						service: "whalehall-local",
+						version: "0.1.0",
+						pid: 4242,
+						status: "ok",
+					},
 				});
 			} else if (request.method === "tool.list") {
-				process.respond({ id: request.id, ok: true, result: { tools: [descriptor] } });
+				process.respond({
+					id: request.id,
+					ok: true,
+					result: { tools: [descriptor] },
+				});
 			} else if (request.method === "tool.call") {
 				const event = JSON.stringify({
 					event: "tool.progress",
@@ -423,7 +445,10 @@ describe("LocalToolClient", () => {
 					ok: true,
 					result: { callId: request.id, output: { os: "macos" } },
 				});
-				process.emitChunks(`${event.slice(0, 20)}`, `${event.slice(20)}\n${response}\n`);
+				process.emitChunks(
+					`${event.slice(0, 20)}`,
+					`${event.slice(20)}\n${response}\n`,
+				);
 			}
 		});
 		const client = new LocalToolClient("fake", { spawn: () => child });
@@ -481,10 +506,10 @@ describe("LocalToolClient", () => {
 		await client.start();
 		child.respond({ event: "desktop.event", data: event });
 		await Bun.sleep(0);
-			expect(pushed).toEqual([event]);
-			await expect(client.getEventTailCursor()).resolves.toEqual({
-				cursor: event.cursor,
-			});
+		expect(pushed).toEqual([event]);
+		await expect(client.getEventTailCursor()).resolves.toEqual({
+			cursor: event.cursor,
+		});
 		await expect(
 			client.queryEvents({ consumerId: "reflection-runtime", limit: 100 }),
 		).resolves.toEqual({
@@ -589,7 +614,7 @@ describe("LocalToolClient", () => {
 						request.method === "monitoring.pause"
 							? "paused"
 							: request.method === "monitoring.configure" &&
-								  request.params.enabled === false
+									request.params.enabled === false
 								? "disabled"
 								: "running",
 					enabled:
@@ -598,8 +623,10 @@ describe("LocalToolClient", () => {
 							: true,
 					tapReady:
 						request.method !== "monitoring.pause" &&
-						!(request.method === "monitoring.configure" &&
-							request.params.enabled === false),
+						!(
+							request.method === "monitoring.configure" &&
+							request.params.enabled === false
+						),
 				}),
 			});
 		});
@@ -773,7 +800,11 @@ describe("LocalToolClient", () => {
 		});
 		await client.start();
 		await expect(
-			client.callTool({ callId: "slow", name: "demo.wait", arguments: { durationMs: 5000 } }),
+			client.callTool({
+				callId: "slow",
+				name: "demo.wait",
+				arguments: { durationMs: 5000 },
+			}),
 		).rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
 		expect(methods).toEqual(["tool.call", "tool.cancel"]);
 		expect(client.isRunning).toBe(true);

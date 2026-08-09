@@ -15,8 +15,8 @@ import {
 import {
 	cloudSyncConsentDigest,
 	completeDataCenterRegistration,
-	createDataCenterConsumerAudit,
 	createDataCenterAgentCredentials,
+	createDataCenterConsumerAudit,
 	createPendingDataCenterAdvance,
 	createPendingDataCenterBatchPrefix,
 	DATA_CENTER_ADVANCE_PATH,
@@ -25,17 +25,17 @@ import {
 	DATA_CENTER_CURSOR_PATH,
 	DATA_CENTER_EMPTY_BATCH_BODY_BYTES,
 	DATA_CENTER_MAX_BATCH_BODY_BYTES,
+	DATA_CENTER_REGISTER_PATH,
+	type DataCenterContentEncryptor,
+	type DataCenterProjectionResult,
+	type DataCenterWireEvent,
 	dataCenterConsentRequest,
 	dataCenterCursorSequence,
 	dataCenterPendingBatchReplacementReason,
 	dataCenterWireEventByteLength,
-	type DataCenterContentEncryptor,
-	type DataCenterProjectionResult,
-	type DataCenterWireEvent,
 	parseDataCenterCursor,
 	parseDataCenterRegistration,
 	projectDataCenterEvent,
-	DATA_CENTER_REGISTER_PATH,
 	signDataCenterRequestV2,
 	validateDataCenterAdvanceResponse,
 	validateDataCenterBatchResponse,
@@ -323,9 +323,7 @@ export class DataCenterSyncService {
 			}
 			if (projection.kind !== "upload") break;
 			const nextBytes =
-				uploadBodyBytes +
-				1 +
-				dataCenterWireEventByteLength(projection.event);
+				uploadBodyBytes + 1 + dataCenterWireEventByteLength(projection.event);
 			if (nextBytes > DATA_CENTER_MAX_BATCH_BODY_BYTES) break;
 			uploadBodyBytes = nextBytes;
 			projections.push(projection);
@@ -475,12 +473,7 @@ export class DataCenterSyncService {
 				signal,
 				"PUT",
 			);
-			validateConsentResponse(
-				response,
-				credentials.deviceId,
-				domain,
-				consent,
-			);
+			validateConsentResponse(response, credentials.deviceId, domain, consent);
 		}
 		this.assertCurrent(identity);
 		const updated = {
@@ -506,9 +499,15 @@ export class DataCenterSyncService {
 				? this.pendingOperation(owner.accountId)
 				: Promise.resolve({ batch: null, advance: null }),
 		]);
-		let remoteCursor = await this.getRemoteCursor(identity, credentials, signal);
+		let remoteCursor = await this.getRemoteCursor(
+			identity,
+			credentials,
+			signal,
+		);
 		if (cursorPosition(remoteCursor) > dataCenterCursorSequence(tail)) {
-			throw new Error("DataCenter cursor is ahead of this local event journal.");
+			throw new Error(
+				"DataCenter cursor is ahead of this local event journal.",
+			);
 		}
 		const audit = createDataCenterConsumerAudit({
 			fromAccountId: owner?.accountId ?? null,
@@ -557,7 +556,9 @@ export class DataCenterSyncService {
 		}
 
 		await this.commit(identity, tail);
-		await this.options.repository.setDataCenterConsumerOwner(identity.accountId);
+		await this.options.repository.setDataCenterConsumerOwner(
+			identity.accountId,
+		);
 		this.assertCurrent(identity);
 	}
 
@@ -593,9 +594,7 @@ export class DataCenterSyncService {
 		}
 		const expectedFrom = previousCursor(pending.firstCursor);
 		if (remoteCursor !== expectedFrom) {
-			throw new Error(
-				"DataCenter and durable pending batch cursors diverged.",
-			);
+			throw new Error("DataCenter and durable pending batch cursors diverged.");
 		}
 		const replacementReason = dataCenterPendingBatchReplacementReason({
 			pending,
@@ -725,8 +724,7 @@ export class DataCenterSyncService {
 		if (
 			cached?.accountId === identity.accountId &&
 			cached.agentId === credentials.agentId &&
-			nowMs <
-				cached.context.expiresAtMs - DATA_CENTER_CONTEXT_REFRESH_WINDOW_MS
+			nowMs < cached.context.expiresAtMs - DATA_CENTER_CONTEXT_REFRESH_WINDOW_MS
 		) {
 			return cached.context;
 		}
@@ -774,7 +772,11 @@ export class DataCenterSyncService {
 			throw new Error("Refusing a cross-origin DataCenter Agent request.");
 		}
 		let lastError: unknown;
-		for (let attempt = 0; attempt < DATA_CENTER_REQUEST_ATTEMPTS; attempt += 1) {
+		for (
+			let attempt = 0;
+			attempt < DATA_CENTER_REQUEST_ATTEMPTS;
+			attempt += 1
+		) {
 			throwIfAborted(signal);
 			this.assertCurrent(identity);
 			try {
@@ -833,7 +835,11 @@ export class DataCenterSyncService {
 		method: "POST" | "PUT" = "POST",
 	): Promise<unknown> {
 		let lastError: unknown;
-		for (let attempt = 0; attempt < DATA_CENTER_REQUEST_ATTEMPTS; attempt += 1) {
+		for (
+			let attempt = 0;
+			attempt < DATA_CENTER_REQUEST_ATTEMPTS;
+			attempt += 1
+		) {
 			throwIfAborted(signal);
 			this.assertCurrent(identity);
 			try {
@@ -907,16 +913,16 @@ export class DataCenterSyncService {
 		}
 	}
 
-	private deletePendingAdvance(
-		pending: DataCenterPendingAdvanceRecord,
-	): void {
+	private deletePendingAdvance(pending: DataCenterPendingAdvanceRecord): void {
 		if (
 			!this.options.repository.deleteDataCenterPendingAdvance(
 				pending.accountId,
 				pending.advanceKey,
 			)
 		) {
-			throw new Error("Durable DataCenter advance disappeared before deletion.");
+			throw new Error(
+				"Durable DataCenter advance disappeared before deletion.",
+			);
 		}
 	}
 
@@ -932,7 +938,10 @@ export class DataCenterSyncService {
 		return result;
 	}
 
-	private async retryWait(attempt: number, signal?: AbortSignal): Promise<void> {
+	private async retryWait(
+		attempt: number,
+		signal?: AbortSignal,
+	): Promise<void> {
 		const delay = this.retryDelayMs * 2 ** attempt;
 		if (delay <= 0) return;
 		await abortableDelay(delay, signal);
@@ -1010,7 +1019,8 @@ function validateConsentResponse(
 function previousCursor(cursor: string): string | null {
 	const sequence = dataCenterCursorSequence(cursor);
 	if (sequence === 1n) return null;
-	if (sequence < 1n) throw new Error("Desktop event cursor cannot precede one.");
+	if (sequence < 1n)
+		throw new Error("Desktop event cursor cannot precede one.");
 	return `ec1_${(sequence - 1n).toString(16).padStart(16, "0")}`;
 }
 

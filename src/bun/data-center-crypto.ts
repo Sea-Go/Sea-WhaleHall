@@ -5,8 +5,8 @@ import {
 	diffieHellman,
 	generateKeyPairSync,
 	hkdfSync,
-	randomBytes,
 	type KeyObject,
+	randomBytes,
 } from "node:crypto";
 import { canonicalJson } from "../agent/reflection/hash";
 import type { DesktopEventV1 } from "../agent/reflection/types";
@@ -14,8 +14,7 @@ import type { DesktopEventV1 } from "../agent/reflection/types";
 export const DATA_CENTER_ENCRYPTION_CONTEXT_PATH =
 	"/api/v1/agent/crypto/encryption-context?purpose=telemetry-sensitive";
 export const DATA_CENTER_ENCRYPTION_PURPOSE = "telemetry-sensitive";
-export const DATA_CENTER_TRANSPORT_ALGORITHM =
-	"X25519-HKDF-SHA256+A256GCM";
+export const DATA_CENTER_TRANSPORT_ALGORITHM = "X25519-HKDF-SHA256+A256GCM";
 export const DATA_CENTER_CONTENT_ALGORITHM = "A256GCM";
 export const DATA_CENTER_AAD_VERSION = "desktop-event-aad.v1";
 export const DATA_CENTER_TRANSPORT_AAD_VERSION = "dek-transport-aad.v1";
@@ -82,8 +81,7 @@ export type DataCenterContentEncryptionInput = {
 /** DataCenterContentCrypto creates the client-envelope.v1 accepted by DataCenter. */
 export class DataCenterContentCrypto {
 	constructor(
-		private readonly materialSource: DataCenterCryptoMaterialSource =
-			defaultMaterialSource,
+		private readonly materialSource: DataCenterCryptoMaterialSource = defaultMaterialSource,
 	) {}
 
 	encrypt(
@@ -133,11 +131,7 @@ export class DataCenterContentCrypto {
 				DATA_CENTER_GCM_NONCE_BYTES,
 				"wrapped key nonce",
 			);
-			assertLength(
-				contentNonce,
-				DATA_CENTER_GCM_NONCE_BYTES,
-				"content nonce",
-			);
+			assertLength(contentNonce, DATA_CENTER_GCM_NONCE_BYTES, "content nonce");
 
 			serverPublicRaw = decodeBase64UrlStrict(
 				input.context.publicKey,
@@ -173,12 +167,7 @@ export class DataCenterContentCrypto {
 				dek,
 				transportAAD,
 			);
-			ciphertext = sealA256GCM(
-				dek,
-				contentNonce,
-				plaintext,
-				eventAAD,
-			);
+			ciphertext = sealA256GCM(dek, contentNonce, plaintext, eventAAD);
 			return {
 				schemaVersion: DATA_CENTER_CLIENT_ENVELOPE_VERSION,
 				contextId: input.context.contextId,
@@ -342,10 +331,7 @@ const defaultMaterialSource: DataCenterCryptoMaterialSource = {
 		}
 		return {
 			privateKey: keyPair.privateKey,
-			publicKeyRaw: decodeBase64UrlStrict(
-				publicJWK.x,
-				DATA_CENTER_KEY_BYTES,
-			),
+			publicKeyRaw: decodeBase64UrlStrict(publicJWK.x, DATA_CENTER_KEY_BYTES),
 		};
 	},
 	randomBytes(length) {
@@ -353,7 +339,9 @@ const defaultMaterialSource: DataCenterCryptoMaterialSource = {
 	},
 };
 
-function validateEncryptionInput(input: DataCenterContentEncryptionInput): void {
+function validateEncryptionInput(
+	input: DataCenterContentEncryptionInput,
+): void {
 	const keyIdentity = parseDataCenterKeyRef(input.context.keyRef);
 	if (
 		input.event.sensitivity !== "content" ||
@@ -390,9 +378,7 @@ function parseDataCenterKeyRef(value: string): {
 }
 
 function parseDataCenterTimestamp(value: string): number {
-	if (
-		!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(value)
-	) {
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(value)) {
 		throw new Error("DataCenter encryption context timestamp is invalid.");
 	}
 	const parsed = Date.parse(value);
@@ -428,7 +414,10 @@ function decodeBase64UrlStrict(value: string, length: number): Buffer {
 		throw new Error("DataCenter base64url value is invalid.");
 	}
 	const decoded = Buffer.from(value, "base64url");
-	if (decoded.byteLength !== length || decoded.toString("base64url") !== value) {
+	if (
+		decoded.byteLength !== length ||
+		decoded.toString("base64url") !== value
+	) {
 		decoded.fill(0);
 		throw new Error("DataCenter base64url value is invalid.");
 	}

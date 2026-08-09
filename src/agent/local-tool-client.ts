@@ -1,24 +1,22 @@
 import {
+	isDesktopEvent,
+	isLocalAuditFiveMinutesResult,
+	isLocalMonitoringConfigure,
+	isLocalMonitoringStatus,
+	isLocalToolDescriptor,
+	isLocalVaultDeleteResultRecord,
+	isLocalVaultKeyStatus,
+	isLocalVaultLegacyMigrationResult,
+	isLocalVaultOpenResultRecord,
+	isLocalVaultSealResultRecord,
+	isRecord,
 	LOCAL_CONTROL_TIMEOUT_MS,
 	LOCAL_KEY_MIGRATION_TIMEOUT_MS,
 	LOCAL_PERMISSION_REFRESH_TIMEOUT_MS,
 	LOCAL_TOOL_TIMEOUT_MS,
-	MAX_JSONL_LINE_BYTES,
-	isDesktopEvent,
-	isLocalAuditFiveMinutesResult,
-	isLocalVaultDeleteResultRecord,
-	isLocalVaultOpenResultRecord,
-	isLocalVaultKeyStatus,
-	isLocalVaultLegacyMigrationResult,
-	isLocalVaultSealResultRecord,
-	isLocalMonitoringConfigure,
-	isLocalMonitoringStatus,
-	isLocalToolDescriptor,
-	isRecord,
-	parseLocalMessage,
-	type LocalDesktopEventFrame,
 	type LocalAuditFiveMinutesQuery,
 	type LocalAuditFiveMinutesResult,
+	type LocalDesktopEventFrame,
 	type LocalEventCommitResult,
 	type LocalEventGoalChange,
 	type LocalEventGoalChangeResult,
@@ -43,17 +41,16 @@ import {
 	type LocalToolListResult,
 	type LocalVaultDeleteBatch,
 	type LocalVaultDeleteBatchResult,
-	type LocalVaultOpenBatch,
-	type LocalVaultOpenBatchResult,
 	type LocalVaultKeyStatus,
 	type LocalVaultLegacyMigrationResult,
+	type LocalVaultOpenBatch,
+	type LocalVaultOpenBatchResult,
 	type LocalVaultSealBatch,
 	type LocalVaultSealBatchResult,
+	MAX_JSONL_LINE_BYTES,
+	parseLocalMessage,
 } from "./local-protocol";
-import {
-	isSemanticCursorV2,
-	isSemanticEventV2,
-} from "./timeline-v2/contract";
+import { isSemanticCursorV2, isSemanticEventV2 } from "./timeline-v2/contract";
 
 export type LocalClientFailureCode =
 	| "SPAWN_FAILED"
@@ -91,8 +88,7 @@ export type SpawnLocalProcess = (
 	environment?: Readonly<Record<string, string>>,
 ) => ChildTransport;
 
-export const STARTUP_GOAL_CHANGE_ENV =
-	"WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
+export const STARTUP_GOAL_CHANGE_ENV = "WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
 
 type EnvironmentSource = Readonly<Record<string, string | undefined>>;
 
@@ -209,7 +205,10 @@ function copyAllowedEnvironment(
 	destination: Record<string, string>,
 ): void {
 	for (const [sourceKey, value] of Object.entries(source)) {
-		if (typeof value !== "string" || SENSITIVE_ENVIRONMENT_KEY.test(sourceKey)) {
+		if (
+			typeof value !== "string" ||
+			SENSITIVE_ENVIRONMENT_KEY.test(sourceKey)
+		) {
 			continue;
 		}
 		const allowedKey = LOCAL_TOOL_ENVIRONMENT_KEY_BY_NORMALIZED.get(
@@ -231,8 +230,13 @@ export interface LocalToolProcess {
 	cancelTool(callId: string): Promise<LocalToolCancelResult>;
 	queryEvents(query: LocalEventQuery): Promise<LocalEventQueryResult>;
 	getEventTailCursor(): Promise<LocalEventTailCursorResult>;
-	commitEventCursor(consumerId: string, cursor: string): Promise<LocalEventCommitResult>;
-	appendGoalChange(change: LocalEventGoalChange): Promise<LocalEventGoalChangeResult>;
+	commitEventCursor(
+		consumerId: string,
+		cursor: string,
+	): Promise<LocalEventCommitResult>;
+	appendGoalChange(
+		change: LocalEventGoalChange,
+	): Promise<LocalEventGoalChangeResult>;
 	getMonitoringStatus(): Promise<LocalMonitoringStatus>;
 	configureMonitoring(
 		configuration: LocalMonitoringConfigure,
@@ -241,7 +245,9 @@ export interface LocalToolProcess {
 	resumeMonitoring(): Promise<LocalMonitoringStatus>;
 	refreshMonitoringPermissions(): Promise<LocalMonitoringStatus>;
 	setupMonitoringPermissions(): Promise<LocalMonitoringStatus>;
-	querySemanticEvents(query: LocalSemanticQuery): Promise<LocalSemanticQueryResult>;
+	querySemanticEvents(
+		query: LocalSemanticQuery,
+	): Promise<LocalSemanticQueryResult>;
 	commitSemanticCursor(
 		consumerId: string,
 		cursor: string,
@@ -249,14 +255,22 @@ export interface LocalToolProcess {
 	queryAuditFiveMinutes(
 		query: LocalAuditFiveMinutesQuery,
 	): Promise<LocalAuditFiveMinutesResult>;
-	sealVaultBatch(batch: LocalVaultSealBatch): Promise<LocalVaultSealBatchResult>;
-	openVaultBatch(batch: LocalVaultOpenBatch): Promise<LocalVaultOpenBatchResult>;
-	deleteVaultBatch(batch: LocalVaultDeleteBatch): Promise<LocalVaultDeleteBatchResult>;
+	sealVaultBatch(
+		batch: LocalVaultSealBatch,
+	): Promise<LocalVaultSealBatchResult>;
+	openVaultBatch(
+		batch: LocalVaultOpenBatch,
+	): Promise<LocalVaultOpenBatchResult>;
+	deleteVaultBatch(
+		batch: LocalVaultDeleteBatch,
+	): Promise<LocalVaultDeleteBatchResult>;
 	getVaultKeyStatus(): Promise<LocalVaultKeyStatus>;
 	migrateLegacyVaultKey(): Promise<LocalVaultLegacyMigrationResult>;
 	stop(): Promise<void>;
 	onEvent(listener: (event: LocalToolEvent) => void): () => void;
-	onDesktopEvent(listener: (event: LocalDesktopEventFrame["data"]) => void): () => void;
+	onDesktopEvent(
+		listener: (event: LocalDesktopEventFrame["data"]) => void,
+	): () => void;
 	onSemanticEvent(
 		listener: (event: LocalSemanticEventFrame["data"]) => void,
 	): () => void;
@@ -293,12 +307,11 @@ export class LocalToolClient implements LocalToolProcess {
 	private readonly semanticEventListeners = new Set<
 		(event: LocalSemanticEventFrame["data"]) => void
 	>();
-	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
+	private readonly failureListeners = new Set<
+		(error: LocalClientError) => void
+	>();
 	private stopping = false;
-	private preparedStartupGoalChange:
-		| LocalEventGoalChange
-		| null
-		| undefined;
+	private preparedStartupGoalChange: LocalEventGoalChange | null | undefined;
 	private preparedStartupGoalChangeJson: string | null | undefined;
 
 	constructor(
@@ -345,10 +358,7 @@ export class LocalToolClient implements LocalToolProcess {
 					this.preparedStartupGoalChange.previous,
 					change.previous,
 				) ||
-				!sameGoalContext(
-					this.preparedStartupGoalChange.next,
-					change.next,
-				)
+				!sameGoalContext(this.preparedStartupGoalChange.next, change.next)
 			) {
 				throw new LocalClientError(
 					"INVALID_ARGUMENTS",
@@ -379,10 +389,7 @@ export class LocalToolClient implements LocalToolProcess {
 		);
 		let child: ChildTransport;
 		try {
-			child = (this.options.spawn ?? spawnLocal)(
-				this.binaryPath,
-				environment,
-			);
+			child = (this.options.spawn ?? spawnLocal)(this.binaryPath, environment);
 		} catch (error) {
 			const clientError = new LocalClientError(
 				"SPAWN_FAILED",
@@ -413,7 +420,11 @@ export class LocalToolClient implements LocalToolProcess {
 
 	async listTools(): Promise<LocalToolDescriptor[]> {
 		const result = await this.request<LocalToolListResult>("tool.list", {});
-		if (!isRecord(result) || !Array.isArray(result.tools) || !result.tools.every(isLocalToolDescriptor)) {
+		if (
+			!isRecord(result) ||
+			!Array.isArray(result.tools) ||
+			!result.tools.every(isLocalToolDescriptor)
+		) {
 			throw this.protocolFailure("tool.list returned an invalid tool catalog.");
 		}
 		return result.tools;
@@ -426,7 +437,11 @@ export class LocalToolClient implements LocalToolProcess {
 			call.callId,
 			this.options.toolTimeoutMs ?? LOCAL_TOOL_TIMEOUT_MS,
 		);
-		if (!isRecord(result) || result.callId !== call.callId || !("output" in result)) {
+		if (
+			!isRecord(result) ||
+			result.callId !== call.callId ||
+			!("output" in result)
+		) {
 			throw this.protocolFailure("tool.call returned an invalid result.");
 		}
 		return result as LocalToolCallResult;
@@ -482,7 +497,10 @@ export class LocalToolClient implements LocalToolProcess {
 		consumerId: string,
 		cursor: string,
 	): Promise<LocalEventCommitResult> {
-		const result = await this.request<unknown>("event.commit", { consumerId, cursor });
+		const result = await this.request<unknown>("event.commit", {
+			consumerId,
+			cursor,
+		});
 		if (
 			!isRecord(result) ||
 			result.consumerId !== consumerId ||
@@ -511,7 +529,9 @@ export class LocalToolClient implements LocalToolProcess {
 			!sameGoalContext(result.event.payload.previous, change.previous) ||
 			!sameGoalContext(result.event.payload.next, change.next)
 		) {
-			throw this.protocolFailure("event.goal.change returned an invalid result.");
+			throw this.protocolFailure(
+				"event.goal.change returned an invalid result.",
+			);
 		}
 		return result as LocalEventGoalChangeResult;
 	}
@@ -529,10 +549,7 @@ export class LocalToolClient implements LocalToolProcess {
 				"monitoring.configure received invalid parameters.",
 			);
 		}
-		return this.requestMonitoringStatus(
-			"monitoring.configure",
-			configuration,
-		);
+		return this.requestMonitoringStatus("monitoring.configure", configuration);
 	}
 
 	async pauseMonitoring(): Promise<LocalMonitoringStatus> {
@@ -590,15 +607,12 @@ export class LocalToolClient implements LocalToolProcess {
 			!isRecord(result) ||
 			!Array.isArray(result.events) ||
 			!result.events.every(isSemanticEventV2) ||
-			(result.nextCursor !== null &&
-				!isSemanticCursorV2(result.nextCursor)) ||
+			(result.nextCursor !== null && !isSemanticCursorV2(result.nextCursor)) ||
 			typeof result.hasMore !== "boolean" ||
 			(result.events.length > 0 &&
 				result.nextCursor !== result.events.at(-1)?.cursor)
 		) {
-			throw this.protocolFailure(
-				"semantic.query returned an invalid result.",
-			);
+			throw this.protocolFailure("semantic.query returned an invalid result.");
 		}
 		return result as LocalSemanticQueryResult;
 	}
@@ -607,10 +621,7 @@ export class LocalToolClient implements LocalToolProcess {
 		consumerId: string,
 		cursor: string,
 	): Promise<LocalSemanticCommitResult> {
-		if (
-			!isSemanticConsumerId(consumerId) ||
-			!isSemanticCursorV2(cursor)
-		) {
+		if (!isSemanticConsumerId(consumerId) || !isSemanticCursorV2(cursor)) {
 			throw new LocalClientError(
 				"INVALID_ARGUMENTS",
 				"semantic.commit received an invalid consumer or cursor.",
@@ -626,9 +637,7 @@ export class LocalToolClient implements LocalToolProcess {
 			result.cursor !== cursor ||
 			typeof result.advanced !== "boolean"
 		) {
-			throw this.protocolFailure(
-				"semantic.commit returned an invalid result.",
-			);
+			throw this.protocolFailure("semantic.commit returned an invalid result.");
 		}
 		return result as LocalSemanticCommitResult;
 	}
@@ -649,10 +658,7 @@ export class LocalToolClient implements LocalToolProcess {
 				"audit.queryFiveMinutes requires one exact non-negative five-minute range.",
 			);
 		}
-		const result = await this.request<unknown>(
-			"audit.queryFiveMinutes",
-			query,
-		);
+		const result = await this.request<unknown>("audit.queryFiveMinutes", query);
 		if (!isLocalAuditFiveMinutesResult(result, query)) {
 			throw this.protocolFailure(
 				"audit.queryFiveMinutes returned an invalid result.",
@@ -677,13 +683,10 @@ export class LocalToolClient implements LocalToolProcess {
 			result.records.length !== batch.records.length ||
 			!result.records.every(isLocalVaultSealResultRecord) ||
 			!result.records.every(
-				(record, index) =>
-					record.recordId === batch.records[index]?.recordId,
+				(record, index) => record.recordId === batch.records[index]?.recordId,
 			)
 		) {
-			throw this.protocolFailure(
-				"vault.sealBatch returned an invalid result.",
-			);
+			throw this.protocolFailure("vault.sealBatch returned an invalid result.");
 		}
 		return result as LocalVaultSealBatchResult;
 	}
@@ -704,13 +707,10 @@ export class LocalToolClient implements LocalToolProcess {
 			result.records.length !== batch.contentRefs.length ||
 			!result.records.every(isLocalVaultOpenResultRecord) ||
 			!result.records.every(
-				(record, index) =>
-					record.contentRef === batch.contentRefs[index],
+				(record, index) => record.contentRef === batch.contentRefs[index],
 			)
 		) {
-			throw this.protocolFailure(
-				"vault.openBatch returned an invalid result.",
-			);
+			throw this.protocolFailure("vault.openBatch returned an invalid result.");
 		}
 		return result as LocalVaultOpenBatchResult;
 	}
@@ -768,7 +768,9 @@ export class LocalToolClient implements LocalToolProcess {
 		this.stopping = true;
 		const child = this.child;
 		this.child = null;
-		this.rejectPending(new LocalClientError("STOPPED", "whalehall-local was stopped."));
+		this.rejectPending(
+			new LocalClientError("STOPPED", "whalehall-local was stopped."),
+		);
 		if (!child) return;
 		await closeGracefully(child);
 	}
@@ -811,7 +813,10 @@ export class LocalToolClient implements LocalToolProcess {
 		}
 		if (this.pending.has(id)) {
 			return Promise.reject(
-				new LocalClientError("PROTOCOL_ERROR", `Duplicate local request id: ${id}`),
+				new LocalClientError(
+					"PROTOCOL_ERROR",
+					`Duplicate local request id: ${id}`,
+				),
 			);
 		}
 
@@ -937,7 +942,8 @@ export class LocalToolClient implements LocalToolProcess {
 			return;
 		}
 		if (message.id === null) {
-			if (message.ok) throw new Error("Successful local response had no request id.");
+			if (message.ok)
+				throw new Error("Successful local response had no request id.");
 			throw new Error(`${message.error.code}: ${message.error.message}`);
 		}
 		const pending = this.pending.get(message.id);
@@ -945,7 +951,10 @@ export class LocalToolClient implements LocalToolProcess {
 		clearTimeout(pending.timeout);
 		this.pending.delete(message.id);
 		if (message.ok) pending.resolve(message.result);
-		else pending.reject(new LocalClientError(message.error.code, message.error.message));
+		else
+			pending.reject(
+				new LocalClientError(message.error.code, message.error.message),
+			);
 	}
 
 	private handleExit(child: ChildTransport, exitCode: number): void {
@@ -967,7 +976,11 @@ export class LocalToolClient implements LocalToolProcess {
 		return error;
 	}
 
-	private failChild(child: ChildTransport, error: LocalClientError, kill: boolean): void {
+	private failChild(
+		child: ChildTransport,
+		error: LocalClientError,
+		kill: boolean,
+	): void {
 		if (child !== this.child) return;
 		this.child = null;
 		this.rejectPending(error);
@@ -1006,17 +1019,11 @@ export class LocalToolClient implements LocalToolProcess {
 }
 
 function isSemanticConsumerId(value: unknown): value is string {
-	return (
-		typeof value === "string" &&
-		/^[A-Za-z0-9._:/-]{1,128}$/u.test(value)
-	);
+	return typeof value === "string" && /^[A-Za-z0-9._:/-]{1,128}$/u.test(value);
 }
 
 function isDesktopEventCursor(value: unknown): value is string {
-	return (
-		typeof value === "string" &&
-		/^ec1_[0-9a-f]{16}$/u.test(value)
-	);
+	return typeof value === "string" && /^ec1_[0-9a-f]{16}$/u.test(value);
 }
 
 function sameGoalContext(
@@ -1091,7 +1098,9 @@ export class JsonlParser {
 	private emitBytes(bytes: Uint8Array): void {
 		const lineBytes = bytes.at(-1) === 0x0d ? bytes.subarray(0, -1) : bytes;
 		if (lineBytes.byteLength > this.maxLineBytes) {
-			throw new JsonlProtocolError(`JSONL line exceeded ${this.maxLineBytes} bytes.`);
+			throw new JsonlProtocolError(
+				`JSONL line exceeded ${this.maxLineBytes} bytes.`,
+			);
 		}
 		try {
 			this.onLine(this.decoder.decode(lineBytes));
@@ -1110,7 +1119,9 @@ function isToolEvent(message: LocalMessage): message is LocalToolEvent {
 	);
 }
 
-function isDesktopEventFrame(message: LocalMessage): message is LocalDesktopEventFrame {
+function isDesktopEventFrame(
+	message: LocalMessage,
+): message is LocalDesktopEventFrame {
 	return "event" in message && message.event === "desktop.event";
 }
 

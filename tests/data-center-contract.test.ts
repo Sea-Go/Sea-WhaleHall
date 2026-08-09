@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import {
-	createHash,
-	createPublicKey,
-	verify,
-} from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
+import type { CloudSyncConfiguration } from "../src/bun/client-config";
 import {
 	canonicalRfc3986Query,
 	createDataCenterAgentCredentials,
@@ -18,7 +15,6 @@ import {
 	validateDataCenterAdvanceResponse,
 	validateDataCenterBatchResponse,
 } from "../src/bun/data-center-contract";
-import type { CloudSyncConfiguration } from "../src/bun/client-config";
 
 const metadataConfiguration: CloudSyncConfiguration = {
 	enabled: true,

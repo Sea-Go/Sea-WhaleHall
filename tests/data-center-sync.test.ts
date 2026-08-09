@@ -86,7 +86,9 @@ describe("DataCenterSyncService", () => {
 		const server = new SignedDesktopServer(log);
 		const first = createService({ repository, events, auth, server });
 
-		await expect(first.syncOnce()).rejects.toThrow("registration response lost");
+		await expect(first.syncOnce()).rejects.toThrow(
+			"registration response lost",
+		);
 		const pending = structuredClone(repository.credentials);
 		expect(pending?.registrationStatus).toBe("pending");
 		expect(auth.registerBodies).toHaveLength(3);
@@ -411,7 +413,12 @@ describe("DataCenterSyncService", () => {
 		]);
 
 		const recovered = new SignedDesktopServer(log);
-		const second = createService({ repository, events, auth, server: recovered });
+		const second = createService({
+			repository,
+			events,
+			auth,
+			server: recovered,
+		});
 		expect(await second.syncOnce()).toBeTrue();
 		expect(recovered.exactBatchBodies).toEqual([exactBody]);
 		expect(log.indexOf("signed:batch")).toBeLessThan(
@@ -1039,7 +1046,8 @@ class MemoryEvents implements DataCenterEventJournal {
 		cursor: string,
 	): Promise<LocalEventCommitResult> {
 		this.log.push(`events:commit:${cursor}`);
-		const advanced = dataCenterCursorSequence(cursor) > cursorPosition(this.committedCursor);
+		const advanced =
+			dataCenterCursorSequence(cursor) > cursorPosition(this.committedCursor);
 		if (advanced) this.committedCursor = cursor;
 		if (this.failCommitResponsesAfterPersist) {
 			throw new Error("commit response lost");
@@ -1148,7 +1156,10 @@ class SignedDesktopServer {
 				];
 			return context
 				? Response.json(context)
-				: Response.json({ error: { code: "missing_test_context" } }, { status: 503 });
+				: Response.json(
+						{ error: { code: "missing_test_context" } },
+						{ status: 503 },
+					);
 		}
 		if (url.pathname.endsWith("/desktop/cursor")) {
 			this.log.push("signed:cursor");
@@ -1160,8 +1171,7 @@ class SignedDesktopServer {
 					this.ackCursor === null
 						? null
 						: Number(dataCenterCursorSequence(this.ackCursor)),
-				updatedAt:
-					this.ackCursor === null ? null : "2026-08-10T00:00:00Z",
+				updatedAt: this.ackCursor === null ? null : "2026-08-10T00:00:00Z",
 			});
 		}
 		if (url.pathname.endsWith("/desktop/batch")) {
@@ -1212,7 +1222,9 @@ class SignedDesktopServer {
 	}) as typeof fetch;
 }
 
-function registeredCredentials(accountId: string): DataCenterAgentCredentialsRecord {
+function registeredCredentials(
+	accountId: string,
+): DataCenterAgentCredentialsRecord {
 	const registered = completeDataCenterRegistration(
 		createDataCenterAgentCredentials({
 			accountId,
@@ -1275,10 +1287,7 @@ function contentEditorEvent(
 	sequence = 1,
 ): DesktopEventV1 {
 	return {
-		...heartbeatEvent(
-			suffix,
-			`ec1_${sequence.toString(16).padStart(16, "0")}`,
-		),
+		...heartbeatEvent(suffix, `ec1_${sequence.toString(16).padStart(16, "0")}`),
 		kind: "editor.documentChanged",
 		occurredAtMs: nowMs,
 		observedAtMs: nowMs,

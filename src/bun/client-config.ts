@@ -360,7 +360,9 @@ function normalizeRelayBaseUrl(
 	}
 	if (role === "reflection") {
 		if (endpoint.origin !== WHALEHALL_RELAY_BASE_URL) {
-			throw new Error("reflection model baseurl is not the approved relay origin.");
+			throw new Error(
+				"reflection model baseurl is not the approved relay origin.",
+			);
 		}
 		return WHALEHALL_RELAY_BASE_URL;
 	}
@@ -378,7 +380,9 @@ function normalizeRelayBaseUrl(
 	return endpoint.origin;
 }
 
-function normalizeCloudSyncConfiguration(value: unknown): CloudSyncConfiguration {
+function normalizeCloudSyncConfiguration(
+	value: unknown,
+): CloudSyncConfiguration {
 	if (
 		!isRecord(value) ||
 		!hasExactKeys(value, ["enabled", "contentEncryptionEnabled", "consents"]) ||

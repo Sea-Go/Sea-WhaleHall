@@ -227,10 +227,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	}
 
 	/** Sends a bearer-only request to a code-owned DataCenter path. */
-	async bearerFetch(
-		path: string,
-		init: RequestInit = {},
-	): Promise<Response> {
+	async bearerFetch(path: string, init: RequestInit = {}): Promise<Response> {
 		if (
 			path !== "/v1/agent/register" &&
 			!/^\/v1\/devices\/[a-f0-9-]{36}\/consents\/(activity|browser|presence)$/iu.test(

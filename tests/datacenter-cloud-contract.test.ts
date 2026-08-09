@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import {
 	createDecipheriv,
 	createHash,
@@ -6,10 +7,9 @@ import {
 	createPublicKey,
 	diffieHellman,
 	hkdfSync,
-	verify,
 	type KeyObject,
+	verify,
 } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
@@ -29,17 +29,23 @@ import {
 	validateDataCenterBatchResponse,
 } from "../src/bun/data-center-contract";
 import {
+	type DataCenterClientEncryptionEnvelope,
 	DataCenterContentCrypto,
+	type DataCenterCryptoMaterialSource,
+	type DataCenterEncryptionContext,
 	dataCenterDEKTransportAAD,
 	dataCenterDesktopEventAAD,
 	parseDataCenterEncryptionContext,
-	type DataCenterClientEncryptionEnvelope,
-	type DataCenterCryptoMaterialSource,
-	type DataCenterEncryptionContext,
 } from "../src/bun/data-center-crypto";
 
+const DATA_CENTER_CI_REPOSITORY = "/workspace/datacenter";
 const DATA_CENTER_REPOSITORY = locateDataCenterRepository();
-const CONTRACT_DIRECTORY = resolve(DATA_CENTER_REPOSITORY, "contracts/v1");
+const CONTRACT_DIRECTORY = DATA_CENTER_REPOSITORY
+	? resolve(DATA_CENTER_REPOSITORY, "contracts/v1")
+	: "";
+const describeDataCenterContract = DATA_CENTER_REPOSITORY
+	? describe
+	: describe.skip;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -153,9 +159,11 @@ const contentConfiguration: CloudSyncConfiguration = {
 	},
 };
 
-describe("DataCenter cross-repository cloud contract", () => {
+describeDataCenterContract("DataCenter cross-repository cloud contract", () => {
 	test("runs against a pinned DataCenter checkout in CI", () => {
-		expect(existsSync(resolve(CONTRACT_DIRECTORY, "signatures.json"))).toBeTrue();
+		expect(
+			existsSync(resolve(CONTRACT_DIRECTORY, "signatures.json")),
+		).toBeTrue();
 		if (!process.env.CI) return;
 		const expected = process.env.DATACENTER_COMMIT_SHA;
 		if (!expected || !/^[a-f0-9]{40}$/u.test(expected)) {
@@ -285,9 +293,7 @@ describe("DataCenter cross-repository cloud contract", () => {
 				parseDataCenterErrorEnvelope(error.envelope) as unknown,
 				error.name,
 			).toEqual(error.envelope);
-			expect([400, 403, 409, 413, 422, 429, 500, 503]).toContain(
-				error.status,
-			);
+			expect([400, 403, 409, 413, 422, 429, 500, 503]).toContain(error.status);
 		}
 	});
 
@@ -301,7 +307,10 @@ describe("DataCenter cross-repository cloud contract", () => {
 		for (const response of corpus.registration.responses) {
 			if (response.status === 200 || response.status === 201) {
 				const body = response.body as JsonRecord;
-				expect(parseDataCenterRegistration(response.body), response.name).toEqual({
+				expect(
+					parseDataCenterRegistration(response.body),
+					response.name,
+				).toEqual({
 					agentId: String(body.agent_id),
 					deviceId: String(body.device_id),
 					configVersion: Number(body.config_version),
@@ -336,9 +345,7 @@ describe("DataCenter cross-repository cloud contract", () => {
 
 	test("projects every shared event kind and encrypts only the content allowlist", async () => {
 		const corpus = fixture<EventCorpus>("events.json");
-		expect(corpus.schemaVersion).toBe(
-			"datacenter-desktop-event-kinds.v1",
-		);
+		expect(corpus.schemaVersion).toBe("datacenter-desktop-event-kinds.v1");
 		expect(corpus.cases).toHaveLength(27);
 		for (const [index, candidate] of corpus.cases.entries()) {
 			const event = corpusEvent(candidate, index);
@@ -474,7 +481,9 @@ describe("DataCenter cross-repository cloud contract", () => {
 			...envelope,
 			ciphertext: flipBase64UrlByte(envelope.ciphertext),
 		};
-		expect(() => decryptGoldenContent(corpus, context, event, tampered)).toThrow();
+		expect(() =>
+			decryptGoldenContent(corpus, context, event, tampered),
+		).toThrow();
 		const changedCursor = {
 			...event,
 			cursor: "ec1_0000000000000002",
@@ -494,18 +503,17 @@ function fixture<T>(name: string): T {
 }
 
 function locateDataCenterRepository(): string {
-	const configured = process.env.DATACENTER_REPOSITORY;
-	if (configured) {
-		const absolute = resolve(configured);
-		if (!existsSync(resolve(absolute, "contracts/v1"))) {
+	if (process.env.CI) {
+		if (!process.env.DATACENTER_REPOSITORY) return "";
+		if (process.env.DATACENTER_REPOSITORY !== DATA_CENTER_CI_REPOSITORY) {
 			throw new Error(
-				`DATACENTER_REPOSITORY has no contracts/v1 directory: ${absolute}`,
+				`CI DATACENTER_REPOSITORY must be ${DATA_CENTER_CI_REPOSITORY}.`,
 			);
 		}
-		return absolute;
-	}
-	if (process.env.CI) {
-		throw new Error("CI must provide DATACENTER_REPOSITORY.");
+		if (!existsSync(resolve(DATA_CENTER_CI_REPOSITORY, "contracts/v1"))) {
+			throw new Error("CI DataCenter checkout has no contracts/v1 directory.");
+		}
+		return DATA_CENTER_CI_REPOSITORY;
 	}
 	for (const candidate of [
 		resolve(process.cwd(), "../Sea-DataCenter-integration"),

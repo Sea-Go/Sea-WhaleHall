@@ -1,8 +1,4 @@
 import type {
-	LocalClientError,
-	LocalToolProcess,
-} from "./local-tool-client";
-import type {
 	LocalAuditFiveMinutesQuery,
 	LocalAuditFiveMinutesResult,
 	LocalEventCommitResult,
@@ -24,13 +20,14 @@ import type {
 	LocalToolEvent,
 	LocalVaultDeleteBatch,
 	LocalVaultDeleteBatchResult,
-	LocalVaultOpenBatch,
-	LocalVaultOpenBatchResult,
 	LocalVaultKeyStatus,
 	LocalVaultLegacyMigrationResult,
+	LocalVaultOpenBatch,
+	LocalVaultOpenBatchResult,
 	LocalVaultSealBatch,
 	LocalVaultSealBatchResult,
 } from "./local-protocol";
+import type { LocalClientError, LocalToolProcess } from "./local-tool-client";
 import type { DesktopEventV1 } from "./reflection/types";
 import type { SemanticEventV2 } from "./timeline-v2/types";
 
@@ -50,9 +47,13 @@ export class AgentRuntime {
 		lastError: null,
 	};
 	private readonly activeCalls = new Set<string>();
-	private readonly statusListeners = new Set<(status: LocalRuntimeStatus) => void>();
+	private readonly statusListeners = new Set<
+		(status: LocalRuntimeStatus) => void
+	>();
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
-	private readonly desktopEventListeners = new Set<(event: DesktopEventV1) => void>();
+	private readonly desktopEventListeners = new Set<
+		(event: DesktopEventV1) => void
+	>();
 	private readonly semanticEventListeners = new Set<
 		(event: SemanticEventV2) => void
 	>();
@@ -73,7 +74,11 @@ export class AgentRuntime {
 	}
 
 	getLocalStatus(): LocalRuntimeStatus {
-		return { ...this.status, pid: this.local.pid, activeCalls: this.activeCalls.size };
+		return {
+			...this.status,
+			pid: this.local.pid,
+			activeCalls: this.activeCalls.size,
+		};
 	}
 
 	onStatusChange(listener: (status: LocalRuntimeStatus) => void): () => void {
@@ -135,7 +140,9 @@ export class AgentRuntime {
 			.start()
 			.then(() => this.local.health())
 			.then(() => this.setStatus("ready", null))
-			.catch((error: unknown) => this.setStatus("degraded", errorMessage(error)))
+			.catch((error: unknown) =>
+				this.setStatus("degraded", errorMessage(error)),
+			)
 			.finally(() => {
 				this.startPromise = null;
 			});
@@ -159,7 +166,9 @@ export class AgentRuntime {
 		return this.local.cancelTool(callId);
 	}
 
-	async queryDesktopEvents(query: LocalEventQuery): Promise<LocalEventQueryResult> {
+	async queryDesktopEvents(
+		query: LocalEventQuery,
+	): Promise<LocalEventQueryResult> {
 		await this.ensureStarted();
 		return this.local.queryEvents(query);
 	}
@@ -292,15 +301,15 @@ export class AgentRuntime {
 			this.automaticRestartPrepared &&
 			this.hasGoalReconciliationIntent
 		) {
-			await this.local.prepareStartupGoalChange(
-				this.goalReconciliationIntent,
-			);
+			await this.local.prepareStartupGoalChange(this.goalReconciliationIntent);
 			this.startupGoalPrepared = true;
 			preparedAutomaticRestart = true;
 		}
 		if (!this.local.isRunning) await this.start();
 		if (!this.local.isRunning) {
-			throw new Error(this.status.lastError ?? "whalehall-local is unavailable.");
+			throw new Error(
+				this.status.lastError ?? "whalehall-local is unavailable.",
+			);
 		}
 		if (preparedAutomaticRestart) {
 			await this.local.acknowledgeStartupGoalChange();
@@ -332,16 +341,17 @@ export class AgentRuntime {
 
 	private handleFailure(error: LocalClientError): void {
 		this.activeCalls.clear();
-		if (
-			this.options.requireStartupGoalPreparation &&
-			!this.local.isRunning
-		) {
+		if (this.options.requireStartupGoalPreparation && !this.local.isRunning) {
 			this.startupGoalPrepared = false;
 		}
-		if (this.status.state !== "stopped") this.setStatus("degraded", error.message);
+		if (this.status.state !== "stopped")
+			this.setStatus("degraded", error.message);
 	}
 
-	private setStatus(state: LocalRuntimeStatus["state"], lastError: string | null): void {
+	private setStatus(
+		state: LocalRuntimeStatus["state"],
+		lastError: string | null,
+	): void {
 		const next: LocalRuntimeStatus = {
 			state,
 			pid: this.local.pid,

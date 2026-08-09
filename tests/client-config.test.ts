@@ -10,19 +10,19 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	REFLECTION_RELAY_COMPLETIONS_PATH,
-	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-	WHALEHALL_DATA_CENTER_STAGING_BASE_URL,
-	WHALEHALL_RELAY_BASE_URL,
-	WHALEHALL_RELAY_MODEL,
 	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	type ClientConfiguration,
 	DEFAULT_CLIENT_CONFIGURATION,
 	loadOrCreateClientConfiguration,
+	REFLECTION_RELAY_COMPLETIONS_PATH,
 	reflectionModelConfigurationFromConfiguration,
-	UNPROVISIONED_REFLECTION_RELAY_KEY,
 	UNPROVISIONED_AGENT_RELAY_KEY,
+	UNPROVISIONED_REFLECTION_RELAY_KEY,
+	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+	WHALEHALL_DATA_CENTER_STAGING_BASE_URL,
+	WHALEHALL_RELAY_BASE_URL,
+	WHALEHALL_RELAY_MODEL,
 	writeProvisionedClientConfiguration,
 } from "../src/bun/client-config";
 
@@ -220,10 +220,7 @@ describe("WhaleHall client config.yaml", () => {
 				WHALEHALL_RELAY_BASE_URL,
 				`${WHALEHALL_RELAY_BASE_URL}${REFLECTION_RELAY_COMPLETIONS_PATH}`,
 			),
-			templateConfiguration().replace(
-				WHALEHALL_RELAY_MODEL,
-				"qwen3:other",
-			),
+			templateConfiguration().replace(WHALEHALL_RELAY_MODEL, "qwen3:other"),
 			templateConfiguration().replace(
 				`agent:\n  name: "${WHALEHALL_RELAY_MODEL}"`,
 				'agent:\n  name: "qwen3:other"',
