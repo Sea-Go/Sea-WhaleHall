@@ -515,6 +515,13 @@ function locateDataCenterRepository(): string {
 		}
 		return DATA_CENTER_CI_REPOSITORY;
 	}
+	if (process.env.DATACENTER_REPOSITORY) {
+		const configured = resolve(process.env.DATACENTER_REPOSITORY);
+		if (existsSync(resolve(configured, "contracts/v1"))) return configured;
+		throw new Error(
+			`DATACENTER_REPOSITORY has no contracts/v1 directory: ${configured}`,
+		);
+	}
 	for (const candidate of [
 		resolve(process.cwd(), "../Sea-DataCenter-integration"),
 		resolve(process.cwd(), "../Sea-DataCenter"),
