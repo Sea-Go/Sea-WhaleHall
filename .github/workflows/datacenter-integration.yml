@@ -1,0 +1,55 @@
+name: DataCenter integration
+
+on:
+  # pull_request_target deliberately loads this workflow from the protected
+  # base branch. The candidate commit is passed to GitLab only as immutable
+  # data and is never checked out or executed in this credentialed job.
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+concurrency:
+  group: datacenter-integration-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Trigger pinned DataCenter contract pipeline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    env:
+      HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+      CURRENT_REPOSITORY: ${{ github.repository }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      WHALEHALL_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+      DATACENTER_GITLAB_PROJECT_ID: ${{ vars.DATACENTER_GITLAB_PROJECT_ID }}
+      DATACENTER_GITLAB_REF: ${{ vars.DATACENTER_GITLAB_REF }}
+      DATACENTER_GITLAB_TRIGGER_TOKEN: ${{ secrets.DATACENTER_GITLAB_TRIGGER_TOKEN }}
+      DATACENTER_GITLAB_API_TOKEN: ${{ secrets.DATACENTER_GITLAB_API_TOKEN }}
+    steps:
+      - name: Require a trusted candidate source
+        run: |
+          if [[ "$HEAD_REPOSITORY" != "$CURRENT_REPOSITORY" ]]; then
+            echo "::error::Fork pull requests cannot receive the cross-CI trigger credentials. Move the reviewed commit to a repository-owned branch before running this required gate."
+            exit 1
+          fi
+          if [[ "$BASE_REF" != "$DEFAULT_BRANCH" ]]; then
+            echo "::error::The credentialed integration gate only accepts pull requests targeting the protected default branch."
+            exit 1
+          fi
+          if [[ ! "$WHALEHALL_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The candidate is not an immutable 40-character commit SHA."
+            exit 1
+          fi
+
+      - name: Checkout protected trigger logic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Trigger DataCenter and require its result
+        run: scripts/ci/trigger-datacenter-integration.sh

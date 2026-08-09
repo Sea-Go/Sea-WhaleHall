@@ -1218,6 +1218,21 @@ fn dispatch_request(
             };
             let _ = output.send(OutboundMessage::Response(response));
         }
+        "event.tailCursor" => {
+            if !is_empty_object(&request.params) {
+                let _ = output.send(OutboundMessage::Response(Response::failure(
+                    Some(request.id),
+                    error_codes::INVALID_ARGUMENTS,
+                    "event.tailCursor accepts an empty params object",
+                )));
+                return;
+            }
+            let response = match event_journal.tail_cursor() {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => event_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
         "event.commit" => {
             let params: EventCommitParams = match serde_json::from_value(request.params) {
                 Ok(params) => params,
@@ -1752,6 +1767,10 @@ mod tests {
             .await
             .expect("write event query");
         input
+            .write_all(b"{\"id\":\"tail\",\"method\":\"event.tailCursor\",\"params\":{}}\n")
+            .await
+            .expect("write event tail cursor");
+        input
             .write_all(
                 format!(
                     "{{\"id\":\"commit\",\"method\":\"event.commit\",\"params\":{{\"consumerId\":\"reflection-runtime\",\"cursor\":\"{}\"}}}}\n",
@@ -1797,6 +1816,11 @@ mod tests {
             .find(|frame| frame["id"] == "events")
             .expect("event.query response");
         assert_eq!(query["result"]["events"][0]["eventId"], appended.event_id);
+        let tail = frames
+            .iter()
+            .find(|frame| frame["id"] == "tail")
+            .expect("event.tailCursor response");
+        assert_eq!(tail["result"]["cursor"], appended.cursor);
         let commit = frames
             .iter()
             .find(|frame| frame["id"] == "commit")

@@ -4,6 +4,11 @@ This directory is deployment material only. Do not deploy it until the
 corresponding PR is merged into `main`. It intentionally contains no Docker,
 FRP, Cloudflare, GPU, activity-Worker, or other-project changes.
 
+The public model origin routes only `POST /v1/activity/completions` to this
+service. Authentication, chat, Agent registration, consent, crypto context and
+desktop event ingestion belong to the DataCenter data origin and must not be
+added to this Caddy handler.
+
 ## Preconditions
 
 On the home cloud, verify the CPU-only target before changing either relay or
@@ -71,14 +76,14 @@ reflection bodies are forwarded transiently and never written to relay storage.
 
 ## Verification and rollback
 
-Use a scrubbed fixture account to verify `POST /v1/auth/sessions`, refresh,
-logout, and `POST /v1/chat/completions` with both a bearer token and matching
-`X-WhaleHall-Agent-Key`. Also verify `/v1/activity/completions` with only the
-provisioned `X-WhaleHall-Reflection-Key`, a non-streaming scrubbed body, and
-an empty relay record directory. Confirm the existing `/v1/activity/analyze`
-endpoint still answers through its previous handler. Check `systemctl status`
-and relay logs only for status/error metadata; neither should contain bearer
-tokens, reflection/personal keys, or raw activity windows.
+Verify `/v1/activity/completions` with only the provisioned
+`X-WhaleHall-Reflection-Key`, a non-streaming scrubbed body, and an empty relay
+record directory. Confirm the existing `/v1/activity/analyze` endpoint still
+answers through its previous handler. Confirm the model-origin Caddy config has
+no `/v1/auth/*`, `/v1/chat/completions`, `/v1/agent/*` or `/api/v1/agent/*`
+matcher; those endpoints are verified independently against the DataCenter data
+origin. Check `systemctl status` and relay logs only for status/error metadata;
+neither should contain bearer tokens, keys, or raw activity windows.
 
 If the relay cannot start or verification fails, remove only the new Caddy
 relay handler, reload Caddy, then stop and disable

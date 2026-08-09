@@ -12,6 +12,8 @@ import { dirname, resolve } from "node:path";
 import { createScryptPasswordHash } from "../services/model-relay/password";
 import type { RelayUser } from "../services/model-relay/types";
 import {
+	DEFAULT_CLIENT_CONFIGURATION,
+	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 	WHALEHALL_RELAY_BASE_URL,
 	WHALEHALL_RELAY_MODEL,
 	writeProvisionedClientConfiguration,
@@ -62,9 +64,10 @@ async function main(): Promise<void> {
 			},
 			agent: {
 				name: WHALEHALL_RELAY_MODEL,
-				baseurl: WHALEHALL_RELAY_BASE_URL,
+				baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 				apikey: personalRelayKey,
 			},
+			cloudSync: structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync),
 		},
 	});
 

@@ -24,6 +24,7 @@ import {
 	type LocalEventGoalChangeResult,
 	type LocalEventQuery,
 	type LocalEventQueryResult,
+	type LocalEventTailCursorResult,
 	type LocalMessage,
 	type LocalMethod,
 	type LocalMonitoringConfigure,
@@ -229,6 +230,7 @@ export interface LocalToolProcess {
 	callTool(call: LocalToolCall): Promise<LocalToolCallResult>;
 	cancelTool(callId: string): Promise<LocalToolCancelResult>;
 	queryEvents(query: LocalEventQuery): Promise<LocalEventQueryResult>;
+	getEventTailCursor(): Promise<LocalEventTailCursorResult>;
 	commitEventCursor(consumerId: string, cursor: string): Promise<LocalEventCommitResult>;
 	appendGoalChange(change: LocalEventGoalChange): Promise<LocalEventGoalChangeResult>;
 	getMonitoringStatus(): Promise<LocalMonitoringStatus>;
@@ -460,6 +462,20 @@ export class LocalToolClient implements LocalToolProcess {
 			throw this.protocolFailure("event.query returned an invalid result.");
 		}
 		return result as LocalEventQueryResult;
+	}
+
+	async getEventTailCursor(): Promise<LocalEventTailCursorResult> {
+		const result = await this.request<unknown>("event.tailCursor", {});
+		if (
+			!isRecord(result) ||
+			Object.keys(result).length !== 1 ||
+			!isDesktopEventCursor(result.cursor)
+		) {
+			throw this.protocolFailure(
+				"event.tailCursor returned an invalid result.",
+			);
+		}
+		return result as LocalEventTailCursorResult;
 	}
 
 	async commitEventCursor(
@@ -993,6 +1009,13 @@ function isSemanticConsumerId(value: unknown): value is string {
 	return (
 		typeof value === "string" &&
 		/^[A-Za-z0-9._:/-]{1,128}$/u.test(value)
+	);
+}
+
+function isDesktopEventCursor(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		/^ec1_[0-9a-f]{16}$/u.test(value)
 	);
 }
 

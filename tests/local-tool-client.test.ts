@@ -455,6 +455,14 @@ describe("LocalToolClient", () => {
 				});
 				return;
 			}
+			if (request.method === "event.tailCursor") {
+				process.respond({
+					id: request.id,
+					ok: true,
+					result: { cursor: event.cursor },
+				});
+				return;
+			}
 			if (request.method === "event.commit") {
 				process.respond({
 					id: request.id,
@@ -473,7 +481,10 @@ describe("LocalToolClient", () => {
 		await client.start();
 		child.respond({ event: "desktop.event", data: event });
 		await Bun.sleep(0);
-		expect(pushed).toEqual([event]);
+			expect(pushed).toEqual([event]);
+			await expect(client.getEventTailCursor()).resolves.toEqual({
+				cursor: event.cursor,
+			});
 		await expect(
 			client.queryEvents({ consumerId: "reflection-runtime", limit: 100 }),
 		).resolves.toEqual({

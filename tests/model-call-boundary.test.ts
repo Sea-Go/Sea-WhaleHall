@@ -50,6 +50,26 @@ describe("desktop model-call boundary", () => {
 			"@whalehall-model-boundary-exception verified-classifier",
 		);
 	});
+
+	test("routes only reflection completions through the production model origin", async () => {
+		const fragment = await readFile(
+			join(
+				repositoryRoot,
+				"deploy/home-cloud/model-relay/Caddyfile.fragment",
+			),
+			"utf8",
+		);
+		const matcher = fragment
+			.split("\n")
+			.find((line) => line.startsWith("@whalehall_model_relay path "));
+		expect(matcher).toBe(
+			"@whalehall_model_relay path /v1/activity/completions",
+		);
+		expect(matcher).not.toContain("/v1/auth/");
+		expect(matcher).not.toContain("/v1/chat/completions");
+		expect(matcher).not.toContain("/v1/agent/");
+		expect(matcher).not.toContain("/api/v1/agent/");
+	});
 });
 
 async function sourceFiles(): Promise<Map<string, string>> {

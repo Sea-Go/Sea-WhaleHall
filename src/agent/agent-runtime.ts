@@ -10,6 +10,7 @@ import type {
 	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
+	LocalEventTailCursorResult,
 	LocalMonitoringConfigure,
 	LocalMonitoringStatus,
 	LocalRuntimeStatus,
@@ -161,6 +162,11 @@ export class AgentRuntime {
 	async queryDesktopEvents(query: LocalEventQuery): Promise<LocalEventQueryResult> {
 		await this.ensureStarted();
 		return this.local.queryEvents(query);
+	}
+
+	async getDesktopEventTailCursor(): Promise<LocalEventTailCursorResult> {
+		await this.ensureStarted();
+		return this.local.getEventTailCursor();
 	}
 
 	async commitDesktopEventCursor(

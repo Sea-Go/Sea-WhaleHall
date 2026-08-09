@@ -22,6 +22,7 @@ export type LocalMethod =
 	| "tool.call"
 	| "tool.cancel"
 	| "event.query"
+	| "event.tailCursor"
 	| "event.commit"
 	| "event.goal.change"
 	| "monitoring.status"
@@ -148,6 +149,10 @@ export type LocalEventQueryResult = {
 	events: DesktopEventV1[];
 	nextCursor: string | null;
 	hasMore: boolean;
+};
+
+export type LocalEventTailCursorResult = {
+	cursor: string;
 };
 
 export type LocalEventCommitResult = {

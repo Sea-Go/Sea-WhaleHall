@@ -5,6 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentToolPolicy, digestArguments } from "../src/bun/agent-tool-policy";
 import {
+	completeDataCenterRegistration,
+	createDataCenterConsumerAudit,
+	createDataCenterAgentCredentials,
+	createPendingDataCenterAdvance,
+	createPendingDataCenterBatch,
+} from "../src/bun/data-center-contract";
+import {
 	CredentialHelperError,
 	type CredentialKeyReference,
 	type CredentialKeyStore,
@@ -163,6 +170,158 @@ describe("EncryptedAgentRepository", () => {
 				status: "pending",
 			}),
 		);
+		reopened.close();
+	});
+
+	test("encrypts DataCenter identity and exact pending wire state with one operation per account", async () => {
+		const keys = new MemoryKeyStore();
+		const { path, repository } = createRepository(keys, () => 20_000);
+		const pendingCredentials = createDataCenterAgentCredentials({
+			accountId: "account-a",
+			installationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			nowMs: 10_000,
+			platform: "darwin",
+		});
+		const credentials = completeDataCenterRegistration(
+			pendingCredentials,
+			{
+				agentId: "11111111-1111-4111-8111-111111111111",
+				deviceId: "22222222-2222-4222-8222-222222222222",
+				configVersion: 1,
+			},
+			11_000,
+		);
+		const secondCredentials = completeDataCenterRegistration(
+			createDataCenterAgentCredentials({
+				accountId: "account-b",
+				installationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+				nowMs: 10_100,
+				platform: "darwin",
+			}),
+			{
+				agentId: "33333333-3333-4333-8333-333333333333",
+				deviceId: "44444444-4444-4444-8444-444444444444",
+				configVersion: 1,
+			},
+			11_100,
+		);
+		const batch = createPendingDataCenterBatch(
+			"account-a",
+			[
+				{
+					schemaVersion: "desktop-event.v1",
+					eventId: `de1_${"a".repeat(64)}`,
+					cursor: "ec1_0000000000000001",
+					deviceId: "local-device",
+					sessionId: "local-session",
+					kind: "system.heartbeat",
+					source: "test",
+					occurredAtMs: 10_000,
+					observedAtMs: 10_000,
+					goalVersion: null,
+					sensitivity: "metadata",
+					payload: {},
+				},
+			],
+			12_000,
+		);
+		await repository.putDataCenterAgentCredentials(credentials);
+		await repository.putDataCenterAgentCredentials(secondCredentials);
+		await repository.putDataCenterPendingBatch(batch);
+		await repository.setDataCenterConsumerOwner("account-a");
+		const audit = createDataCenterConsumerAudit({
+			fromAccountId: "previous-account-sentinel",
+			toAccountId: "account-a",
+			fromCursor: null,
+			toCursor: batch.lastCursor,
+			boundaryEpochMs: 1,
+			createdAtMs: 12_100,
+		});
+		await repository.appendDataCenterConsumerAudit(audit);
+		await repository.appendDataCenterConsumerAudit(audit);
+
+		const conflicting = { ...batch, batchKey: `${batch.batchKey}-other` };
+		await expect(
+			repository.putDataCenterPendingBatch(conflicting),
+		).rejects.toThrow("already pending");
+		await expect(
+			repository.putDataCenterPendingAdvance(
+				createPendingDataCenterAdvance({
+					accountId: "account-a",
+					fromCursor: null,
+					toCursor: "ec1_0000000000000001",
+					reason: "account-boundary",
+					createdAtMs: 12_500,
+				}),
+			),
+		).rejects.toThrow("already pending");
+		for (const sentinel of [
+			credentials.privateKeyPkcs8,
+			credentials.registrationRequestBody,
+			secondCredentials.privateKeyPkcs8,
+			secondCredentials.registrationRequestBody,
+			batch.body,
+			"previous-account-sentinel",
+		]) {
+			expect(sqliteFilesContain(path, sentinel)).toBe(false);
+		}
+
+		repository.close();
+		const reopened = new EncryptedAgentRepository({
+			databasePath: path,
+			installationId: "install-1",
+			keyStore: keys,
+		});
+		await expect(
+			reopened.getDataCenterAgentCredentials("account-a"),
+		).resolves.toEqual(credentials);
+		await expect(
+			reopened.getDataCenterAgentCredentials("account-b"),
+		).resolves.toEqual(secondCredentials);
+		expect(secondCredentials.installationId).not.toBe(credentials.installationId);
+		expect(secondCredentials.privateKeyPkcs8).not.toBe(
+			credentials.privateKeyPkcs8,
+		);
+		await expect(
+			reopened.getDataCenterPendingBatch("account-a"),
+		).resolves.toEqual(batch);
+		expect(reopened.getDataCenterConsumerOwner()?.accountId).toBe("account-a");
+		await expect(
+			reopened.listDataCenterConsumerAudits("account-a"),
+		).resolves.toEqual([audit]);
+		const replacement = createPendingDataCenterAdvance({
+			accountId: "account-a",
+			fromCursor: null,
+			toCursor: batch.lastCursor,
+			reason: "retention-expired",
+			createdAtMs: 12_900,
+		});
+		await expect(
+			reopened.replaceDataCenterPendingBatchWithAdvance(batch, replacement),
+		).resolves.toBe(true);
+		await expect(
+			reopened.getDataCenterPendingBatch("account-a"),
+		).resolves.toBeNull();
+		await expect(
+			reopened.getDataCenterPendingAdvance("account-a"),
+		).resolves.toEqual(replacement);
+		expect(
+			reopened.deleteDataCenterPendingAdvance(
+				"account-a",
+				replacement.advanceKey,
+			),
+		).toBe(true);
+		const advance = createPendingDataCenterAdvance({
+			accountId: "account-a",
+			fromCursor: "ec1_0000000000000001",
+			toCursor: "ec1_0000000000000003",
+			reason: "retention-expired",
+			createdAtMs: 13_000,
+		});
+		await reopened.putDataCenterPendingAdvance(advance);
+		await expect(
+			reopened.getDataCenterPendingAdvance("account-a"),
+		).resolves.toEqual(advance);
 		reopened.close();
 	});
 

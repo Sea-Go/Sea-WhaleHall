@@ -12,8 +12,8 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use whalehall_local_protocol::{
     DESKTOP_EVENT_SCHEMA_VERSION, DesktopEvent, DesktopEventSensitivity, EventCommitParams,
-    EventCommitResult, EventGoalChangeParams, EventQueryParams, EventQueryResult, GoalContext,
-    MAX_EVENT_QUERY_LIMIT, desktop_event_kinds,
+    EventCommitResult, EventGoalChangeParams, EventQueryParams, EventQueryResult,
+    EventTailCursorResult, GoalContext, MAX_EVENT_QUERY_LIMIT, desktop_event_kinds,
 };
 
 const SCHEMA_VERSION: i64 = 1;
@@ -381,6 +381,23 @@ impl EventJournal {
             events,
             next_cursor,
             has_more,
+        })
+    }
+
+    /// Returns the latest durable cursor without reading event payloads.
+    ///
+    /// The retained-through cursor is included so a fully cleaned journal still
+    /// exposes the monotonic tail needed by privacy-first consumer rebasing.
+    pub fn tail_cursor(&self) -> Result<EventTailCursorResult, EventJournalError> {
+        let connection = connect(&self.inner.database_path)?;
+        let maximum_sequence = connection.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM desktop_events",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let retained_through = retained_through_sequence(&connection)?;
+        Ok(EventTailCursorResult {
+            cursor: encode_cursor(maximum_sequence.max(retained_through)),
         })
     }
 
@@ -1658,6 +1675,16 @@ mod tests {
         assert_eq!(second.events.len(), 3);
         assert_eq!(second.events[0].payload["key"], "event-2");
         assert!(!second.has_more);
+    }
+
+    #[test]
+    fn tail_cursor_reports_start_and_latest_without_reading_payloads() {
+        let (_directory, journal) = test_journal();
+        assert_eq!(journal.tail_cursor().unwrap().cursor, EVENT_START_CURSOR);
+        let first = journal.append(draft("tail-first", 1_000)).unwrap();
+        let second = journal.append(draft("tail-second", 2_000)).unwrap();
+        assert_eq!(journal.tail_cursor().unwrap().cursor, second.event.cursor);
+        assert_ne!(first.event.cursor, second.event.cursor);
     }
 
     #[test]

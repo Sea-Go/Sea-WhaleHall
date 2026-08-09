@@ -13,10 +13,14 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-/** Both desktop roles use WhaleHall's remote relay origin.  Endpoint selection
- * is fixed in Bun, never user-controlled YAML. */
+/** Reflection remains on the model relay. Auth, chat, and Agent APIs use one
+ * of the two code-owned DataCenter origins. */
 export const WHALEHALL_RELAY_BASE_URL =
 	"https://model.sea-ridethewindbreakthewaves.xyz";
+export const WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL =
+	"https://data.sea-ridethewindbreakthewaves.xyz";
+export const WHALEHALL_DATA_CENTER_STAGING_BASE_URL =
+	"https://data-staging.sea-ridethewindbreakthewaves.xyz";
 export const REFLECTION_RELAY_COMPLETIONS_PATH = "/v1/activity/completions";
 export const WHALEHALL_RELAY_MODEL = "qwen3:1.7b";
 export const UNPROVISIONED_REFLECTION_RELAY_KEY =
@@ -34,6 +38,18 @@ export type ModelConfiguration = {
 	apikey: string;
 };
 
+export type CloudSyncConsentLevel = "off" | "metadata" | "content";
+
+export type CloudSyncConfiguration = {
+	enabled: boolean;
+	contentEncryptionEnabled: boolean;
+	consents: {
+		activity: CloudSyncConsentLevel;
+		browser: CloudSyncConsentLevel;
+		presence: CloudSyncConsentLevel;
+	};
+};
+
 /**
  * The editable desktop configuration intentionally contains only these roles.
  *
@@ -46,6 +62,7 @@ export type ModelConfiguration = {
 export type ClientConfiguration = {
 	reflection: ModelConfiguration;
 	agent: ModelConfiguration;
+	cloudSync: CloudSyncConfiguration;
 };
 
 export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
@@ -56,8 +73,17 @@ export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 	},
 	agent: {
 		name: WHALEHALL_RELAY_MODEL,
-		baseurl: WHALEHALL_RELAY_BASE_URL,
+		baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 		apikey: UNPROVISIONED_AGENT_RELAY_KEY,
+	},
+	cloudSync: {
+		enabled: false,
+		contentEncryptionEnabled: false,
+		consents: {
+			activity: "off",
+			browser: "off",
+			presence: "off",
+		},
 	},
 };
 
@@ -281,12 +307,22 @@ function isLegacyConfiguration(value: unknown): boolean {
 }
 
 function normalizeClientConfiguration(value: unknown): ClientConfiguration {
-	if (!isRecord(value) || !hasExactKeys(value, ["reflection", "agent"])) {
+	if (
+		!isRecord(value) ||
+		!(
+			hasExactKeys(value, ["reflection", "agent"]) ||
+			hasExactKeys(value, ["reflection", "agent", "cloudSync"])
+		)
+	) {
 		throw new Error("Client configuration root is invalid.");
 	}
 	return {
 		reflection: normalizeModelConfiguration(value.reflection, "reflection"),
 		agent: normalizeModelConfiguration(value.agent, "agent"),
+		cloudSync:
+			value.cloudSync === undefined
+				? structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync)
+				: normalizeCloudSyncConfiguration(value.cloudSync),
 	};
 }
 
@@ -322,10 +358,53 @@ function normalizeRelayBaseUrl(
 	if (endpoint.pathname !== "/" && endpoint.pathname !== "") {
 		throw new Error(`${role} model baseurl must be the relay origin.`);
 	}
-	if (endpoint.origin !== WHALEHALL_RELAY_BASE_URL) {
-		throw new Error(`${role} model baseurl is not the approved relay origin.`);
+	if (role === "reflection") {
+		if (endpoint.origin !== WHALEHALL_RELAY_BASE_URL) {
+			throw new Error("reflection model baseurl is not the approved relay origin.");
+		}
+		return WHALEHALL_RELAY_BASE_URL;
 	}
-	return WHALEHALL_RELAY_BASE_URL;
+	if (endpoint.origin === WHALEHALL_RELAY_BASE_URL) {
+		// Existing owner files used the model origin for both roles. Preserve the
+		// literal key while moving Auth/Chat/Agent to the production DataCenter.
+		return WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL;
+	}
+	if (
+		endpoint.origin !== WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL &&
+		endpoint.origin !== WHALEHALL_DATA_CENTER_STAGING_BASE_URL
+	) {
+		throw new Error("agent baseurl is not an approved DataCenter origin.");
+	}
+	return endpoint.origin;
+}
+
+function normalizeCloudSyncConfiguration(value: unknown): CloudSyncConfiguration {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, ["enabled", "contentEncryptionEnabled", "consents"]) ||
+		typeof value.enabled !== "boolean" ||
+		typeof value.contentEncryptionEnabled !== "boolean" ||
+		!isRecord(value.consents) ||
+		!hasExactKeys(value.consents, ["activity", "browser", "presence"])
+	) {
+		throw new Error("cloudSync configuration is invalid.");
+	}
+	return {
+		enabled: value.enabled,
+		contentEncryptionEnabled: value.contentEncryptionEnabled,
+		consents: {
+			activity: normalizeConsentLevel(value.consents.activity),
+			browser: normalizeConsentLevel(value.consents.browser),
+			presence: normalizeConsentLevel(value.consents.presence),
+		},
+	};
+}
+
+function normalizeConsentLevel(value: unknown): CloudSyncConsentLevel {
+	if (value !== "off" && value !== "metadata" && value !== "content") {
+		throw new Error("cloudSync consent level is invalid.");
+	}
+	return value;
 }
 
 function parseRemoteHttpsUrl(value: string, role: string): URL {
@@ -351,7 +430,7 @@ function parseRemoteHttpsUrl(value: string, role: string): URL {
 function normalizeLiteralApiKey(value: string, role: string): string {
 	const apikey = value.trim();
 	if (
-		apikey.length < 1 ||
+		apikey.length < (role === "agent" ? 16 : 1) ||
 		apikey.length >
 			(role === "agent"
 				? MAXIMUM_PERSONAL_RELAY_KEY_LENGTH
@@ -389,6 +468,14 @@ function serializeConfiguration(configuration: ClientConfiguration): string {
 		`  name: ${JSON.stringify(configuration.agent.name)}`,
 		`  baseurl: ${JSON.stringify(configuration.agent.baseurl)}`,
 		`  apikey: ${JSON.stringify(configuration.agent.apikey)}`,
+		"",
+		"cloudSync:",
+		`  enabled: ${configuration.cloudSync.enabled}`,
+		`  contentEncryptionEnabled: ${configuration.cloudSync.contentEncryptionEnabled}`,
+		"  consents:",
+		`    activity: ${JSON.stringify(configuration.cloudSync.consents.activity)}`,
+		`    browser: ${JSON.stringify(configuration.cloudSync.consents.browser)}`,
+		`    presence: ${JSON.stringify(configuration.cloudSync.consents.presence)}`,
 		"",
 	].join("\n");
 }

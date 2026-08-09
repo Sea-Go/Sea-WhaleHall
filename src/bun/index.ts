@@ -55,6 +55,8 @@ import {
 	loadOrCreateClientConfiguration,
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
+import { DataCenterSyncService } from "./data-center-sync";
+import { DataCenterContentCrypto } from "./data-center-crypto";
 import {
 	AgentPermissionRevisionConflictError,
 	EncryptedAgentRepository,
@@ -204,9 +206,10 @@ let relayBridge!: SidecarModelRelayBridge;
 let activityReflectionRelayBridge: SidecarModelRelayBridge | null = null;
 let activityAnalysisDispatcher: ActivityAnalysisDispatcher | null = null;
 let activityReflectionAnalyzer: MastraActivityReflectionAnalyzer | null = null;
+let dataCenterSync: DataCenterSyncService | null = null;
 
 const authSession = new RemoteAuthSessionManager(credentialStore, {
-	baseUrl: agentModelConfiguration?.baseurl,
+	baseUrl: clientConfiguration.configuration.agent.baseurl,
 	agentKey: agentModelConfiguration?.apikey,
 	onSessionExpired: () => {
 		try {
@@ -225,6 +228,7 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 		}
 		activeGoalStore?.invalidateSynchronously();
 		const cleanupTasks: Array<() => unknown | Promise<unknown>> = [
+			() => dataCenterSync?.stop(),
 			() => activeGoalStore.clearForAccountTransition(),
 		];
 		if (accountId && coordinator) {
@@ -389,6 +393,20 @@ const agent = new AgentRuntime(
 	}),
 	{ requireStartupGoalPreparation: true },
 );
+dataCenterSync = new DataCenterSyncService({
+	baseUrl: clientConfiguration.configuration.agent.baseurl,
+	configuration: clientConfiguration.configuration.cloudSync,
+	repository: agentRepository,
+	events: agent,
+	auth: authSession,
+	contentCrypto: new DataCenterContentCrypto(),
+	onError(error) {
+		console.warn(
+			"WhaleHall DataCenter cloud synchronization retry:",
+			error instanceof Error ? error.message : "UNKNOWN",
+		);
+	},
+});
 const rawAuditSource = createRawFiveMinuteAuditSource(agent);
 const rawOnlyAuditExporter = new TimelineFiveMinuteAuditExporter(
 	rawAuditSource,
@@ -677,6 +695,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						);
 					}
 					activityAnalysisDispatcher?.wake();
+					dataCenterSync?.start();
 					return session;
 				}),
 			signIn: (input) =>
@@ -719,6 +738,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						);
 					}
 					activityAnalysisDispatcher?.wake();
+					dataCenterSync?.start();
 					return session;
 				}),
 			signOut: () =>
@@ -1086,6 +1106,7 @@ function shutdown(): Promise<void> {
 		cancelStartupRetryWait?.();
 		auditCaptureCoordinator.dispose();
 		relayBridge.abortAll();
+		await dataCenterSync?.stop();
 		await sidecar.stop();
 		await stopActivityWindowDelivery();
 		// Startup owns both the initial native start and any reflection-service

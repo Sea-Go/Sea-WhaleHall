@@ -12,6 +12,7 @@ import type {
 	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
+	LocalEventTailCursorResult,
 	LocalMonitoringConfigure,
 	LocalMonitoringStatus,
 	LocalRuntimeHealth,
@@ -76,6 +77,10 @@ class FakeLocalProcess implements LocalToolProcess {
 			pid: 7001,
 			status: "ok",
 		};
+	}
+
+	async getEventTailCursor(): Promise<LocalEventTailCursorResult> {
+		return { cursor: "ec1_0000000000000000" };
 	}
 
 	async listTools(): Promise<LocalToolDescriptor[]> {

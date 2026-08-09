@@ -93,7 +93,7 @@ access token 和 personal relay key 只停留在 Bun 主进程。密码提交后
 state 清除，不写入数据库、日志、argv 或环境变量。refresh、退出与会话过期会先关闭
 AuthGate、递增 generation、终止模型流并清理旧账号的本地运行，再允许新账号开始。
 
-`config.yaml` 的 `agent` 角色固定为 `qwen3:1.7b` 与 relay origin。每个聊天请求
+`config.yaml` 的 `agent` 角色固定为 `qwen3:1.7b` 与 DataCenter origin。每个聊天请求
 同时附带 bearer 和 `X-WhaleHall-Agent-Key`；relay 验证两者同属一个账户后才转发。
 
 ## 对话、Tool 与审批
@@ -115,21 +115,25 @@ Bun 在模型后验证 schema、引用、日期、IANA 时区、时长、截止�
 
 ## 远端服务
 
-`services/model-relay` 只公开：
+生产公网按 origin 分离：model origin 只公开：
+
+- `POST /v1/activity/completions`
+
+DataCenter data origin 公开桌面所需的：
 
 - `POST /v1/auth/sessions`
 - `POST /v1/auth/sessions/refresh`
 - `DELETE /v1/auth/sessions/current`
 - `GET /v1/auth/me`
-- `POST /v1/activity/completions`
 - `POST /v1/chat/completions`
+- Agent 注册、consent、crypto context 与 desktop event API
 
-Chat endpoint 同时验证 bearer subject 和该 subject 的 scrypt `agentKeyHash`，拒绝
+DataCenter Chat endpoint 同时验证 bearer subject 和该 subject 的 personal Agent key，拒绝
 body/header 中的自报身份与供应商凭据，执行 16 MiB 大小限制、精确模型 allowlist、
 限流和幂等检查，然后把原始 OpenAI-compatible 字节转发到固定 CPU-only Ollama
 loopback。SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，
-流式中断不会续传。部署、数据保留与多实例存储说明见
-`deploy/home-cloud/model-relay/README.md`。
+流式中断不会续传。model origin 的 Caddy 部署说明见
+`deploy/home-cloud/model-relay/README.md`；该 handler 不得匹配 auth/chat/agent/events。
 
 Reflection endpoint 只接受 `X-WhaleHall-Reflection-Key`，拒绝 bearer 与 agent key，
 只允许非流式请求。它验证 key 的 scrypt hash、执行模型 allowlist 和限流后，原样转发到

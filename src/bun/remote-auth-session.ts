@@ -217,13 +217,45 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		path: string,
 		init: RequestInit = {},
 	): Promise<Response> {
-		const agentKey = this.requireAgentKey();
+		if (path !== "/v1/chat/completions") {
+			throw new RemoteAuthError(
+				"unexpected",
+				"个人 Agent relay key 只能发送到固定聊天入口。",
+			);
+		}
+		return this.authorizedRequest(path, init, this.requireAgentKey());
+	}
+
+	/** Sends a bearer-only request to a code-owned DataCenter path. */
+	async bearerFetch(
+		path: string,
+		init: RequestInit = {},
+	): Promise<Response> {
+		if (
+			path !== "/v1/agent/register" &&
+			!/^\/v1\/devices\/[a-f0-9-]{36}\/consents\/(activity|browser|presence)$/iu.test(
+				path,
+			)
+		) {
+			throw new RemoteAuthError(
+				"unexpected",
+				"Bearer 凭据只能发送到固定 DataCenter 注册与授权入口。",
+			);
+		}
+		return this.authorizedRequest(path, init, null);
+	}
+
+	private async authorizedRequest(
+		path: string,
+		init: RequestInit,
+		agentKey: string | null,
+	): Promise<Response> {
 		await this.getValidAccessToken();
 		const current = this.current;
 		if (!current) throw new RemoteAuthError("expired", "登录会话已过期。", 401);
 		const headers = new Headers(init.headers);
 		headers.set("authorization", `Bearer ${current.accessToken}`);
-		headers.set("x-whalehall-agent-key", agentKey);
+		if (agentKey) headers.set("x-whalehall-agent-key", agentKey);
 		headers.set("x-session-generation", String(this.generation));
 		const first = await this.request(path, { ...init, headers });
 		if (first.status !== 401) return first;
@@ -234,7 +266,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			throw new RemoteAuthError("expired", "登录会话已过期。", 401);
 		const nextHeaders = new Headers(init.headers);
 		nextHeaders.set("authorization", `Bearer ${refreshed.accessToken}`);
-		nextHeaders.set("x-whalehall-agent-key", agentKey);
+		if (agentKey) nextHeaders.set("x-whalehall-agent-key", agentKey);
 		nextHeaders.set("x-session-generation", String(this.generation));
 		const second = await this.request(path, { ...init, headers: nextHeaders });
 		if (second.status === 401) await this.expireLocalSession();
