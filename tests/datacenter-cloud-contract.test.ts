@@ -39,6 +39,14 @@ import {
 } from "../src/bun/data-center-crypto";
 
 const DATA_CENTER_CI_REPOSITORY = "/workspace/datacenter";
+const DATA_CENTER_LOCAL_INTEGRATION_REPOSITORY = resolve(
+	import.meta.dir,
+	"../../Sea-DataCenter-integration",
+);
+const DATA_CENTER_LOCAL_REPOSITORY = resolve(
+	import.meta.dir,
+	"../../Sea-DataCenter",
+);
 const DATA_CENTER_REPOSITORY = locateDataCenterRepository();
 const CONTRACT_DIRECTORY = DATA_CENTER_REPOSITORY
 	? resolve(DATA_CENTER_REPOSITORY, "contracts/v1")
@@ -48,6 +56,12 @@ const describeDataCenterContract = DATA_CENTER_REPOSITORY
 	: describe.skip;
 
 type JsonRecord = Record<string, unknown>;
+type ContractFixtureName =
+	| "agent.json"
+	| "desktop.json"
+	| "encryption.json"
+	| "events.json"
+	| "signatures.json";
 
 type SignatureCorpus = {
 	schemaVersion: string;
@@ -494,12 +508,27 @@ describeDataCenterContract("DataCenter cross-repository cloud contract", () => {
 	});
 });
 
-function fixture<T>(name: string): T {
-	const path = resolve(CONTRACT_DIRECTORY, name);
+function fixture<T>(name: ContractFixtureName): T {
+	const path = contractFixturePath(name);
 	if (!existsSync(path)) {
 		throw new Error(`Required DataCenter contract fixture is missing: ${path}`);
 	}
 	return JSON.parse(readFileSync(path, "utf8")) as T;
+}
+
+function contractFixturePath(name: ContractFixtureName): string {
+	switch (name) {
+		case "agent.json":
+			return resolve(CONTRACT_DIRECTORY, "agent.json");
+		case "desktop.json":
+			return resolve(CONTRACT_DIRECTORY, "desktop.json");
+		case "encryption.json":
+			return resolve(CONTRACT_DIRECTORY, "encryption.json");
+		case "events.json":
+			return resolve(CONTRACT_DIRECTORY, "events.json");
+		case "signatures.json":
+			return resolve(CONTRACT_DIRECTORY, "signatures.json");
+	}
 }
 
 function locateDataCenterRepository(): string {
@@ -517,17 +546,33 @@ function locateDataCenterRepository(): string {
 	}
 	if (process.env.DATACENTER_REPOSITORY) {
 		const configured = resolve(process.env.DATACENTER_REPOSITORY);
-		if (existsSync(resolve(configured, "contracts/v1"))) return configured;
+		if (
+			configured === DATA_CENTER_LOCAL_INTEGRATION_REPOSITORY &&
+			existsSync(
+				resolve(DATA_CENTER_LOCAL_INTEGRATION_REPOSITORY, "contracts/v1"),
+			)
+		) {
+			return DATA_CENTER_LOCAL_INTEGRATION_REPOSITORY;
+		}
+		if (
+			configured === DATA_CENTER_LOCAL_REPOSITORY &&
+			existsSync(resolve(DATA_CENTER_LOCAL_REPOSITORY, "contracts/v1"))
+		) {
+			return DATA_CENTER_LOCAL_REPOSITORY;
+		}
 		throw new Error(
-			`DATACENTER_REPOSITORY has no contracts/v1 directory: ${configured}`,
+			"DATACENTER_REPOSITORY must select a known adjacent DataCenter checkout.",
 		);
 	}
-	for (const candidate of [
-		resolve(process.cwd(), "../Sea-DataCenter-integration"),
-		resolve(process.cwd(), "../Sea-DataCenter"),
-		resolve(process.cwd(), "../../Sea-DataCenter"),
-	]) {
-		if (existsSync(resolve(candidate, "contracts/v1"))) return candidate;
+	if (
+		existsSync(
+			resolve(DATA_CENTER_LOCAL_INTEGRATION_REPOSITORY, "contracts/v1"),
+		)
+	) {
+		return DATA_CENTER_LOCAL_INTEGRATION_REPOSITORY;
+	}
+	if (existsSync(resolve(DATA_CENTER_LOCAL_REPOSITORY, "contracts/v1"))) {
+		return DATA_CENTER_LOCAL_REPOSITORY;
 	}
 	throw new Error(
 		"Set DATACENTER_REPOSITORY to a DataCenter checkout containing contracts/v1.",
