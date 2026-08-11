@@ -56,7 +56,10 @@ import {
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
 import { DataCenterContentCrypto } from "./data-center-crypto";
-import { DataCenterSyncService } from "./data-center-sync";
+import {
+	DataCenterSyncService,
+	dataCenterSyncDiagnosticCode,
+} from "./data-center-sync";
 import {
 	AgentPermissionRevisionConflictError,
 	EncryptedAgentRepository,
@@ -407,7 +410,7 @@ dataCenterSync = new DataCenterSyncService({
 	onError(error) {
 		console.warn(
 			"WhaleHall DataCenter cloud synchronization retry:",
-			error instanceof Error ? error.message : "UNKNOWN",
+			dataCenterSyncDiagnosticCode(error),
 		);
 	},
 });

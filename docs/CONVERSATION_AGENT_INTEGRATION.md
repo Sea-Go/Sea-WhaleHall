@@ -7,8 +7,8 @@ flowchart LR
   React["React WebView\n只负责 UI"] <-->|"Typed RPC"| Bun["Bun 主进程\n身份、存储、日历、政策"]
   Bun <-->|"Content-Length stdio"| Sidecar["Node 22.18 Mastra Sidecar\nAgent、Memory、Workflow、Tool Loop"]
   Sidecar -->|"完整 OpenAI-compatible body"| Bun
-  Bun -->|"Bearer + personal relay key\nHTTPS"| Relay["远端 auth/model relay"]
-  Relay --> Provider["模型供应商"]
+  Bun -->|"HTTPS · 认证/Bearer\n聊天 relay key · Agent v2 签名"| DataCenter["DataCenter data origin\n认证、聊天、Agent、同步"]
+  DataCenter -->|"聊天模型转发"| Provider["模型供应商"]
   Bun --> SQLite["字段加密 SQLite"]
   Bun --> Vault["Credential Manager / Keychain"]
 ```
@@ -25,9 +25,9 @@ flowchart LR
   Window["已封闭活动窗口"] --> Bridge["Bun: 完整 prompt、时间片/分数校验"]
   Bridge -->|"完整本地 prompt"| Sidecar["Mastra Workflow + 原生本地 Skills"]
   Sidecar -->|"OpenAI-compatible body"| Bridge
-  Bridge -->|"reflection key"| Relay["通用 CPU model relay"]
-  Relay -->|"原样转发"| Qwen["CPU qwen3:1.7b"]
-  Qwen --> Relay --> Bridge
+  Bridge -->|"reflection key + HTTPS"| ModelOrigin["Model origin\n仅 reflection completion relay"]
+  ModelOrigin -->|"原样转发"| Qwen["CPU qwen3:1.7b"]
+  Qwen --> ModelOrigin --> Bridge
 ```
 
 Sidecar 是客户端的一部分：它会在一次调用的内存中看到完整 `userPrompt`，并用

@@ -56,6 +56,8 @@ import type {
 } from "./encrypted-agent-repository";
 
 const DATA_CENTER_SYNC_INTERVAL_MS = 15_000;
+const DATA_CENTER_LOOP_RESTART_DELAY_MS = 250;
+const DATA_CENTER_REQUEST_TIMEOUT_MS = 20_000;
 const DATA_CENTER_MAX_DRAIN_OPERATIONS = 100;
 const DATA_CENTER_MAX_RESPONSE_BYTES = 1024 * 1024;
 const DATA_CENTER_REQUEST_ATTEMPTS = 3;
@@ -121,10 +123,19 @@ export interface DataCenterSyncServiceOptions {
 	now?: () => number;
 	retryDelayMs?: number;
 	syncIntervalMs?: number;
-	onError?: (error: unknown) => void;
+	loopRestartDelayMs?: number;
+	requestTimeoutMs?: number;
+	onError?: (error: unknown) => void | Promise<void>;
 	agentVersion?: string;
 	createCloudInstallationId?: () => string;
 }
+
+export type DataCenterSyncDiagnosticCode =
+	| "HTTP_STATUS"
+	| "LOCAL_TOOL"
+	| "REQUEST_ABORTED"
+	| "REQUEST_TIMEOUT"
+	| "UNKNOWN";
 
 /**
  * Account-bound encrypted cloud synchronization for the durable DesktopEvent journal.
@@ -139,7 +150,9 @@ export class DataCenterSyncService {
 	private readonly now: () => number;
 	private readonly retryDelayMs: number;
 	private readonly syncIntervalMs: number;
-	private readonly onError: (error: unknown) => void;
+	private readonly loopRestartDelayMs: number;
+	private readonly requestTimeoutMs: number;
+	private readonly onError: (error: unknown) => void | Promise<void>;
 	private readonly contentCrypto: DataCenterContentCrypto;
 	private readonly createCloudInstallationId: () => string;
 	private encryptionContextCache: {
@@ -152,7 +165,6 @@ export class DataCenterSyncService {
 	private loopPromise: Promise<void> | null = null;
 	private wakeWaiter: (() => void) | null = null;
 	private serialTail: Promise<unknown> = Promise.resolve();
-	private bearerRequests = 0;
 
 	constructor(private readonly options: DataCenterSyncServiceOptions) {
 		this.baseUrl = validateDataCenterBaseUrl(options.baseUrl);
@@ -161,6 +173,10 @@ export class DataCenterSyncService {
 		this.retryDelayMs = options.retryDelayMs ?? 250;
 		this.syncIntervalMs =
 			options.syncIntervalMs ?? DATA_CENTER_SYNC_INTERVAL_MS;
+		this.loopRestartDelayMs =
+			options.loopRestartDelayMs ?? DATA_CENTER_LOOP_RESTART_DELAY_MS;
+		this.requestTimeoutMs =
+			options.requestTimeoutMs ?? DATA_CENTER_REQUEST_TIMEOUT_MS;
 		this.onError = options.onError ?? (() => {});
 		this.contentCrypto = options.contentCrypto ?? new DataCenterContentCrypto();
 		this.createCloudInstallationId =
@@ -177,12 +193,7 @@ export class DataCenterSyncService {
 		const controller = new AbortController();
 		this.loopController = controller;
 		const loop = this.runLoop(controller.signal);
-		this.loopPromise = loop;
-		void loop.finally(() => {
-			if (this.loopPromise === loop) this.loopPromise = null;
-			if (this.loopController === controller) this.loopController = null;
-			if (this.desiredRunning) this.start();
-		});
+		this.loopPromise = this.superviseLoop(loop, controller);
 	}
 
 	wake(): void {
@@ -194,10 +205,9 @@ export class DataCenterSyncService {
 		this.encryptionContextCache = null;
 		this.loopController?.abort();
 		this.wake();
-		// A bearer request can expire its own auth session and enter the session
-		// transition barrier. In that re-entrant case, identity guards plus abort
-		// are the barrier; awaiting this same loop would deadlock the transition.
-		if (this.bearerRequests > 0) return;
+		// Per-attempt request scopes race both signed and bearer transports against
+		// this lifecycle abort, so even an auth-transition callback can drain the
+		// synchronization loop without waiting on its own bearer transport.
 		await this.loopPromise;
 		await this.serialTail;
 	}
@@ -229,11 +239,53 @@ export class DataCenterSyncService {
 			try {
 				await this.syncOnce(signal);
 			} catch (error) {
-				if (!signal.aborted) this.onError(error);
+				if (!signal.aborted) this.notifyError(error);
 			}
 			if (!signal.aborted && this.desiredRunning) {
 				await this.waitForWake(signal);
 			}
+		}
+	}
+
+	private async superviseLoop(
+		loop: Promise<void>,
+		controller: AbortController,
+	): Promise<void> {
+		let unexpectedSettlement = false;
+		try {
+			await loop;
+			unexpectedSettlement = this.desiredRunning && !controller.signal.aborted;
+		} catch (error) {
+			unexpectedSettlement = true;
+			if (!controller.signal.aborted) this.notifyError(error);
+		}
+		if (
+			unexpectedSettlement &&
+			this.desiredRunning &&
+			!controller.signal.aborted
+		) {
+			await abortableDelay(this.loopRestartDelayMs, controller.signal).catch(
+				() => undefined,
+			);
+		}
+		if (this.loopController !== controller) return;
+		this.loopController = null;
+		this.loopPromise = null;
+		if (this.desiredRunning) {
+			try {
+				this.start();
+			} catch (error) {
+				this.notifyError(error);
+			}
+		}
+	}
+
+	private notifyError(error: unknown): void {
+		try {
+			const notification = this.onError(error);
+			if (notification) void notification.catch(() => undefined);
+		} catch {
+			// Diagnostics are best effort and never own the synchronization lifecycle.
 		}
 	}
 
@@ -278,6 +330,17 @@ export class DataCenterSyncService {
 		this.assertCurrent(identity);
 		if (page.events.length === 0) return false;
 		assertContiguousEvents(page.events);
+		const remoteCursor = await this.getRemoteCursor(
+			identity,
+			credentials,
+			signal,
+		);
+		const expectedFrom = previousCursor(page.events[0]?.cursor ?? "");
+		if (remoteCursor !== expectedFrom) {
+			throw new Error(
+				"DataCenter and local desktop cursors diverged without a durable pending operation.",
+			);
+		}
 
 		const projections: DataCenterProjectionResult[] = [];
 		const contentEncryptor = this.contentEncryptor(
@@ -329,17 +392,6 @@ export class DataCenterSyncService {
 			projections.push(projection);
 		}
 		this.assertCurrent(identity);
-		const remoteCursor = await this.getRemoteCursor(
-			identity,
-			credentials,
-			signal,
-		);
-		const expectedFrom = previousCursor(page.events[0]?.cursor ?? "");
-		if (remoteCursor !== expectedFrom) {
-			throw new Error(
-				"DataCenter and local desktop cursors diverged without a durable pending operation.",
-			);
-		}
 
 		if (projections[0]?.kind === "upload") {
 			const events: DataCenterWireEvent[] = [];
@@ -780,42 +832,56 @@ export class DataCenterSyncService {
 			throwIfAborted(signal);
 			this.assertCurrent(identity);
 			try {
-				const signed = signDataCenterRequestV2({
-					agentId: credentials.agentId,
-					privateKeyPkcs8: credentials.privateKeyPkcs8,
-					method,
-					url,
-					body,
-					nowMs: this.now(),
-				});
-				const headers = new Headers(signed);
-				headers.set("accept", "application/json");
-				if (method === "POST") {
-					headers.set("content-type", "application/json");
-				}
-				const response = await this.fetchImpl(url, {
-					method,
-					headers,
-					...(method === "POST" ? { body } : {}),
-					redirect: "error",
-					cache: "no-store",
+				const requestScope = createDataCenterRequestScope(
+					this.requestTimeoutMs,
 					signal,
-				});
-				this.assertCurrent(identity);
-				if (response.status !== expectedStatus) {
+				);
+				try {
+					const signed = signDataCenterRequestV2({
+						agentId: credentials.agentId,
+						privateKeyPkcs8: credentials.privateKeyPkcs8,
+						method,
+						url,
+						body,
+						nowMs: this.now(),
+					});
+					const headers = new Headers(signed);
+					headers.set("accept", "application/json");
+					if (method === "POST") {
+						headers.set("content-type", "application/json");
+					}
+					const response = await withAbortSignal(
+						this.fetchImpl(url, {
+							method,
+							headers,
+							...(method === "POST" ? { body } : {}),
+							redirect: "error",
+							cache: "no-store",
+							signal: requestScope.signal,
+						}),
+						requestScope.signal,
+					);
+					this.assertCurrent(identity);
+					if (response.status !== expectedStatus) {
+						cancelResponseBody(response);
+						throw new DataCenterHttpStatusError(path, response.status);
+					}
+					return await readBoundedJson(response, requestScope.signal);
+				} finally {
+					requestScope.cleanup();
+				}
+			} catch (error) {
+				lastError = error;
+				if (error instanceof DataCenterHttpStatusError) {
 					if (
-						(response.status === 429 || response.status >= 500) &&
+						isRetryableDataCenterStatus(error.status) &&
 						attempt + 1 < DATA_CENTER_REQUEST_ATTEMPTS
 					) {
 						await this.retryWait(attempt, signal);
 						continue;
 					}
-					throw new DataCenterHttpStatusError(path, response.status);
+					throw error;
 				}
-				return await readBoundedJson(response);
-			} catch (error) {
-				lastError = error;
-				if (error instanceof DataCenterHttpStatusError) throw error;
 				if (signal?.aborted || !this.options.auth.isCurrentSession(identity)) {
 					throw error;
 				}
@@ -843,36 +909,44 @@ export class DataCenterSyncService {
 			throwIfAborted(signal);
 			this.assertCurrent(identity);
 			try {
-				this.bearerRequests += 1;
-				let response: Response;
+				const requestScope = createDataCenterRequestScope(
+					this.requestTimeoutMs,
+					signal,
+				);
 				try {
-					response = await this.options.auth.bearerFetch(path, {
-						method,
-						headers: {
-							accept: "application/json",
-							"content-type": "application/json",
-						},
-						body,
-						signal,
-					});
+					const response = await withAbortSignal(
+						this.options.auth.bearerFetch(path, {
+							method,
+							headers: {
+								accept: "application/json",
+								"content-type": "application/json",
+							},
+							body,
+							signal: requestScope.signal,
+						}),
+						requestScope.signal,
+					);
+					this.assertCurrent(identity);
+					if (!expectedStatuses.includes(response.status)) {
+						cancelResponseBody(response);
+						throw new DataCenterHttpStatusError(path, response.status);
+					}
+					return await readBoundedJson(response, requestScope.signal);
 				} finally {
-					this.bearerRequests -= 1;
+					requestScope.cleanup();
 				}
-				this.assertCurrent(identity);
-				if (!expectedStatuses.includes(response.status)) {
+			} catch (error) {
+				lastError = error;
+				if (error instanceof DataCenterHttpStatusError) {
 					if (
-						(response.status === 429 || response.status >= 500) &&
+						isRetryableDataCenterStatus(error.status) &&
 						attempt + 1 < DATA_CENTER_REQUEST_ATTEMPTS
 					) {
 						await this.retryWait(attempt, signal);
 						continue;
 					}
-					throw new DataCenterHttpStatusError(path, response.status);
+					throw error;
 				}
-				return await readBoundedJson(response);
-			} catch (error) {
-				lastError = error;
-				if (error instanceof DataCenterHttpStatusError) throw error;
 				if (signal?.aborted || !this.options.auth.isCurrentSession(identity)) {
 					throw error;
 				}
@@ -966,10 +1040,31 @@ export class DataCenterSyncService {
 }
 
 class DataCenterHttpStatusError extends Error {
-	constructor(path: string, status: number) {
+	constructor(
+		path: string,
+		readonly status: number,
+	) {
 		super(`DataCenter ${path} returned HTTP ${status}.`);
 		this.name = "DataCenterHttpStatusError";
 	}
+}
+
+function isRetryableDataCenterStatus(status: number): boolean {
+	return status === 429 || status >= 500;
+}
+
+export function dataCenterSyncDiagnosticCode(
+	error: unknown,
+): DataCenterSyncDiagnosticCode {
+	if (error instanceof DataCenterHttpStatusError) return "HTTP_STATUS";
+	if (error instanceof DOMException) {
+		if (error.name === "TimeoutError") return "REQUEST_TIMEOUT";
+		if (error.name === "AbortError") return "REQUEST_ABORTED";
+	}
+	if (error instanceof Error && error.name === "LocalClientError") {
+		return "LOCAL_TOOL";
+	}
+	return "UNKNOWN";
 }
 
 function validateDataCenterBaseUrl(value: string): URL {
@@ -1043,10 +1138,15 @@ function assertContiguousEvents(events: DesktopEventV1[]): void {
 	}
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(
+	response: Response,
+	signal: AbortSignal,
+): Promise<unknown> {
+	throwIfAborted(signal);
 	const declaredLength = response.headers.get("content-length");
 	if (declaredLength !== null) {
 		if (!/^\d+$/u.test(declaredLength)) {
+			cancelResponseBody(response);
 			throw new Error("DataCenter JSON response size is invalid.");
 		}
 		const parsedLength = Number(declaredLength);
@@ -1055,6 +1155,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 			parsedLength < 1 ||
 			parsedLength > DATA_CENTER_MAX_RESPONSE_BYTES
 		) {
+			cancelResponseBody(response);
 			throw new Error("DataCenter JSON response size is invalid.");
 		}
 	}
@@ -1066,17 +1167,27 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 	let byteLength = 0;
 	try {
 		while (true) {
-			const result = await reader.read();
+			const result = await withAbortSignal(reader.read(), signal);
 			if (result.done) break;
 			byteLength += result.value.byteLength;
 			if (byteLength > DATA_CENTER_MAX_RESPONSE_BYTES) {
-				await reader.cancel().catch(() => undefined);
+				void reader.cancel().catch(() => undefined);
 				throw new Error("DataCenter JSON response size is invalid.");
 			}
 			chunks.push(result.value);
 		}
+		throwIfAborted(signal);
+	} catch (error) {
+		if (signal.aborted) {
+			void reader.cancel(signal.reason).catch(() => undefined);
+		}
+		throw error;
 	} finally {
-		reader.releaseLock();
+		try {
+			reader.releaseLock();
+		} catch {
+			// A best-effort cancellation may still own a hostile custom stream.
+		}
 	}
 	if (byteLength < 1) {
 		throw new Error("DataCenter JSON response size is invalid.");
@@ -1096,19 +1207,104 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 	}
 }
 
+function cancelResponseBody(response: Response): void {
+	try {
+		void response.body?.cancel().catch(() => undefined);
+	} catch {
+		// Discarding an invalid or retryable response is best effort.
+	}
+}
+
+interface DataCenterRequestScope {
+	signal: AbortSignal;
+	cleanup(): void;
+}
+
+function createDataCenterRequestScope(
+	timeoutMs: number,
+	callerSignal?: AbortSignal,
+): DataCenterRequestScope {
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+		throw new Error("DataCenter request timeout must be a positive integer.");
+	}
+	const controller = new AbortController();
+	let cleaned = false;
+	const abortFromCaller = () => {
+		if (controller.signal.aborted) return;
+		controller.abort(
+			callerSignal?.reason ??
+				new DOMException("DataCenter request aborted.", "AbortError"),
+		);
+	};
+	const timer = setTimeout(() => {
+		controller.abort(
+			new DOMException("DataCenter request timed out.", "TimeoutError"),
+		);
+	}, timeoutMs);
+	callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+	if (callerSignal?.aborted) abortFromCaller();
+	return {
+		signal: controller.signal,
+		cleanup() {
+			if (cleaned) return;
+			cleaned = true;
+			clearTimeout(timer);
+			callerSignal?.removeEventListener("abort", abortFromCaller);
+		},
+	};
+}
+
+function withAbortSignal<T>(
+	operation: Promise<T>,
+	signal: AbortSignal,
+): Promise<T> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", abort);
+		const settle = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			callback();
+		};
+		const abort = () =>
+			settle(() => reject(signal.reason ?? new Error("Operation aborted.")));
+		signal.addEventListener("abort", abort, { once: true });
+		operation.then(
+			(value) => settle(() => resolve(value)),
+			(error: unknown) => settle(() => reject(error)),
+		);
+		if (signal.aborted) abort();
+	});
+}
+
 function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) {
-			reject(signal.reason ?? new Error("Operation aborted."));
+			reject(signal?.reason ?? new Error("Operation aborted."));
 			return;
 		}
-		const timer = setTimeout(resolve, delayMs);
-		if (!signal) return;
-		const abort = () => {
-			clearTimeout(timer);
-			reject(signal.reason ?? new Error("Operation aborted."));
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timer !== undefined) clearTimeout(timer);
+			signal?.removeEventListener("abort", abort);
 		};
-		signal.addEventListener("abort", abort, { once: true });
+		const complete = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve();
+		};
+		const abort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(signal?.reason ?? new Error("Operation aborted."));
+		};
+		timer = setTimeout(complete, delayMs);
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
 	});
 }
 

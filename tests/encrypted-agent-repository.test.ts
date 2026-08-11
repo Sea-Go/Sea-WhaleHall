@@ -350,6 +350,97 @@ describe("EncryptedAgentRepository", () => {
 		reopened.close();
 	});
 
+	test("enforces signed i64 cursors in encrypted DataCenter records", async () => {
+		const { repository } = createRepository(new MemoryKeyStore(), () => 1_000);
+		const maximumCursorBatch = createPendingDataCenterBatch(
+			"account-a",
+			[
+				{
+					schemaVersion: "desktop-event.v1",
+					eventId: `de1_${"f".repeat(64)}`,
+					cursor: "ec1_7fffffffffffffff",
+					deviceId: "local-device",
+					sessionId: "local-session",
+					kind: "system.heartbeat",
+					source: "test",
+					occurredAtMs: 1_000,
+					observedAtMs: 1_000,
+					goalVersion: null,
+					sensitivity: "metadata",
+					payload: {},
+				},
+			],
+			1_000,
+		);
+		await repository.putDataCenterPendingBatch(maximumCursorBatch);
+		await expect(
+			repository.getDataCenterPendingBatch("account-a"),
+		).resolves.toEqual(maximumCursorBatch);
+		await expect(
+			repository.putDataCenterPendingBatch({
+				...maximumCursorBatch,
+				firstCursor: "ec1_8000000000000000",
+				lastCursor: "ec1_8000000000000000",
+			}),
+		).rejects.toThrow("pending batch");
+		repository.close();
+	});
+
+	test("prunes DataCenter consumer audits by age and count per owning account", async () => {
+		const retentionMs = 31 * 24 * 60 * 60 * 1_000;
+		let nowMs = 0;
+		const { repository } = createRepository(new MemoryKeyStore(), () => nowMs);
+		const audit = (accountId: string, sequence: number, createdAtMs: number) =>
+			createDataCenterConsumerAudit({
+				fromAccountId: null,
+				toAccountId: accountId,
+				fromCursor: null,
+				toCursor: `ec1_${sequence.toString(16).padStart(16, "0")}`,
+				boundaryEpochMs: sequence,
+				createdAtMs,
+			});
+
+		const staleA = audit("account-a", 1, nowMs);
+		const staleB = audit("account-b", 1, nowMs);
+		await repository.appendDataCenterConsumerAudit(staleA);
+		await repository.appendDataCenterConsumerAudit(staleB);
+
+		nowMs = retentionMs + 1;
+		const freshA = audit("account-a", 2, nowMs);
+		await repository.appendDataCenterConsumerAudit(freshA);
+		await expect(
+			repository.listDataCenterConsumerAudits("account-a"),
+		).resolves.toEqual([freshA]);
+		await expect(
+			repository.listDataCenterConsumerAudits("account-b"),
+		).resolves.toEqual([staleB]);
+
+		const freshB = audit("account-b", 2, nowMs);
+		await repository.appendDataCenterConsumerAudit(freshB);
+		await expect(
+			repository.listDataCenterConsumerAudits("account-b"),
+		).resolves.toEqual([freshB]);
+
+		const capped: ReturnType<typeof audit>[] = [];
+		for (let index = 0; index < 1_001; index += 1) {
+			nowMs += 1;
+			const record = audit("account-a", index + 10, nowMs);
+			capped.push(record);
+			await repository.appendDataCenterConsumerAudit(record);
+		}
+		const retained = await repository.listDataCenterConsumerAudits(
+			"account-a",
+			1_000,
+		);
+		expect(retained.map((record) => record.id)).toEqual(
+			capped.slice(1).map((record) => record.id),
+		);
+		await expect(
+			repository.listDataCenterConsumerAudits("account-b"),
+		).resolves.toEqual([freshB]);
+		repository.close();
+	});
+
 	test("enforces client-message idempotency and preserves partial message state", async () => {
 		const { repository } = createRepository(new MemoryKeyStore());
 		await repository.putConversation({

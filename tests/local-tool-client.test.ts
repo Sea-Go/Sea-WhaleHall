@@ -527,6 +527,36 @@ describe("LocalToolClient", () => {
 		await client.stop();
 	});
 
+	test("accepts only signed i64 desktop tail cursors", async () => {
+		for (const cursor of ["ec1_0000000000000000", "ec1_7fffffffffffffff"]) {
+			const child = new FakeChild((line, process) => {
+				const request = JSON.parse(line) as { id: string; method: string };
+				if (request.method === "event.tailCursor") {
+					process.respond({ id: request.id, ok: true, result: { cursor } });
+				}
+			});
+			const client = new LocalToolClient("fake", { spawn: () => child });
+			await client.start();
+			await expect(client.getEventTailCursor()).resolves.toEqual({ cursor });
+			await client.stop();
+		}
+
+		for (const cursor of ["ec1_8000000000000000", "ec1_ffffffffffffffff"]) {
+			const child = new FakeChild((line, process) => {
+				const request = JSON.parse(line) as { id: string; method: string };
+				if (request.method === "event.tailCursor") {
+					process.respond({ id: request.id, ok: true, result: { cursor } });
+				}
+			});
+			const client = new LocalToolClient("fake", { spawn: () => child });
+			await client.start();
+			await expect(client.getEventTailCursor()).rejects.toMatchObject({
+				code: "PROTOCOL_ERROR",
+			});
+			expect(client.isRunning).toBe(false);
+		}
+	});
+
 	test("appends only the specific validated durable goal boundary", async () => {
 		const child = new FakeChild((line, process) => {
 			const request = JSON.parse(line) as {

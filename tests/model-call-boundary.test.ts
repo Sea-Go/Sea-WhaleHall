@@ -56,16 +56,29 @@ describe("desktop model-call boundary", () => {
 			join(repositoryRoot, "deploy/home-cloud/model-relay/Caddyfile.fragment"),
 			"utf8",
 		);
-		const matcher = fragment
-			.split("\n")
-			.find((line) => line.startsWith("@whalehall_model_relay path "));
-		expect(matcher).toBe(
-			"@whalehall_model_relay path /v1/activity/completions",
+		expect(fragment).toMatch(
+			/@whalehall_model_relay \{\s+method POST\s+path \/v1\/activity\/completions\s+\}/,
 		);
-		expect(matcher).not.toContain("/v1/auth/");
-		expect(matcher).not.toContain("/v1/chat/completions");
-		expect(matcher).not.toContain("/v1/agent/");
-		expect(matcher).not.toContain("/api/v1/agent/");
+		expect(fragment).toMatch(
+			/@whalehall_model_relay_invalid_method \{\s+not method POST\s+path \/v1\/activity\/completions\s+\}/,
+		);
+		expect(fragment).toContain(
+			"respond @whalehall_model_relay_invalid_method 405",
+		);
+		const dataCenterDenyMatcher = fragment.match(
+			/@whalehall_datacenter_paths \{([\s\S]*?)\n\}/,
+		)?.[1];
+		expect(dataCenterDenyMatcher).toBeDefined();
+		for (const path of [
+			"/v1/auth/*",
+			"/v1/chat/*",
+			"/v1/agent/*",
+			"/v1/devices/*",
+			"/api/v1/agent/*",
+		]) {
+			expect(dataCenterDenyMatcher).toContain(path);
+		}
+		expect(fragment).toContain("respond @whalehall_datacenter_paths 404");
 	});
 });
 

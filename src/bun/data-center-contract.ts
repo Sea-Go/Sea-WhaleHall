@@ -286,13 +286,16 @@ export async function projectDataCenterEvent(options: {
 			},
 		};
 	}
-	return publicPayload && dataCenterPayloadFits(publicPayload)
+	if (!publicPayload) {
+		return { kind: "advance", domain, reason: "content-not-consented" };
+	}
+	return dataCenterPayloadFits(publicPayload)
 		? {
 				kind: "upload",
 				domain,
 				event: metadataWireEvent(event, publicPayload),
 			}
-		: { kind: "advance", domain, reason: "content-not-consented" };
+		: { kind: "advance", domain, reason: "payload-unsupported" };
 }
 
 export function createPendingDataCenterBatch(
@@ -934,7 +937,7 @@ function sha256Hex(value: string): string {
 }
 
 function isDesktopCursor(value: unknown): value is string {
-	return typeof value === "string" && /^ec1_[0-9a-f]{16}$/u.test(value);
+	return typeof value === "string" && /^ec1_[0-7][0-9a-f]{15}$/u.test(value);
 }
 
 function isUuid(value: unknown): value is string {

@@ -1023,7 +1023,7 @@ function isSemanticConsumerId(value: unknown): value is string {
 }
 
 function isDesktopEventCursor(value: unknown): value is string {
-	return typeof value === "string" && /^ec1_[0-9a-f]{16}$/u.test(value);
+	return typeof value === "string" && /^ec1_[0-7][0-9a-f]{15}$/u.test(value);
 }
 
 function sameGoalContext(

@@ -21,6 +21,7 @@ import {
 	DATA_CENTER_REGISTER_PATH,
 	dataCenterCanonicalRequestV2,
 	dataCenterConsentRequest,
+	dataCenterCursorSequence,
 	parseDataCenterCursor,
 	parseDataCenterErrorEnvelope,
 	parseDataCenterRegistration,
@@ -361,8 +362,12 @@ describeDataCenterContract("DataCenter cross-repository cloud contract", () => {
 		const corpus = fixture<EventCorpus>("events.json");
 		expect(corpus.schemaVersion).toBe("datacenter-desktop-event-kinds.v1");
 		expect(corpus.cases).toHaveLength(27);
+		let previousCursorSequence = 0n;
 		for (const [index, candidate] of corpus.cases.entries()) {
 			const event = corpusEvent(candidate, index);
+			const cursorSequence = dataCenterCursorSequence(event.cursor);
+			expect(cursorSequence, candidate.kind).toBe(previousCursorSequence + 1n);
+			previousCursorSequence = cursorSequence;
 			const metadata = await projectDataCenterEvent({
 				event,
 				configuration: metadataConfiguration,
@@ -586,7 +591,7 @@ function corpusEvent(
 	return {
 		schemaVersion: "desktop-event.v1",
 		eventId: `de1_${(index + 1).toString(16).padStart(64, "0")}`,
-		cursor: `ec1_${(index + 1).toString().padStart(16, "0")}`,
+		cursor: `ec1_${(index + 1).toString(16).padStart(16, "0")}`,
 		deviceId: "golden-device",
 		sessionId: "golden-session",
 		kind: candidate.kind,

@@ -25,14 +25,17 @@ import {
 } from "./planning-authority-digest";
 
 const DATABASE_SCHEMA_VERSION = 3;
-// Existing ciphertext was bound to schema=1. Database table evolution must not
-// silently make every account record undecryptable.
+// Database schema version 2 was never published or used by a released build,
+// so no schema-2 ciphertext exists to migrate. Existing ciphertext remains
+// bound to schema=1; table evolution must not make account records undecryptable.
 const CIPHER_AAD_SCHEMA_VERSION = 1;
 const CIPHER_VERSION = 1;
 const KEY_VERSION = 1;
 const NONCE_BYTES = 12;
 const MAX_LIST_LIMIT = 1_000;
 const MAX_DATA_CENTER_BATCH_BODY_BYTES = 15 * 1024 * 1024;
+const DATA_CENTER_CONSUMER_AUDIT_RETENTION_MS = 31 * 24 * 60 * 60 * 1_000;
+const MAX_DATA_CENTER_CONSUMER_AUDITS_PER_ACCOUNT = 1_000;
 
 export interface AgentConversationRecord {
 	accountId: string;
@@ -698,23 +701,48 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			"record",
 			record,
 		);
-		this.database
-			.query(
-				`INSERT INTO datacenter_consumer_audit
-				 (audit_id, account_id, key_version, cipher_version, record_nonce,
-				  record_ciphertext, created_at_ms)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)
-				 ON CONFLICT(audit_id) DO NOTHING`,
-			)
-			.run(
-				record.id,
-				record.toAccountId,
-				cipher.keyVersion,
-				cipher.cipherVersion,
-				cipher.nonce,
-				cipher.ciphertext,
-				record.createdAtMs,
-			);
+		const cutoffMs = this.now() - DATA_CENTER_CONSUMER_AUDIT_RETENTION_MS;
+		const append = this.database.transaction(() => {
+			this.database
+				.query(
+					`INSERT INTO datacenter_consumer_audit
+					 (audit_id, account_id, key_version, cipher_version, record_nonce,
+					  record_ciphertext, created_at_ms)
+					 VALUES (?, ?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(audit_id) DO NOTHING`,
+				)
+				.run(
+					record.id,
+					record.toAccountId,
+					cipher.keyVersion,
+					cipher.cipherVersion,
+					cipher.nonce,
+					cipher.ciphertext,
+					record.createdAtMs,
+				);
+			this.database
+				.query(
+					`DELETE FROM datacenter_consumer_audit
+					 WHERE account_id = ? AND created_at_ms < ?`,
+				)
+				.run(record.toAccountId, cutoffMs);
+			this.database
+				.query(
+					`DELETE FROM datacenter_consumer_audit
+					 WHERE account_id = ? AND audit_id IN (
+					  SELECT audit_id FROM datacenter_consumer_audit
+					  WHERE account_id = ?
+					  ORDER BY created_at_ms DESC, audit_id DESC
+					  LIMIT -1 OFFSET ?
+					 )`,
+				)
+				.run(
+					record.toAccountId,
+					record.toAccountId,
+					MAX_DATA_CENTER_CONSUMER_AUDITS_PER_ACCOUNT,
+				);
+		});
+		append.immediate();
 	}
 
 	async listDataCenterConsumerAudits(
@@ -755,6 +783,12 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		return records;
 	}
 
+	/**
+	 * Forgets records and key material owned by one account. Audit ciphertext
+	 * owned by another account may refer to this identifier until that owner's
+	 * bounded retention removes it; scanning every account is a separate
+	 * all-account deletion operation and is intentionally outside this method.
+	 */
 	async forgetAccount(accountId: string): Promise<{ deleted: boolean }> {
 		this.requireOpen();
 		validateIdentifier(accountId, "accountId");
@@ -3513,7 +3547,7 @@ function isEd25519PublicKeyBase64(value: unknown): value is string {
 }
 
 function isDesktopCursor(value: unknown): value is string {
-	return typeof value === "string" && /^ec1_[0-9a-f]{16}$/u.test(value);
+	return typeof value === "string" && /^ec1_[0-7][0-9a-f]{15}$/u.test(value);
 }
 
 function previousDesktopCursor(cursor: string): string | null {

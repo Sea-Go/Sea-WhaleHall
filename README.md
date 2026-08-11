@@ -15,8 +15,8 @@ flowchart TB
     Pet["Transparent Canvas pet window"] -->|"Typed RPC"| Bun
     Bun <-->|"private Content-Length stdio"| Mastra["Bundled Node 22.18 Mastra Sidecar\nconversation, planning, Tool loop"]
     Mastra -->|"complete OpenAI-compatible request"| Bun
-    Bun -.->|"future bearer + HTTPS\nlocal test account disabled"| Relay["Remote auth + raw model relay"]
-    Relay --> LLM["OpenAI-compatible model"]
+    Bun -.->|"HTTPS · auth/bearer · chat relay key · Agent v2 signature"| DataCenter["DataCenter data origin\nauth, chat, Agent, cloud sync"]
+    DataCenter -->|"chat model forwarding"| LLM["OpenAI-compatible model"]
     Bun --> AgentDB["Encrypted Agent SQLite"]
     Bun --> CredentialHelper["Credential helper\nCredential Manager / Keychain"]
     Bun --> Agent["TypeScript reflection boundary"]
@@ -25,10 +25,10 @@ flowchart TB
     Reflection --> SealedWindow["sealed-window outbox"]
     SealedWindow -->|"complete client-owned prompt / Mastra Workflow"| Mastra
     Mastra -->|"complete OpenAI-compatible request"| Bun
-    Bun -->|"reflection relay key + HTTPS"| Relay
-    Relay -->|"CPU-only forward"| LLM
-    LLM -->|"model JSON"| Relay
-    Relay -->|"model JSON"| Bun
+    Bun -->|"reflection relay key + HTTPS"| ModelOrigin["Model origin\nreflection completion relay only"]
+    ModelOrigin -->|"CPU-only forward"| LLM
+    LLM -->|"model JSON"| ModelOrigin
+    ModelOrigin -->|"model JSON"| Bun
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
     Observer["Signed macOS Observer"] --> Server
     Server --> EventJournal["EventJournal · SQLite WAL"]

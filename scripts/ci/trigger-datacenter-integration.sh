@@ -3,6 +3,12 @@
 set -euo pipefail
 
 readonly datacenter_gitlab_origin="https://gitlab.sea-ridethewindbreakthewaves.xyz"
+readonly pipeline_deadline_seconds=3600
+readonly poll_interval_seconds=15
+
+# Keep the complete trigger-and-wait operation below the workflow's 65-minute
+# timeout, including bounded API requests and cleanup.
+SECONDS=0
 
 : "${WHALEHALL_CANDIDATE_SHA:?WHALEHALL_CANDIDATE_SHA is required}"
 : "${DATACENTER_GITLAB_PROJECT_ID:?DATACENTER_GITLAB_PROJECT_ID is required}"
@@ -52,13 +58,30 @@ echo "Triggered DataCenter pipeline $pipeline_id for WhaleHall $WHALEHALL_CANDID
 echo "DataCenter pipeline: $pipeline_url"
 
 status_url="$datacenter_gitlab_origin/api/v4/projects/$DATACENTER_GITLAB_PROJECT_ID/pipelines/$pipeline_id"
-for _ in $(seq 1 240); do
-	curl --fail-with-body --silent --show-error \
-		--connect-timeout 10 --max-time 30 \
+while ((SECONDS < pipeline_deadline_seconds)); do
+	remaining_seconds=$((pipeline_deadline_seconds - SECONDS))
+	request_timeout_seconds=30
+	if ((remaining_seconds < request_timeout_seconds)); then
+		request_timeout_seconds=$remaining_seconds
+	fi
+	if ! curl --fail-with-body --silent --show-error \
+		--connect-timeout 10 --max-time "$request_timeout_seconds" \
 		--header "PRIVATE-TOKEN: $DATACENTER_GITLAB_API_TOKEN" \
 		--output "$work_dir/pipeline.json" \
-		"$status_url"
+		"$status_url"; then
+		if ((SECONDS >= pipeline_deadline_seconds)); then
+			break
+		fi
+		echo "Failed to read DataCenter integration pipeline status: $pipeline_url" >&2
+		exit 1
+	fi
+	if ((SECONDS >= pipeline_deadline_seconds)); then
+		break
+	fi
 	status=$(jq -er '.status | strings' "$work_dir/pipeline.json")
+	if ((SECONDS >= pipeline_deadline_seconds)); then
+		break
+	fi
 	case "$status" in
 		success)
 			echo "DataCenter integration pipeline succeeded: $pipeline_url"
@@ -69,7 +92,14 @@ for _ in $(seq 1 240); do
 			exit 1
 			;;
 		created|waiting_for_resource|preparing|pending|running|scheduled)
-			sleep 15
+			remaining_seconds=$((pipeline_deadline_seconds - SECONDS))
+			sleep_seconds=$poll_interval_seconds
+			if ((remaining_seconds < sleep_seconds)); then
+				sleep_seconds=$remaining_seconds
+			fi
+			if ((sleep_seconds > 0)); then
+				sleep "$sleep_seconds"
+			fi
 			;;
 		*)
 			echo "DataCenter integration pipeline returned unknown status '$status'." >&2
@@ -78,5 +108,5 @@ for _ in $(seq 1 240); do
 	esac
 done
 
-echo "Timed out waiting for DataCenter integration pipeline: $pipeline_url" >&2
+echo "Timed out after $pipeline_deadline_seconds seconds waiting for DataCenter integration pipeline: $pipeline_url" >&2
 exit 1

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import type {
 	LocalEventCommitResult,
@@ -24,6 +24,7 @@ import {
 	type DataCenterEventJournal,
 	type DataCenterSyncRepository,
 	DataCenterSyncService,
+	dataCenterSyncDiagnosticCode,
 } from "../src/bun/data-center-sync";
 import type {
 	DataCenterAgentCredentialsRecord,
@@ -587,6 +588,38 @@ describe("DataCenterSyncService", () => {
 		}
 	});
 
+	test("checks the remote cursor before requesting content encryption context", async () => {
+		const log: string[] = [];
+		const repository = new MemoryRepository(log);
+		repository.owner = { accountId: CONTENT_ACCOUNT_ID, updatedAtMs: 1 };
+		repository.credentials = registeredCredentials(CONTENT_ACCOUNT_ID);
+		const event = contentEditorEvent("1", CONTENT_NOW_MS);
+		const events = new MemoryEvents([event], log);
+		const auth = new MemoryAuth(log, CONTENT_ACCOUNT_ID);
+		const server = new SignedDesktopServer(log);
+		server.ackCursor = "ec1_0000000000000002";
+		const service = createService({
+			repository,
+			events,
+			auth,
+			server,
+			configuration: enabledContent,
+			now: () => CONTENT_NOW_MS,
+		});
+
+		await expect(service.syncOnce()).rejects.toThrow(
+			"desktop cursors diverged",
+		);
+		expect(server.cursorRequests).toBe(1);
+		expect(server.contextRequests).toBe(0);
+		expect(server.batches).toEqual([]);
+		expect(server.advances).toEqual([]);
+		expect(repository.batch).toBeNull();
+		expect(repository.advance).toBeNull();
+		expect(events.committedCursor).toBeNull();
+		expect(log).not.toContain("signed:encryption-context");
+	});
+
 	test("blocks content sync on a 503 encryption-context response without metadata downgrade or ACK", async () => {
 		const log: string[] = [];
 		const repository = new MemoryRepository(log);
@@ -852,6 +885,502 @@ describe("DataCenterSyncService", () => {
 			expect(events.committedCursor).toBeNull();
 		}
 	});
+
+	test("bounds signed header and body stalls with three timed attempts", async () => {
+		for (const phase of ["headers", "body"] as const) {
+			const log: string[] = [];
+			const repository = new MemoryRepository(log);
+			repository.owner = { accountId: "account-1", updatedAtMs: 1 };
+			repository.credentials = registeredCredentials("account-1");
+			const events = new MemoryEvents(
+				[heartbeatEvent("1", "ec1_0000000000000001")],
+				log,
+			);
+			const auth = new MemoryAuth(log);
+			const server = new SignedDesktopServer(log);
+			server.stallCursorHeaders = phase === "headers";
+			server.stallCursorBody = phase === "body";
+			const service = createService({
+				repository,
+				events,
+				auth,
+				server,
+				requestTimeoutMs: 10,
+			});
+
+			const error = await captureFailure(service.syncOnce());
+
+			expect(dataCenterSyncDiagnosticCode(error), phase).toBe(
+				"REQUEST_TIMEOUT",
+			);
+			expect(server.cursorRequests, phase).toBe(3);
+			expect(
+				server.cursorSignals.map((signal) => signal.reason?.name),
+				phase,
+			).toEqual(["TimeoutError", "TimeoutError", "TimeoutError"]);
+			expect(server.cursorBodyCancellations, phase).toBe(
+				phase === "body" ? 3 : 0,
+			);
+			expect(
+				server.cursorBodyResponses.every(
+					(response) => response.body?.locked === false,
+				),
+				phase,
+			).toBeTrue();
+			expect(repository.batch).toBeNull();
+			expect(events.committedCursor).toBeNull();
+		}
+	});
+
+	test("bounds bearer header and body stalls with three timed attempts", async () => {
+		for (const phase of ["headers", "body"] as const) {
+			const log: string[] = [];
+			const repository = new MemoryRepository(log);
+			const events = new MemoryEvents([], log);
+			const auth = new MemoryAuth(log);
+			auth.stallRegisterHeaders = phase === "headers";
+			auth.stallRegisterBody = phase === "body";
+			const server = new SignedDesktopServer(log);
+			const service = createService({
+				repository,
+				events,
+				auth,
+				server,
+				requestTimeoutMs: 10,
+			});
+
+			const error = await captureFailure(service.syncOnce());
+
+			expect(dataCenterSyncDiagnosticCode(error), phase).toBe(
+				"REQUEST_TIMEOUT",
+			);
+			expect(auth.registerBodies, phase).toHaveLength(3);
+			expect(
+				auth.registerSignals.map((signal) => signal.reason?.name),
+				phase,
+			).toEqual(["TimeoutError", "TimeoutError", "TimeoutError"]);
+			expect(auth.registerBodyCancellations, phase).toBe(
+				phase === "body" ? 3 : 0,
+			);
+			expect(
+				auth.registerBodyResponses.every(
+					(response) => response.body?.locked === false,
+				),
+				phase,
+			).toBeTrue();
+			expect(repository.batch).toBeNull();
+			expect(events.committedCursor).toBeNull();
+		}
+	});
+
+	test("preserves caller abort reason and removes its request listener", async () => {
+		const log: string[] = [];
+		const repository = new MemoryRepository(log);
+		repository.owner = { accountId: "account-1", updatedAtMs: 1 };
+		repository.credentials = registeredCredentials("account-1");
+		const events = new MemoryEvents(
+			[heartbeatEvent("2", "ec1_0000000000000001")],
+			log,
+		);
+		const auth = new MemoryAuth(log);
+		const server = new SignedDesktopServer(log);
+		server.stallCursorHeaders = true;
+		const service = createService({
+			repository,
+			events,
+			auth,
+			server,
+			requestTimeoutMs: 10_000,
+		});
+		const controller = new AbortController();
+		const addListener = spyOn(controller.signal, "addEventListener");
+		const removeListener = spyOn(controller.signal, "removeEventListener");
+
+		try {
+			const operation = service.syncOnce(controller.signal);
+			await waitForCondition(() => server.cursorRequests === 1);
+			const reason = new DOMException("caller cancelled sync", "AbortError");
+			controller.abort(reason);
+			const error = await captureFailure(operation);
+
+			expect(error).toBe(reason);
+			expect(dataCenterSyncDiagnosticCode(error)).toBe("REQUEST_ABORTED");
+			expect(server.cursorRequests).toBe(1);
+			expect(server.cursorSignals[0]?.reason).toBe(reason);
+			expect(addListener).toHaveBeenCalledTimes(1);
+			expect(removeListener).toHaveBeenCalledTimes(1);
+		} finally {
+			addListener.mockRestore();
+			removeListener.mockRestore();
+		}
+	});
+
+	test("stop aborts a stalled signed request and drains the loop", async () => {
+		const log: string[] = [];
+		const repository = new MemoryRepository(log);
+		repository.owner = { accountId: "account-1", updatedAtMs: 1 };
+		repository.credentials = registeredCredentials("account-1");
+		const events = new MemoryEvents(
+			[heartbeatEvent("3", "ec1_0000000000000001")],
+			log,
+		);
+		const auth = new MemoryAuth(log);
+		const server = new SignedDesktopServer(log);
+		server.stallCursorHeaders = true;
+		const errors: unknown[] = [];
+		const service = createService({
+			repository,
+			events,
+			auth,
+			server,
+			requestTimeoutMs: 10_000,
+			onError: (error) => {
+				errors.push(error);
+			},
+		});
+
+		service.start();
+		await waitForCondition(() => server.cursorRequests === 1);
+		const stopped = await Promise.race([
+			service.stop().then(() => true),
+			Bun.sleep(250).then(() => false),
+		]);
+
+		expect(stopped).toBeTrue();
+		expect(server.cursorRequests).toBe(1);
+		expect(server.cursorSignals[0]?.aborted).toBeTrue();
+		expect(server.cursorSignals[0]?.reason?.name).toBe("AbortError");
+		expect(errors).toEqual([]);
+	});
+
+	test("stop aborts a stalled bearer request and drains the loop", async () => {
+		const log: string[] = [];
+		const repository = new MemoryRepository(log);
+		const events = new MemoryEvents([], log);
+		const auth = new MemoryAuth(log);
+		auth.stallRegisterHeaders = true;
+		const server = new SignedDesktopServer(log);
+		const errors: unknown[] = [];
+		const service = createService({
+			repository,
+			events,
+			auth,
+			server,
+			requestTimeoutMs: 10_000,
+			onError: (error) => {
+				errors.push(error);
+			},
+		});
+
+		service.start();
+		await waitForCondition(() => auth.registerBodies.length === 1);
+		const stopped = await Promise.race([
+			service.stop().then(() => true),
+			Bun.sleep(250).then(() => false),
+		]);
+
+		expect(stopped).toBeTrue();
+		expect(auth.registerBodies).toHaveLength(1);
+		expect(auth.registerSignals[0]?.aborted).toBeTrue();
+		expect(auth.registerSignals[0]?.reason?.name).toBe("AbortError");
+		expect(errors).toEqual([]);
+	});
+
+	test("drains a re-entrant auth transition that stops its own bearer request", async () => {
+		const log: string[] = [];
+		const repository = new MemoryRepository(log);
+		const events = new MemoryEvents([], log);
+		const auth = new MemoryAuth(log);
+		const server = new SignedDesktopServer(log);
+		let barrierCompleted = false;
+		let service!: DataCenterSyncService;
+		auth.beforeRegisterResponse = async () => {
+			await service.stop();
+			barrierCompleted = true;
+		};
+		service = createService({
+			repository,
+			events,
+			auth,
+			server,
+			requestTimeoutMs: 10_000,
+		});
+
+		service.start();
+		await waitForCondition(() => barrierCompleted, 500);
+
+		expect(auth.registerBodies).toHaveLength(1);
+		expect(auth.registerSignals[0]?.aborted).toBeTrue();
+		expect(auth.registerSignals[0]?.reason?.name).toBe("AbortError");
+	});
+
+	test("stop aborts retry backoff without restarting or sending another request", async () => {
+		const log: string[] = [];
+		const repository = new MemoryRepository(log);
+		repository.owner = { accountId: "account-1", updatedAtMs: 1 };
+		repository.credentials = registeredCredentials("account-1");
+		const events = new MemoryEvents(
+			[heartbeatEvent("6", "ec1_0000000000000001")],
+			log,
+		);
+		const auth = new MemoryAuth(log);
+		const server = new SignedDesktopServer(log);
+		server.failCursorResponses = true;
+		const service = createService({
+			repository,
+			events,
+			auth,
+			server,
+			retryDelayMs: 10_000,
+			requestTimeoutMs: 10_000,
+		});
+
+		service.start();
+		await waitForCondition(() => server.cursorRequests === 1);
+		const stopped = await Promise.race([
+			service.stop().then(() => true),
+			Bun.sleep(250).then(() => false),
+		]);
+		await Bun.sleep(20);
+
+		expect(stopped).toBeTrue();
+		expect(server.cursorRequests).toBe(1);
+	});
+
+	test("restarts an unexpectedly settled loop after backoff without unhandled rejection", async () => {
+		const log: string[] = [];
+		const repository = new MemoryRepository(log);
+		const events = new MemoryEvents([], log);
+		const auth = new MemoryAuth(log);
+		auth.current = false;
+		const server = new SignedDesktopServer(log);
+		const observed: Array<{ error: unknown; at: number }> = [];
+		const unhandled: unknown[] = [];
+		const service = createService({
+			repository,
+			events,
+			auth,
+			server,
+			syncIntervalMs: 12_345,
+			loopRestartDelayMs: 30,
+			onError: async (error) => {
+				observed.push({ error, at: Date.now() });
+				throw new Error("diagnostic observer failed");
+			},
+		});
+		const originalSetTimeout = globalThis.setTimeout;
+		let failWakeTimer = true;
+		const handleUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", handleUnhandled);
+		globalThis.setTimeout = ((...args: unknown[]) => {
+			if (args[1] === 12_345 && failWakeTimer) {
+				failWakeTimer = false;
+				throw new Error("wake timer failed");
+			}
+			return Reflect.apply(originalSetTimeout, globalThis, args) as ReturnType<
+				typeof setTimeout
+			>;
+		}) as unknown as typeof setTimeout;
+
+		try {
+			service.start();
+			await waitForCondition(() => auth.captureCalls >= 2, 1_000);
+			expect(observed).toHaveLength(1);
+			expect(observed[0]?.error).toEqual(new Error("wake timer failed"));
+			expect(
+				(auth.captureTimes[1] ?? 0) - (observed[0]?.at ?? Number.MAX_VALUE),
+			).toBeGreaterThanOrEqual(20);
+		} finally {
+			globalThis.setTimeout = originalSetTimeout;
+			await service.stop();
+			await Bun.sleep(5);
+			process.off("unhandledRejection", handleUnhandled);
+		}
+		expect(unhandled).toEqual([]);
+	});
+
+	test("removes request and retry listeners after normal retry delays", async () => {
+		const log: string[] = [];
+		const repository = new MemoryRepository(log);
+		repository.owner = { accountId: "account-1", updatedAtMs: 1 };
+		repository.credentials = registeredCredentials("account-1");
+		const events = new MemoryEvents(
+			[heartbeatEvent("4", "ec1_0000000000000001")],
+			log,
+		);
+		const auth = new MemoryAuth(log);
+		const server = new SignedDesktopServer(log);
+		server.failCursorResponses = true;
+		const controller = new AbortController();
+		const addListener = spyOn(controller.signal, "addEventListener");
+		const removeListener = spyOn(controller.signal, "removeEventListener");
+		const service = createService({
+			repository,
+			events,
+			auth,
+			server,
+			retryDelayMs: 5,
+			requestTimeoutMs: 1_000,
+		});
+
+		try {
+			const error = await captureFailure(service.syncOnce(controller.signal));
+			expect(dataCenterSyncDiagnosticCode(error)).toBe("HTTP_STATUS");
+			expect(server.cursorRequests).toBe(3);
+			expect(addListener).toHaveBeenCalledTimes(5);
+			expect(removeListener).toHaveBeenCalledTimes(5);
+		} finally {
+			addListener.mockRestore();
+			removeListener.mockRestore();
+		}
+	});
+
+	test("clears successful signed and bearer request deadlines", async () => {
+		const signedLog: string[] = [];
+		const signedRepository = new MemoryRepository(signedLog);
+		signedRepository.owner = { accountId: "account-1", updatedAtMs: 1 };
+		signedRepository.credentials = registeredCredentials("account-1");
+		const signedEvents = new MemoryEvents(
+			[heartbeatEvent("5", "ec1_0000000000000001")],
+			signedLog,
+		);
+		const signedAuth = new MemoryAuth(signedLog);
+		const signedServer = new SignedDesktopServer(signedLog);
+		const signedService = createService({
+			repository: signedRepository,
+			events: signedEvents,
+			auth: signedAuth,
+			server: signedServer,
+			requestTimeoutMs: 50,
+		});
+
+		expect(await signedService.syncOnce()).toBeTrue();
+
+		const bearerLog: string[] = [];
+		const bearerRepository = new MemoryRepository(bearerLog);
+		const bearerEvents = new MemoryEvents([], bearerLog);
+		const bearerAuth = new MemoryAuth(bearerLog);
+		const bearerServer = new SignedDesktopServer(bearerLog);
+		const bearerService = createService({
+			repository: bearerRepository,
+			events: bearerEvents,
+			auth: bearerAuth,
+			server: bearerServer,
+			requestTimeoutMs: 50,
+		});
+
+		expect(await bearerService.syncOnce()).toBeTrue();
+		await Bun.sleep(70);
+		expect(signedServer.cursorSignals.length).toBeGreaterThan(0);
+		expect(
+			signedServer.cursorSignals.every((signal) => !signal.aborted),
+		).toBeTrue();
+		expect(bearerAuth.registerSignals).toHaveLength(1);
+		expect(bearerAuth.registerSignals[0]?.aborted).toBeFalse();
+	});
+
+	test("cancels bodies rejected by status or declared size before retrying", async () => {
+		let signedStatusCancellations = 0;
+		const signedLog: string[] = [];
+		const signedRepository = new MemoryRepository(signedLog);
+		signedRepository.owner = { accountId: "account-1", updatedAtMs: 1 };
+		signedRepository.credentials = registeredCredentials("account-1");
+		const signedEvents = new MemoryEvents(
+			[heartbeatEvent("7", "ec1_0000000000000001")],
+			signedLog,
+		);
+		const signedAuth = new MemoryAuth(signedLog);
+		const signedServer = new SignedDesktopServer(signedLog);
+		signedServer.cursorResponse = () =>
+			stalledJsonResponse(
+				() => {
+					signedStatusCancellations += 1;
+				},
+				{ status: 503 },
+			);
+		const signedService = createService({
+			repository: signedRepository,
+			events: signedEvents,
+			auth: signedAuth,
+			server: signedServer,
+		});
+
+		await expect(signedService.syncOnce()).rejects.toThrow("HTTP 503");
+		expect(signedStatusCancellations).toBe(3);
+
+		let bearerStatusCancellations = 0;
+		const bearerLog: string[] = [];
+		const bearerRepository = new MemoryRepository(bearerLog);
+		const bearerEvents = new MemoryEvents([], bearerLog);
+		const bearerAuth = new MemoryAuth(bearerLog);
+		bearerAuth.registerResponse = () =>
+			stalledJsonResponse(
+				() => {
+					bearerStatusCancellations += 1;
+				},
+				{ status: 503 },
+			);
+		const bearerServer = new SignedDesktopServer(bearerLog);
+		const bearerService = createService({
+			repository: bearerRepository,
+			events: bearerEvents,
+			auth: bearerAuth,
+			server: bearerServer,
+		});
+
+		await expect(bearerService.syncOnce()).rejects.toThrow("HTTP 503");
+		expect(bearerStatusCancellations).toBe(3);
+
+		let declaredSizeCancellations = 0;
+		const sizeLog: string[] = [];
+		const sizeRepository = new MemoryRepository(sizeLog);
+		sizeRepository.owner = { accountId: "account-1", updatedAtMs: 1 };
+		sizeRepository.credentials = registeredCredentials("account-1");
+		const sizeEvents = new MemoryEvents(
+			[heartbeatEvent("8", "ec1_0000000000000001")],
+			sizeLog,
+		);
+		const sizeAuth = new MemoryAuth(sizeLog);
+		const sizeServer = new SignedDesktopServer(sizeLog);
+		sizeServer.cursorResponse = () =>
+			stalledJsonResponse(
+				() => {
+					declaredSizeCancellations += 1;
+				},
+				{ headers: { "content-length": String(1024 * 1024 + 1) } },
+			);
+		const sizeService = createService({
+			repository: sizeRepository,
+			events: sizeEvents,
+			auth: sizeAuth,
+			server: sizeServer,
+		});
+
+		await expect(sizeService.syncOnce()).rejects.toThrow(
+			"JSON response size is invalid",
+		);
+		expect(declaredSizeCancellations).toBe(3);
+	});
+
+	test("projects only stable allowlisted diagnostic codes", () => {
+		const localError = new Error("private local protocol detail");
+		localError.name = "LocalClientError";
+
+		expect(dataCenterSyncDiagnosticCode(localError)).toBe("LOCAL_TOOL");
+		expect(dataCenterSyncDiagnosticCode(new Error("source secret"))).toBe(
+			"UNKNOWN",
+		);
+		expect(
+			dataCenterSyncDiagnosticCode(
+				new DOMException("request timed out", "TimeoutError"),
+			),
+		).toBe("REQUEST_TIMEOUT");
+		expect(
+			dataCenterSyncDiagnosticCode(
+				new DOMException("request stopped", "AbortError"),
+			),
+		).toBe("REQUEST_ABORTED");
+	});
 });
 
 function createService(options: {
@@ -861,6 +1390,11 @@ function createService(options: {
 	server: SignedDesktopServer;
 	configuration?: CloudSyncConfiguration;
 	now?: () => number;
+	retryDelayMs?: number;
+	syncIntervalMs?: number;
+	loopRestartDelayMs?: number;
+	requestTimeoutMs?: number;
+	onError?: (error: unknown) => void | Promise<void>;
 	createCloudInstallationId?: () => string;
 }): DataCenterSyncService {
 	return new DataCenterSyncService({
@@ -871,7 +1405,11 @@ function createService(options: {
 		auth: options.auth,
 		fetch: options.server.fetch,
 		now: options.now ?? (() => 2_000),
-		retryDelayMs: 0,
+		retryDelayMs: options.retryDelayMs ?? 0,
+		syncIntervalMs: options.syncIntervalMs,
+		loopRestartDelayMs: options.loopRestartDelayMs,
+		requestTimeoutMs: options.requestTimeoutMs,
+		onError: options.onError,
 		createCloudInstallationId: options.createCloudInstallationId,
 	});
 }
@@ -1059,9 +1597,18 @@ class MemoryEvents implements DataCenterEventJournal {
 class MemoryAuth implements DataCenterBearerAuthorization {
 	readonly identity: AuthSessionIdentity;
 	readonly registerBodies: string[] = [];
+	readonly registerSignals: AbortSignal[] = [];
+	readonly registerBodyResponses: Response[] = [];
 	readonly consentDomains: string[] = [];
+	captureCalls = 0;
+	readonly captureTimes: number[] = [];
 	current = true;
 	failRegisterResponses = false;
+	stallRegisterHeaders = false;
+	stallRegisterBody = false;
+	registerBodyCancellations = 0;
+	beforeRegisterResponse: (() => Promise<void>) | null = null;
+	registerResponse: (() => Response) | null = null;
 
 	constructor(
 		private readonly log: string[],
@@ -1071,6 +1618,8 @@ class MemoryAuth implements DataCenterBearerAuthorization {
 	}
 
 	captureCurrentSession(): AuthSessionIdentity | null {
+		this.captureCalls += 1;
+		this.captureTimes.push(Date.now());
 		return this.current ? { ...this.identity } : null;
 	}
 
@@ -1088,6 +1637,19 @@ class MemoryAuth implements DataCenterBearerAuthorization {
 			const body = String(init?.body ?? "");
 			this.log.push("bearer:register");
 			this.registerBodies.push(body);
+			if (init?.signal) this.registerSignals.push(init.signal);
+			await this.beforeRegisterResponse?.();
+			if (this.stallRegisterHeaders) {
+				return new Promise<Response>(() => {});
+			}
+			if (this.stallRegisterBody) {
+				const response = stalledJsonResponse(() => {
+					this.registerBodyCancellations += 1;
+				});
+				this.registerBodyResponses.push(response);
+				return response;
+			}
+			if (this.registerResponse) return this.registerResponse();
 			if (this.failRegisterResponses) {
 				throw new Error("registration response lost");
 			}
@@ -1126,8 +1688,15 @@ class SignedDesktopServer {
 	readonly advances: unknown[] = [];
 	readonly exactBatchBodies: string[] = [];
 	readonly signatureVersions: Array<string | null> = [];
+	readonly cursorSignals: AbortSignal[] = [];
+	readonly cursorBodyResponses: Response[] = [];
 	failBatchResponses = false;
 	failContextResponses = false;
+	failCursorResponses = false;
+	stallCursorHeaders = false;
+	stallCursorBody = false;
+	cursorBodyCancellations = 0;
+	cursorRequests = 0;
 	contextRequests = 0;
 	encryptionContexts: unknown[] = [];
 	cursorResponse: (() => Response) | null = null;
@@ -1163,6 +1732,24 @@ class SignedDesktopServer {
 		}
 		if (url.pathname.endsWith("/desktop/cursor")) {
 			this.log.push("signed:cursor");
+			this.cursorRequests += 1;
+			if (init?.signal) this.cursorSignals.push(init.signal);
+			if (this.stallCursorHeaders) {
+				return new Promise<Response>(() => {});
+			}
+			if (this.stallCursorBody) {
+				const response = stalledJsonResponse(() => {
+					this.cursorBodyCancellations += 1;
+				});
+				this.cursorBodyResponses.push(response);
+				return response;
+			}
+			if (this.failCursorResponses) {
+				return Response.json(
+					{ error: { code: "cursor_unavailable" } },
+					{ status: 503 },
+				);
+			}
 			if (this.cursorResponse) return this.cursorResponse();
 			return Response.json({
 				schemaVersion: "desktop-event-cursor.v1",
@@ -1329,6 +1916,48 @@ function encryptionContext(
 		issuedAt: new Date(issuedAtMs).toISOString(),
 		expiresAt: new Date(expiresAtMs).toISOString(),
 	};
+}
+
+async function captureFailure(operation: Promise<unknown>): Promise<unknown> {
+	try {
+		await operation;
+	} catch (error) {
+		return error;
+	}
+	throw new Error("Expected operation to fail.");
+}
+
+async function waitForCondition(
+	predicate: () => boolean,
+	timeoutMs = 500,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() >= deadline) {
+			throw new Error("Timed out waiting for the test condition.");
+		}
+		await Bun.sleep(1);
+	}
+}
+
+function stalledJsonResponse(
+	onCancel: () => void,
+	init: ResponseInit = {},
+): Response {
+	return new Response(
+		new ReadableStream<Uint8Array>({
+			cancel() {
+				onCancel();
+			},
+		}),
+		{
+			...init,
+			headers: {
+				"content-type": "application/json",
+				...Object.fromEntries(new Headers(init.headers)),
+			},
+		},
+	);
 }
 
 function cursorPosition(cursor: string | null): bigint {

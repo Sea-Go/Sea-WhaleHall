@@ -8,7 +8,9 @@ import {
 	createPendingDataCenterAdvance,
 	createPendingDataCenterBatch,
 	createPendingDataCenterBatchPrefix,
+	DATA_CENTER_MAX_EVENT_PAYLOAD_BYTES,
 	dataCenterCanonicalRequestV2,
+	dataCenterCursorSequence,
 	parseDataCenterCursor,
 	projectDataCenterEvent,
 	signDataCenterRequestV2,
@@ -144,6 +146,16 @@ describe("DataCenter desktop contract", () => {
 		expect(() => canonicalRfc3986Query("invalid=%ZZ")).toThrow();
 	});
 
+	test("accepts only non-negative signed i64 desktop cursors", () => {
+		expect(dataCenterCursorSequence("ec1_0000000000000000")).toBe(0n);
+		expect(dataCenterCursorSequence("ec1_7fffffffffffffff")).toBe(
+			0x7fff_ffff_ffff_ffffn,
+		);
+		for (const cursor of ["ec1_8000000000000000", "ec1_ffffffffffffffff"]) {
+			expect(() => dataCenterCursorSequence(cursor)).toThrow("cursor");
+		}
+	});
+
 	test("allow-lists editor metadata and strips relative path and text during content downgrade", async () => {
 		const event = desktopEvent({
 			kind: "editor.documentChanged",
@@ -182,7 +194,7 @@ describe("DataCenter desktop contract", () => {
 		expect(JSON.stringify(result.event)).not.toContain("secret");
 	});
 
-	test("classifies non-downgradable content, revoked consent, and 31-day expiry as audited advances", async () => {
+	test("classifies missing and oversized public payloads, revoked consent, and expiry", async () => {
 		const goal = desktopEvent({
 			kind: "goal.contextChanged",
 			sensitivity: "content",
@@ -204,6 +216,22 @@ describe("DataCenter desktop contract", () => {
 				nowMs: 2_000,
 			}),
 		).toMatchObject({ kind: "advance", reason: "content-not-consented" });
+
+		const oversizedPublicPayload = desktopEvent({
+			kind: "application.foregroundChanged",
+			sensitivity: "content",
+			payload: {
+				appId: "oversized-app",
+				appName: "x".repeat(DATA_CENTER_MAX_EVENT_PAYLOAD_BYTES),
+			},
+		});
+		expect(
+			await projectDataCenterEvent({
+				event: oversizedPublicPayload,
+				configuration: metadataConfiguration,
+				nowMs: 2_000,
+			}),
+		).toMatchObject({ kind: "advance", reason: "payload-unsupported" });
 
 		const browser = desktopEvent({
 			kind: "browser.tabOpened",
