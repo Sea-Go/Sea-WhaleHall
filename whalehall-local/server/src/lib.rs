@@ -777,6 +777,8 @@ impl ObservationRetentionTask {
     ) -> Self {
         let (stop, mut stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
+            let mut ticker = interval_at(Instant::now() + cleanup_interval, cleanup_interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
                 let cleanup_journal = observation_journal.clone();
                 let cleanup_operation = cleanup.clone();
@@ -789,8 +791,6 @@ impl ObservationRetentionTask {
                     eprintln!("observation retention cleanup worker failed");
                 }
 
-                let mut ticker = interval_at(Instant::now() + cleanup_interval, cleanup_interval);
-                ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 tokio::select! {
                     _ = &mut stopped => break,
                     _ = ticker.tick() => {}
@@ -1973,8 +1973,17 @@ mod tests {
             .await
             .expect("cleanup worker start timed out")
             .expect("cleanup worker did not report entry");
+        let shutdown = tokio::spawn(task.shutdown());
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "retention shutdown abandoned the in-flight cleanup worker"
+        );
         release_tx.send(()).expect("release cleanup worker");
-        task.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("retention shutdown timed out")
+            .expect("retention shutdown task failed");
     }
 
     #[tokio::test]
