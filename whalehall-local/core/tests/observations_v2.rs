@@ -65,6 +65,93 @@ fn memory_journal_with_retentions(
     .expect("open encrypted observation journal")
 }
 
+#[test]
+fn schema_v2_upgrade_indexes_encrypted_payload_references() {
+    let directory = tempfile::tempdir().expect("create observation schema directory");
+    let database_path = directory.path().join("observation-journal.sqlite3");
+    drop(memory_journal(&directory, Duration::from_secs(60)));
+
+    let connection = Connection::open(&database_path).expect("open schema v2 fixture");
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS observations_content_ref;
+             DROP INDEX IF EXISTS semantic_events_content_ref;
+             DROP INDEX IF EXISTS projector_state_content_ref;
+             INSERT INTO semantic_consumers (
+                consumer_id, committed_sequence, committed_cursor, updated_at_ms
+             ) VALUES ('schema-upgrade-consumer', 0, 'sec2_0000000000000000', 1234);
+             PRAGMA user_version = 2;",
+        )
+        .expect("downgrade schema fixture to v2");
+    drop(connection);
+
+    drop(memory_journal(&directory, Duration::from_secs(60)));
+    let connection = Connection::open(&database_path).expect("inspect upgraded schema");
+    let version = connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .expect("read upgraded schema version");
+    assert_eq!(version, 3);
+    for index in [
+        "observations_content_ref",
+        "semantic_events_content_ref",
+        "projector_state_content_ref",
+    ] {
+        let present = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'index' AND name = ?1
+                 )",
+                [index],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("query migrated content reference index");
+        assert!(present, "missing migrated index {index}");
+    }
+    let consumer = connection
+        .query_row(
+            "SELECT committed_sequence, committed_cursor, updated_at_ms
+             FROM semantic_consumers WHERE consumer_id = 'schema-upgrade-consumer'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .expect("read preserved semantic consumer");
+    assert_eq!(consumer, (0, "sec2_0000000000000000".to_owned(), 1234));
+
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("enable foreign key query planning");
+    let mut statement = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN
+             DELETE FROM encrypted_payloads WHERE content_ref = 'ct2_missing'",
+        )
+        .expect("prepare encrypted payload delete plan");
+    let plan = statement
+        .query_map([], |row| row.get::<_, String>(3))
+        .expect("query encrypted payload delete plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect encrypted payload delete plan")
+        .join("\n");
+    for table in [
+        "observations",
+        "semantic_events",
+        "projector_state",
+        "vault_records",
+    ] {
+        assert!(
+            !plan.contains(&format!("SCAN {table}")),
+            "encrypted payload delete still scans {table}: {plan}"
+        );
+    }
+}
+
 fn browser_observation(at_ms: i64, title: &str) -> RawObservationInputV2 {
     RawObservationInputV2 {
         schema_version: RAW_OBSERVATION_SCHEMA_VERSION.to_owned(),

@@ -759,19 +759,41 @@ struct ObservationRetentionTask {
     task: JoinHandle<()>,
 }
 
+type ObservationCleanup = dyn Fn(&ObservationJournal) + Send + Sync + 'static;
+
 impl ObservationRetentionTask {
     fn start(observation_journal: ObservationJournal, cleanup_interval: Duration) -> Self {
-        run_observation_retention_cleanup(&observation_journal);
+        Self::start_with_cleanup(
+            observation_journal,
+            cleanup_interval,
+            Arc::new(run_observation_retention_cleanup),
+        )
+    }
+
+    fn start_with_cleanup(
+        observation_journal: ObservationJournal,
+        cleanup_interval: Duration,
+        cleanup: Arc<ObservationCleanup>,
+    ) -> Self {
         let (stop, mut stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let mut ticker = interval_at(Instant::now() + cleanup_interval, cleanup_interval);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
+                let cleanup_journal = observation_journal.clone();
+                let cleanup_operation = cleanup.clone();
+                if tokio::task::spawn_blocking(move || cleanup_operation(&cleanup_journal))
+                    .await
+                    .is_err()
+                {
+                    // Deliberately omit panic payloads because cleanup may be
+                    // operating on private observation records.
+                    eprintln!("observation retention cleanup worker failed");
+                }
+
+                let mut ticker = interval_at(Instant::now() + cleanup_interval, cleanup_interval);
+                ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 tokio::select! {
                     _ = &mut stopped => break,
-                    _ = ticker.tick() => {
-                        run_observation_retention_cleanup(&observation_journal);
-                    }
+                    _ = ticker.tick() => {}
                 }
             }
         });
@@ -1909,6 +1931,49 @@ mod tests {
         })
         .await
         .expect("scheduled cleanup should run");
+        task.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn observation_retention_cleanup_does_not_block_startup_runtime() {
+        let directory = tempfile::tempdir().expect("create observation retention directory");
+        let journal = ObservationJournal::open_with_config(ObservationJournalConfig::new(
+            directory.path().join("observation-journal.sqlite3"),
+            Arc::new(MemoryObservationKeyProvider::new([7; 32])),
+        ))
+        .expect("open observation retention journal");
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let entered_tx = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let cleanup = Arc::new(move |_: &ObservationJournal| {
+            if let Some(entered_tx) = entered_tx.lock().expect("lock cleanup entry sender").take() {
+                let _ = entered_tx.send(());
+            }
+            let _ = release_rx
+                .lock()
+                .expect("lock cleanup release receiver")
+                .recv_timeout(Duration::from_secs(1));
+        });
+
+        let started_at = std::time::Instant::now();
+        let task =
+            ObservationRetentionTask::start_with_cleanup(journal, Duration::from_secs(60), cleanup);
+        assert!(
+            started_at.elapsed() < Duration::from_millis(500),
+            "retention cleanup blocked the current-thread runtime during startup"
+        );
+        let runtime_resumed_at = std::time::Instant::now();
+        tokio::task::yield_now().await;
+        assert!(
+            runtime_resumed_at.elapsed() < Duration::from_millis(500),
+            "retention cleanup ran on the current-thread runtime"
+        );
+        tokio::time::timeout(Duration::from_secs(1), entered_rx)
+            .await
+            .expect("cleanup worker start timed out")
+            .expect("cleanup worker did not report entry");
+        release_tx.send(()).expect("release cleanup worker");
         task.shutdown().await;
     }
 
