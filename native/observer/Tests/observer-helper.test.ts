@@ -440,6 +440,27 @@ macOSTest(
 		expect(shutdownResult?.ok).toBe(true);
 		expect(await child.exited).toBe(0);
 		runningChild = undefined;
+
+		// Rust owns the helper's stdin pipe. A forced whalehall-local exit closes
+		// that pipe even when Rust destructors cannot run; the packaged helper must
+		// treat the resulting EOF as parent disconnect and terminate itself.
+		const eofChild = Bun.spawn([executable], {
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		runningChild = eofChild;
+		const eofFrames = new FrameReader(eofChild.stdout);
+		expect((await eofFrames.next()).type).toBe("ready");
+		eofChild.stdin.end();
+		const eofExitCode = await Promise.race([
+			eofChild.exited,
+			Bun.sleep(5_000).then(() => {
+				throw new Error("Observer did not exit after its parent stdin closed.");
+			}),
+		]);
+		expect(eofExitCode).toBe(0);
+		runningChild = undefined;
 	},
 	20_000,
 );

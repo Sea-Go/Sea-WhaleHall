@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	BackgroundAppLifecycle,
 	type BackgroundWindow,
+	runBestEffortShutdown,
 } from "../src/bun/app-lifecycle";
 
 class TestWindow implements BackgroundWindow {
@@ -95,7 +96,45 @@ describe("background application lifecycle", () => {
 		expect(order).toEqual(["shutdown", "persisted", "exit"]);
 	});
 
-	test("a failed shutdown is reported but does not strand explicit quit", async () => {
+	test("vetoes Electrobun quit until shutdown authorizes the final exit", async () => {
+		let releaseShutdown: (() => void) | undefined;
+		const shutdownReleased = new Promise<void>((resolve) => {
+			releaseShutdown = resolve;
+		});
+		let shutdownCount = 0;
+		let exitCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: () => {
+				shutdownCount += 1;
+				return shutdownReleased;
+			},
+			exit: () => {
+				exitCount += 1;
+			},
+		});
+		const firstEvent: { response?: { allow: boolean } } = {};
+
+		lifecycle.handleBeforeQuit(firstEvent);
+		expect(firstEvent.response).toEqual({ allow: false });
+		expect(exitCount).toBe(0);
+		const repeatedEvent: { response?: { allow: boolean } } = {};
+		lifecycle.handleBeforeQuit(repeatedEvent);
+		expect(repeatedEvent.response).toEqual({ allow: false });
+		await Promise.resolve();
+		expect(shutdownCount).toBe(1);
+
+		releaseShutdown?.();
+		await lifecycle.quit();
+		expect(exitCount).toBe(1);
+
+		const finalEvent: { response?: { allow: boolean } } = {};
+		lifecycle.handleBeforeQuit(finalEvent);
+		expect(finalEvent.response).toBeUndefined();
+		expect(exitCount).toBe(1);
+	});
+
+	test("a failed shutdown is reported and does not authorize exit", async () => {
 		const errors: string[] = [];
 		let exitCount = 0;
 		const lifecycle = new BackgroundAppLifecycle({
@@ -113,6 +152,51 @@ describe("background application lifecycle", () => {
 
 		await lifecycle.quit();
 		expect(errors).toEqual(["quit"]);
-		expect(exitCount).toBe(1);
+		expect(exitCount).toBe(0);
+		const repeatedEvent: { response?: { allow: boolean } } = {};
+		lifecycle.handleBeforeQuit(repeatedEvent);
+		expect(repeatedEvent.response).toEqual({ allow: false });
+	});
+
+	test("best-effort shutdown continues after failures and diagnostic errors", async () => {
+		const order: string[] = [];
+		const errors: string[] = [];
+
+		const shutdown = runBestEffortShutdown(
+			[
+				{
+					name: "first",
+					critical: true,
+					run() {
+						order.push("first");
+						throw new Error("first failed");
+					},
+				},
+				{
+					name: "second",
+					run() {
+						order.push("second");
+					},
+				},
+				{
+					name: "third",
+					async run() {
+						await Promise.resolve();
+						order.push("third");
+					},
+				},
+			],
+			(step) => {
+				errors.push(step);
+				throw new Error("diagnostic failed");
+			},
+		);
+		await expect(shutdown).rejects.toMatchObject({
+			name: "CriticalShutdownError",
+			failedSteps: ["first"],
+		});
+
+		expect(order).toEqual(["first", "second", "third"]);
+		expect(errors).toEqual(["first"]);
 	});
 });
