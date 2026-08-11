@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import {
+import Electrobun, {
 	app,
 	BrowserView,
 	BrowserWindow,
@@ -45,7 +45,11 @@ import { runAccountSessionCleanup } from "./account-session-cleanup";
 import { ActivityAnalysisDispatcher } from "./activity-analysis-dispatcher";
 import { AgentRunCoordinator } from "./agent-run-coordinator";
 import { AgentToolPolicy } from "./agent-tool-policy";
-import { BackgroundAppLifecycle } from "./app-lifecycle";
+import {
+	BackgroundAppLifecycle,
+	type BeforeQuitEvent,
+	runBestEffortShutdown,
+} from "./app-lifecycle";
 import { CalendarRepository } from "./calendar-repository";
 import {
 	activityReflectionConfigurationFromConfiguration,
@@ -1109,38 +1113,96 @@ petWindow.webview.on("dom-ready", () => {
 
 function shutdown(): Promise<void> {
 	if (shutdownPromise) return shutdownPromise;
-	shutdownPromise = (async () => {
-		cancelStartupRetryWait?.();
-		auditCaptureCoordinator.dispose();
-		relayBridge.abortAll();
-		await dataCenterSync?.stop();
-		await sidecar.stop();
-		await stopActivityWindowDelivery();
-		// Startup owns both the initial native start and any reflection-service
-		// start. Waiting here prevents a late candidate from restarting the
-		// native sensor process after shutdown has already stopped it.
-		await startupPromise;
-		await timelineLifecycle.close();
-		await reflectionRuntime?.close();
-		reflectionRuntime = null;
-		await agent.stop();
-		agentRepository.close();
-		petStateArbiter.dispose();
-		petWindowController.dispose();
-		try {
-			petWindow.close();
-		} catch {}
-	})();
+	shutdownPromise = runBestEffortShutdown(
+		[
+			{
+				name: "startup-retry",
+				run: () => cancelStartupRetryWait?.(),
+			},
+			{
+				name: "audit-capture",
+				run: () => auditCaptureCoordinator.dispose(),
+			},
+			{
+				name: "model-relay",
+				run: () => relayBridge.abortAll(),
+			},
+			{
+				name: "data-center-sync",
+				run: () => dataCenterSync?.stop(),
+			},
+			{
+				name: "sensor-sidecar",
+				run: () => sidecar.stop(),
+			},
+			{
+				name: "activity-window-delivery",
+				run: () => stopActivityWindowDelivery(),
+			},
+			{
+				name: "startup",
+				// Startup owns both the initial native start and any reflection-service
+				// start. Waiting here prevents a late candidate from restarting the
+				// native sensor process after shutdown has already stopped it.
+				run: async () => {
+					await startupPromise;
+				},
+			},
+			{
+				name: "timeline",
+				run: () => timelineLifecycle.close(),
+			},
+			{
+				name: "reflection",
+				run: async () => {
+					const runtime = reflectionRuntime;
+					reflectionRuntime = null;
+					await runtime?.close();
+				},
+			},
+			{
+				name: "local-tool-host",
+				critical: true,
+				run: () => agent.stop(),
+			},
+			{
+				name: "agent-repository",
+				run: () => agentRepository.close(),
+			},
+			{
+				name: "pet-state",
+				run: () => petStateArbiter.dispose(),
+			},
+			{
+				name: "pet-window-controller",
+				run: () => petWindowController.dispose(),
+			},
+			{
+				name: "pet-window",
+				run: () => petWindow.close(),
+			},
+		],
+		(operation, error) => {
+			console.error(
+				`[shutdown] ${operation} failed:`,
+				error instanceof LocalClientError
+					? error.code
+					: error instanceof Error
+						? error.name
+						: "UNKNOWN",
+			);
+		},
+	);
 	return shutdownPromise;
 }
 
 app.on("reopen", () => {
 	void clientLifecycle.open();
 });
-app.on("before-quit", () => {
-	// Normal menu/Dock quit still starts the same idempotent persistence path.
-	// Explicit WhaleHall quit actions await this path before calling Utils.quit.
-	void shutdown();
+Electrobun.events.on("before-quit", (event: BeforeQuitEvent) => {
+	// The high-level app event strips the response setter Electrobun requires
+	// to veto its synchronous quit path, so lifecycle owns the raw event.
+	clientLifecycle.handleBeforeQuit(event);
 });
 process.once("SIGINT", () => {
 	void clientLifecycle.quit();

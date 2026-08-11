@@ -584,14 +584,39 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let observer_config = ObserverSupervisorConfig::from_environment().map_err(io::Error::other)?;
+    let observer = ObserverSupervisor::start(observer_config, observation_journal.clone());
+    serve_session_with_observer(
+        reader,
+        writer,
+        host,
+        services,
+        event_journal,
+        observation_journal,
+        observer,
+    )
+    .await
+}
+
+async fn serve_session_with_observer<R, W>(
+    reader: R,
+    writer: W,
+    host: Arc<ToolHost>,
+    services: ResidentServices,
+    event_journal: EventJournal,
+    observation_journal: ObservationJournal,
+    observer: ObserverSupervisor,
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let retention_task =
         EventRetentionTask::start(event_journal.clone(), EVENT_RETENTION_CLEANUP_INTERVAL);
     let observation_retention_task = ObservationRetentionTask::start(
         observation_journal.clone(),
         OBSERVATION_RETENTION_CLEANUP_INTERVAL,
     );
-    let observer_config = ObserverSupervisorConfig::from_environment().map_err(io::Error::other)?;
-    let observer = ObserverSupervisor::start(observer_config, observation_journal.clone());
     let observation_services = ObservationServices {
         journal: observation_journal.clone(),
         observer: observer.clone(),
@@ -731,6 +756,9 @@ where
         );
     }
 
+    // EOF means the owning Bun client has already rejected every pending call.
+    // Do not let a long-running request delay Observer's bounded helper teardown.
+    calls.abort_all();
     while calls.join_next().await.is_some() {}
     observer.shutdown().await;
     observation_retention_task.shutdown().await;
@@ -1410,8 +1438,8 @@ mod tests {
         ActivityConfig, ActivityError, ActivityService, ForegroundApp, ForegroundAppProvider,
     };
     use whalehall_local_protocol::{
-        EventCommitParams, EventQueryParams, SemanticQueryParams, desktop_event_kinds,
-        semantic_event_kinds,
+        EventCommitParams, EventQueryParams, MonitoringState, SemanticQueryParams,
+        desktop_event_kinds, semantic_event_kinds,
     };
 
     use super::*;
@@ -1628,10 +1656,22 @@ mod tests {
             .write_all(b"{\"id\":\"activity\",\"method\":\"tool.call\",\"params\":{\"name\":\"activity.status\",\"arguments\":{}}}\n")
             .await
             .expect("write activity status");
-        input.shutdown().await.expect("close input");
-
         let mut output = BufReader::new(output);
         let mut lines = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while lines.len() < 6 {
+                let mut line = String::new();
+                assert_ne!(
+                    output.read_line(&mut line).await.expect("read output"),
+                    0,
+                    "server closed before completing the accepted requests",
+                );
+                lines.push(line);
+            }
+        })
+        .await
+        .expect("accepted requests complete before EOF");
+        input.shutdown().await.expect("close input");
         loop {
             let mut line = String::new();
             if output.read_line(&mut line).await.expect("read output") == 0 {
@@ -1649,6 +1689,74 @@ mod tests {
         assert!(lines[2].contains("activity.status"));
         assert!(lines[2].contains("device.environment"));
         assert!(lines.iter().any(|line| line.contains("usage.sqlite3")));
+    }
+
+    #[tokio::test]
+    async fn eof_aborts_long_call_before_observer_teardown() {
+        let (mut input, server_input) = duplex(16 * 1024);
+        let (server_output, output) = duplex(16 * 1024);
+        let (directory, activity) = test_activity();
+        let event_journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let observation_journal =
+            ObservationJournal::open_with_config(ObservationJournalConfig::new(
+                directory.path().join("observations.sqlite3"),
+                Arc::new(MemoryObservationKeyProvider::new([8; 32])),
+            ))
+            .expect("open observations");
+        let observer = ObserverSupervisor::start(
+            ObserverSupervisorConfig {
+                enabled: false,
+                capture_content: false,
+                excluded_bundle_ids: Vec::new(),
+                helper_path: None,
+            },
+            observation_journal.clone(),
+        );
+        let observer_status = observer.clone();
+        let host = Arc::new(ToolHost::with_activity(activity.clone()));
+        let server = tokio::spawn(serve_session_with_observer(
+            BufReader::new(server_input),
+            server_output,
+            host,
+            ResidentServices::activity_only(activity),
+            event_journal,
+            observation_journal,
+            observer,
+        ));
+        let mut output = BufReader::new(output);
+
+        input
+            .write_all(
+                b"{\"id\":\"blocked\",\"method\":\"tool.call\",\"params\":{\"name\":\"demo.wait\",\"arguments\":{\"durationMs\":5000}}}\n",
+            )
+            .await
+            .expect("write long-running call");
+        let mut started = String::new();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                started.clear();
+                assert_ne!(
+                    output.read_line(&mut started).await.expect("read output"),
+                    0,
+                    "server closed before the tool call started",
+                );
+                let frame: Value = serde_json::from_str(&started).expect("parse output frame");
+                if frame["event"] == "tool.started" && frame["callId"] == "blocked" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("long-running call starts");
+
+        input.shutdown().await.expect("close input");
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("EOF must not wait for the five-second tool call")
+            .expect("server join")
+            .expect("server result");
+        assert_eq!(observer_status.status().state, MonitoringState::Stopped);
     }
 
     #[tokio::test]
