@@ -11,6 +11,12 @@ import type {
 	LocalVaultKeyStatus,
 	LocalVaultLegacyMigrationResult,
 } from '../agent/local-protocol';
+import type {
+	DataCenterAuthSessionProjection,
+	DataCenterSyncErrorCode,
+	DataCenterSyncState,
+	DataCenterSyncStatus,
+} from './datacenter';
 
 export type {
 	LocalRuntimeStatus,
@@ -22,6 +28,10 @@ export type {
 	LocalVaultLegacyMigrationResult,
 	PetPresentationEvent,
 	ActiveGoalContextV1,
+	DataCenterAuthSessionProjection,
+	DataCenterSyncErrorCode,
+	DataCenterSyncState,
+	DataCenterSyncStatus,
 };
 
 export type PetMood = 'idle' | 'happy' | 'busy' | 'error';
@@ -250,6 +260,30 @@ export type ClientRPC = {
 			setActiveGoalContext: {
 				params: { goal: ActiveGoalContextV1 | null };
 				response: { goal: ActiveGoalContextV1 | null };
+			};
+			datacenterSignIn: {
+				params: { email: string; password: string };
+				response: { session: DataCenterAuthSessionProjection };
+			};
+			datacenterSignOut: {
+				params: Record<string, never>;
+				response: { signedOut: boolean };
+			};
+			datacenterRestoreSession: {
+				params: Record<string, never>;
+				response: { session: DataCenterAuthSessionProjection | null };
+			};
+			datacenterSyncStatus: {
+				params: Record<string, never>;
+				response: { status: DataCenterSyncStatus };
+			};
+			datacenterSetSyncEnabled: {
+				params: { enabled: boolean };
+				response: { status: DataCenterSyncStatus };
+			};
+			datacenterRefreshConsents: {
+				params: Record<string, never>;
+				response: { status: DataCenterSyncStatus };
 			};
 		};
 		messages: Record<never, never>;

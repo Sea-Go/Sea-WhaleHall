@@ -15,6 +15,12 @@ export const ACTIVITY_EVENT_WORKER_MODEL = "qwen3:1.7b";
 export const ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE =
 	"${WHALEHALL_ACTIVITY_WORKER_TOKEN}";
 
+export const DATACENTER_DEFAULT_BASE_URL = "http://175.24.130.226:23012";
+export const DATACENTER_DEFAULT_SYNC_ENABLED = false;
+export const DATACENTER_DEFAULT_SYNC_INTERVAL_MS = 30_000;
+export const DATACENTER_URL_ENVIRONMENT_REFERENCE =
+	"WHALEHALL_DATACENTER_URL";
+
 const LEGACY_CONFIGURATION_SCHEMA_VERSION = "whalehall-client-config.v1";
 const MAXIMUM_CONFIGURATION_BYTES = 64 * 1024;
 const MAXIMUM_MODEL_NAME_LENGTH = 160;
@@ -27,6 +33,22 @@ export type ModelConfiguration = {
 	apikey: string;
 };
 
+export type DataCenterSyncConfiguration = {
+	enabled: boolean;
+	intervalMs: number;
+};
+
+export type DataCenterConfiguration = {
+	baseUrl: string;
+	sync: DataCenterSyncConfiguration;
+};
+
+export type DataCenterRuntimeConfiguration = {
+	baseUrl: string;
+	syncEnabled: boolean;
+	syncIntervalMs: number;
+};
+
 /**
  * The editable user configuration intentionally contains only the two model
  * roles WhaleHall needs. Both roles may use the same endpoint and key.
@@ -34,6 +56,7 @@ export type ModelConfiguration = {
 export type ClientConfiguration = {
 	reflection: ModelConfiguration;
 	agent: ModelConfiguration;
+	datacenter: DataCenterConfiguration;
 };
 
 export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
@@ -46,6 +69,13 @@ export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 		name: ACTIVITY_EVENT_WORKER_MODEL,
 		baseurl: ACTIVITY_EVENT_WORKER_ENDPOINT,
 		apikey: ACTIVITY_EVENT_WORKER_API_KEY_REFERENCE,
+	},
+	datacenter: {
+		baseUrl: DATACENTER_DEFAULT_BASE_URL,
+		sync: {
+			enabled: DATACENTER_DEFAULT_SYNC_ENABLED,
+			intervalMs: DATACENTER_DEFAULT_SYNC_INTERVAL_MS,
+		},
 	},
 };
 
@@ -156,6 +186,106 @@ export function activityEventWorkerConfigurationFromConfiguration(
 	};
 }
 
+/**
+ * Resolves the Sea DataCenter runtime configuration. A valid
+ * WHALEHALL_DATACENTER_URL environment override wins over the editable
+ * config.yaml value; syncEnabled and syncIntervalMs come from config.yaml.
+ */
+export function datacenterRuntimeConfigurationFromConfiguration(
+	configuration: ClientConfiguration,
+	environment: Readonly<Record<string, string | undefined>>,
+): DataCenterRuntimeConfiguration {
+	return {
+		baseUrl: resolveDataCenterBaseUrl(
+			configuration.datacenter.baseUrl,
+			environment,
+		),
+		syncEnabled: configuration.datacenter.sync.enabled,
+		syncIntervalMs: configuration.datacenter.sync.intervalMs,
+	};
+}
+
+function resolveDataCenterBaseUrl(
+	configured: string,
+	environment: Readonly<Record<string, string | undefined>>,
+): string {
+	const override = environment[DATACENTER_URL_ENVIRONMENT_REFERENCE];
+	if (override !== undefined && override.trim() !== "") {
+		try {
+			return normalizeDataCenterBaseUrl(override);
+		} catch {
+			// An invalid environment override falls back to the configured URL.
+		}
+	}
+	return configured;
+}
+
+function parseDataCenterConfiguration(value: unknown): DataCenterConfiguration {
+	const defaults = DEFAULT_CLIENT_CONFIGURATION.datacenter;
+	if (value === undefined) return structuredClone(defaults);
+	if (!isRecord(value)) {
+		throw new Error("datacenter configuration is invalid.");
+	}
+	const baseUrl =
+		typeof value.baseUrl === "string"
+			? safeDataCenterBaseUrl(value.baseUrl, defaults.baseUrl)
+			: defaults.baseUrl;
+	const sync = isRecord(value.sync)
+		? parseDataCenterSyncConfiguration(value.sync, defaults.sync)
+		: structuredClone(defaults.sync);
+	return { baseUrl, sync };
+}
+
+function safeDataCenterBaseUrl(
+	value: string,
+	fallback: string,
+): string {
+	try {
+		return normalizeDataCenterBaseUrl(value);
+	} catch {
+		return fallback;
+	}
+}
+
+function normalizeDataCenterBaseUrl(value: string): string {
+	let url: URL;
+	try {
+		url = new URL(value.trim());
+	} catch {
+		throw new Error("datacenter baseUrl is invalid.");
+	}
+	if (
+		(url.protocol !== "https:" && url.protocol !== "http:") ||
+		url.hostname.length === 0 ||
+		url.username !== "" ||
+		url.password !== "" ||
+		url.search !== "" ||
+		url.hash !== ""
+	) {
+		throw new Error("datacenter baseUrl must be an HTTP(S) URL.");
+	}
+	let path = url.pathname;
+	if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+	if (path === "/") path = "";
+	return url.origin + path;
+}
+
+function parseDataCenterSyncConfiguration(
+	value: Record<string, unknown>,
+	defaults: DataCenterSyncConfiguration,
+): DataCenterSyncConfiguration {
+	const enabled =
+		typeof value.enabled === "boolean" ? value.enabled : defaults.enabled;
+	const intervalMs =
+		typeof value.intervalMs === "number" &&
+		Number.isSafeInteger(value.intervalMs) &&
+		value.intervalMs >= 1_000 &&
+		value.intervalMs <= 3_600_000
+			? value.intervalMs
+			: defaults.intervalMs;
+	return { enabled, intervalMs };
+}
+
 function defaultConfiguration(
 	path: string,
 	status: "invalid" | "defaults",
@@ -196,11 +326,13 @@ function parseConfiguration(source: string): ClientConfiguration {
 	const value = Bun.YAML.parse(source);
 	if (
 		isRecord(value) &&
-		hasExactKeys(value, ["reflection", "agent"])
+		(hasExactKeys(value, ["reflection", "agent"]) ||
+			hasExactKeys(value, ["reflection", "agent", "datacenter"]))
 	) {
 		return {
 			reflection: parseModelConfiguration(value.reflection, "reflection"),
 			agent: parseModelConfiguration(value.agent, "agent"),
+			datacenter: parseDataCenterConfiguration(value.datacenter),
 		};
 	}
 	const migrated = parseLegacyConfiguration(value);
@@ -236,6 +368,7 @@ function parseLegacyConfiguration(value: unknown): ClientConfiguration | null {
 	return {
 		reflection: model,
 		agent: { ...model },
+		datacenter: structuredClone(DEFAULT_CLIENT_CONFIGURATION.datacenter),
 	};
 }
 

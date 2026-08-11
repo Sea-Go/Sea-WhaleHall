@@ -29,6 +29,9 @@ export function loadTimelineModernBertConfiguration(
 		environment.WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT?.trim();
 	const pinnedManifestPath =
 		environment.WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST?.trim();
+	const allowedRemoteOrigins = parseAllowedRemoteOrigins(
+		environment.WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS,
+	);
 	const configured = [endpoint, manifestEndpoint, pinnedManifestPath].filter(
 		(value) => value !== undefined && value.length > 0,
 	).length;
@@ -72,12 +75,13 @@ export function loadTimelineModernBertConfiguration(
 			endpoint,
 			manifestEndpoint,
 			expectedArtifact,
+			allowedRemoteOrigins,
 			...(authorizationToken === undefined
 				? {}
 				: { authorizationToken }),
 		};
-		// Constructor validation is metadata-only and applies the classifier's
-		// default loopback policy before composition can report "enabled".
+		// Constructor validation is metadata-only and requires an exact HTTPS
+		// allowlist entry before a remote deployment can report "enabled".
 		new ModernBertEpisodeClassifier(modernBert);
 		return {
 			modernBert,
@@ -86,6 +90,14 @@ export function loadTimelineModernBertConfiguration(
 	} catch {
 		return invalidConfiguration();
 	}
+}
+
+function parseAllowedRemoteOrigins(value: string | undefined): string[] {
+	if (value === undefined || value.trim().length === 0) return [];
+	return value
+		.split(",")
+		.map((origin) => origin.trim())
+		.filter((origin) => origin.length > 0);
 }
 
 function invalidConfiguration(): TimelineModernBertConfiguration {

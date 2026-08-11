@@ -58,7 +58,7 @@ describe("verifyOllamaModelLock", () => {
 		).rejects.toBeInstanceOf(OllamaModelLockError);
 	});
 
-	test("rejects non-loopback lock destinations before any request", async () => {
+	test("rejects unallowlisted remote lock destinations before any request", async () => {
 		let calls = 0;
 		await expect(
 			verifyOllamaModelLock(
@@ -70,7 +70,51 @@ describe("verifyOllamaModelLock", () => {
 					},
 				},
 			),
-		).rejects.toThrow("loopback");
+		).rejects.toThrow("allowlisted");
 		expect(calls).toBe(0);
+	});
+
+	test("uses an allowlisted HTTPS destination and environment-only token", async () => {
+		const authorizations: string[] = [];
+		await expect(
+			verifyOllamaModelLock(
+				{
+					...WHALEHALL_TEACHER_MODEL_LOCK,
+					baseUrl: "https://models.example.test",
+				},
+				{
+					allowedRemoteOrigins: ["https://models.example.test"],
+					authorizationToken: "remote-only-token",
+					fetch: async (input, init) => {
+						authorizations.push(
+							new Headers(init?.headers).get("authorization") ?? "",
+						);
+						if (String(input).endsWith("/api/version")) {
+							return Response.json({
+								version: WHALEHALL_TEACHER_MODEL_LOCK.ollamaVersion,
+							});
+						}
+						return Response.json({
+							models: [
+								{
+									name: WHALEHALL_TEACHER_MODEL_LOCK.model,
+									digest: WHALEHALL_TEACHER_MODEL_LOCK.digest,
+									details: {
+										parameter_size:
+											WHALEHALL_TEACHER_MODEL_LOCK.parameterSize,
+										quantization_level:
+											WHALEHALL_TEACHER_MODEL_LOCK.quantizationLevel,
+									},
+								},
+							],
+						});
+					},
+				},
+			),
+		).resolves.toMatchObject({ model: WHALEHALL_TEACHER_MODEL_LOCK.model });
+		expect(authorizations).toEqual([
+			"Bearer remote-only-token",
+			"Bearer remote-only-token",
+		]);
 	});
 });

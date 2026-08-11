@@ -29,6 +29,10 @@ import {
 	AuditExportControl,
 	type AuditExportService,
 } from "../audit-export/public";
+import {
+	CloudSyncStatusControl,
+	type CloudSyncController,
+} from "./public";
 import { Button } from "../../shared/ui/Button";
 import { ConfirmationDialog } from "../../shared/ui/ConfirmationDialog";
 import { EmptyState } from "../../shared/ui/EmptyState";
@@ -69,6 +73,7 @@ export interface SettingsPageProps {
 	user: AuthUser;
 	controller: PreferencesController;
 	monitoringController: MonitoringController;
+	cloudSyncController: CloudSyncController;
 	auditExportService: AuditExportService;
 	category: SettingsCategory;
 	onCategoryChange: (category: SettingsCategory) => void;
@@ -80,6 +85,7 @@ export function SettingsPage({
 	user,
 	controller,
 	monitoringController,
+	cloudSyncController,
 	auditExportService,
 	category,
 	onCategoryChange,
@@ -208,6 +214,7 @@ export function SettingsPage({
 									values={preferencesState.draft}
 									disabled={saving}
 									monitoringController={monitoringController}
+									cloudSyncController={cloudSyncController}
 									auditExportService={auditExportService}
 									onUpdate={(section, value) =>
 										controller.update(section, value)
@@ -312,6 +319,7 @@ interface SettingsPanelProps {
 	values: PreferenceValues;
 	disabled: boolean;
 	monitoringController: MonitoringController;
+	cloudSyncController: CloudSyncController;
 	auditExportService: AuditExportService;
 	onUpdate: <K extends keyof PreferenceValues>(
 		section: K,
@@ -691,6 +699,7 @@ function PrivacySettings({
 	disabled,
 	onUpdate,
 	monitoringController,
+	cloudSyncController,
 	auditExportService,
 }: SettingsPanelProps) {
 	const section = values.privacy;
@@ -703,6 +712,7 @@ function PrivacySettings({
 			<AuditExportControl service={auditExportService} />
 			<MonitoringPermissionsControl controller={monitoringController} />
 			<MonitoringExclusionsControl controller={monitoringController} />
+			<CloudSyncStatusControl controller={cloudSyncController} />
 			<SettingRow
 				title="使用活动汇总生成洞察"
 				description="只使用本地聚合时长，不把窗口内容发送到桌宠。"

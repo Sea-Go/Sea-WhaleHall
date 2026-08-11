@@ -5,10 +5,7 @@ import { PlanningController } from "./features/planning/public";
 import { MonitoringController } from "./features/monitoring/public";
 import { ReportController } from "./features/reports/public";
 import { PreferencesController } from "./features/settings/public";
-import {
-	MockAuthService,
-	MOCK_AUTH_EXPERIENCE,
-} from "./infrastructure/auth/MockAuthService";
+import { DataCenterAuthService } from "./infrastructure/auth/DataCenterAuthService";
 import { MockCalendarService } from "./infrastructure/calendar/MockCalendarService";
 import { CalendarPlanningGateway } from "./infrastructure/planning/CalendarPlanningGateway";
 import { MockPlanningGenerationService } from "./infrastructure/planning/MockPlanningGenerationService";
@@ -16,6 +13,10 @@ import { MockReportService } from "./infrastructure/reports/MockReportService";
 import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
 import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
 import { ElectrobunAuditExportService } from "./infrastructure/audit-export/ElectrobunAuditExportService";
+import { ElectrobunCloudSyncService } from "./infrastructure/settings/ElectrobunCloudSyncService";
+import {
+	CloudSyncController,
+} from "./features/settings/public";
 import { MockPreferencesService } from "./infrastructure/settings/MockPreferencesService";
 import {
 	ActiveGoalSyncCoordinator,
@@ -24,7 +25,7 @@ import {
 import { Temporal } from "temporal-polyfill";
 import { useEffect, useRef } from "react";
 
-const authService = new MockAuthService();
+const authService = new DataCenterAuthService();
 const calendarService = new MockCalendarService();
 const planningGenerator = new MockPlanningGenerationService();
 const planningCalendarGateway = new CalendarPlanningGateway(calendarService);
@@ -74,6 +75,9 @@ const petBridge = new ElectrobunPetPresentationBridge();
 const monitoringController = new MonitoringController(
 	new ElectrobunMonitoringService(),
 );
+const cloudSyncController = new CloudSyncController(
+	new ElectrobunCloudSyncService(),
+);
 const auditExportService = new ElectrobunAuditExportService();
 
 export function App() {
@@ -111,7 +115,6 @@ export function App() {
 	return (
 		<AuthGate
 			service={authService}
-			experienceCredentials={MOCK_AUTH_EXPERIENCE}
 			renderAuthenticated={({ session, logout }) => (
 					<AppShell
 						user={session.user}
@@ -134,6 +137,7 @@ export function App() {
 					preferencesController={preferencesController}
 					petBridge={petBridge}
 					monitoringController={monitoringController}
+					cloudSyncController={cloudSyncController}
 					auditExportService={auditExportService}
 					enableQaControls={enableQaControls}
 				/>

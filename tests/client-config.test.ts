@@ -16,6 +16,7 @@ import {
 	DEFAULT_CLIENT_CONFIGURATION,
 	activityEventWorkerConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
+	datacenterRuntimeConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
 	reflectionModelConfigurationFromConfiguration,
 } from "../src/bun/client-config";
@@ -218,5 +219,101 @@ describe("WhaleHall client config.yaml", () => {
 
 		expect(result.status).toBe("loaded");
 		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
+	});
+});
+
+describe("WhaleHall DataCenter configuration", () => {
+	test("defaults the datacenter block when absent", () => {
+		const directory = temporaryDirectory();
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		writeFileSync(path, validConfiguration());
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.status).toBe("loaded");
+		expect(result.configuration.datacenter.baseUrl).toBe(
+			"http://175.24.130.226:23012",
+		);
+		expect(result.configuration.datacenter.sync.enabled).toBe(false);
+		expect(result.configuration.datacenter.sync.intervalMs).toBe(30_000);
+	});
+
+	test("parses an explicit datacenter block without a trailing slash", () => {
+		const directory = temporaryDirectory();
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		writeFileSync(
+			path,
+			validConfiguration(
+				[
+					"datacenter:",
+					'  baseUrl: "http://127.0.0.1:8080/"',
+					"  sync:",
+					"    enabled: true",
+					"    intervalMs: 60000",
+				].join("\n"),
+			),
+		);
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.status).toBe("loaded");
+		expect(result.configuration.datacenter.baseUrl).toBe(
+			"http://127.0.0.1:8080",
+		);
+		expect(result.configuration.datacenter.sync.enabled).toBe(true);
+		expect(result.configuration.datacenter.sync.intervalMs).toBe(60_000);
+	});
+
+	test("falls back to defaults for an invalid datacenter block", () => {
+		const directory = temporaryDirectory();
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		writeFileSync(
+			path,
+			validConfiguration(
+				["datacenter:", '  baseUrl: "ftp://bad"', "  sync:"].join("\n"),
+			),
+		);
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.status).toBe("loaded");
+		expect(result.configuration.datacenter.baseUrl).toBe(
+			"http://175.24.130.226:23012",
+		);
+	});
+
+	test("resolves a WHALEHALL_DATACENTER_URL environment override", () => {
+		const configuration = DEFAULT_CLIENT_CONFIGURATION;
+		const runtime = datacenterRuntimeConfigurationFromConfiguration(
+			configuration,
+			{ WHALEHALL_DATACENTER_URL: "https://dc.example.invalid:8443" },
+		);
+		expect(runtime.baseUrl).toBe("https://dc.example.invalid:8443");
+		expect(runtime.syncEnabled).toBe(false);
+		expect(runtime.syncIntervalMs).toBe(30_000);
+	});
+
+	test("ignores an invalid environment override", () => {
+		const configuration = DEFAULT_CLIENT_CONFIGURATION;
+		const runtime = datacenterRuntimeConfigurationFromConfiguration(
+			configuration,
+			{ WHALEHALL_DATACENTER_URL: "not a url" },
+		);
+		expect(runtime.baseUrl).toBe("http://175.24.130.226:23012");
 	});
 });

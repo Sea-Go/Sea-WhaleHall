@@ -11,3 +11,11 @@ agent:
   name: "qwen3:1.7b"
   baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
   apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+
+# Sea DataCenter 云同步配置。baseUrl 指向家里云 IPv4 FRP 端口（DataCenter API 代理）；
+# sync.enabled 默认关闭，可在设置页开启。
+datacenter:
+  baseUrl: "http://175.24.130.226:23012"
+  sync:
+    enabled: false
+    intervalMs: 30000

@@ -10,3 +10,11 @@ agent:
   name: "qwen3:1.7b"
   baseurl: "https://model.sea-ridethewindbreakthewaves.xyz/v1/activity/analyze"
   apikey: "${WHALEHALL_ACTIVITY_WORKER_TOKEN}"
+
+# Sea DataCenter cloud sync. baseUrl points at the home-cloud IPv4 FRP port
+# that proxies the DataCenter API; sync.enabled is turned on from Settings.
+datacenter:
+  baseUrl: "http://175.24.130.226:23012"
+  sync:
+    enabled: false
+    intervalMs: 30000

@@ -2,6 +2,8 @@ import { Electroview } from "electrobun/view";
 import type {
 	ClientRPC,
 	ActiveGoalContextV1,
+	DataCenterAuthSessionProjection,
+	DataCenterSyncStatus,
 	LocalMonitoringConfigure,
 	LocalRuntimeStatus,
 	MonitoringPermissionSettingsTarget,
@@ -31,6 +33,11 @@ const rpc = Electroview.defineRPC<ClientRPC>({
 });
 
 new Electroview({ rpc });
+
+export type {
+	DataCenterAuthSessionProjection,
+	DataCenterSyncStatus,
+} from "../../shared/contracts";
 
 export const clientApi = {
 	getLocalStatus: () => rpc.request.getLocalStatus({}),
@@ -68,6 +75,14 @@ export const clientApi = {
 		rpc.request.presentPetEvent(event),
 	setActiveGoalContext: (goal: ActiveGoalContextV1 | null) =>
 		rpc.request.setActiveGoalContext({ goal }),
+	datacenterSignIn: (credentials: { email: string; password: string }) =>
+		rpc.request.datacenterSignIn(credentials),
+	datacenterSignOut: () => rpc.request.datacenterSignOut({}),
+	datacenterRestoreSession: () => rpc.request.datacenterRestoreSession({}),
+	datacenterSyncStatus: () => rpc.request.datacenterSyncStatus({}),
+	datacenterSetSyncEnabled: (enabled: boolean) =>
+		rpc.request.datacenterSetSyncEnabled({ enabled }),
+	datacenterRefreshConsents: () => rpc.request.datacenterRefreshConsents({}),
 	onStatus(listener: StatusListener): () => void {
 		statusListeners.add(listener);
 		return () => statusListeners.delete(listener);

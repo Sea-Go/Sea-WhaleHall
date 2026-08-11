@@ -7,6 +7,10 @@ import {
 	type SettingsCategory,
 } from "../src/views/client/features/settings/domain";
 import { PreferencesController } from "../src/views/client/features/settings/PreferencesController";
+import {
+	CloudSyncController,
+	type CloudSyncService,
+} from "../src/views/client/features/settings/public";
 import { SettingsPage } from "../src/views/client/features/settings/SettingsPage";
 import { MockPreferencesService } from "../src/views/client/infrastructure/settings/MockPreferencesService";
 import {
@@ -65,6 +69,7 @@ async function setup() {
 				user={user}
 				controller={controller}
 				monitoringController={monitoringController}
+				cloudSyncController={new CloudSyncController(fakeCloudSyncService())}
 				auditExportService={auditExportService}
 				category={category}
 				onCategoryChange={() => {}}
@@ -73,6 +78,33 @@ async function setup() {
 			/>,
 		);
 	return { controller, render };
+}
+
+function fakeCloudSyncService(): CloudSyncService {
+	return {
+		async status() {
+			return {
+				state: "disabled",
+				enabled: false,
+				signedIn: false,
+				agentRegistered: false,
+				baseUrl: "http://127.0.0.1:8080",
+				lastSyncAtMs: null,
+				lastErrorCode: null,
+				lastErrorMessage: null,
+				pendingEventCount: 0,
+				blockedCursor: null,
+				blockedReason: null,
+				updatedAtMs: 0,
+			};
+		},
+		async setEnabled(enabled) {
+			return { ...(await this.status()), enabled };
+		},
+		async refreshConsents() {
+			return this.status();
+		},
+	};
 }
 
 async function createMonitoringController(): Promise<MonitoringController> {
@@ -248,6 +280,7 @@ describe("settings UI", () => {
 				user={user}
 				controller={controller}
 				monitoringController={await createMonitoringController()}
+				cloudSyncController={new CloudSyncController(fakeCloudSyncService())}
 				auditExportService={auditExportService}
 				category="pet"
 				onCategoryChange={() => {}}

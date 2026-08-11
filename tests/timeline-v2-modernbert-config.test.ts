@@ -136,14 +136,13 @@ describe("Timeline v2 ModernBERT Bun configuration", () => {
 		).toMatchObject({ code: "invalid_config" });
 	});
 
-	test("enables only a complete pinned loopback configuration", () => {
+	test("propagates YAML-owned remote origins while keeping the token environment-only", () => {
 		const directory = temporaryDirectory();
 		const path = join(directory, "manifest.json");
 		writeFileSync(path, JSON.stringify(manifest()));
 		const result = loadTimelineModernBertConfiguration({
 			...completeEnvironment(path),
 			WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "local-token",
-			// Production composition intentionally ignores future remote knobs.
 			WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS:
 				"https://model.example",
 			WHALEHALL_TIMELINE_MODERNBERT_ALLOW_INSECURE_REMOTE: "1",
@@ -157,12 +156,43 @@ describe("Timeline v2 ModernBERT Bun configuration", () => {
 				"http://127.0.0.1:8766/v2/manifest",
 			expectedArtifact: manifest(),
 			authorizationToken: "local-token",
+			allowedRemoteOrigins: ["https://model.example"],
 		});
-		expect(result.modernBert).not.toHaveProperty(
-			"allowedRemoteOrigins",
-		);
 		expect(result.modernBert).not.toHaveProperty(
 			"allowInsecureRemote",
 		);
+	});
+
+	test("enables a complete remote configuration only with its exact HTTPS origin", () => {
+		const directory = temporaryDirectory();
+		const path = join(directory, "manifest.json");
+		writeFileSync(path, JSON.stringify(manifest()));
+		const remoteEnvironment = {
+			WHALEHALL_TIMELINE_MODERNBERT_ENDPOINT:
+				"https://models.example.test/v2/episodes:classify",
+			WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT:
+				"https://models.example.test/v2/manifest",
+			WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST: path,
+		};
+
+		expect(loadTimelineModernBertConfiguration(remoteEnvironment)).toEqual({
+			modernBert: { enabled: false },
+			code: "invalid_config",
+		});
+		expect(
+			loadTimelineModernBertConfiguration({
+				...remoteEnvironment,
+				WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS:
+					"https://models.example.test",
+			}),
+		).toMatchObject({
+			code: "enabled",
+			modernBert: {
+				enabled: true,
+				endpoint: "https://models.example.test/v2/episodes:classify",
+				manifestEndpoint: "https://models.example.test/v2/manifest",
+				allowedRemoteOrigins: ["https://models.example.test"],
+			},
+		});
 	});
 });

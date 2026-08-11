@@ -17,3 +17,14 @@ export {
 	type SettingsCategory,
 } from "./domain";
 export { SettingsPage, type SettingsPageProps } from "./SettingsPage";
+export {
+	CloudSyncController,
+	cloudSyncFailureMessage,
+	type CloudSyncOperation,
+	type CloudSyncState,
+} from "./CloudSyncController";
+export {
+	CloudSyncStatusControl,
+	type CloudSyncStatusControlProps,
+} from "./CloudSyncStatusControl";
+export type { CloudSyncService } from "./cloud-sync-service";

@@ -22,6 +22,10 @@ import {
 	type MonitoringService,
 	type MonitoringSnapshot,
 } from "../src/views/client/features/monitoring/public";
+import {
+	CloudSyncController,
+	type CloudSyncService,
+} from "../src/views/client/features/settings/public";
 import { MockPreferencesService } from "../src/views/client/infrastructure/settings/MockPreferencesService";
 import type { AuditExportService } from "../src/views/client/features/audit-export/public";
 
@@ -110,6 +114,31 @@ const monitoringService: MonitoringService = {
 	async openPermissionSettings() {},
 };
 const monitoringController = new MonitoringController(monitoringService);
+const cloudSyncService: CloudSyncService = {
+	async status() {
+		return {
+			state: "disabled",
+			enabled: false,
+			signedIn: false,
+			agentRegistered: false,
+			baseUrl: "http://127.0.0.1:8080",
+			lastSyncAtMs: null,
+			lastErrorCode: null,
+			lastErrorMessage: null,
+			pendingEventCount: 0,
+			blockedCursor: null,
+			blockedReason: null,
+			updatedAtMs: 0,
+		};
+	},
+	async setEnabled(enabled) {
+		return { ...(await this.status()), enabled };
+	},
+	async refreshConsents() {
+		return this.status();
+	},
+};
+const cloudSyncController = new CloudSyncController(cloudSyncService);
 await monitoringController.load();
 const auditExportService: AuditExportService = {
 	async exportFiveMinutes() {
@@ -165,6 +194,7 @@ describe("client app shell", () => {
 				preferencesController={preferencesController}
 				petBridge={petBridge}
 				monitoringController={monitoringController}
+				cloudSyncController={cloudSyncController}
 				auditExportService={auditExportService}
 			/>,
 		);

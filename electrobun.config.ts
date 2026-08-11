@@ -102,6 +102,7 @@ export default {
 		mac: {
 			bundleCEF: false,
 			codesign: macCodeSigningEnabled,
+			icons: "assets/app-icon.iconset",
 			entitlements: MACOS_OUTER_ENTITLEMENTS,
 			notarize:
 				macCodeSigningEnabled &&
@@ -111,9 +112,11 @@ export default {
 		linux: {
 			bundleCEF: true,
 			defaultRenderer: "native",
+			icon: "assets/app-icon.png",
 		},
 		win: {
 			bundleCEF: false,
+			icon: "assets/app-icon.ico",
 		},
 	},
 	runtime: {

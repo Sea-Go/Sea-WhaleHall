@@ -34,6 +34,7 @@ import {
 } from "../features/monitoring/public";
 import {
 	SettingsPage,
+	type CloudSyncController,
 	type PreferencesController,
 	type PreferencesSnapshot,
 	type SettingsCategory,
@@ -77,6 +78,7 @@ export interface AppShellProps {
 	preferencesController: PreferencesController;
 	petBridge: PetPresentationBridge;
 	monitoringController: MonitoringController;
+	cloudSyncController: CloudSyncController;
 	auditExportService: AuditExportService;
 	initialPage?: PageId;
 	enableQaControls?: boolean;
@@ -91,6 +93,7 @@ export function AppShell({
 	preferencesController,
 	petBridge,
 	monitoringController,
+	cloudSyncController,
 	auditExportService,
 	initialPage = "calendar",
 	enableQaControls = false,
@@ -386,6 +389,7 @@ export function AppShell({
 						user={user}
 						controller={preferencesController}
 						monitoringController={monitoringController}
+						cloudSyncController={cloudSyncController}
 						auditExportService={auditExportService}
 						category={settingsCategory}
 						onCategoryChange={setSettingsCategory}

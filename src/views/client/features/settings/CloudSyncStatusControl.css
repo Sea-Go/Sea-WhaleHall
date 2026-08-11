@@ -1,0 +1,152 @@
+.cloud-sync {
+	display: grid;
+	gap: 10px;
+	padding: 14px 16px;
+	border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+	border-radius: 14px;
+	background: var(--surface-raised, rgba(255, 255, 255, 0.04));
+}
+
+.cloud-sync--loading,
+.cloud-sync--error {
+	align-items: center;
+	grid-template-columns: auto 1fr;
+}
+
+.cloud-sync--error button {
+	grid-column: 1 / -1;
+	justify-self: start;
+}
+
+.cloud-sync__header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.cloud-sync__header strong {
+	font-size: 14px;
+	line-height: 1.3;
+}
+
+.cloud-sync__endpoint {
+	display: block;
+	font-size: 12px;
+	opacity: 0.65;
+	overflow-wrap: anywhere;
+}
+
+.cloud-sync__switch {
+	position: relative;
+	display: inline-flex;
+	margin-left: auto;
+}
+
+.cloud-sync__switch input {
+	position: absolute;
+	opacity: 0;
+	pointer-events: none;
+}
+
+.cloud-sync__switch > span:last-child {
+	width: 40px;
+	height: 22px;
+	border-radius: 999px;
+	background: rgba(128, 128, 128, 0.35);
+	position: relative;
+	transition: background 160ms ease;
+	cursor: pointer;
+}
+
+.cloud-sync__switch > span:last-child::after {
+	content: "";
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: #fff;
+	transition: transform 160ms ease;
+}
+
+.cloud-sync__switch input:checked + span {
+	background: var(--accent, #4c8dff);
+}
+
+.cloud-sync__switch input:checked + span::after {
+	transform: translateX(18px);
+}
+
+.cloud-sync__switch input:disabled + span {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.cloud-sync__body {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.cloud-sync__badge {
+	font-size: 12px;
+	font-weight: 600;
+	padding: 3px 9px;
+	border-radius: 999px;
+	background: rgba(128, 128, 128, 0.2);
+}
+
+.cloud-sync__badge--ready {
+	background: rgba(52, 199, 123, 0.18);
+	color: #34c77b;
+}
+
+.cloud-sync__badge--sending,
+.cloud-sync__badge--committing {
+	background: rgba(76, 141, 255, 0.18);
+	color: #6fa7ff;
+}
+
+.cloud-sync__badge--blocked_content,
+.cloud-sync__badge--blocked_reconcile,
+.cloud-sync__badge--needs_session,
+.cloud-sync__badge--needs_agent {
+	background: rgba(255, 159, 67, 0.18);
+	color: #ff9f43;
+}
+
+.cloud-sync__badge--retry_wait {
+	background: rgba(255, 204, 92, 0.16);
+	color: #ffcc5c;
+}
+
+.cloud-sync__meta {
+	font-size: 12px;
+	opacity: 0.7;
+}
+
+.cloud-sync__action {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 12px;
+	padding: 4px 10px;
+	border-radius: 999px;
+	border: 1px solid rgba(128, 128, 128, 0.3);
+	background: transparent;
+	cursor: pointer;
+}
+
+.cloud-sync__action:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.cloud-sync__detail {
+	font-size: 12px;
+	opacity: 0.75;
+	line-height: 1.45;
+	margin: 0;
+}

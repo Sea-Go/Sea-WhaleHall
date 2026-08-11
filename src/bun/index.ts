@@ -43,8 +43,10 @@ import {
 import {
 	agentModelConfigurationFromConfiguration,
 	activityEventWorkerConfigurationFromConfiguration,
+	datacenterRuntimeConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
 } from "./client-config";
+import { DataCenterAuthError, DataCenterService } from "./datacenter";
 import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import { BackgroundAppLifecycle } from "./app-lifecycle";
 import {
@@ -126,6 +128,22 @@ const agent = new AgentRuntime(
 	}),
 	{ requireStartupGoalPreparation: true },
 );
+const datacenterConfiguration = datacenterRuntimeConfigurationFromConfiguration(
+	clientConfiguration.configuration,
+	process.env,
+);
+const datacenterService = new DataCenterService({
+	configuration: datacenterConfiguration,
+	localDataPath,
+	agent: {
+		queryEvents: (consumerId, limit) =>
+			agent.queryDesktopEvents({ consumerId, limit }),
+		commitCursor: (consumerId, cursor) =>
+			agent.commitDesktopEventCursor(consumerId, cursor),
+		getMonitoringStatus: () => agent.getMonitoringStatus(),
+	},
+});
+datacenterService.start();
 const rawAuditSource = createRawFiveMinuteAuditSource(agent);
 const rawOnlyAuditExporter = new TimelineFiveMinuteAuditExporter(
 	rawAuditSource,
@@ -270,6 +288,13 @@ let clientWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow;
 let petWindowController: PetWindowController;
 let petStateArbiter: PetStateArbiter;
+
+function toDataCenterAuthRpcError(error: unknown): Error {
+	if (error instanceof DataCenterAuthError) {
+		return new Error(`DATACENTER_AUTH:${error.kind}`);
+	}
+	return new Error("DATACENTER_AUTH:unexpected");
+}
 
 function sendLocalStatus(status = agent.getLocalStatus()): void {
 	if (clientWindow !== null) clientRPC.send.localStatusChanged(status);
@@ -482,6 +507,33 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						: null,
 				};
 			},
+			datacenterSignIn: async ({ email, password }) => {
+				try {
+					const session = await datacenterService.signIn(
+						email,
+						password,
+					);
+					return { session };
+				} catch (error) {
+					throw toDataCenterAuthRpcError(error);
+				}
+			},
+			datacenterSignOut: async () => {
+				await datacenterService.signOut();
+				return { signedOut: true };
+			},
+			datacenterRestoreSession: async () => ({
+				session: await datacenterService.restoreSession(),
+			}),
+			datacenterSyncStatus: async () => ({
+				status: await datacenterService.getSyncStatus(),
+			}),
+			datacenterSetSyncEnabled: async ({ enabled }) => ({
+				status: await datacenterService.setSyncEnabled(enabled),
+			}),
+			datacenterRefreshConsents: async () => ({
+				status: await datacenterService.refreshConsents(),
+			}),
 		},
 		messages: {},
 	},
@@ -630,6 +682,7 @@ function shutdown(): Promise<void> {
 		// native sensor process after shutdown has already stopped it.
 		await startupPromise;
 		await stopActivityWindowDelivery();
+		datacenterService.stop();
 		await timelineLifecycle.close();
 		await reflectionRuntime?.close();
 		reflectionRuntime = null;
