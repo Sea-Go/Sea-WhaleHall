@@ -57,6 +57,7 @@ export type LocalClientFailureCode =
 	| "PROCESS_EXITED"
 	| "PROTOCOL_ERROR"
 	| "REQUEST_TIMEOUT"
+	| "STOP_FAILED"
 	| "STOPPED"
 	| "WRITE_FAILED";
 
@@ -89,6 +90,9 @@ export type SpawnLocalProcess = (
 ) => ChildTransport;
 
 export const STARTUP_GOAL_CHANGE_ENV = "WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
+
+const LOCAL_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 10_000;
+const LOCAL_POST_KILL_EXIT_TIMEOUT_MS = 2_000;
 
 type EnvironmentSource = Readonly<Record<string, string | undefined>>;
 
@@ -311,6 +315,7 @@ export class LocalToolClient implements LocalToolProcess {
 		(error: LocalClientError) => void
 	>();
 	private stopping = false;
+	private stopPromise: Promise<void> | null = null;
 	private preparedStartupGoalChange: LocalEventGoalChange | null | undefined;
 	private preparedStartupGoalChangeJson: string | null | undefined;
 
@@ -322,6 +327,7 @@ export class LocalToolClient implements LocalToolProcess {
 			controlTimeoutMs?: number;
 			toolTimeoutMs?: number;
 			maxLineBytes?: number;
+			shutdownSleep?: (durationMs: number) => Promise<void>;
 		} = {},
 	) {}
 
@@ -764,15 +770,39 @@ export class LocalToolClient implements LocalToolProcess {
 		return result as LocalVaultLegacyMigrationResult;
 	}
 
-	async stop(): Promise<void> {
+	stop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise;
+		const operation = this.stopOwnedChild();
+		this.stopPromise = operation;
+		void operation.then(
+			() => {
+				if (this.stopPromise === operation) this.stopPromise = null;
+			},
+			() => {
+				if (this.stopPromise === operation) this.stopPromise = null;
+			},
+		);
+		return operation;
+	}
+
+	private async stopOwnedChild(): Promise<void> {
 		this.stopping = true;
 		const child = this.child;
-		this.child = null;
 		this.rejectPending(
 			new LocalClientError("STOPPED", "whalehall-local was stopped."),
 		);
 		if (!child) return;
-		await closeGracefully(child);
+		const outcome = await closeGracefully(
+			child,
+			this.options.shutdownSleep ?? ((durationMs) => Bun.sleep(durationMs)),
+		);
+		if (this.child === child) this.child = null;
+		if (outcome === "forced") {
+			throw new LocalClientError(
+				"STOP_FAILED",
+				"whalehall-local required forced termination after graceful shutdown timed out.",
+			);
+		}
 	}
 
 	onEvent(listener: (event: LocalToolEvent) => void): () => void {
@@ -1041,18 +1071,44 @@ function sameGoalContext(
 	);
 }
 
-async function closeGracefully(child: ChildTransport): Promise<void> {
+async function closeGracefully(
+	child: ChildTransport,
+	shutdownSleep: (durationMs: number) => Promise<void>,
+): Promise<"graceful" | "forced"> {
 	try {
 		void child.stdin.end();
 	} catch {}
 	const exited = await Promise.race([
 		child.exited.then(() => true),
-		Bun.sleep(1000).then(() => false),
+		shutdownSleep(LOCAL_GRACEFUL_SHUTDOWN_TIMEOUT_MS).then(() => false),
 	]);
-	if (exited) return;
+	if (exited) return "graceful";
 	try {
 		child.kill();
-	} catch {}
+	} catch (error) {
+		const exitedAfterKillFailure = await Promise.race([
+			child.exited.then(() => true),
+			shutdownSleep(LOCAL_POST_KILL_EXIT_TIMEOUT_MS).then(() => false),
+		]);
+		if (exitedAfterKillFailure) return "forced";
+		throw new LocalClientError(
+			"STOP_FAILED",
+			`Unable to terminate whalehall-local after graceful shutdown timed out: ${
+				error instanceof Error ? error.name : "UNKNOWN"
+			}`,
+		);
+	}
+	const exitedAfterKill = await Promise.race([
+		child.exited.then(() => true),
+		shutdownSleep(LOCAL_POST_KILL_EXIT_TIMEOUT_MS).then(() => false),
+	]);
+	if (!exitedAfterKill) {
+		throw new LocalClientError(
+			"STOP_FAILED",
+			"whalehall-local did not exit after forced termination.",
+		);
+	}
+	return "forced";
 }
 
 export class JsonlProtocolError extends Error {

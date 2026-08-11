@@ -27,7 +27,7 @@ use whalehall_local_protocol::{
 };
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const RAW_CURSOR_PREFIX: &str = "sc2_";
 const SEMANTIC_CURSOR_PREFIX: &str = "sec2_";
 const DEFAULT_RAW_CONTENT_RETENTION_DAYS: u64 = 7;
@@ -4333,6 +4333,21 @@ fn initialize(connection: &mut Connection) -> Result<(), ObservationJournalError
              );
              CREATE INDEX IF NOT EXISTS observation_coverage_gaps_time
                 ON observation_coverage_gaps(ended_at_ms, started_at_ms);",
+        )?;
+    }
+    if version < 3 {
+        // SQLite checks every child table when an encrypted payload is
+        // deleted. Without indexes on these foreign-key columns, retention
+        // cleanup scans the complete observation and semantic tables once per
+        // expired payload and can prevent the single-threaded JSONL server
+        // from becoming ready.
+        transaction.execute_batch(
+            "CREATE INDEX IF NOT EXISTS observations_content_ref
+                ON observations(content_ref);
+             CREATE INDEX IF NOT EXISTS semantic_events_content_ref
+                ON semantic_events(content_ref);
+             CREATE INDEX IF NOT EXISTS projector_state_content_ref
+                ON projector_state(content_ref);",
         )?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import {
+import Electrobun, {
 	app,
 	BrowserView,
 	BrowserWindow,
@@ -45,7 +45,11 @@ import { runAccountSessionCleanup } from "./account-session-cleanup";
 import { ActivityAnalysisDispatcher } from "./activity-analysis-dispatcher";
 import { AgentRunCoordinator } from "./agent-run-coordinator";
 import { AgentToolPolicy } from "./agent-tool-policy";
-import { BackgroundAppLifecycle } from "./app-lifecycle";
+import {
+	BackgroundAppLifecycle,
+	type BeforeQuitEvent,
+	runBestEffortShutdown,
+} from "./app-lifecycle";
 import { CalendarRepository } from "./calendar-repository";
 import {
 	activityReflectionConfigurationFromConfiguration,
@@ -424,7 +428,9 @@ const rawOnlyAuditExporter = new TimelineFiveMinuteAuditExporter(
 	},
 );
 let petVisible = true;
+let shutdownRequested = false;
 let shutdownPromise: Promise<void> | null = null;
+const completedShutdownSteps = new Set<string>();
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
@@ -436,7 +442,7 @@ const STARTUP_RETRY_DELAYS_MS = [
 const timelineLifecycle = new TimelineRuntimeLifecycle<TimelineV2Runtime>({
 	async createRuntime() {
 		const reflection = reflectionRuntime;
-		if (reflection === null || shutdownPromise !== null) {
+		if (reflection === null || shutdownRequested) {
 			throw new Error(
 				"Timeline runtime cannot start without an active reflection runtime.",
 			);
@@ -795,7 +801,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 				if (
 					vault.availability === "available" &&
 					reflectionRuntime !== null &&
-					shutdownPromise === null &&
+					!shutdownRequested &&
 					timelineLifecycle.current === null &&
 					!timelineLifecycle.recoveryPending
 				) {
@@ -1108,39 +1114,119 @@ petWindow.webview.on("dom-ready", () => {
 });
 
 function shutdown(): Promise<void> {
+	shutdownRequested = true;
 	if (shutdownPromise) return shutdownPromise;
-	shutdownPromise = (async () => {
-		cancelStartupRetryWait?.();
-		auditCaptureCoordinator.dispose();
-		relayBridge.abortAll();
-		await dataCenterSync?.stop();
-		await sidecar.stop();
-		await stopActivityWindowDelivery();
-		// Startup owns both the initial native start and any reflection-service
-		// start. Waiting here prevents a late candidate from restarting the
-		// native sensor process after shutdown has already stopped it.
-		await startupPromise;
-		await timelineLifecycle.close();
-		await reflectionRuntime?.close();
-		reflectionRuntime = null;
-		await agent.stop();
-		agentRepository.close();
-		petStateArbiter.dispose();
-		petWindowController.dispose();
-		try {
-			petWindow.close();
-		} catch {}
-	})();
-	return shutdownPromise;
+	const steps = [
+		{
+			name: "startup-retry",
+			run: () => cancelStartupRetryWait?.(),
+		},
+		{
+			name: "audit-capture",
+			run: () => auditCaptureCoordinator.dispose(),
+		},
+		{
+			name: "model-relay",
+			run: () => relayBridge.abortAll(),
+		},
+		{
+			name: "data-center-sync",
+			run: () => dataCenterSync?.stop(),
+		},
+		{
+			name: "sensor-sidecar",
+			run: () => sidecar.stop(),
+		},
+		{
+			name: "activity-window-delivery",
+			run: () => stopActivityWindowDelivery(),
+		},
+		{
+			name: "startup",
+			// Startup owns both the initial native start and any reflection-service
+			// start. Waiting here prevents a late candidate from restarting the
+			// native sensor process after shutdown has already stopped it.
+			run: async () => {
+				await startupPromise;
+			},
+		},
+		{
+			name: "timeline",
+			run: () => timelineLifecycle.close(),
+		},
+		{
+			name: "reflection",
+			run: async () => {
+				const runtime = reflectionRuntime;
+				reflectionRuntime = null;
+				await runtime?.close();
+			},
+		},
+		{
+			name: "local-tool-host",
+			critical: true,
+			run: () => agent.stop(),
+		},
+		{
+			name: "agent-repository",
+			run: () => agentRepository.close(),
+		},
+		{
+			name: "pet-state",
+			run: () => petStateArbiter.dispose(),
+		},
+		{
+			name: "pet-window-controller",
+			run: () => petWindowController.dispose(),
+		},
+		{
+			name: "pet-window",
+			run: () => petWindow.close(),
+		},
+	] as const;
+	const operation = runBestEffortShutdown(
+		steps
+			.filter((step) => !completedShutdownSteps.has(step.name))
+			.map((step) => ({
+				...step,
+				async run() {
+					await step.run();
+					completedShutdownSteps.add(step.name);
+				},
+			})),
+		(operation, error) => {
+			console.error(
+				`[shutdown] ${operation} failed:`,
+				error instanceof LocalClientError
+					? error.code
+					: error instanceof Error
+						? error.name
+						: "UNKNOWN",
+			);
+		},
+	);
+	shutdownPromise = operation;
+	void operation.then(
+		() => {
+			if (shutdownPromise === operation) shutdownPromise = null;
+		},
+		() => {
+			if (shutdownPromise === operation) shutdownPromise = null;
+		},
+	);
+	return operation;
 }
 
 app.on("reopen", () => {
-	void clientLifecycle.open();
+	// A shutdown veto intentionally rejects reopen while critical process owners
+	// are waiting for a later quit retry. Normal create failures are already
+	// projected through the lifecycle error handler.
+	void clientLifecycle.open().catch(() => undefined);
 });
-app.on("before-quit", () => {
-	// Normal menu/Dock quit still starts the same idempotent persistence path.
-	// Explicit WhaleHall quit actions await this path before calling Utils.quit.
-	void shutdown();
+Electrobun.events.on("before-quit", (event: BeforeQuitEvent) => {
+	// The high-level app event strips the response setter Electrobun requires
+	// to veto its synchronous quit path, so lifecycle owns the raw event.
+	clientLifecycle.handleBeforeQuit(event);
 });
 process.once("SIGINT", () => {
 	void clientLifecycle.quit();
@@ -1151,7 +1237,7 @@ process.once("SIGTERM", () => {
 
 startupPromise = (async () => {
 	let attempt = 0;
-	while (!shutdownPromise) {
+	while (!shutdownRequested) {
 		let candidate: WhaleHallReflectionRuntime | null = null;
 		try {
 			candidate = await createWhaleHallReflectionRuntime({
@@ -1159,7 +1245,7 @@ startupPromise = (async () => {
 				dataDirectory: localDataPath,
 				onWindowSealed: (window) => {
 					const delivery = activityWindowDelivery;
-					if (delivery === null || shutdownPromise !== null) return;
+					if (delivery === null || shutdownRequested) return;
 					return delivery.enqueueWindow(window);
 				},
 				environment: {
@@ -1167,13 +1253,13 @@ startupPromise = (async () => {
 					WHALEHALL_MODERNBERT_ALLOWED_ORIGINS: undefined,
 				},
 			});
-			if (shutdownPromise) {
+			if (shutdownRequested) {
 				await candidate.close();
 				return;
 			}
 			await startActivityWindowDelivery(candidate.repository);
 			await candidate.service.start();
-			if (shutdownPromise) {
+			if (shutdownRequested) {
 				await candidate.close();
 				return;
 			}
@@ -1196,7 +1282,7 @@ startupPromise = (async () => {
 				);
 				return;
 			}
-			if (shutdownPromise) {
+			if (shutdownRequested) {
 				await timelineLifecycle.close();
 				await reflectionRuntime?.close();
 				reflectionRuntime = null;
@@ -1227,7 +1313,7 @@ startupPromise = (async () => {
 				});
 				reflectionRuntime = null;
 			}
-			if (shutdownPromise) return;
+			if (shutdownRequested) return;
 			// A failed health/query can leave a child allocated but unusable.
 			// Stop it before retrying so AgentRuntime cannot mistake that child
 			// for a healthy already-started transport.
@@ -1276,7 +1362,7 @@ async function startActivityWindowDelivery(
 		activityReflectionConfiguration === null ||
 		activityReflectionRelayBridge === null ||
 		activityWindowDelivery !== null ||
-		shutdownPromise !== null
+		shutdownRequested
 	) {
 		return;
 	}

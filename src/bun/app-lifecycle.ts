@@ -3,6 +3,45 @@ export interface BackgroundWindow {
 	show(): unknown;
 }
 
+export interface BeforeQuitEvent {
+	response?: { allow: boolean };
+}
+
+export interface ShutdownStep {
+	name: string;
+	critical?: boolean;
+	run(): void | Promise<void>;
+}
+
+export class CriticalShutdownError extends Error {
+	constructor(public readonly failedSteps: readonly string[]) {
+		super(`Critical shutdown steps failed: ${failedSteps.join(", ")}`);
+		this.name = "CriticalShutdownError";
+	}
+}
+
+export async function runBestEffortShutdown(
+	steps: readonly ShutdownStep[],
+	onError: (step: string, error: unknown) => void = () => {},
+): Promise<void> {
+	const criticalFailures: string[] = [];
+	for (const step of steps) {
+		try {
+			await step.run();
+		} catch (error) {
+			if (step.critical) criticalFailures.push(step.name);
+			try {
+				onError(step.name, error);
+			} catch {
+				// Diagnostics must not prevent later process owners from shutting down.
+			}
+		}
+	}
+	if (criticalFailures.length > 0) {
+		throw new CriticalShutdownError(criticalFailures);
+	}
+}
+
 export interface BackgroundAppLifecycleOptions<
 	WindowType extends BackgroundWindow,
 > {
@@ -22,6 +61,8 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	private window: WindowType | null = null;
 	private opening: Promise<WindowType> | null = null;
 	private quitting: Promise<void> | null = null;
+	private quitRequested = false;
+	private exitAuthorized = false;
 
 	constructor(
 		private readonly options: BackgroundAppLifecycleOptions<WindowType>,
@@ -32,6 +73,11 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	}
 
 	open(): Promise<WindowType> {
+		if (this.quitRequested) {
+			return Promise.reject(
+				new Error("Cannot open a control window while WhaleHall is quitting."),
+			);
+		}
 		if (this.window !== null) {
 			this.window.show();
 			this.window.activate();
@@ -42,7 +88,7 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 		const opening = this.options
 			.createWindow()
 			.then((window) => {
-				if (this.quitting !== null) {
+				if (this.quitRequested) {
 					throw new Error(
 						"Cannot attach a control window while WhaleHall is quitting.",
 					);
@@ -65,17 +111,34 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 		if (this.window === window) this.window = null;
 	}
 
+	handleBeforeQuit(event: BeforeQuitEvent): void {
+		if (this.exitAuthorized) return;
+		// Electrobun exits synchronously after this event unless it is vetoed.
+		// Hold that exit until the application-owned child processes have stopped.
+		event.response = { allow: false };
+		void this.quit();
+	}
+
 	quit(): Promise<void> {
+		this.quitRequested = true;
 		if (this.quitting !== null) return this.quitting;
 		const quitting = (async () => {
 			try {
 				await this.opening?.catch(() => undefined);
 				await this.options.shutdown();
 			} catch (error) {
-				this.options.onError?.("quit", error);
-			} finally {
-				this.options.exit();
+				try {
+					this.options.onError?.("quit", error);
+				} catch {
+					// Diagnostics must not turn a failed shutdown into an authorized exit.
+				}
+				// Preserve the veto, but let a later quit retry any process owner that
+				// could not be stopped during this attempt.
+				this.quitting = null;
+				return;
 			}
+			this.exitAuthorized = true;
+			this.options.exit();
 		})();
 		this.quitting = quitting;
 		return quitting;

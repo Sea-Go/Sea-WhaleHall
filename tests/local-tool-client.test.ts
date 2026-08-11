@@ -34,6 +34,11 @@ class FakeChild implements ChildTransport {
 			value: string,
 			child: FakeChild,
 		) => void = () => {},
+		private readonly lifecycle: {
+			exitOnEnd?: boolean;
+			exitOnKill?: boolean;
+			throwOnKill?: boolean;
+		} = {},
 	) {
 		this.stdout = new ReadableStream({
 			start: (controller) => {
@@ -58,7 +63,7 @@ class FakeChild implements ChildTransport {
 			flush: () => 0,
 			end: () => {
 				this.endCalled = true;
-				this.exit(0);
+				if (this.lifecycle.exitOnEnd !== false) this.exit(0);
 				return 0;
 			},
 		};
@@ -85,7 +90,8 @@ class FakeChild implements ChildTransport {
 
 	kill(): void {
 		this.killCalled = true;
-		this.exit(143);
+		if (this.lifecycle.throwOnKill) throw new Error("kill failed");
+		if (this.lifecycle.exitOnKill !== false) this.exit(143);
 	}
 }
 
@@ -286,6 +292,95 @@ describe("LocalToolClient", () => {
 		await client.stop();
 		expect(child.endCalled).toBe(true);
 		expect(child.killCalled).toBe(false);
+	});
+
+	test("waits for process exit after the graceful window requires a kill", async () => {
+		const child = new FakeChild(() => {}, {
+			exitOnEnd: false,
+			exitOnKill: false,
+		});
+		let gracefulWindowMs: number | undefined;
+		const shutdownSleeps: number[] = [];
+		const client = new LocalToolClient("fake", {
+			spawn: () => child,
+			shutdownSleep: async (durationMs) => {
+				gracefulWindowMs ??= durationMs;
+				shutdownSleeps.push(durationMs);
+				if (durationMs === 2_000) await new Promise(() => {});
+			},
+		});
+		await client.start();
+
+		let settled = false;
+		const stopping = client.stop();
+		expect(client.stop()).toBe(stopping);
+		void stopping.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		for (let attempt = 0; attempt < 100 && !child.killCalled; attempt += 1) {
+			await Bun.sleep(1);
+		}
+
+		expect(child.endCalled).toBe(true);
+		expect(gracefulWindowMs).toBe(10_000);
+		expect(shutdownSleeps).toEqual([10_000, 2_000]);
+		expect(child.killCalled).toBe(true);
+		expect(settled).toBe(false);
+		child.exit(143);
+		await expect(stopping).rejects.toMatchObject({ code: "STOP_FAILED" });
+		expect(settled).toBe(true);
+	});
+
+	test("retains ownership when a successful kill does not produce an exit", async () => {
+		const child = new FakeChild(() => {}, {
+			exitOnEnd: false,
+			exitOnKill: false,
+		});
+		const shutdownSleeps: number[] = [];
+		const client = new LocalToolClient("fake", {
+			spawn: () => child,
+			shutdownSleep: async (durationMs) => {
+				shutdownSleeps.push(durationMs);
+			},
+		});
+		await client.start();
+
+		await expect(client.stop()).rejects.toMatchObject({ code: "STOP_FAILED" });
+		expect(shutdownSleeps).toEqual([10_000, 2_000]);
+		expect(child.killCalled).toBe(true);
+		expect(client.isRunning).toBe(true);
+		child.exit(143);
+		await Promise.resolve();
+		expect(client.isRunning).toBe(false);
+	});
+
+	test("reports a kill failure after the graceful window", async () => {
+		const child = new FakeChild(() => {}, {
+			exitOnEnd: false,
+			throwOnKill: true,
+		});
+		const shutdownSleeps: number[] = [];
+		const client = new LocalToolClient("fake", {
+			spawn: () => child,
+			shutdownSleep: async (durationMs) => {
+				shutdownSleeps.push(durationMs);
+			},
+		});
+		await client.start();
+
+		await expect(client.stop()).rejects.toMatchObject({ code: "STOP_FAILED" });
+		expect(shutdownSleeps).toEqual([10_000, 2_000]);
+		expect(child.endCalled).toBe(true);
+		expect(child.killCalled).toBe(true);
+		expect(client.isRunning).toBe(true);
+		child.exit(143);
+		await Promise.resolve();
+		expect(client.isRunning).toBe(false);
 	});
 
 	test("injects only the explicitly prepared startup goal JSON", async () => {

@@ -584,14 +584,39 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let observer_config = ObserverSupervisorConfig::from_environment().map_err(io::Error::other)?;
+    let observer = ObserverSupervisor::start(observer_config, observation_journal.clone());
+    serve_session_with_observer(
+        reader,
+        writer,
+        host,
+        services,
+        event_journal,
+        observation_journal,
+        observer,
+    )
+    .await
+}
+
+async fn serve_session_with_observer<R, W>(
+    reader: R,
+    writer: W,
+    host: Arc<ToolHost>,
+    services: ResidentServices,
+    event_journal: EventJournal,
+    observation_journal: ObservationJournal,
+    observer: ObserverSupervisor,
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let retention_task =
         EventRetentionTask::start(event_journal.clone(), EVENT_RETENTION_CLEANUP_INTERVAL);
     let observation_retention_task = ObservationRetentionTask::start(
         observation_journal.clone(),
         OBSERVATION_RETENTION_CLEANUP_INTERVAL,
     );
-    let observer_config = ObserverSupervisorConfig::from_environment().map_err(io::Error::other)?;
-    let observer = ObserverSupervisor::start(observer_config, observation_journal.clone());
     let observation_services = ObservationServices {
         journal: observation_journal.clone(),
         observer: observer.clone(),
@@ -731,6 +756,9 @@ where
         );
     }
 
+    // EOF means the owning Bun client has already rejected every pending call.
+    // Do not let a long-running request delay Observer's bounded helper teardown.
+    calls.abort_all();
     while calls.join_next().await.is_some() {}
     observer.shutdown().await;
     observation_retention_task.shutdown().await;
@@ -759,19 +787,41 @@ struct ObservationRetentionTask {
     task: JoinHandle<()>,
 }
 
+type ObservationCleanup = dyn Fn(&ObservationJournal) + Send + Sync + 'static;
+
 impl ObservationRetentionTask {
     fn start(observation_journal: ObservationJournal, cleanup_interval: Duration) -> Self {
-        run_observation_retention_cleanup(&observation_journal);
+        Self::start_with_cleanup(
+            observation_journal,
+            cleanup_interval,
+            Arc::new(run_observation_retention_cleanup),
+        )
+    }
+
+    fn start_with_cleanup(
+        observation_journal: ObservationJournal,
+        cleanup_interval: Duration,
+        cleanup: Arc<ObservationCleanup>,
+    ) -> Self {
         let (stop, mut stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             let mut ticker = interval_at(Instant::now() + cleanup_interval, cleanup_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
+                let cleanup_journal = observation_journal.clone();
+                let cleanup_operation = cleanup.clone();
+                if tokio::task::spawn_blocking(move || cleanup_operation(&cleanup_journal))
+                    .await
+                    .is_err()
+                {
+                    // Deliberately omit panic payloads because cleanup may be
+                    // operating on private observation records.
+                    eprintln!("observation retention cleanup worker failed");
+                }
+
                 tokio::select! {
                     _ = &mut stopped => break,
-                    _ = ticker.tick() => {
-                        run_observation_retention_cleanup(&observation_journal);
-                    }
+                    _ = ticker.tick() => {}
                 }
             }
         });
@@ -1388,8 +1438,8 @@ mod tests {
         ActivityConfig, ActivityError, ActivityService, ForegroundApp, ForegroundAppProvider,
     };
     use whalehall_local_protocol::{
-        EventCommitParams, EventQueryParams, SemanticQueryParams, desktop_event_kinds,
-        semantic_event_kinds,
+        EventCommitParams, EventQueryParams, MonitoringState, SemanticQueryParams,
+        desktop_event_kinds, semantic_event_kinds,
     };
 
     use super::*;
@@ -1606,10 +1656,22 @@ mod tests {
             .write_all(b"{\"id\":\"activity\",\"method\":\"tool.call\",\"params\":{\"name\":\"activity.status\",\"arguments\":{}}}\n")
             .await
             .expect("write activity status");
-        input.shutdown().await.expect("close input");
-
         let mut output = BufReader::new(output);
         let mut lines = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while lines.len() < 6 {
+                let mut line = String::new();
+                assert_ne!(
+                    output.read_line(&mut line).await.expect("read output"),
+                    0,
+                    "server closed before completing the accepted requests",
+                );
+                lines.push(line);
+            }
+        })
+        .await
+        .expect("accepted requests complete before EOF");
+        input.shutdown().await.expect("close input");
         loop {
             let mut line = String::new();
             if output.read_line(&mut line).await.expect("read output") == 0 {
@@ -1627,6 +1689,74 @@ mod tests {
         assert!(lines[2].contains("activity.status"));
         assert!(lines[2].contains("device.environment"));
         assert!(lines.iter().any(|line| line.contains("usage.sqlite3")));
+    }
+
+    #[tokio::test]
+    async fn eof_aborts_long_call_before_observer_teardown() {
+        let (mut input, server_input) = duplex(16 * 1024);
+        let (server_output, output) = duplex(16 * 1024);
+        let (directory, activity) = test_activity();
+        let event_journal =
+            EventJournal::open(directory.path().join("events.sqlite3")).expect("open events");
+        let observation_journal =
+            ObservationJournal::open_with_config(ObservationJournalConfig::new(
+                directory.path().join("observations.sqlite3"),
+                Arc::new(MemoryObservationKeyProvider::new([8; 32])),
+            ))
+            .expect("open observations");
+        let observer = ObserverSupervisor::start(
+            ObserverSupervisorConfig {
+                enabled: false,
+                capture_content: false,
+                excluded_bundle_ids: Vec::new(),
+                helper_path: None,
+            },
+            observation_journal.clone(),
+        );
+        let observer_status = observer.clone();
+        let host = Arc::new(ToolHost::with_activity(activity.clone()));
+        let server = tokio::spawn(serve_session_with_observer(
+            BufReader::new(server_input),
+            server_output,
+            host,
+            ResidentServices::activity_only(activity),
+            event_journal,
+            observation_journal,
+            observer,
+        ));
+        let mut output = BufReader::new(output);
+
+        input
+            .write_all(
+                b"{\"id\":\"blocked\",\"method\":\"tool.call\",\"params\":{\"name\":\"demo.wait\",\"arguments\":{\"durationMs\":5000}}}\n",
+            )
+            .await
+            .expect("write long-running call");
+        let mut started = String::new();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                started.clear();
+                assert_ne!(
+                    output.read_line(&mut started).await.expect("read output"),
+                    0,
+                    "server closed before the tool call started",
+                );
+                let frame: Value = serde_json::from_str(&started).expect("parse output frame");
+                if frame["event"] == "tool.started" && frame["callId"] == "blocked" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("long-running call starts");
+
+        input.shutdown().await.expect("close input");
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("EOF must not wait for the five-second tool call")
+            .expect("server join")
+            .expect("server result");
+        assert_eq!(observer_status.status().state, MonitoringState::Stopped);
     }
 
     #[tokio::test]
@@ -1910,6 +2040,58 @@ mod tests {
         .await
         .expect("scheduled cleanup should run");
         task.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn observation_retention_cleanup_does_not_block_startup_runtime() {
+        let directory = tempfile::tempdir().expect("create observation retention directory");
+        let journal = ObservationJournal::open_with_config(ObservationJournalConfig::new(
+            directory.path().join("observation-journal.sqlite3"),
+            Arc::new(MemoryObservationKeyProvider::new([7; 32])),
+        ))
+        .expect("open observation retention journal");
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let entered_tx = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let cleanup = Arc::new(move |_: &ObservationJournal| {
+            if let Some(entered_tx) = entered_tx.lock().expect("lock cleanup entry sender").take() {
+                let _ = entered_tx.send(());
+            }
+            let _ = release_rx
+                .lock()
+                .expect("lock cleanup release receiver")
+                .recv_timeout(Duration::from_secs(1));
+        });
+
+        let started_at = std::time::Instant::now();
+        let task =
+            ObservationRetentionTask::start_with_cleanup(journal, Duration::from_secs(60), cleanup);
+        assert!(
+            started_at.elapsed() < Duration::from_millis(500),
+            "retention cleanup blocked the current-thread runtime during startup"
+        );
+        let runtime_resumed_at = std::time::Instant::now();
+        tokio::task::yield_now().await;
+        assert!(
+            runtime_resumed_at.elapsed() < Duration::from_millis(500),
+            "retention cleanup ran on the current-thread runtime"
+        );
+        tokio::time::timeout(Duration::from_secs(1), entered_rx)
+            .await
+            .expect("cleanup worker start timed out")
+            .expect("cleanup worker did not report entry");
+        let shutdown = tokio::spawn(task.shutdown());
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "retention shutdown abandoned the in-flight cleanup worker"
+        );
+        release_tx.send(()).expect("release cleanup worker");
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("retention shutdown timed out")
+            .expect("retention shutdown task failed");
     }
 
     #[tokio::test]
