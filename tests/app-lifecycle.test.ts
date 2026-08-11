@@ -134,13 +134,16 @@ describe("background application lifecycle", () => {
 		expect(exitCount).toBe(1);
 	});
 
-	test("a failed shutdown is reported and does not authorize exit", async () => {
+	test("a failed shutdown is reported and a later quit retries before exit", async () => {
 		const errors: string[] = [];
 		let exitCount = 0;
+		let shutdownCount = 0;
+		let shutdownFails = true;
 		const lifecycle = new BackgroundAppLifecycle({
 			createWindow: async () => new TestWindow(),
 			shutdown: async () => {
-				throw new Error("shutdown failed");
+				shutdownCount += 1;
+				if (shutdownFails) throw new Error("shutdown failed");
 			},
 			exit: () => {
 				exitCount += 1;
@@ -153,9 +156,18 @@ describe("background application lifecycle", () => {
 		await lifecycle.quit();
 		expect(errors).toEqual(["quit"]);
 		expect(exitCount).toBe(0);
+		expect(shutdownCount).toBe(1);
+		await expect(lifecycle.open()).rejects.toThrow(
+			"while WhaleHall is quitting",
+		);
+
+		shutdownFails = false;
 		const repeatedEvent: { response?: { allow: boolean } } = {};
 		lifecycle.handleBeforeQuit(repeatedEvent);
 		expect(repeatedEvent.response).toEqual({ allow: false });
+		await lifecycle.quit();
+		expect(shutdownCount).toBe(2);
+		expect(exitCount).toBe(1);
 	});
 
 	test("best-effort shutdown continues after failures and diagnostic errors", async () => {

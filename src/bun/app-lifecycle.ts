@@ -61,6 +61,7 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	private window: WindowType | null = null;
 	private opening: Promise<WindowType> | null = null;
 	private quitting: Promise<void> | null = null;
+	private quitRequested = false;
 	private exitAuthorized = false;
 
 	constructor(
@@ -72,6 +73,11 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	}
 
 	open(): Promise<WindowType> {
+		if (this.quitRequested) {
+			return Promise.reject(
+				new Error("Cannot open a control window while WhaleHall is quitting."),
+			);
+		}
 		if (this.window !== null) {
 			this.window.show();
 			this.window.activate();
@@ -82,7 +88,7 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 		const opening = this.options
 			.createWindow()
 			.then((window) => {
-				if (this.quitting !== null) {
+				if (this.quitRequested) {
 					throw new Error(
 						"Cannot attach a control window while WhaleHall is quitting.",
 					);
@@ -114,6 +120,7 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	}
 
 	quit(): Promise<void> {
+		this.quitRequested = true;
 		if (this.quitting !== null) return this.quitting;
 		const quitting = (async () => {
 			try {
@@ -125,6 +132,9 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 				} catch {
 					// Diagnostics must not turn a failed shutdown into an authorized exit.
 				}
+				// Preserve the veto, but let a later quit retry any process owner that
+				// could not be stopped during this attempt.
+				this.quitting = null;
 				return;
 			}
 			this.exitAuthorized = true;

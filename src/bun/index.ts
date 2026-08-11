@@ -428,7 +428,9 @@ const rawOnlyAuditExporter = new TimelineFiveMinuteAuditExporter(
 	},
 );
 let petVisible = true;
+let shutdownRequested = false;
 let shutdownPromise: Promise<void> | null = null;
+const completedShutdownSteps = new Set<string>();
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
@@ -440,7 +442,7 @@ const STARTUP_RETRY_DELAYS_MS = [
 const timelineLifecycle = new TimelineRuntimeLifecycle<TimelineV2Runtime>({
 	async createRuntime() {
 		const reflection = reflectionRuntime;
-		if (reflection === null || shutdownPromise !== null) {
+		if (reflection === null || shutdownRequested) {
 			throw new Error(
 				"Timeline runtime cannot start without an active reflection runtime.",
 			);
@@ -799,7 +801,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 				if (
 					vault.availability === "available" &&
 					reflectionRuntime !== null &&
-					shutdownPromise === null &&
+					!shutdownRequested &&
 					timelineLifecycle.current === null &&
 					!timelineLifecycle.recoveryPending
 				) {
@@ -1112,76 +1114,86 @@ petWindow.webview.on("dom-ready", () => {
 });
 
 function shutdown(): Promise<void> {
+	shutdownRequested = true;
 	if (shutdownPromise) return shutdownPromise;
-	shutdownPromise = runBestEffortShutdown(
-		[
-			{
-				name: "startup-retry",
-				run: () => cancelStartupRetryWait?.(),
+	const steps = [
+		{
+			name: "startup-retry",
+			run: () => cancelStartupRetryWait?.(),
+		},
+		{
+			name: "audit-capture",
+			run: () => auditCaptureCoordinator.dispose(),
+		},
+		{
+			name: "model-relay",
+			run: () => relayBridge.abortAll(),
+		},
+		{
+			name: "data-center-sync",
+			run: () => dataCenterSync?.stop(),
+		},
+		{
+			name: "sensor-sidecar",
+			run: () => sidecar.stop(),
+		},
+		{
+			name: "activity-window-delivery",
+			run: () => stopActivityWindowDelivery(),
+		},
+		{
+			name: "startup",
+			// Startup owns both the initial native start and any reflection-service
+			// start. Waiting here prevents a late candidate from restarting the
+			// native sensor process after shutdown has already stopped it.
+			run: async () => {
+				await startupPromise;
 			},
-			{
-				name: "audit-capture",
-				run: () => auditCaptureCoordinator.dispose(),
+		},
+		{
+			name: "timeline",
+			run: () => timelineLifecycle.close(),
+		},
+		{
+			name: "reflection",
+			run: async () => {
+				const runtime = reflectionRuntime;
+				reflectionRuntime = null;
+				await runtime?.close();
 			},
-			{
-				name: "model-relay",
-				run: () => relayBridge.abortAll(),
-			},
-			{
-				name: "data-center-sync",
-				run: () => dataCenterSync?.stop(),
-			},
-			{
-				name: "sensor-sidecar",
-				run: () => sidecar.stop(),
-			},
-			{
-				name: "activity-window-delivery",
-				run: () => stopActivityWindowDelivery(),
-			},
-			{
-				name: "startup",
-				// Startup owns both the initial native start and any reflection-service
-				// start. Waiting here prevents a late candidate from restarting the
-				// native sensor process after shutdown has already stopped it.
-				run: async () => {
-					await startupPromise;
+		},
+		{
+			name: "local-tool-host",
+			critical: true,
+			run: () => agent.stop(),
+		},
+		{
+			name: "agent-repository",
+			run: () => agentRepository.close(),
+		},
+		{
+			name: "pet-state",
+			run: () => petStateArbiter.dispose(),
+		},
+		{
+			name: "pet-window-controller",
+			run: () => petWindowController.dispose(),
+		},
+		{
+			name: "pet-window",
+			run: () => petWindow.close(),
+		},
+	] as const;
+	const operation = runBestEffortShutdown(
+		steps
+			.filter((step) => !completedShutdownSteps.has(step.name))
+			.map((step) => ({
+				...step,
+				async run() {
+					await step.run();
+					completedShutdownSteps.add(step.name);
 				},
-			},
-			{
-				name: "timeline",
-				run: () => timelineLifecycle.close(),
-			},
-			{
-				name: "reflection",
-				run: async () => {
-					const runtime = reflectionRuntime;
-					reflectionRuntime = null;
-					await runtime?.close();
-				},
-			},
-			{
-				name: "local-tool-host",
-				critical: true,
-				run: () => agent.stop(),
-			},
-			{
-				name: "agent-repository",
-				run: () => agentRepository.close(),
-			},
-			{
-				name: "pet-state",
-				run: () => petStateArbiter.dispose(),
-			},
-			{
-				name: "pet-window-controller",
-				run: () => petWindowController.dispose(),
-			},
-			{
-				name: "pet-window",
-				run: () => petWindow.close(),
-			},
-		],
+			})),
 		(operation, error) => {
 			console.error(
 				`[shutdown] ${operation} failed:`,
@@ -1193,7 +1205,16 @@ function shutdown(): Promise<void> {
 			);
 		},
 	);
-	return shutdownPromise;
+	shutdownPromise = operation;
+	void operation.then(
+		() => {
+			if (shutdownPromise === operation) shutdownPromise = null;
+		},
+		() => {
+			if (shutdownPromise === operation) shutdownPromise = null;
+		},
+	);
+	return operation;
 }
 
 app.on("reopen", () => {
@@ -1213,7 +1234,7 @@ process.once("SIGTERM", () => {
 
 startupPromise = (async () => {
 	let attempt = 0;
-	while (!shutdownPromise) {
+	while (!shutdownRequested) {
 		let candidate: WhaleHallReflectionRuntime | null = null;
 		try {
 			candidate = await createWhaleHallReflectionRuntime({
@@ -1221,7 +1242,7 @@ startupPromise = (async () => {
 				dataDirectory: localDataPath,
 				onWindowSealed: (window) => {
 					const delivery = activityWindowDelivery;
-					if (delivery === null || shutdownPromise !== null) return;
+					if (delivery === null || shutdownRequested) return;
 					return delivery.enqueueWindow(window);
 				},
 				environment: {
@@ -1229,13 +1250,13 @@ startupPromise = (async () => {
 					WHALEHALL_MODERNBERT_ALLOWED_ORIGINS: undefined,
 				},
 			});
-			if (shutdownPromise) {
+			if (shutdownRequested) {
 				await candidate.close();
 				return;
 			}
 			await startActivityWindowDelivery(candidate.repository);
 			await candidate.service.start();
-			if (shutdownPromise) {
+			if (shutdownRequested) {
 				await candidate.close();
 				return;
 			}
@@ -1258,7 +1279,7 @@ startupPromise = (async () => {
 				);
 				return;
 			}
-			if (shutdownPromise) {
+			if (shutdownRequested) {
 				await timelineLifecycle.close();
 				await reflectionRuntime?.close();
 				reflectionRuntime = null;
@@ -1289,7 +1310,7 @@ startupPromise = (async () => {
 				});
 				reflectionRuntime = null;
 			}
-			if (shutdownPromise) return;
+			if (shutdownRequested) return;
 			// A failed health/query can leave a child allocated but unusable.
 			// Stop it before retrying so AgentRuntime cannot mistake that child
 			// for a healthy already-started transport.
@@ -1338,7 +1359,7 @@ async function startActivityWindowDelivery(
 		activityReflectionConfiguration === null ||
 		activityReflectionRelayBridge === null ||
 		activityWindowDelivery !== null ||
-		shutdownPromise !== null
+		shutdownRequested
 	) {
 		return;
 	}
