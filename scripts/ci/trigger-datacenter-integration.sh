@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly datacenter_gitlab_origin="https://gitlab.sea-ridethewindbreakthewaves.xyz"
+readonly whalehall_repository_url="https://github.com/Sea-Go/Sea-WhaleHall.git"
 readonly pipeline_deadline_seconds=3600
 readonly poll_interval_seconds=15
 
@@ -49,6 +50,7 @@ curl --fail-with-body --silent --show-error \
 	--form-string "token=$DATACENTER_GITLAB_TRIGGER_TOKEN" \
 	--form-string "ref=$DATACENTER_GITLAB_REF" \
 	--form-string "variables[WHALEHALL_CANDIDATE_SHA]=$WHALEHALL_CANDIDATE_SHA" \
+	--form-string "variables[WHALEHALL_REPOSITORY_URL]=$whalehall_repository_url" \
 	--output "$work_dir/trigger.json" \
 	"$trigger_url"
 
