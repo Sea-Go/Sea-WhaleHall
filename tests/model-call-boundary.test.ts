@@ -50,6 +50,36 @@ describe("desktop model-call boundary", () => {
 			"@whalehall-model-boundary-exception verified-classifier",
 		);
 	});
+
+	test("routes only reflection completions through the production model origin", async () => {
+		const fragment = await readFile(
+			join(repositoryRoot, "deploy/home-cloud/model-relay/Caddyfile.fragment"),
+			"utf8",
+		);
+		expect(fragment).toMatch(
+			/@whalehall_model_relay \{\s+method POST\s+path \/v1\/activity\/completions\s+\}/,
+		);
+		expect(fragment).toMatch(
+			/@whalehall_model_relay_invalid_method \{\s+not method POST\s+path \/v1\/activity\/completions\s+\}/,
+		);
+		expect(fragment).toContain(
+			"respond @whalehall_model_relay_invalid_method 405",
+		);
+		const dataCenterDenyMatcher = fragment.match(
+			/@whalehall_datacenter_paths \{([\s\S]*?)\n\}/,
+		)?.[1];
+		expect(dataCenterDenyMatcher).toBeDefined();
+		for (const path of [
+			"/v1/auth/*",
+			"/v1/chat/*",
+			"/v1/agent/*",
+			"/v1/devices/*",
+			"/api/v1/agent/*",
+		]) {
+			expect(dataCenterDenyMatcher).toContain(path);
+		}
+		expect(fragment).toContain("respond @whalehall_datacenter_paths 404");
+	});
 });
 
 async function sourceFiles(): Promise<Map<string, string>> {

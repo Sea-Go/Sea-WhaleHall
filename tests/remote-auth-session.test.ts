@@ -111,6 +111,7 @@ describe("RemoteAuthSessionManager", () => {
 		const credentials = new MemoryCredentials();
 		const observed = {
 			modelHeaders: null as Headers | null,
+			bearerHeaders: null as Headers | null,
 			modelRedirect: null as RequestRedirect | null,
 		};
 		const manager = new RemoteAuthSessionManager(credentials, {
@@ -120,7 +121,11 @@ describe("RemoteAuthSessionManager", () => {
 				if (new URL(String(input)).pathname === "/v1/auth/sessions") {
 					return Response.json(sessionPayload("active"));
 				}
-				observed.modelHeaders = new Headers(init?.headers);
+				if (new URL(String(input)).pathname === "/v1/agent/register") {
+					observed.bearerHeaders = new Headers(init?.headers);
+				} else {
+					observed.modelHeaders = new Headers(init?.headers);
+				}
 				observed.modelRedirect = init?.redirect ?? null;
 				return Response.json({ id: "model-response" });
 			}) as unknown as typeof fetch,
@@ -130,6 +135,7 @@ describe("RemoteAuthSessionManager", () => {
 		const identity = manager.captureCurrentSession();
 		if (!identity) throw new Error("Expected a current session.");
 		await manager.authorizedFetch("/v1/chat/completions", { method: "POST" });
+		await manager.bearerFetch("/v1/agent/register", { method: "POST" });
 
 		const headers = observed.modelHeaders;
 		if (!headers)
@@ -137,6 +143,8 @@ describe("RemoteAuthSessionManager", () => {
 		expect(headers.get("x-whalehall-agent-key")).toBe(personalRelayKey);
 		expect(headers.get("authorization")).toStartWith("Bearer ");
 		expect(headers.get("x-session-generation")).toBe("1");
+		expect(observed.bearerHeaders?.get("authorization")).toStartWith("Bearer ");
+		expect(observed.bearerHeaders?.get("x-whalehall-agent-key")).toBeNull();
 		expect(observed.modelRedirect).toBe("error");
 		expect(manager.isCurrentSession(identity)).toBeTrue();
 		expect(await manager.clearSessionIfCurrent(identity)).toBeTrue();

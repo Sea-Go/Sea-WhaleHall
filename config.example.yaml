@@ -7,5 +7,15 @@ reflection:
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
   apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
+
+# Content encryption is implemented but remains separately opt-in. Enabling it
+# also requires a per-domain "content" consent below.
+cloudSync:
+  enabled: false
+  contentEncryptionEnabled: false
+  consents:
+    activity: "off"
+    browser: "off"
+    presence: "off"

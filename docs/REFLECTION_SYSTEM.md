@@ -537,8 +537,8 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 
 家里云配置以仓库根目录的
 [`config.example.yaml`](../config.example.yaml) 为模板，并阅读
-[远端模型配置说明](REMOTE_MODEL_CONFIGURATION.md)。它只有两个角色，均为
-`name`、`baseurl`、`apikey`：
+[远端模型配置说明](REMOTE_MODEL_CONFIGURATION.md)。它有两个固定模型角色和一个默认关闭的
+`cloudSync` 策略：
 
 ```yaml
 reflection:
@@ -548,11 +548,20 @@ reflection:
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
   apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
+
+cloudSync:
+  enabled: false
+  contentEncryptionEnabled: false
+  consents:
+    activity: "off"
+    browser: "off"
+    presence: "off"
 ```
 
-两个 `baseurl` 都必须是无 credentials、query 或 fragment 的远端 HTTPS relay origin。
+`reflection.baseurl` 必须是固定 model origin；`agent.baseurl` 必须是 production 或 staging
+DataCenter origin。两者都不得含 credentials、query 或 fragment。
 `apikey` 必须是 owner-only user-data 文件中的直接字面量密钥；不支持环境变量引用。无效、
 部分、symlink 或超大的配置会回退到安全默认值，且不会覆盖用户原文件。
 

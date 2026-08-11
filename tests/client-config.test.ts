@@ -10,17 +10,19 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	REFLECTION_RELAY_COMPLETIONS_PATH,
-	WHALEHALL_RELAY_BASE_URL,
-	WHALEHALL_RELAY_MODEL,
 	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	type ClientConfiguration,
 	DEFAULT_CLIENT_CONFIGURATION,
 	loadOrCreateClientConfiguration,
+	REFLECTION_RELAY_COMPLETIONS_PATH,
 	reflectionModelConfigurationFromConfiguration,
-	UNPROVISIONED_REFLECTION_RELAY_KEY,
 	UNPROVISIONED_AGENT_RELAY_KEY,
+	UNPROVISIONED_REFLECTION_RELAY_KEY,
+	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+	WHALEHALL_DATA_CENTER_STAGING_BASE_URL,
+	WHALEHALL_RELAY_BASE_URL,
+	WHALEHALL_RELAY_MODEL,
 	writeProvisionedClientConfiguration,
 } from "../src/bun/client-config";
 
@@ -52,8 +54,16 @@ function templateConfiguration(): string {
 		"",
 		"agent:",
 		`  name: "${WHALEHALL_RELAY_MODEL}"`,
-		`  baseurl: "${WHALEHALL_RELAY_BASE_URL}"`,
+		`  baseurl: "${WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL}"`,
 		`  apikey: "${UNPROVISIONED_AGENT_RELAY_KEY}"`,
+		"",
+		"cloudSync:",
+		"  enabled: false",
+		"  contentEncryptionEnabled: false",
+		"  consents:",
+		"    activity: off",
+		"    browser: off",
+		"    presence: off",
 		"",
 	].join("\n");
 }
@@ -67,9 +77,10 @@ function provisionedConfiguration(): ClientConfiguration {
 		},
 		agent: {
 			name: WHALEHALL_RELAY_MODEL,
-			baseurl: WHALEHALL_RELAY_BASE_URL,
+			baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 			apikey: fixtureRelayKey,
 		},
+		cloudSync: structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync),
 	};
 }
 
@@ -111,6 +122,58 @@ describe("WhaleHall client config.yaml", () => {
 		expect(
 			agentModelConfigurationFromConfiguration(result.configuration),
 		).toBeNull();
+	});
+
+	test("accepts staging only as an explicit DataCenter origin and keeps sync disabled", () => {
+		const directory = temporaryDirectory();
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		writeFileSync(
+			path,
+			templateConfiguration().replace(
+				WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+				WHALEHALL_DATA_CENTER_STAGING_BASE_URL,
+			),
+		);
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.status).toBe("loaded");
+		expect(result.configuration.agent.baseurl).toBe(
+			WHALEHALL_DATA_CENTER_STAGING_BASE_URL,
+		);
+		expect(result.configuration.cloudSync.enabled).toBeFalse();
+	});
+
+	test("normalizes a pre-split two-role model origin without enabling cloud sync", () => {
+		const directory = temporaryDirectory();
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		const oldConfiguration = templateConfiguration()
+			.replace(
+				WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+				WHALEHALL_RELAY_BASE_URL,
+			)
+			.split("\ncloudSync:")[0];
+		writeFileSync(path, `${oldConfiguration}\n`);
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.status).toBe("loaded");
+		expect(result.configuration.agent.baseurl).toBe(
+			WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+		);
+		expect(result.configuration.cloudSync).toEqual(
+			DEFAULT_CLIENT_CONFIGURATION.cloudSync,
+		);
 	});
 
 	test("loads literal reflection and personal relay keys into their separate roles", () => {
@@ -157,10 +220,7 @@ describe("WhaleHall client config.yaml", () => {
 				WHALEHALL_RELAY_BASE_URL,
 				`${WHALEHALL_RELAY_BASE_URL}${REFLECTION_RELAY_COMPLETIONS_PATH}`,
 			),
-			templateConfiguration().replace(
-				WHALEHALL_RELAY_MODEL,
-				"qwen3:other",
-			),
+			templateConfiguration().replace(WHALEHALL_RELAY_MODEL, "qwen3:other"),
 			templateConfiguration().replace(
 				`agent:\n  name: "${WHALEHALL_RELAY_MODEL}"`,
 				'agent:\n  name: "qwen3:other"',
@@ -168,6 +228,10 @@ describe("WhaleHall client config.yaml", () => {
 			templateConfiguration().replace(
 				UNPROVISIONED_AGENT_RELAY_KEY,
 				"a".repeat(1_025),
+			),
+			templateConfiguration().replace(
+				UNPROVISIONED_AGENT_RELAY_KEY,
+				"too-short",
 			),
 			`${templateConfiguration()}unexpected: true\n`,
 		];

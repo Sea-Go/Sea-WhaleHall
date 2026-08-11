@@ -48,13 +48,18 @@ import { AgentToolPolicy } from "./agent-tool-policy";
 import { BackgroundAppLifecycle } from "./app-lifecycle";
 import { CalendarRepository } from "./calendar-repository";
 import {
-	REFLECTION_RELAY_COMPLETIONS_PATH,
-	WHALEHALL_RELAY_MODEL,
 	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
+	REFLECTION_RELAY_COMPLETIONS_PATH,
+	WHALEHALL_RELAY_MODEL,
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
+import { DataCenterContentCrypto } from "./data-center-crypto";
+import {
+	DataCenterSyncService,
+	dataCenterSyncDiagnosticCode,
+} from "./data-center-sync";
 import {
 	AgentPermissionRevisionConflictError,
 	EncryptedAgentRepository,
@@ -67,9 +72,9 @@ import {
 import { exportFiveMinuteAuditToFile } from "./five-minute-audit-file-export";
 import { loadOrCreateInstallationId } from "./installation-id";
 import { WhaleHallAgentToolExecutor } from "./local-agent-tool-executor";
+import { MastraActivityReflectionAnalyzer } from "./mastra-activity-reflection";
 import { LocalAgentHostServices } from "./mastra-host-services";
 import { MastraSidecarClient } from "./mastra-sidecar-client";
-import { MastraActivityReflectionAnalyzer } from "./mastra-activity-reflection";
 import { ModelRelayTransport } from "./model-relay-transport";
 import { monitoringPermissionSettingsUrl } from "./monitoring-permission-settings";
 import {
@@ -81,6 +86,7 @@ import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { PlanningAuthorityService } from "./planning-authority-service";
 import { PrivateTrainingWindowExportCoordinator } from "./private-training-window-export";
+import { ReflectionModelRelayAuthorization } from "./reflection-model-relay-authorization";
 import {
 	createWhaleHallReflectionRuntime,
 	setRuntimeGoal,
@@ -90,7 +96,6 @@ import {
 	RemoteAuthError,
 	RemoteAuthSessionManager,
 } from "./remote-auth-session";
-import { ReflectionModelRelayAuthorization } from "./reflection-model-relay-authorization";
 import { SidecarModelRelayBridge } from "./sidecar-model-relay-bridge";
 import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import {
@@ -204,9 +209,10 @@ let relayBridge!: SidecarModelRelayBridge;
 let activityReflectionRelayBridge: SidecarModelRelayBridge | null = null;
 let activityAnalysisDispatcher: ActivityAnalysisDispatcher | null = null;
 let activityReflectionAnalyzer: MastraActivityReflectionAnalyzer | null = null;
+let dataCenterSync: DataCenterSyncService | null = null;
 
 const authSession = new RemoteAuthSessionManager(credentialStore, {
-	baseUrl: agentModelConfiguration?.baseurl,
+	baseUrl: clientConfiguration.configuration.agent.baseurl,
 	agentKey: agentModelConfiguration?.apikey,
 	onSessionExpired: () => {
 		try {
@@ -225,6 +231,7 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 		}
 		activeGoalStore?.invalidateSynchronously();
 		const cleanupTasks: Array<() => unknown | Promise<unknown>> = [
+			() => dataCenterSync?.stop(),
 			() => activeGoalStore.clearForAccountTransition(),
 		];
 		if (accountId && coordinator) {
@@ -302,7 +309,9 @@ const sidecar = new MastraSidecarClient({
 				const analyzer = activityReflectionAnalyzer;
 				const bridge = activityReflectionRelayBridge;
 				if (!analyzer?.hasPendingInvocation(ownerRunId) || !bridge) {
-					throw new Error("Reflection model relay call is not locally authorized.");
+					throw new Error(
+						"Reflection model relay call is not locally authorized.",
+					);
 				}
 				return bridge.open(call.requestId, params);
 			}
@@ -325,7 +334,9 @@ const sidecar = new MastraSidecarClient({
 			// Abort frames intentionally contain only the relay/run IDs. Pending
 			// reflection invocation ownership is therefore the capability check.
 			if (activityReflectionAnalyzer?.hasPendingInvocation(ownerRunId)) {
-				return activityReflectionRelayBridge?.abort(params) ?? { aborted: false };
+				return (
+					activityReflectionRelayBridge?.abort(params) ?? { aborted: false }
+				);
 			}
 			return coordinator.runBoundHostCall(ownerRunId, async () =>
 				relayBridge.abort(params),
@@ -389,6 +400,20 @@ const agent = new AgentRuntime(
 	}),
 	{ requireStartupGoalPreparation: true },
 );
+dataCenterSync = new DataCenterSyncService({
+	baseUrl: clientConfiguration.configuration.agent.baseurl,
+	configuration: clientConfiguration.configuration.cloudSync,
+	repository: agentRepository,
+	events: agent,
+	auth: authSession,
+	contentCrypto: new DataCenterContentCrypto(),
+	onError(error) {
+		console.warn(
+			"WhaleHall DataCenter cloud synchronization retry:",
+			dataCenterSyncDiagnosticCode(error),
+		);
+	},
+});
 const rawAuditSource = createRawFiveMinuteAuditSource(agent);
 const rawOnlyAuditExporter = new TimelineFiveMinuteAuditExporter(
 	rawAuditSource,
@@ -677,6 +702,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						);
 					}
 					activityAnalysisDispatcher?.wake();
+					dataCenterSync?.start();
 					return session;
 				}),
 			signIn: (input) =>
@@ -719,6 +745,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						);
 					}
 					activityAnalysisDispatcher?.wake();
+					dataCenterSync?.start();
 					return session;
 				}),
 			signOut: () =>
@@ -1086,6 +1113,7 @@ function shutdown(): Promise<void> {
 		cancelStartupRetryWait?.();
 		auditCaptureCoordinator.dispose();
 		relayBridge.abortAll();
+		await dataCenterSync?.stop();
 		await sidecar.stop();
 		await stopActivityWindowDelivery();
 		// Startup owns both the initial native start and any reflection-service

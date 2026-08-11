@@ -15,8 +15,8 @@ flowchart TB
     Pet["Transparent Canvas pet window"] -->|"Typed RPC"| Bun
     Bun <-->|"private Content-Length stdio"| Mastra["Bundled Node 22.18 Mastra Sidecar\nconversation, planning, Tool loop"]
     Mastra -->|"complete OpenAI-compatible request"| Bun
-    Bun -.->|"future bearer + HTTPS\nlocal test account disabled"| Relay["Remote auth + raw model relay"]
-    Relay --> LLM["OpenAI-compatible model"]
+    Bun -.->|"HTTPS · auth/bearer · chat relay key · Agent v2 signature"| DataCenter["DataCenter data origin\nauth, chat, Agent, cloud sync"]
+    DataCenter -->|"chat model forwarding"| LLM["OpenAI-compatible model"]
     Bun --> AgentDB["Encrypted Agent SQLite"]
     Bun --> CredentialHelper["Credential helper\nCredential Manager / Keychain"]
     Bun --> Agent["TypeScript reflection boundary"]
@@ -25,10 +25,10 @@ flowchart TB
     Reflection --> SealedWindow["sealed-window outbox"]
     SealedWindow -->|"complete client-owned prompt / Mastra Workflow"| Mastra
     Mastra -->|"complete OpenAI-compatible request"| Bun
-    Bun -->|"reflection relay key + HTTPS"| Relay
-    Relay -->|"CPU-only forward"| LLM
-    LLM -->|"model JSON"| Relay
-    Relay -->|"model JSON"| Bun
+    Bun -->|"reflection relay key + HTTPS"| ModelOrigin["Model origin\nreflection completion relay only"]
+    ModelOrigin -->|"CPU-only forward"| LLM
+    LLM -->|"model JSON"| ModelOrigin
+    ModelOrigin -->|"model JSON"| Bun
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
     Observer["Signed macOS Observer"] --> Server
     Server --> EventJournal["EventJournal · SQLite WAL"]
@@ -61,7 +61,7 @@ prompt from a sealed window, and normalizes the model JSON into reviewable
 time/action events plus a local score receipt. Mastra does not absorb the
 sensor catalogue or the deterministic Reflection pipeline.
 
-Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. The remote service has no conversation, planning, history, Tool, or prompt-injection API: it authenticates a short-lived bearer plus the same account's personal relay key, stores relay records, and forwards the already-complete OpenAI-compatible body to the fixed CPU-only upstream. Browser contexts never communicate directly, never receive bearer tokens or relay keys, and never supply account identity.
+Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. DataCenter authenticates a short-lived bearer plus the same account's personal relay key for chat and owns Agent/cloud APIs; the separate model origin accepts only the reflection completion route. Browser contexts never communicate directly, never receive bearer tokens or relay keys, and never supply account identity.
 
 Production login uses the configured remote email/password service. The submitted password is immediately cleared from React state; access and refresh credentials remain in Bun's secure credential storage, while the personal relay key remains only in owner-provisioned local `config.yaml`. WhaleHall does not fabricate credentials or fall back to a remote Agent.
 
@@ -76,7 +76,7 @@ Production login uses the configured remote email/password service. The submitte
 | Electrobun main process | [`src/bun`](src/bun) | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition |
 | Shared frontend contracts | [`src/shared`](src/shared) | Electrobun Typed RPC schemas shared with both WebViews |
 | Credential helper | [`whalehall-credential-helper`](whalehall-credential-helper) | One-shot OS vault access without secrets in argv, environment, stderr, or Renderer RPC |
-| Remote model relay | [`services/model-relay`](services/model-relay) | Authentication and byte-preserving OpenAI-compatible forwarding only; never an Agent |
+| Remote model relay | [`services/model-relay`](services/model-relay) | Model-origin reflection forwarding only in production Caddy; never an Agent |
 | Rust Local protocol | [`whalehall-local/protocol`](whalehall-local/protocol) | JSONL requests, responses, tool descriptors, events, and errors |
 | Rust Local core | [`whalehall-local/core`](whalehall-local/core) | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence |
 | Rust Local server | [`whalehall-local/server`](whalehall-local/server) | Concurrent stdin/stdout JSONL server and packaged executable |
@@ -205,11 +205,13 @@ the credential helper, verifies and stages the pinned Node runtime, and bundles
 the local Mastra Sidecar. On macOS it also builds and signs the Observer and
 versioned Vault Broker before the existing post-wrap and post-package security
 checks run. Desktop authentication and model requests use the owner-provisioned
-`config.yaml` two-role configuration. The reflection relay key and personal
+`config.yaml` fixed-role configuration. Reflection uses the model origin;
+authentication, chat, Agent registration, and opt-in encrypted cloud sync use the
+DataCenter origin. The reflection relay key and personal
 relay key are literal owner-only values; upstream model credentials remain in
 the separately deployed relay process. See
 [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) for
-the two-role configuration and deployment boundary, and
+the configuration and deployment boundary, and
 [`docs/CONVERSATION_AGENT_INTEGRATION.md`](docs/CONVERSATION_AGENT_INTEGRATION.md)
 for the desktop Agent lifecycle.
 
@@ -246,6 +248,15 @@ bun run build:canary
 ```
 
 GitHub Actions repeats these checks across hosted macOS and Windows, multiple Ubuntu versions, mainstream Linux distribution containers, and a virtual X11 desktop before retaining unsigned artifacts for seven days. The real desktop certification matrix and its runner requirements are documented in [`.github/CI_COMPATIBILITY.md`](.github/CI_COMPATIBILITY.md).
+
+Pull requests from repository-owned branches into the protected default branch
+also trigger DataCenter's GitLab integration pipeline with the exact WhaleHall
+head SHA. The credentialed `pull_request_target` job checks out only protected
+default-branch trigger logic; it never checks out or executes candidate code.
+Configure repository variables `DATACENTER_GITLAB_PROJECT_ID` and
+`DATACENTER_GITLAB_REF`, plus secrets `DATACENTER_GITLAB_TRIGGER_TOKEN` and
+`DATACENTER_GITLAB_API_TOKEN`. Fork pull requests fail closed and must be moved
+to a reviewed repository-owned branch before this required gate can run.
 
 ## Local Tool protocol
 

@@ -4,6 +4,11 @@ This directory is deployment material only. Do not deploy it until the
 corresponding PR is merged into `main`. It intentionally contains no Docker,
 FRP, Cloudflare, GPU, activity-Worker, or other-project changes.
 
+The public model origin routes only `POST /v1/activity/completions` to this
+service. Authentication, chat, Agent registration, consent, crypto context and
+desktop event ingestion belong to the DataCenter data origin and must not be
+added to this Caddy handler.
+
 ## Preconditions
 
 On the home cloud, verify the CPU-only target before changing either relay or
@@ -53,8 +58,8 @@ overwrite.
 4. Install `whalehall-model-relay.service` under
    `/etc/systemd/system/`. Its `ExecStart` expects `/usr/bin/node`; confirm that
    path resolves to Node 22 before enabling it.
-5. Add the exact handler in `Caddyfile.fragment` above generic model routing.
-   Preserve the existing `/v1/activity/analyze` handler verbatim.
+5. Add the exact allow and deny handlers in `Caddyfile.fragment` above generic
+   model routing. Preserve the existing `/v1/activity/analyze` handler verbatim.
 6. Only reload the two affected services:
 
 ```sh
@@ -71,14 +76,30 @@ reflection bodies are forwarded transiently and never written to relay storage.
 
 ## Verification and rollback
 
-Use a scrubbed fixture account to verify `POST /v1/auth/sessions`, refresh,
-logout, and `POST /v1/chat/completions` with both a bearer token and matching
-`X-WhaleHall-Agent-Key`. Also verify `/v1/activity/completions` with only the
-provisioned `X-WhaleHall-Reflection-Key`, a non-streaming scrubbed body, and
-an empty relay record directory. Confirm the existing `/v1/activity/analyze`
-endpoint still answers through its previous handler. Check `systemctl status`
-and relay logs only for status/error metadata; neither should contain bearer
-tokens, reflection/personal keys, or raw activity windows.
+Verify `/v1/activity/completions` with only the provisioned
+`X-WhaleHall-Reflection-Key`, a non-streaming scrubbed body, and an empty relay
+record directory. Confirm the existing `/v1/activity/analyze` endpoint still
+answers through its previous handler. Then verify the model origin fails closed
+before any generic `/v1/*` model handler can receive the request:
+
+```sh
+model_origin=https://model.sea-ridethewindbreakthewaves.xyz
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --request GET "$model_origin/v1/activity/completions")" = 405
+for data_path in \
+  /v1/auth/me \
+  /v1/chat/completions \
+  /v1/agent/register \
+  /v1/devices/test-device/consents/activity \
+  /api/v1/agent/events/desktop/cursor; do
+  test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$model_origin$data_path")" = 404
+done
+```
+
+Verify those DataCenter endpoints independently against the data origin. Check
+`systemctl status` and relay logs only for status/error metadata; neither should
+contain bearer tokens, keys, or raw activity windows.
 
 If the relay cannot start or verification fails, remove only the new Caddy
 relay handler, reload Caddy, then stop and disable

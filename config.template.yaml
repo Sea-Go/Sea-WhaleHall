@@ -7,5 +7,16 @@ reflection:
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
+  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
   apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
+
+# Cloud synchronization is opt-in. Content uses a DataCenter-issued X25519
+# context and client-envelope.v1 only when this flag and the domain consent are
+# both enabled; the checked-in default keeps every cloud path disabled.
+cloudSync:
+  enabled: false
+  contentEncryptionEnabled: false
+  consents:
+    activity: "off"
+    browser: "off"
+    presence: "off"

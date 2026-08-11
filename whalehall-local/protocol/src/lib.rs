@@ -273,6 +273,12 @@ pub struct EventQueryResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EventTailCursorResult {
+    pub cursor: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventCommitParams {
     pub consumer_id: String,

@@ -12,3 +12,5 @@ self-hosted-runner:
 
 config-variables:
   - WHALEHALL_ENABLE_DESKTOP_RUNNERS
+  - DATACENTER_GITLAB_PROJECT_ID
+  - DATACENTER_GITLAB_REF

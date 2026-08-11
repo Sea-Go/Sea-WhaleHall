@@ -1,12 +1,12 @@
+import { Database } from "bun:sqlite";
 import { createHash, webcrypto } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { Database } from "bun:sqlite";
-import type { AgentRunStatus as SharedAgentRunStatus } from "../shared/agent-runs";
 import {
 	AGENT_READ_PERMISSION_IDS,
 	type AgentReadPermissionsSnapshot,
 } from "../shared/agent-permissions";
+import type { AgentRunStatus as SharedAgentRunStatus } from "../shared/agent-runs";
 import type { CalendarEvent } from "../shared/calendar";
 import type { PlanningAuthoritySnapshot } from "../shared/planning-authority";
 import type {
@@ -24,11 +24,18 @@ import {
 	planningDraftDigest,
 } from "./planning-authority-digest";
 
-const DATABASE_SCHEMA_VERSION = 1;
+const DATABASE_SCHEMA_VERSION = 3;
+// Database schema version 2 was never published or used by a released build,
+// so no schema-2 ciphertext exists to migrate. Existing ciphertext remains
+// bound to schema=1; table evolution must not make account records undecryptable.
+const CIPHER_AAD_SCHEMA_VERSION = 1;
 const CIPHER_VERSION = 1;
 const KEY_VERSION = 1;
 const NONCE_BYTES = 12;
 const MAX_LIST_LIMIT = 1_000;
+const MAX_DATA_CENTER_BATCH_BODY_BYTES = 15 * 1024 * 1024;
+const DATA_CENTER_CONSUMER_AUDIT_RETENTION_MS = 31 * 24 * 60 * 60 * 1_000;
+const MAX_DATA_CENTER_CONSUMER_AUDITS_PER_ACCOUNT = 1_000;
 
 export interface AgentConversationRecord {
 	accountId: string;
@@ -151,6 +158,62 @@ export interface EncryptedAgentRepositoryOptions {
 	now?: () => number;
 }
 
+export interface DataCenterAgentCredentialsRecord {
+	schemaVersion: "datacenter-agent-credentials.v1";
+	accountId: string;
+	installationId: string;
+	publicKey: string;
+	privateKeyPkcs8: string;
+	fingerprint: string;
+	registrationRequestBody: string;
+	registrationStatus: "pending" | "registered";
+	agentId: string | null;
+	deviceId: string | null;
+	configVersion: number | null;
+	consentDigest: string | null;
+	createdAtMs: number;
+	updatedAtMs: number;
+}
+
+export interface DataCenterPendingBatchRecord {
+	schemaVersion: "datacenter-pending-batch.v1";
+	accountId: string;
+	batchKey: string;
+	body: string;
+	requestHash: string;
+	firstCursor: string;
+	lastCursor: string;
+	createdAtMs: number;
+}
+
+export interface DataCenterPendingAdvanceRecord {
+	schemaVersion: "datacenter-pending-advance.v1";
+	accountId: string;
+	advanceKey: string;
+	body: string;
+	requestHash: string;
+	fromCursor: string | null;
+	toCursor: string;
+	eventCount: number;
+	createdAtMs: number;
+}
+
+export interface DataCenterConsumerOwnerRecord {
+	accountId: string;
+	updatedAtMs: number;
+}
+
+export interface DataCenterConsumerAuditRecord {
+	schemaVersion: "datacenter-consumer-audit.v1";
+	id: string;
+	fromAccountId: string | null;
+	toAccountId: string;
+	fromCursor: string | null;
+	toCursor: string;
+	reason: "account-boundary";
+	createdAtMs: number;
+}
+
 export type EncryptedAgentRepositoryErrorCode =
 	| "INVALID_ARGUMENT"
 	| "ACCOUNT_KEY_MISSING"
@@ -218,6 +281,10 @@ type CipherRow = {
 	ciphertext: Uint8Array;
 };
 
+type DataCenterCipherRow = CipherRow & {
+	updated_at_ms: number;
+};
+
 type AccountContext = {
 	keyReference: CredentialKeyReference;
 	cryptoKey: webcrypto.CryptoKey;
@@ -229,6 +296,10 @@ type PreparedCipher = {
 	nonce: Uint8Array;
 	ciphertext: Uint8Array;
 };
+
+type DataCenterPendingTable =
+	| "datacenter_pending_batch"
+	| "datacenter_pending_advance";
 
 type PreparedCalendarEvent = {
 	record: AgentCalendarEventRecord;
@@ -378,6 +449,346 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		await this.accountContext(accountId);
 	}
 
+	async getDataCenterAgentCredentials(
+		accountId: string,
+	): Promise<DataCenterAgentCredentialsRecord | null> {
+		this.requireOpen();
+		validateIdentifier(accountId, "accountId");
+		const row = this.database
+			.query(
+				`SELECT key_version, cipher_version, state_nonce AS nonce,
+				        state_ciphertext AS ciphertext, updated_at_ms
+				 FROM datacenter_agent_credentials WHERE account_id = ?`,
+			)
+			.get(accountId) as DataCenterCipherRow | null;
+		if (!row) return null;
+		const value = await this.decryptJson(
+			accountId,
+			"datacenter_agent_credentials",
+			accountId,
+			"state",
+			row,
+		);
+		if (!isDataCenterAgentCredentialsRecord(value, accountId)) {
+			throw decryptionFailure();
+		}
+		return value;
+	}
+
+	async putDataCenterAgentCredentials(
+		record: DataCenterAgentCredentialsRecord,
+	): Promise<void> {
+		this.requireOpen();
+		validateDataCenterAgentCredentialsRecord(record);
+		const cipher = await this.encryptJson(
+			record.accountId,
+			"datacenter_agent_credentials",
+			record.accountId,
+			"state",
+			record,
+		);
+		this.database
+			.query(
+				`INSERT INTO datacenter_agent_credentials
+				 (account_id, key_version, cipher_version, state_nonce,
+				  state_ciphertext, updated_at_ms)
+				 VALUES (?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(account_id) DO UPDATE SET
+				  key_version = excluded.key_version,
+				  cipher_version = excluded.cipher_version,
+				  state_nonce = excluded.state_nonce,
+				  state_ciphertext = excluded.state_ciphertext,
+				  updated_at_ms = excluded.updated_at_ms`,
+			)
+			.run(
+				record.accountId,
+				cipher.keyVersion,
+				cipher.cipherVersion,
+				cipher.nonce,
+				cipher.ciphertext,
+				record.updatedAtMs,
+			);
+	}
+
+	async getDataCenterPendingBatch(
+		accountId: string,
+	): Promise<DataCenterPendingBatchRecord | null> {
+		return this.getDataCenterPendingRecord(
+			accountId,
+			"datacenter_pending_batch",
+			isDataCenterPendingBatchRecord,
+		);
+	}
+
+	async putDataCenterPendingBatch(
+		record: DataCenterPendingBatchRecord,
+	): Promise<void> {
+		validateDataCenterPendingBatchRecord(record);
+		await this.putDataCenterPendingRecord(
+			"datacenter_pending_batch",
+			record.accountId,
+			record.batchKey,
+			record.requestHash,
+			record.createdAtMs,
+			record,
+		);
+	}
+
+	async replaceDataCenterPendingBatchWithAdvance(
+		batch: DataCenterPendingBatchRecord,
+		advance: DataCenterPendingAdvanceRecord,
+	): Promise<boolean> {
+		validateDataCenterPendingBatchRecord(batch);
+		validateDataCenterPendingAdvanceRecord(advance);
+		let advanceBody: unknown;
+		try {
+			advanceBody = JSON.parse(advance.body) as unknown;
+		} catch {
+			throw invalidArgument("DataCenter pending replacement body is invalid.");
+		}
+		if (
+			batch.accountId !== advance.accountId ||
+			advance.fromCursor !== previousDesktopCursor(batch.firstCursor) ||
+			advance.toCursor !== batch.lastCursor ||
+			!isRecord(advanceBody) ||
+			(advanceBody.reason !== "consent-revoked" &&
+				advanceBody.reason !== "content-not-consented" &&
+				advanceBody.reason !== "retention-expired")
+		) {
+			throw invalidArgument("DataCenter pending replacement range is invalid.");
+		}
+		const cipher = await this.encryptJson(
+			advance.accountId,
+			"datacenter_pending_advance",
+			advance.accountId,
+			"record",
+			advance,
+		);
+		const replace = this.database.transaction(() => {
+			const existing = this.database
+				.query(
+					`SELECT operation_key, request_hash
+					 FROM datacenter_pending_batch WHERE account_id = ?`,
+				)
+				.get(batch.accountId) as {
+				operation_key: string;
+				request_hash: string;
+			} | null;
+			if (
+				!existing ||
+				existing.operation_key !== batch.batchKey ||
+				existing.request_hash !== batch.requestHash
+			) {
+				return false;
+			}
+			if (
+				this.database
+					.query(
+						"SELECT 1 AS present FROM datacenter_pending_advance WHERE account_id = ?",
+					)
+					.get(batch.accountId) !== null
+			) {
+				throw invalidArgument(
+					"A different durable DataCenter operation is already pending.",
+				);
+			}
+			const deleted = this.database
+				.query(
+					`DELETE FROM datacenter_pending_batch
+					 WHERE account_id = ? AND operation_key = ? AND request_hash = ?`,
+				)
+				.run(batch.accountId, batch.batchKey, batch.requestHash);
+			if (deleted.changes !== 1) return false;
+			this.database
+				.query(
+					`INSERT INTO datacenter_pending_advance
+					 (account_id, operation_key, request_hash, key_version,
+					  cipher_version, record_nonce, record_ciphertext, created_at_ms)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.run(
+					advance.accountId,
+					advance.advanceKey,
+					advance.requestHash,
+					cipher.keyVersion,
+					cipher.cipherVersion,
+					cipher.nonce,
+					cipher.ciphertext,
+					advance.createdAtMs,
+				);
+			return true;
+		});
+		return replace.immediate();
+	}
+
+	deleteDataCenterPendingBatch(accountId: string, batchKey: string): boolean {
+		return this.deleteDataCenterPendingRecord(
+			"datacenter_pending_batch",
+			accountId,
+			batchKey,
+		);
+	}
+
+	async getDataCenterPendingAdvance(
+		accountId: string,
+	): Promise<DataCenterPendingAdvanceRecord | null> {
+		return this.getDataCenterPendingRecord(
+			accountId,
+			"datacenter_pending_advance",
+			isDataCenterPendingAdvanceRecord,
+		);
+	}
+
+	async putDataCenterPendingAdvance(
+		record: DataCenterPendingAdvanceRecord,
+	): Promise<void> {
+		validateDataCenterPendingAdvanceRecord(record);
+		await this.putDataCenterPendingRecord(
+			"datacenter_pending_advance",
+			record.accountId,
+			record.advanceKey,
+			record.requestHash,
+			record.createdAtMs,
+			record,
+		);
+	}
+
+	deleteDataCenterPendingAdvance(
+		accountId: string,
+		advanceKey: string,
+	): boolean {
+		return this.deleteDataCenterPendingRecord(
+			"datacenter_pending_advance",
+			accountId,
+			advanceKey,
+		);
+	}
+
+	getDataCenterConsumerOwner(): DataCenterConsumerOwnerRecord | null {
+		this.requireOpen();
+		return this.database
+			.query(
+				`SELECT account_id AS accountId, updated_at_ms AS updatedAtMs
+				 FROM datacenter_consumer_owner WHERE singleton = 1`,
+			)
+			.get() as DataCenterConsumerOwnerRecord | null;
+	}
+
+	async setDataCenterConsumerOwner(accountId: string): Promise<void> {
+		this.requireOpen();
+		validateIdentifier(accountId, "accountId");
+		await this.accountContext(accountId);
+		this.database
+			.query(
+				`INSERT INTO datacenter_consumer_owner
+				 (singleton, account_id, updated_at_ms) VALUES (1, ?, ?)
+				 ON CONFLICT(singleton) DO UPDATE SET
+				  account_id = excluded.account_id,
+				  updated_at_ms = excluded.updated_at_ms`,
+			)
+			.run(accountId, this.now());
+	}
+
+	async appendDataCenterConsumerAudit(
+		record: DataCenterConsumerAuditRecord,
+	): Promise<void> {
+		this.requireOpen();
+		validateDataCenterConsumerAuditRecord(record);
+		const cipher = await this.encryptJson(
+			record.toAccountId,
+			"datacenter_consumer_audit",
+			record.id,
+			"record",
+			record,
+		);
+		const cutoffMs = this.now() - DATA_CENTER_CONSUMER_AUDIT_RETENTION_MS;
+		const append = this.database.transaction(() => {
+			this.database
+				.query(
+					`INSERT INTO datacenter_consumer_audit
+					 (audit_id, account_id, key_version, cipher_version, record_nonce,
+					  record_ciphertext, created_at_ms)
+					 VALUES (?, ?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(audit_id) DO NOTHING`,
+				)
+				.run(
+					record.id,
+					record.toAccountId,
+					cipher.keyVersion,
+					cipher.cipherVersion,
+					cipher.nonce,
+					cipher.ciphertext,
+					record.createdAtMs,
+				);
+			this.database
+				.query(
+					`DELETE FROM datacenter_consumer_audit
+					 WHERE account_id = ? AND created_at_ms < ?`,
+				)
+				.run(record.toAccountId, cutoffMs);
+			this.database
+				.query(
+					`DELETE FROM datacenter_consumer_audit
+					 WHERE account_id = ? AND audit_id IN (
+					  SELECT audit_id FROM datacenter_consumer_audit
+					  WHERE account_id = ?
+					  ORDER BY created_at_ms DESC, audit_id DESC
+					  LIMIT -1 OFFSET ?
+					 )`,
+				)
+				.run(
+					record.toAccountId,
+					record.toAccountId,
+					MAX_DATA_CENTER_CONSUMER_AUDITS_PER_ACCOUNT,
+				);
+		});
+		append.immediate();
+	}
+
+	async listDataCenterConsumerAudits(
+		accountId: string,
+		limit = 100,
+	): Promise<DataCenterConsumerAuditRecord[]> {
+		this.requireOpen();
+		validateIdentifier(accountId, "accountId");
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
+			throw invalidArgument("DataCenter audit limit is invalid.");
+		}
+		const rows = this.database
+			.query(
+				`SELECT audit_id, key_version, cipher_version,
+				        record_nonce AS nonce, record_ciphertext AS ciphertext,
+				        created_at_ms AS updated_at_ms
+				 FROM datacenter_consumer_audit
+				 WHERE account_id = ?
+				 ORDER BY created_at_ms ASC, audit_id ASC LIMIT ?`,
+			)
+			.all(accountId, limit) as Array<
+			DataCenterCipherRow & { audit_id: string }
+		>;
+		const records: DataCenterConsumerAuditRecord[] = [];
+		for (const row of rows) {
+			const value = await this.decryptJson(
+				accountId,
+				"datacenter_consumer_audit",
+				row.audit_id,
+				"record",
+				row,
+			);
+			if (!isDataCenterConsumerAuditRecord(value, accountId, row.audit_id)) {
+				throw decryptionFailure();
+			}
+			records.push(value);
+		}
+		return records;
+	}
+
+	/**
+	 * Forgets records and key material owned by one account. Audit ciphertext
+	 * owned by another account may refer to this identifier until that owner's
+	 * bounded retention removes it; scanning every account is a separate
+	 * all-account deletion operation and is intentionally outside this method.
+	 */
 	async forgetAccount(accountId: string): Promise<{ deleted: boolean }> {
 		this.requireOpen();
 		validateIdentifier(accountId, "accountId");
@@ -645,7 +1056,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		validateApprovalStatus(expected);
 		validateApprovalStatus(next);
 		if (expected !== "pending" || next === "pending") {
-			throw invalidArgument("Approval status changes must consume a pending approval.");
+			throw invalidArgument(
+				"Approval status changes must consume a pending approval.",
+			);
 		}
 		const result = this.database
 			.query(
@@ -726,7 +1139,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				 ORDER BY updated_at_ms DESC, conversation_id DESC LIMIT ?`,
 			)
 			.all(accountId, limit) as ConversationRow[];
-		return Promise.all(rows.map((row) => this.conversationFromRow(accountId, row)));
+		return Promise.all(
+			rows.map((row) => this.conversationFromRow(accountId, row)),
+		);
 	}
 
 	async putMessage(record: AgentMessageRecord): Promise<AgentMessageRecord> {
@@ -853,7 +1268,13 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	async putWorkflow(record: AgentWorkflowRecord): Promise<AgentWorkflowRecord> {
 		validateWorkflow(record);
 		const [name, definition] = await Promise.all([
-			this.encryptText(record.accountId, "workflows", record.id, "name", record.name),
+			this.encryptText(
+				record.accountId,
+				"workflows",
+				record.id,
+				"name",
+				record.name,
+			),
 			this.encryptJson(
 				record.accountId,
 				"workflows",
@@ -913,9 +1334,16 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		expectedVersion: number | null,
 	): Promise<boolean> {
 		validateWorkflow(record);
-		if (expectedVersion !== null) validateTimestamp(expectedVersion, "expectedVersion");
+		if (expectedVersion !== null)
+			validateTimestamp(expectedVersion, "expectedVersion");
 		const [name, definition] = await Promise.all([
-			this.encryptText(record.accountId, "workflows", record.id, "name", record.name),
+			this.encryptText(
+				record.accountId,
+				"workflows",
+				record.id,
+				"name",
+				record.name,
+			),
 			this.encryptJson(
 				record.accountId,
 				"workflows",
@@ -1011,7 +1439,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	): Promise<AgentWorkflowSnapshotRecord> {
 		validateWorkflowSnapshot(record);
 		if (record.resourceId !== record.accountId) {
-			throw invalidArgument("Workflow snapshot resource must match its account.");
+			throw invalidArgument(
+				"Workflow snapshot resource must match its account.",
+			);
 		}
 		const rowId = workflowSnapshotRowId(record.workflowName, record.runId);
 		const snapshot = await this.encryptJson(
@@ -1057,27 +1487,30 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	): Promise<AgentWorkflowSnapshotRecord | null> {
 		validateIdentifier(accountId, "accountId");
 		validateIdentifier(runId, "runId");
-		if (workflowName !== undefined) validateIdentifier(workflowName, "workflowName");
-		const row = (workflowName === undefined
-			? this.database
-				.query(
-					`SELECT workflow_name, run_id, key_version, cipher_version,
+		if (workflowName !== undefined)
+			validateIdentifier(workflowName, "workflowName");
+		const row = (
+			workflowName === undefined
+				? this.database
+						.query(
+							`SELECT workflow_name, run_id, key_version, cipher_version,
 					        snapshot_nonce AS nonce, snapshot_ciphertext AS ciphertext,
 					        created_at_ms, updated_at_ms
 					 FROM mastra_workflow_snapshots
 					 WHERE account_id = ? AND run_id = ?
 					 ORDER BY updated_at_ms DESC, workflow_name ASC LIMIT 1`,
-				)
-				.get(accountId, runId)
-			: this.database
-				.query(
-					`SELECT workflow_name, run_id, key_version, cipher_version,
+						)
+						.get(accountId, runId)
+				: this.database
+						.query(
+							`SELECT workflow_name, run_id, key_version, cipher_version,
 					        snapshot_nonce AS nonce, snapshot_ciphertext AS ciphertext,
 					        created_at_ms, updated_at_ms
 					 FROM mastra_workflow_snapshots
 					 WHERE account_id = ? AND run_id = ? AND workflow_name = ?`,
-				)
-				.get(accountId, runId, workflowName)) as WorkflowSnapshotRow | null;
+						)
+						.get(accountId, runId, workflowName)
+		) as WorkflowSnapshotRow | null;
 		return row ? this.workflowSnapshotFromRow(accountId, row) : null;
 	}
 
@@ -1086,12 +1519,15 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		options: AgentWorkflowSnapshotListOptions = {},
 	): Promise<AgentWorkflowSnapshotListResult> {
 		validateIdentifier(accountId, "accountId");
-		if (options.workflowName !== undefined) validateIdentifier(options.workflowName, "workflowName");
+		if (options.workflowName !== undefined)
+			validateIdentifier(options.workflowName, "workflowName");
 		if (options.resourceId !== undefined && options.resourceId !== accountId) {
 			return { runs: [], total: 0 };
 		}
-		if (options.fromDateMs !== undefined) validateTimestamp(options.fromDateMs, "fromDateMs");
-		if (options.toDateMs !== undefined) validateTimestamp(options.toDateMs, "toDateMs");
+		if (options.fromDateMs !== undefined)
+			validateTimestamp(options.fromDateMs, "fromDateMs");
+		if (options.toDateMs !== undefined)
+			validateTimestamp(options.toDateMs, "toDateMs");
 		if (
 			options.fromDateMs !== undefined &&
 			options.toDateMs !== undefined &&
@@ -1099,11 +1535,16 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		) {
 			throw invalidArgument("Workflow snapshot date range is invalid.");
 		}
-		if (options.page !== undefined && (!Number.isSafeInteger(options.page) || options.page < 0)) {
+		if (
+			options.page !== undefined &&
+			(!Number.isSafeInteger(options.page) || options.page < 0)
+		) {
 			throw invalidArgument("Workflow snapshot page is invalid.");
 		}
-		if (options.perPage !== undefined && options.perPage !== false) validateLimit(options.perPage);
-		if (options.status !== undefined) validateText(options.status, "workflow status");
+		if (options.perPage !== undefined && options.perPage !== false)
+			validateLimit(options.perPage);
+		if (options.status !== undefined)
+			validateText(options.status, "workflow status");
 		const rows = this.database
 			.query(
 				`SELECT workflow_name, run_id, key_version, cipher_version,
@@ -1132,7 +1573,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		);
 		if (options.status !== undefined) {
 			records = records.filter(
-				(record) => isRecord(record.snapshot) && record.snapshot.status === options.status,
+				(record) =>
+					isRecord(record.snapshot) &&
+					record.snapshot.status === options.status,
 			);
 		}
 		const total = records.length;
@@ -1167,7 +1610,13 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	async putRun(record: AgentRunRecord): Promise<AgentRunRecord> {
 		validateRun(record);
 		const [input, output, error] = await Promise.all([
-			this.encryptJson(record.accountId, "agent_runs", record.id, "input", record.input),
+			this.encryptJson(
+				record.accountId,
+				"agent_runs",
+				record.id,
+				"input",
+				record.input,
+			),
 			record.output === null
 				? null
 				: this.encryptJson(
@@ -1241,7 +1690,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		return structuredClone(record);
 	}
 
-	async getRun(accountId: string, runId: string): Promise<AgentRunRecord | null> {
+	async getRun(
+		accountId: string,
+		runId: string,
+	): Promise<AgentRunRecord | null> {
 		validateIdentifier(accountId, "accountId");
 		validateIdentifier(runId, "runId");
 		const row = this.database
@@ -1305,7 +1757,11 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		}
 		if (options.from !== undefined) validateDateOnly(options.from, "from");
 		if (options.to !== undefined) validateDateOnly(options.to, "to");
-		if (options.from !== undefined && options.to !== undefined && options.from >= options.to) {
+		if (
+			options.from !== undefined &&
+			options.to !== undefined &&
+			options.from >= options.to
+		) {
 			throw invalidArgument("Calendar query range is invalid.");
 		}
 		const rows = this.database
@@ -1328,15 +1784,22 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				limit,
 				offset,
 			) as CalendarEventRow[];
-		return Promise.all(rows.map((row) => this.calendarEventFromRow(accountId, row)));
+		return Promise.all(
+			rows.map((row) => this.calendarEventFromRow(accountId, row)),
+		);
 	}
 
-	async deleteCalendarEvent(accountId: string, eventId: string): Promise<boolean> {
+	async deleteCalendarEvent(
+		accountId: string,
+		eventId: string,
+	): Promise<boolean> {
 		await this.accountContext(accountId);
 		validateIdentifier(eventId, "eventId");
 		const transaction = this.database.transaction(() => {
 			const result = this.database
-				.query("DELETE FROM calendar_events WHERE account_id = ? AND event_id = ?")
+				.query(
+					"DELETE FROM calendar_events WHERE account_id = ? AND event_id = ?",
+				)
 				.run(accountId, eventId);
 			if (result.changes === 1) this.incrementCalendarRevision(accountId);
 			return result.changes === 1;
@@ -1377,7 +1840,8 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			value.status !== row.status ||
 			value.updatedAtMs !== row.updated_at_ms ||
 			(value.commit?.commitId ?? null) !== row.last_commit_id ||
-			(value.commit?.calendarRevision ?? null) !== row.commit_calendar_revision ||
+			(value.commit?.calendarRevision ?? null) !==
+				row.commit_calendar_revision ||
 			planningSnapshotCommitDigest(value) !== row.last_commit_digest
 		) {
 			throw decryptionFailure();
@@ -1395,12 +1859,16 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		validatePlanningAuthoritySnapshot(snapshot);
 		if (expectedRevision === null) {
 			if (snapshot.revision !== 1) {
-				throw invalidArgument("A new planning authority must start at revision 1.");
+				throw invalidArgument(
+					"A new planning authority must start at revision 1.",
+				);
 			}
 		} else {
 			validateRevision(expectedRevision);
 			if (snapshot.revision !== expectedRevision + 1) {
-				throw invalidArgument("Planning authority revision must increment exactly once.");
+				throw invalidArgument(
+					"Planning authority revision must increment exactly once.",
+				);
 			}
 		}
 		const cipher = await this.encryptJson(
@@ -1471,12 +1939,16 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			commit.authority.revision !== commit.expectedAuthorityRevision + 1 ||
 			commit.authority.status !== "committed" ||
 			commit.authority.commit?.commitId !== commit.commitId ||
-			commit.authority.commit.draftRevision !== commit.expectedAuthorityRevision ||
+			commit.authority.commit.draftRevision !==
+				commit.expectedAuthorityRevision ||
 			commit.authority.commit.draftDigest !==
 				planningDraftDigest(commit.authority.input, commit.authority.draft) ||
-			commit.authority.commit.calendarRevision !== commit.calendar.expectedRevision + 1
+			commit.authority.commit.calendarRevision !==
+				commit.calendar.expectedRevision + 1
 		) {
-			throw invalidArgument("Planning authority commit metadata is inconsistent.");
+			throw invalidArgument(
+				"Planning authority commit metadata is inconsistent.",
+			);
 		}
 		const { deleteIds, prepared } = await this.prepareCalendarBatch(
 			accountId,
@@ -1505,11 +1977,11 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 					 FROM planning_authority WHERE account_id = ?`,
 				)
 				.get(accountId) as {
-					revision: number;
-					last_commit_id: string | null;
-					last_commit_digest: string | null;
-					commit_calendar_revision: number | null;
-				} | null;
+				revision: number;
+				last_commit_id: string | null;
+				last_commit_digest: string | null;
+				commit_calendar_revision: number | null;
+			} | null;
 			if (!authorityRow) {
 				throw new PlanningAuthorityRevisionConflictError(
 					commit.expectedAuthorityRevision,
@@ -1518,7 +1990,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			}
 			if (authorityRow.last_commit_id === commit.commitId) {
 				if (authorityRow.last_commit_digest !== digest) {
-					throw invalidArgument("Planning commit ID was reused for different content.");
+					throw invalidArgument(
+						"Planning commit ID was reused for different content.",
+					);
 				}
 				return {
 					calendarRevision: authorityRow.commit_calendar_revision!,
@@ -1542,7 +2016,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			for (const event of prepared) this.upsertPreparedCalendarEvent(event);
 			for (const eventId of deleteIds) {
 				this.database
-					.query("DELETE FROM calendar_events WHERE account_id = ? AND event_id = ?")
+					.query(
+						"DELETE FROM calendar_events WHERE account_id = ? AND event_id = ?",
+					)
 					.run(accountId, eventId);
 			}
 			const calendarRevision = actualCalendarRevision + 1;
@@ -1593,7 +2069,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		accountId: string,
 		batch: CalendarBatchCommit,
 	): Promise<{ revision: number }> {
-		const { deleteIds, prepared } = await this.prepareCalendarBatch(accountId, batch);
+		const { deleteIds, prepared } = await this.prepareCalendarBatch(
+			accountId,
+			batch,
+		);
 		const transaction = this.database.transaction(() => {
 			const actualRevision = this.readCalendarRevision(accountId);
 			if (actualRevision !== batch.expectedRevision) {
@@ -1605,7 +2084,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			for (const event of prepared) this.upsertPreparedCalendarEvent(event);
 			for (const eventId of deleteIds) {
 				this.database
-					.query("DELETE FROM calendar_events WHERE account_id = ? AND event_id = ?")
+					.query(
+						"DELETE FROM calendar_events WHERE account_id = ? AND event_id = ?",
+					)
 					.run(accountId, eventId);
 			}
 			const revision = actualRevision + 1;
@@ -1712,7 +2193,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		};
 	}
 
-	private async runFromRow(accountId: string, row: RunRow): Promise<AgentRunRecord> {
+	private async runFromRow(
+		accountId: string,
+		row: RunRow,
+	): Promise<AgentRunRecord> {
 		const [input, output, error] = await Promise.all([
 			this.decryptJson(accountId, "agent_runs", row.run_id, "input", {
 				key_version: row.input_key_version,
@@ -1826,7 +2310,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				throw invalidArgument("Calendar batch mixes account ids.");
 			}
 			if (upsertIds.has(record.event.id) || deleteIds.has(record.event.id)) {
-				throw invalidArgument("Calendar batch contains conflicting event operations.");
+				throw invalidArgument(
+					"Calendar batch contains conflicting event operations.",
+				);
 			}
 			upsertIds.add(record.event.id);
 		}
@@ -1884,6 +2370,125 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			.get(accountId) as { revision: number } | null;
 		if (!row) throw invalidArgument("Unknown encrypted account.");
 		return row.revision;
+	}
+
+	private async getDataCenterPendingRecord<T>(
+		accountId: string,
+		table: DataCenterPendingTable,
+		validate: (value: unknown, accountId: string) => value is T,
+	): Promise<T | null> {
+		this.requireOpen();
+		validateIdentifier(accountId, "accountId");
+		const row = this.database
+			.query(
+				`SELECT key_version, cipher_version, record_nonce AS nonce,
+				        record_ciphertext AS ciphertext, created_at_ms AS updated_at_ms
+				 FROM ${table} WHERE account_id = ?`,
+			)
+			.get(accountId) as DataCenterCipherRow | null;
+		if (!row) return null;
+		const value = await this.decryptJson(
+			accountId,
+			table,
+			accountId,
+			"record",
+			row,
+		);
+		if (!validate(value, accountId)) throw decryptionFailure();
+		return value;
+	}
+
+	private async putDataCenterPendingRecord(
+		table: DataCenterPendingTable,
+		accountId: string,
+		operationKey: string,
+		requestHash: string,
+		createdAtMs: number,
+		record: DataCenterPendingBatchRecord | DataCenterPendingAdvanceRecord,
+	): Promise<void> {
+		this.requireOpen();
+		validateIdentifier(accountId, "accountId");
+		validateIdentifier(operationKey, "DataCenter pending operation key");
+		validateSha256Hex(requestHash, "DataCenter requestHash");
+		validateTimestamp(createdAtMs, "createdAtMs");
+		const cipher = await this.encryptJson(
+			accountId,
+			table,
+			accountId,
+			"record",
+			record,
+		);
+		const write = this.database.transaction(() => {
+			const otherTable: DataCenterPendingTable =
+				table === "datacenter_pending_batch"
+					? "datacenter_pending_advance"
+					: "datacenter_pending_batch";
+			if (
+				this.database
+					.query(`SELECT 1 AS present FROM ${otherTable} WHERE account_id = ?`)
+					.get(accountId) !== null
+			) {
+				throw invalidArgument(
+					"A different durable DataCenter operation is already pending.",
+				);
+			}
+			const existing = this.database
+				.query(
+					`SELECT operation_key, request_hash FROM ${table}
+					 WHERE account_id = ?`,
+				)
+				.get(accountId) as {
+				operation_key: string;
+				request_hash: string;
+			} | null;
+			if (existing) {
+				if (
+					existing.operation_key !== operationKey ||
+					existing.request_hash !== requestHash
+				) {
+					throw invalidArgument(
+						"A different durable DataCenter operation is already pending.",
+					);
+				}
+				return;
+			}
+			this.database
+				.query(
+					`INSERT INTO ${table}
+					 (account_id, operation_key, request_hash, key_version,
+					  cipher_version, record_nonce, record_ciphertext, created_at_ms)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.run(
+					accountId,
+					operationKey,
+					requestHash,
+					cipher.keyVersion,
+					cipher.cipherVersion,
+					cipher.nonce,
+					cipher.ciphertext,
+					createdAtMs,
+				);
+		});
+		write.immediate();
+	}
+
+	private deleteDataCenterPendingRecord(
+		table: DataCenterPendingTable,
+		accountId: string,
+		operationKey: string,
+	): boolean {
+		this.requireOpen();
+		validateIdentifier(accountId, "accountId");
+		validateIdentifier(operationKey, "DataCenter pending operation key");
+		return (
+			this.database
+				.query(
+					`DELETE FROM ${table}
+					 WHERE account_id = ? AND operation_key = ?`,
+				)
+				.run(accountId, operationKey).changes === 1
+		);
 	}
 
 	private async encryptText(
@@ -1969,7 +2574,13 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		field: string,
 		cipher: CipherRow,
 	): Promise<string> {
-		const plaintext = await this.decryptBytes(accountId, table, recordId, field, cipher);
+		const plaintext = await this.decryptBytes(
+			accountId,
+			table,
+			recordId,
+			field,
+			cipher,
+		);
 		try {
 			return new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
 		} catch {
@@ -1986,7 +2597,13 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		field: string,
 		cipher: CipherRow,
 	): Promise<unknown> {
-		const text = await this.decryptText(accountId, table, recordId, field, cipher);
+		const text = await this.decryptText(
+			accountId,
+			table,
+			recordId,
+			field,
+			cipher,
+		);
 		try {
 			return JSON.parse(text) as unknown;
 		} catch {
@@ -2081,7 +2698,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			try {
 				keyBytes = await this.keyStore.getKey(reference);
 			} catch (error) {
-				if (!(error instanceof CredentialHelperError) || error.code !== "NOT_FOUND") {
+				if (
+					!(error instanceof CredentialHelperError) ||
+					error.code !== "NOT_FOUND"
+				) {
 					throw error;
 				}
 				try {
@@ -2133,7 +2753,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		try {
 			keyBytes = await this.keyStore.getKey(reference);
 		} catch (error) {
-			if (error instanceof CredentialHelperError && error.code === "NOT_FOUND") {
+			if (
+				error instanceof CredentialHelperError &&
+				error.code === "NOT_FOUND"
+			) {
 				throw new EncryptedAgentRepositoryError(
 					"ACCOUNT_KEY_MISSING",
 					"Encrypted account data exists but its OS credential key is missing.",
@@ -2178,7 +2801,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			const schema = this.database
 				.query("SELECT version FROM encrypted_agent_schema WHERE singleton = 1")
 				.get() as { version: number } | null;
-			if (schema && schema.version !== DATABASE_SCHEMA_VERSION) {
+			if (
+				schema &&
+				(schema.version < 1 || schema.version > DATABASE_SCHEMA_VERSION)
+			) {
 				throw new EncryptedAgentRepositoryError(
 					"SCHEMA_UNSUPPORTED",
 					`Unsupported encrypted Agent schema version: ${schema.version}.`,
@@ -2376,11 +3002,71 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				);
 				CREATE INDEX IF NOT EXISTS tool_approvals_by_status
 					ON tool_approvals(account_id, status, expires_at_ms, approval_id);
+
+				CREATE TABLE IF NOT EXISTS datacenter_agent_credentials (
+					account_id TEXT PRIMARY KEY,
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					state_nonce BLOB NOT NULL,
+					state_ciphertext BLOB NOT NULL,
+					updated_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS datacenter_pending_batch (
+					account_id TEXT PRIMARY KEY,
+					operation_key TEXT NOT NULL,
+					request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					record_nonce BLOB NOT NULL,
+					record_ciphertext BLOB NOT NULL,
+					created_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS datacenter_pending_advance (
+					account_id TEXT PRIMARY KEY,
+					operation_key TEXT NOT NULL,
+					request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					record_nonce BLOB NOT NULL,
+					record_ciphertext BLOB NOT NULL,
+					created_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS datacenter_consumer_owner (
+					singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+					account_id TEXT NOT NULL,
+					updated_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS datacenter_consumer_audit (
+					audit_id TEXT PRIMARY KEY,
+					account_id TEXT NOT NULL,
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					record_nonce BLOB NOT NULL,
+					record_ciphertext BLOB NOT NULL,
+					created_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+				CREATE INDEX IF NOT EXISTS datacenter_consumer_audit_by_account
+					ON datacenter_consumer_audit(account_id, created_at_ms, audit_id);
 			`);
 			if (!schema) {
 				this.database
 					.query(
 						"INSERT INTO encrypted_agent_schema(singleton, version) VALUES (1, ?)",
+					)
+					.run(DATABASE_SCHEMA_VERSION);
+			} else if (schema.version < DATABASE_SCHEMA_VERSION) {
+				this.database
+					.query(
+						"UPDATE encrypted_agent_schema SET version = ? WHERE singleton = 1",
 					)
 					.run(DATABASE_SCHEMA_VERSION);
 			}
@@ -2423,7 +3109,7 @@ function aad(
 	return new TextEncoder().encode(
 		[
 			"whalehall.encrypted-agent",
-			`schema=${DATABASE_SCHEMA_VERSION}`,
+			`schema=${CIPHER_AAD_SCHEMA_VERSION}`,
 			`cipher=${CIPHER_VERSION}`,
 			`key=${keyVersion}`,
 			`account=${accountId}`,
@@ -2449,20 +3135,23 @@ function calendarDateRange(event: CalendarEvent): [string, string] {
 	}
 	const startMs = parseInstant(event.schedule.start, "calendar start");
 	const endMs = parseInstant(event.schedule.end, "calendar end");
-	if (startMs >= endMs) throw invalidArgument("Calendar event range is invalid.");
+	if (startMs >= endMs)
+		throw invalidArgument("Calendar event range is invalid.");
 	const start = zonedDateParts(startMs, event.schedule.timeZone);
 	const end = zonedDateParts(endMs, event.schedule.timeZone);
-	return [
-		start.date,
-		end.atMidnight ? end.date : addDateOnlyDays(end.date, 1),
-	];
+	return [start.date, end.atMidnight ? end.date : addDateOnlyDays(end.date, 1)];
 }
 
 function isCalendarEvent(value: unknown): value is CalendarEvent {
-	if (!isRecord(value) || typeof value.id !== "string" || typeof value.title !== "string") {
+	if (
+		!isRecord(value) ||
+		typeof value.id !== "string" ||
+		typeof value.title !== "string"
+	) {
 		return false;
 	}
-	if (!isRecord(value.schedule) || typeof value.schedule.allDay !== "boolean") return false;
+	if (!isRecord(value.schedule) || typeof value.schedule.allDay !== "boolean")
+		return false;
 	if (value.schedule.allDay) {
 		return (
 			typeof value.schedule.startDate === "string" &&
@@ -2538,7 +3227,8 @@ function validateRun(record: AgentRunRecord): void {
 	if (record.conversationId !== null) {
 		validateIdentifier(record.conversationId, "conversationId");
 	}
-	if (record.workflowId !== null) validateIdentifier(record.workflowId, "workflowId");
+	if (record.workflowId !== null)
+		validateIdentifier(record.workflowId, "workflowId");
 	if (
 		![
 			"starting",
@@ -2583,9 +3273,11 @@ function validatePlanningAuthoritySnapshot(
 		if (
 			(snapshot.confirmedPlan !== null) !== hasPreviousCommit ||
 			(snapshot.activeGoal !== null) !== hasPreviousCommit ||
-			(snapshot.commit?.effect.status === "pending")
+			snapshot.commit?.effect.status === "pending"
 		) {
-			throw invalidArgument("Draft planning authority has inconsistent previous commit state.");
+			throw invalidArgument(
+				"Draft planning authority has inconsistent previous commit state.",
+			);
 		}
 	} else if (
 		snapshot.confirmedPlan === null ||
@@ -2645,6 +3337,261 @@ function planningSnapshotCommitDigest(
 		draftRevision: snapshot.commit.draftRevision,
 		draftDigest: snapshot.commit.draftDigest,
 	});
+}
+
+function validateDataCenterAgentCredentialsRecord(
+	record: DataCenterAgentCredentialsRecord,
+): void {
+	if (!isDataCenterAgentCredentialsRecord(record, record.accountId)) {
+		throw invalidArgument("DataCenter Agent credentials are invalid.");
+	}
+}
+
+function isDataCenterAgentCredentialsRecord(
+	value: unknown,
+	accountId: string,
+): value is DataCenterAgentCredentialsRecord {
+	if (
+		!isRecord(value) ||
+		!hasExactObjectKeys(value, [
+			"schemaVersion",
+			"accountId",
+			"installationId",
+			"publicKey",
+			"privateKeyPkcs8",
+			"fingerprint",
+			"registrationRequestBody",
+			"registrationStatus",
+			"agentId",
+			"deviceId",
+			"configVersion",
+			"consentDigest",
+			"createdAtMs",
+			"updatedAtMs",
+		]) ||
+		value.schemaVersion !== "datacenter-agent-credentials.v1" ||
+		value.accountId !== accountId ||
+		!isUuid(value.installationId) ||
+		!isEd25519PublicKeyBase64(value.publicKey) ||
+		!isBoundedNonControlString(value.privateKeyPkcs8, 32, 2_048) ||
+		!isSha256Hex(value.fingerprint) ||
+		!isBoundedNonControlString(value.registrationRequestBody, 2, 64 * 1024) ||
+		(value.registrationStatus !== "pending" &&
+			value.registrationStatus !== "registered") ||
+		!isNullableIdentifier(value.agentId) ||
+		!isNullableIdentifier(value.deviceId) ||
+		!(
+			value.configVersion === null ||
+			(Number.isSafeInteger(value.configVersion) &&
+				(value.configVersion as number) >= 1)
+		) ||
+		!(value.consentDigest === null || isSha256Hex(value.consentDigest)) ||
+		!isNonNegativeSafeIntegerValue(value.createdAtMs) ||
+		!isNonNegativeSafeIntegerValue(value.updatedAtMs) ||
+		(value.updatedAtMs as number) < (value.createdAtMs as number)
+	) {
+		return false;
+	}
+	return value.registrationStatus === "pending"
+		? value.agentId === null &&
+				value.deviceId === null &&
+				value.configVersion === null
+		: value.agentId !== null &&
+				value.deviceId !== null &&
+				value.configVersion !== null;
+}
+
+function validateDataCenterPendingBatchRecord(
+	record: DataCenterPendingBatchRecord,
+): void {
+	if (!isDataCenterPendingBatchRecord(record, record.accountId)) {
+		throw invalidArgument("DataCenter pending batch is invalid.");
+	}
+}
+
+function isDataCenterPendingBatchRecord(
+	value: unknown,
+	accountId: string,
+): value is DataCenterPendingBatchRecord {
+	return (
+		isRecord(value) &&
+		hasExactObjectKeys(value, [
+			"schemaVersion",
+			"accountId",
+			"batchKey",
+			"body",
+			"requestHash",
+			"firstCursor",
+			"lastCursor",
+			"createdAtMs",
+		]) &&
+		value.schemaVersion === "datacenter-pending-batch.v1" &&
+		value.accountId === accountId &&
+		isBoundedNonControlString(value.batchKey, 1, 128) &&
+		isBoundedNonControlString(
+			value.body,
+			2,
+			MAX_DATA_CENTER_BATCH_BODY_BYTES,
+		) &&
+		Buffer.byteLength(value.body, "utf8") <= MAX_DATA_CENTER_BATCH_BODY_BYTES &&
+		isSha256Hex(value.requestHash) &&
+		isDesktopCursor(value.firstCursor) &&
+		isDesktopCursor(value.lastCursor) &&
+		value.firstCursor <= value.lastCursor &&
+		isNonNegativeSafeIntegerValue(value.createdAtMs)
+	);
+}
+
+function validateDataCenterConsumerAuditRecord(
+	record: DataCenterConsumerAuditRecord,
+): void {
+	if (!isDataCenterConsumerAuditRecord(record, record.toAccountId, record.id)) {
+		throw invalidArgument("DataCenter consumer audit is invalid.");
+	}
+}
+
+function isDataCenterConsumerAuditRecord(
+	value: unknown,
+	accountId: string,
+	auditId: string,
+): value is DataCenterConsumerAuditRecord {
+	if (
+		!isRecord(value) ||
+		!hasExactObjectKeys(value, [
+			"schemaVersion",
+			"fromAccountId",
+			"toAccountId",
+			"fromCursor",
+			"toCursor",
+			"reason",
+			"createdAtMs",
+			"id",
+		]) ||
+		value.schemaVersion !== "datacenter-consumer-audit.v1" ||
+		value.id !== auditId ||
+		value.toAccountId !== accountId ||
+		!(
+			value.fromAccountId === null ||
+			isStorageComponentValue(value.fromAccountId)
+		) ||
+		!isStorageComponentValue(value.toAccountId) ||
+		!(value.fromCursor === null || isDesktopCursor(value.fromCursor)) ||
+		!isDesktopCursor(value.toCursor) ||
+		value.reason !== "account-boundary" ||
+		!isNonNegativeSafeIntegerValue(value.createdAtMs)
+	) {
+		return false;
+	}
+	return /^dcaudit1_[a-f0-9]{64}$/u.test(value.id);
+}
+
+function validateDataCenterPendingAdvanceRecord(
+	record: DataCenterPendingAdvanceRecord,
+): void {
+	if (!isDataCenterPendingAdvanceRecord(record, record.accountId)) {
+		throw invalidArgument("DataCenter pending cursor advance is invalid.");
+	}
+}
+
+function isDataCenterPendingAdvanceRecord(
+	value: unknown,
+	accountId: string,
+): value is DataCenterPendingAdvanceRecord {
+	return (
+		isRecord(value) &&
+		hasExactObjectKeys(value, [
+			"schemaVersion",
+			"accountId",
+			"advanceKey",
+			"body",
+			"requestHash",
+			"fromCursor",
+			"toCursor",
+			"eventCount",
+			"createdAtMs",
+		]) &&
+		value.schemaVersion === "datacenter-pending-advance.v1" &&
+		value.accountId === accountId &&
+		isBoundedNonControlString(value.advanceKey, 1, 256) &&
+		isBoundedNonControlString(value.body, 2, 64 * 1024) &&
+		isSha256Hex(value.requestHash) &&
+		(value.fromCursor === null || isDesktopCursor(value.fromCursor)) &&
+		isDesktopCursor(value.toCursor) &&
+		isNonNegativeSafeIntegerValue(value.eventCount) &&
+		(value.eventCount as number) >= 1 &&
+		isNonNegativeSafeIntegerValue(value.createdAtMs)
+	);
+}
+
+function isNullableIdentifier(value: unknown): value is string | null {
+	return value === null || isBoundedNonControlString(value, 1, 256);
+}
+
+function isStorageComponentValue(value: unknown): value is string {
+	return (
+		typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,127}$/u.test(value)
+	);
+}
+
+function isUuid(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu.test(
+			value,
+		)
+	);
+}
+
+function isEd25519PublicKeyBase64(value: unknown): value is string {
+	return typeof value === "string" && /^[A-Za-z0-9+/]{43}=$/u.test(value);
+}
+
+function isDesktopCursor(value: unknown): value is string {
+	return typeof value === "string" && /^ec1_[0-7][0-9a-f]{15}$/u.test(value);
+}
+
+function previousDesktopCursor(cursor: string): string | null {
+	if (!isDesktopCursor(cursor)) return null;
+	const sequence = BigInt(`0x${cursor.slice(4)}`);
+	if (sequence < 1n) {
+		throw invalidArgument("DataCenter pending batch cursor is invalid.");
+	}
+	return sequence === 1n
+		? null
+		: `ec1_${(sequence - 1n).toString(16).padStart(16, "0")}`;
+}
+
+function isSha256Hex(value: unknown): value is string {
+	return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function validateSha256Hex(value: string, name: string): void {
+	if (!isSha256Hex(value)) throw invalidArgument(`${name} is invalid.`);
+}
+
+function isNonNegativeSafeIntegerValue(value: unknown): value is number {
+	return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isBoundedNonControlString(
+	value: unknown,
+	minimum: number,
+	maximum: number,
+): value is string {
+	return (
+		typeof value === "string" &&
+		value.length >= minimum &&
+		value.length <= maximum &&
+		!value.includes("\u0000")
+	);
+}
+
+function hasExactObjectKeys(
+	value: Record<string, unknown>,
+	keys: readonly string[],
+): boolean {
+	const actual = Object.keys(value);
+	return actual.length === keys.length && keys.every((key) => key in value);
 }
 
 function validatePermission(permission: AgentPermission): void {
@@ -2790,7 +3737,11 @@ function validateStorageComponent(value: string, name: string): void {
 }
 
 function validateText(value: string, name: string): void {
-	if (typeof value !== "string" || value.length < 1 || value.length > 1_000_000) {
+	if (
+		typeof value !== "string" ||
+		value.length < 1 ||
+		value.length > 1_000_000
+	) {
 		throw invalidArgument(`${name} is invalid.`);
 	}
 }
@@ -2809,7 +3760,9 @@ function validateRevision(value: number): void {
 
 function validateLimit(limit: number): void {
 	if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
-		throw invalidArgument(`List limit must be between 1 and ${MAX_LIST_LIMIT}.`);
+		throw invalidArgument(
+			`List limit must be between 1 and ${MAX_LIST_LIMIT}.`,
+		);
 	}
 }
 

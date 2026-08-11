@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { AgentRuntime } from "../src/agent/agent-runtime";
-import {
-	LocalClientError,
-	type LocalToolProcess,
-} from "../src/agent/local-tool-client";
 import type {
 	LocalAuditFiveMinutesQuery,
 	LocalAuditFiveMinutesResult,
@@ -12,6 +8,7 @@ import type {
 	LocalEventGoalChangeResult,
 	LocalEventQuery,
 	LocalEventQueryResult,
+	LocalEventTailCursorResult,
 	LocalMonitoringConfigure,
 	LocalMonitoringStatus,
 	LocalRuntimeHealth,
@@ -23,15 +20,19 @@ import type {
 	LocalToolCancelResult,
 	LocalToolDescriptor,
 	LocalToolEvent,
-	LocalVaultOpenBatch,
-	LocalVaultOpenBatchResult,
 	LocalVaultDeleteBatch,
 	LocalVaultDeleteBatchResult,
 	LocalVaultKeyStatus,
 	LocalVaultLegacyMigrationResult,
+	LocalVaultOpenBatch,
+	LocalVaultOpenBatchResult,
 	LocalVaultSealBatch,
 	LocalVaultSealBatchResult,
 } from "../src/agent/local-protocol";
+import {
+	LocalClientError,
+	type LocalToolProcess,
+} from "../src/agent/local-tool-client";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
 import type { SemanticEventV2 } from "../src/agent/timeline-v2/types";
 
@@ -45,11 +46,15 @@ class FakeLocalProcess implements LocalToolProcess {
 	readonly appendedGoalChanges: LocalEventGoalChange[] = [];
 	startupGoalAcknowledgements = 0;
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
-	private readonly desktopEventListeners = new Set<(event: DesktopEventV1) => void>();
+	private readonly desktopEventListeners = new Set<
+		(event: DesktopEventV1) => void
+	>();
 	private readonly semanticEventListeners = new Set<
 		(event: SemanticEventV2) => void
 	>();
-	private readonly failureListeners = new Set<(error: LocalClientError) => void>();
+	private readonly failureListeners = new Set<
+		(error: LocalClientError) => void
+	>();
 
 	async prepareStartupGoalChange(
 		change: LocalEventGoalChange | null,
@@ -78,6 +83,10 @@ class FakeLocalProcess implements LocalToolProcess {
 		};
 	}
 
+	async getEventTailCursor(): Promise<LocalEventTailCursorResult> {
+		return { cursor: "ec1_0000000000000000" };
+	}
+
 	async listTools(): Promise<LocalToolDescriptor[]> {
 		return [
 			{
@@ -92,8 +101,16 @@ class FakeLocalProcess implements LocalToolProcess {
 	}
 
 	async callTool(call: LocalToolCall): Promise<LocalToolCallResult> {
-		this.emit({ event: "tool.started", callId: call.callId, data: { name: call.name } });
-		this.emit({ event: "tool.completed", callId: call.callId, data: { name: call.name } });
+		this.emit({
+			event: "tool.started",
+			callId: call.callId,
+			data: { name: call.name },
+		});
+		this.emit({
+			event: "tool.completed",
+			callId: call.callId,
+			data: { name: call.name },
+		});
 		return { callId: call.callId, output: { ok: true } };
 	}
 
@@ -465,9 +482,17 @@ describe("AgentRuntime", () => {
 		const local = new FakeLocalProcess();
 		const runtime = new AgentRuntime(local);
 		await runtime.start();
-		local.emit({ event: "tool.started", callId: "call-1", data: { name: "demo.wait" } });
+		local.emit({
+			event: "tool.started",
+			callId: "call-1",
+			data: { name: "demo.wait" },
+		});
 		expect(runtime.getLocalStatus().activeCalls).toBe(1);
-		local.emit({ event: "tool.cancelled", callId: "call-1", data: { name: "demo.wait" } });
+		local.emit({
+			event: "tool.cancelled",
+			callId: "call-1",
+			data: { name: "demo.wait" },
+		});
 		expect(runtime.getLocalStatus().activeCalls).toBe(0);
 	});
 

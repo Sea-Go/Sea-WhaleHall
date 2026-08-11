@@ -1,14 +1,11 @@
+import { MAX_ACTIVE_GOAL_TEXT_LENGTH } from "../shared/goal-context";
 import type {
 	ActiveGoalContextV1,
 	DesktopEventKind,
 	DesktopEventV1,
 } from "./reflection/types";
-import { MAX_ACTIVE_GOAL_TEXT_LENGTH } from "../shared/goal-context";
 import { isSemanticEventV2 } from "./timeline-v2/contract";
-import type {
-	CoverageLevel,
-	SemanticEventV2,
-} from "./timeline-v2/types";
+import type { CoverageLevel, SemanticEventV2 } from "./timeline-v2/types";
 
 export const MAX_JSONL_LINE_BYTES = 1024 * 1024;
 export const LOCAL_CONTROL_TIMEOUT_MS = 5000;
@@ -22,6 +19,7 @@ export type LocalMethod =
 	| "tool.call"
 	| "tool.cancel"
 	| "event.query"
+	| "event.tailCursor"
 	| "event.commit"
 	| "event.goal.change"
 	| "monitoring.status"
@@ -148,6 +146,10 @@ export type LocalEventQueryResult = {
 	events: DesktopEventV1[];
 	nextCursor: string | null;
 	hasMore: boolean;
+};
+
+export type LocalEventTailCursorResult = {
+	cursor: string;
 };
 
 export type LocalEventCommitResult = {
@@ -382,7 +384,8 @@ export function parseLocalMessage(line: string): LocalMessage {
 	} catch (error) {
 		throw new Error(`whalehall-local emitted invalid JSON: ${String(error)}`);
 	}
-	if (!isRecord(value)) throw new Error("Local protocol message must be an object.");
+	if (!isRecord(value))
+		throw new Error("Local protocol message must be an object.");
 
 	if (value.event === "desktop.event") {
 		if (!isDesktopEvent(value.data)) {
@@ -445,8 +448,7 @@ export function isLocalAuditFiveMinutesResult(
 		Number.isSafeInteger(toMs) &&
 		toMs >= 0 &&
 		toMs - fromMs === 300_000 &&
-		(query === undefined ||
-			(fromMs === query.fromMs && toMs === query.toMs)) &&
+		(query === undefined || (fromMs === query.fromMs && toMs === query.toMs)) &&
 		isMonitoringPermissions(value.permissions) &&
 		Array.isArray(value.coverage) &&
 		value.coverage.every(isCoverageLevel) &&
@@ -495,8 +497,7 @@ export function isLocalVaultOpenResultRecord(
 		isProtocolIdentifier(value.contentRef, 512) &&
 		isProtocolIdentifier(value.contentHash, 256) &&
 		isNonNegativeSafeInteger(value.createdAtMs) &&
-		(value.expiresAtMs === null ||
-			isNonNegativeSafeInteger(value.expiresAtMs))
+		(value.expiresAtMs === null || isNonNegativeSafeInteger(value.expiresAtMs))
 	);
 }
 
@@ -582,8 +583,7 @@ export function isLocalMonitoringStatus(
 		!Array.isArray(value.excludedBundleIds) ||
 		value.excludedBundleIds.length > 256 ||
 		!value.excludedBundleIds.every(isMonitoringBundleId) ||
-		new Set(value.excludedBundleIds).size !==
-			value.excludedBundleIds.length ||
+		new Set(value.excludedBundleIds).size !== value.excludedBundleIds.length ||
 		!(
 			value.helperPid === null ||
 			(isNonNegativeSafeInteger(value.helperPid) &&
@@ -604,10 +604,7 @@ export function isLocalMonitoringStatus(
 			value.lastCallbackAtMs,
 			value.lastHeartbeatAtMs,
 		) ||
-		!isNullableHealthTimestamp(
-			value.lastBucketAtMs,
-			value.lastHeartbeatAtMs,
-		) ||
+		!isNullableHealthTimestamp(value.lastBucketAtMs, value.lastHeartbeatAtMs) ||
 		(value.tapReady &&
 			(value.state !== "running" ||
 				value.helperPid === null ||
@@ -617,8 +614,7 @@ export function isLocalMonitoringStatus(
 		!isNullableNonNegativeSafeInteger(value.permissionsCheckedAtMs) ||
 		typeof value.permissionSetupAvailable !== "boolean" ||
 		typeof value.permissionSetupAttempted !== "boolean" ||
-		(value.permissionSetupAttempted &&
-			!value.permissionSetupAvailable) ||
+		(value.permissionSetupAttempted && !value.permissionSetupAvailable) ||
 		(value.permissionCheckState === "unchecked" &&
 			value.permissionsCheckedAtMs !== null) ||
 		(value.permissionCheckState === "current" &&
@@ -627,10 +623,7 @@ export function isLocalMonitoringStatus(
 		value.coverage.length > 5 ||
 		!value.coverage.every(isCoverageLevel) ||
 		new Set(value.coverage).size !== value.coverage.length ||
-		!(
-			value.lastError === null ||
-			isBoundedString(value.lastError, 2_048)
-		)
+		!(value.lastError === null || isBoundedString(value.lastError, 2_048))
 	) {
 		return false;
 	}
@@ -654,30 +647,31 @@ export function isLocalMonitoringConfigure(
 ): value is LocalMonitoringConfigure {
 	return (
 		isRecord(value) &&
-		hasExactKeys(value, [
-			"enabled",
-			"captureContent",
-			"excludedBundleIds",
-		]) &&
+		hasExactKeys(value, ["enabled", "captureContent", "excludedBundleIds"]) &&
 		typeof value.enabled === "boolean" &&
 		typeof value.captureContent === "boolean" &&
 		Array.isArray(value.excludedBundleIds) &&
 		value.excludedBundleIds.length <= 256 &&
 		value.excludedBundleIds.every(isMonitoringBundleId) &&
-		new Set(value.excludedBundleIds).size ===
-			value.excludedBundleIds.length
+		new Set(value.excludedBundleIds).size === value.excludedBundleIds.length
 	);
 }
 
-export function isLocalToolDescriptor(value: unknown): value is LocalToolDescriptor {
+export function isLocalToolDescriptor(
+	value: unknown,
+): value is LocalToolDescriptor {
 	return (
 		isRecord(value) &&
 		typeof value.name === "string" &&
 		typeof value.description === "string" &&
 		isRecord(value.inputSchema) &&
-		(value.risk === "read" || value.risk === "write" || value.risk === "control") &&
+		(value.risk === "read" ||
+			value.risk === "write" ||
+			value.risk === "control") &&
 		Array.isArray(value.requiredPermissions) &&
-		value.requiredPermissions.every((permission) => typeof permission === "string") &&
+		value.requiredPermissions.every(
+			(permission) => typeof permission === "string",
+		) &&
 		typeof value.supportsCancellation === "boolean"
 	);
 }
@@ -796,7 +790,10 @@ function containsContentOnlyDesktopField(value: unknown): boolean {
 	return containsMatchingField(value, CONTENT_ONLY_DESKTOP_FIELDS);
 }
 
-function containsMatchingField(value: unknown, fields: ReadonlySet<string>): boolean {
+function containsMatchingField(
+	value: unknown,
+	fields: ReadonlySet<string>,
+): boolean {
 	if (Array.isArray(value)) {
 		return value.some((child) => containsMatchingField(child, fields));
 	}
@@ -1097,8 +1094,7 @@ function isPermissionList(value: unknown): boolean {
 		value.every(
 			(permission) =>
 				typeof permission === "string" &&
-				(permission === "*" ||
-					/^[a-z][a-z0-9.-]{0,127}$/u.test(permission)),
+				(permission === "*" || /^[a-z][a-z0-9.-]{0,127}$/u.test(permission)),
 		)
 	);
 }
