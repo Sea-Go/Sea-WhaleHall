@@ -304,8 +304,9 @@ describe("LocalToolClient", () => {
 		const client = new LocalToolClient("fake", {
 			spawn: () => child,
 			shutdownSleep: async (durationMs) => {
-				gracefulWindowMs = durationMs;
+				gracefulWindowMs ??= durationMs;
 				shutdownSleeps.push(durationMs);
+				if (durationMs === 2_000) await new Promise(() => {});
 			},
 		});
 		await client.start();
@@ -327,12 +328,35 @@ describe("LocalToolClient", () => {
 
 		expect(child.endCalled).toBe(true);
 		expect(gracefulWindowMs).toBe(10_000);
-		expect(shutdownSleeps).toEqual([10_000]);
+		expect(shutdownSleeps).toEqual([10_000, 2_000]);
 		expect(child.killCalled).toBe(true);
 		expect(settled).toBe(false);
 		child.exit(143);
 		await expect(stopping).rejects.toMatchObject({ code: "STOP_FAILED" });
 		expect(settled).toBe(true);
+	});
+
+	test("retains ownership when a successful kill does not produce an exit", async () => {
+		const child = new FakeChild(() => {}, {
+			exitOnEnd: false,
+			exitOnKill: false,
+		});
+		const shutdownSleeps: number[] = [];
+		const client = new LocalToolClient("fake", {
+			spawn: () => child,
+			shutdownSleep: async (durationMs) => {
+				shutdownSleeps.push(durationMs);
+			},
+		});
+		await client.start();
+
+		await expect(client.stop()).rejects.toMatchObject({ code: "STOP_FAILED" });
+		expect(shutdownSleeps).toEqual([10_000, 2_000]);
+		expect(child.killCalled).toBe(true);
+		expect(client.isRunning).toBe(true);
+		child.exit(143);
+		await Promise.resolve();
+		expect(client.isRunning).toBe(false);
 	});
 
 	test("reports a kill failure after the graceful window", async () => {

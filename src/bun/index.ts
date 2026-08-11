@@ -1218,7 +1218,10 @@ function shutdown(): Promise<void> {
 }
 
 app.on("reopen", () => {
-	void clientLifecycle.open();
+	// A shutdown veto intentionally rejects reopen while critical process owners
+	// are waiting for a later quit retry. Normal create failures are already
+	// projected through the lifecycle error handler.
+	void clientLifecycle.open().catch(() => undefined);
 });
 Electrobun.events.on("before-quit", (event: BeforeQuitEvent) => {
 	// The high-level app event strips the response setter Electrobun requires

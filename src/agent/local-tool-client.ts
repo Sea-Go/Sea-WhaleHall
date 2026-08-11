@@ -1098,7 +1098,16 @@ async function closeGracefully(
 			}`,
 		);
 	}
-	await child.exited;
+	const exitedAfterKill = await Promise.race([
+		child.exited.then(() => true),
+		shutdownSleep(LOCAL_POST_KILL_EXIT_TIMEOUT_MS).then(() => false),
+	]);
+	if (!exitedAfterKill) {
+		throw new LocalClientError(
+			"STOP_FAILED",
+			"whalehall-local did not exit after forced termination.",
+		);
+	}
 	return "forced";
 }
 
