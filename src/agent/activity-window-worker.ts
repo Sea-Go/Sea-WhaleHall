@@ -9,6 +9,7 @@ import {
 	type ActivityAnalysisWorkerResult as SharedActivityAnalysisWorkerResult,
 	serializedActivityAnalysisLength,
 } from "../shared/activity-analysis-contract";
+import type { AuthSessionIdentity } from "../shared/session-identity";
 import {
 	ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION,
 	ACTIVITY_EVENT_WORKER_RESPONSE_SCHEMA_VERSION,
@@ -18,7 +19,6 @@ import {
 	type ActivityScoreStatus,
 } from "./activity-event-worker";
 import type { EventWindowV1 } from "./reflection/types";
-import type { AuthSessionIdentity } from "../shared/session-identity";
 
 export const DEFAULT_ACTIVITY_WINDOW_SCORE_THRESHOLD = 1;
 

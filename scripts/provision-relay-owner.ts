@@ -13,9 +13,9 @@ import { createScryptPasswordHash } from "../services/model-relay/password";
 import type { RelayUser } from "../services/model-relay/types";
 import {
 	DEFAULT_CLIENT_CONFIGURATION,
+	UNPROVISIONED_REFLECTION_RELAY_KEY,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 	WHALEHALL_RELAY_MODEL,
-	UNPROVISIONED_REFLECTION_RELAY_KEY,
 	writeProvisionedClientConfiguration,
 } from "../src/bun/client-config";
 

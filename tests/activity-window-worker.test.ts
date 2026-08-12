@@ -299,7 +299,9 @@ describe("ActivityWindowDeliveryService", () => {
 			await enqueueing;
 			await service.whenIdle();
 			expect(analyzer.requests).toHaveLength(1);
-			expect((analyzer.requests[0]?.raw_event as EventWindowV1).windowId).toBe(
+			const analyzed = analyzer.requests[0];
+			if (!analyzed) throw new Error("Expected one analyzed activity window.");
+			expect((analyzed.raw_event as EventWindowV1).windowId).toBe(
 				concurrent.windowId,
 			);
 			expect(service.getStatus().acceptedAnalysisCount).toBe(1);
@@ -376,9 +378,11 @@ describe("ActivityWindowDeliveryService", () => {
 			await service.start();
 			await service.whenIdle();
 			expect(analyzer.requests).toHaveLength(1);
-			expect(
-				(analyzer.requests[0]?.raw_event as EventWindowV1).windowId,
-			).toBe(lostNotification.windowId);
+			const analyzed = analyzer.requests[0];
+			if (!analyzed) throw new Error("Expected one recovered activity window.");
+			expect((analyzed.raw_event as EventWindowV1).windowId).toBe(
+				lostNotification.windowId,
+			);
 			expect(service.getStatus()).toMatchObject({
 				acceptedAnalysisCount: 1,
 				pendingWindowCount: 0,

@@ -13,7 +13,9 @@ export type ModelRelayPurpose = "agent" | "activity";
 const MAX_RELAY_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_STREAM_CHUNK_BYTES = 64 * 1024;
 const RELAY_COMPLETIONS_PATH = "/v1/chat/completions";
-const DEFAULT_INFLIGHT_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const;
+const DEFAULT_INFLIGHT_RETRY_DELAYS_MS = [
+	250, 500, 1_000, 2_000, 4_000, 8_000,
+] as const;
 
 export interface ModelRelayRequest {
 	runId: string;
@@ -61,7 +63,10 @@ export class ModelRelayTransport {
 	private readonly active = new Map<string, AbortController>();
 	private readonly purpose: ModelRelayPurpose;
 	private readonly inflightRetryDelaysMs: readonly number[];
-	private readonly wait: (delayMs: number, signal: AbortSignal) => Promise<void>;
+	private readonly wait: (
+		delayMs: number,
+		signal: AbortSignal,
+	) => Promise<void>;
 
 	constructor(
 		private readonly auth: ModelRelayAuthorization,
@@ -274,7 +279,9 @@ async function isRequestInProgress(response: Response): Promise<boolean> {
 function validateRetryDelays(delays: readonly number[]): readonly number[] {
 	if (
 		delays.length > 10 ||
-		delays.some((delay) => !Number.isFinite(delay) || delay < 0 || delay > 30_000)
+		delays.some(
+			(delay) => !Number.isFinite(delay) || delay < 0 || delay > 30_000,
+		)
 	) {
 		throw new Error("Model relay retry delays are invalid.");
 	}
