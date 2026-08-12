@@ -196,6 +196,10 @@ describe("ModelRelayTransport", () => {
 			"user_id",
 			"accessToken",
 			"apiKey",
+			"token",
+			"key",
+			"api_key",
+			"access_token",
 		].entries()) {
 			await expect(
 				transport.open(

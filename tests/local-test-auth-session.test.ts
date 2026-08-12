@@ -112,7 +112,9 @@ describe("LocalTestAuthSessionManager", () => {
 	test("fails model relay authorization closed", async () => {
 		const manager = new LocalTestAuthSessionManager();
 		await manager.signInTestAccount(LOCAL_TEST_AUTH_EXPERIENCE);
-		await expect(manager.authorizedFetch("/v1/chat/completions")).rejects.toMatchObject({
+		await expect(
+			manager.authorizedFetch("/v1/chat/completions", {}, "agent"),
+		).rejects.toMatchObject({
 			kind: "service-unavailable",
 		});
 	});

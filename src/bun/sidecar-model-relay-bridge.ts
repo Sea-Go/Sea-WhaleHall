@@ -196,8 +196,7 @@ function requireOpenParams(
 	if (
 		!boundedId(value.relayId) ||
 		(value.runId !== null && !boundedId(value.runId)) ||
-		(value.originatingRequestId !== null &&
-			!boundedId(value.originatingRequestId)) ||
+		!boundedId(value.originatingRequestId) ||
 		!boundedId(value.provider) ||
 		!boundedId(value.modelId) ||
 		!isRecord(value.request) ||
@@ -263,11 +262,11 @@ function relayFailure(error: unknown): AgentHostErrorPayload {
 }
 
 function relayIdempotencyKey(
-	originatingRequestId: string | null,
+	originatingRequestId: string,
 	body: Record<string, unknown>,
 ): string {
 	return `relay-${createHash("sha256")
-		.update(originatingRequestId ?? "")
+		.update(originatingRequestId)
 		.update("\0")
 		.update(JSON.stringify(body))
 		.digest("hex")}`;

@@ -521,7 +521,7 @@ export class ActivityWindowDeliveryStore {
 		const outbox = this.database
 			.query(
 				`SELECT
-					SUM(CASE WHEN terminal = 0 THEN 1 ELSE 0 END) AS pending_count,
+					SUM(CASE WHEN terminal = 0 AND owner_account_id IS NOT NULL THEN 1 ELSE 0 END) AS pending_count,
 					SUM(CASE WHEN terminal = 1 THEN 1 ELSE 0 END) AS terminal_count
 				 FROM activity_window_worker_outbox`,
 			)

@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelRelayEventFrame } from "../src/agent/mastra-host/protocol";
 import {
+	type ModelRelayAuthorization,
 	ModelRelayError,
 	ModelRelayTransport,
 } from "../src/bun/model-relay-transport";
-import type { RemoteAuthSessionManager } from "../src/bun/remote-auth-session";
 import { SidecarModelRelayBridge } from "../src/bun/sidecar-model-relay-bridge";
 
 describe("SidecarModelRelayBridge", () => {
@@ -353,6 +353,10 @@ describe("SidecarModelRelayBridge", () => {
 			"user_id",
 			"accessToken",
 			"apiKey",
+			"token",
+			"key",
+			"api_key",
+			"access_token",
 		].entries()) {
 			await expect(
 				bridge.open(
@@ -364,6 +368,31 @@ describe("SidecarModelRelayBridge", () => {
 				),
 			).rejects.toThrow("不得携带自报身份或供应商凭据");
 		}
+		expect(remoteCalls).toBe(0);
+	});
+
+	test("rejects a missing durable originating request ID before any remote request", async () => {
+		let remoteCalls = 0;
+		const bridge = new SidecarModelRelayBridge({
+			transport: new ModelRelayTransport(
+				authWithResponse(() => {
+					remoteCalls += 1;
+					return Response.json({ ok: true });
+				}),
+			),
+			modelId: "approved-model",
+			send: async () => {},
+		});
+		const params = relayOpenParams(
+			"relay-missing-origin",
+			"run-missing-origin",
+			validBody(),
+		);
+		params.originatingRequestId = null;
+
+		await expect(
+			bridge.open("host-request-missing-origin", params),
+		).rejects.toThrow("Invalid model relay open request");
 		expect(remoteCalls).toBe(0);
 	});
 
@@ -396,20 +425,30 @@ describe("SidecarModelRelayBridge", () => {
 				"origin-stable",
 			),
 		);
+		await bridge.open(
+			"host-request-stable-4",
+			relayOpenParams(
+				"relay-stable-4",
+				"run-stable-4",
+				body,
+				"origin-distinct",
+			),
+		);
 
-		expect(keys).toHaveLength(3);
+		expect(keys).toHaveLength(4);
 		expect(keys[0]).toMatch(/^relay-[0-9a-f]{64}$/);
 		expect(keys[1]).toBe(keys[0]);
 		expect(keys[2]).not.toBe(keys[0]);
+		expect(keys[3]).not.toBe(keys[0]);
 	});
 });
 
 function authWithResponse(
 	respond: (path: string, init: RequestInit) => Response | Promise<Response>,
-): RemoteAuthSessionManager {
+): ModelRelayAuthorization {
 	return {
-		authorizedFetch: respond,
-	} as RemoteAuthSessionManager;
+		authorizedFetch: async (path, init) => respond(path, init),
+	};
 }
 
 function relayOpenParams(

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -245,6 +246,48 @@ async function eventually(
 }
 
 describe("ActivityWindowDeliveryService", () => {
+	test("excludes legacy unowned rows from pending status without dropping them", () => {
+		const directory = temporaryDirectory();
+		const databasePath = join(directory, "activity-window-worker.sqlite3");
+		const legacy = new Database(databasePath, { create: true, strict: true });
+		legacy.exec(`
+			CREATE TABLE activity_window_worker_outbox (
+				window_id TEXT PRIMARY KEY,
+				request_id TEXT NOT NULL UNIQUE,
+				window_json TEXT NOT NULL,
+				queued_at_ms INTEGER NOT NULL,
+				attempt INTEGER NOT NULL CHECK (attempt >= 0),
+				next_attempt_at_ms INTEGER NOT NULL,
+				terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+				last_error TEXT
+			);
+			INSERT INTO activity_window_worker_outbox
+			 (window_id, request_id, window_json, queued_at_ms, attempt,
+			  next_attempt_at_ms, terminal, last_error)
+			 VALUES
+			 ('legacy-pending', 'legacy-request-pending', '{}', 1, 0, 1, 0, NULL),
+			 ('legacy-terminal', 'legacy-request-terminal', '{}', 2, 1, 2, 1, 'terminal');
+		`);
+		legacy.close();
+
+		const store = new ActivityWindowDeliveryStore(databasePath);
+		try {
+			store.initializeBaseline([], activityOwner);
+			store.enqueue(
+				sealedWindow("owned-pending", 2),
+				"owned-request-pending",
+				3,
+				activityOwner,
+			);
+			expect(store.getStatus(1)).toMatchObject({
+				pendingWindowCount: 1,
+				terminalWindowCount: 1,
+			});
+		} finally {
+			store.close();
+		}
+	});
+
 	test("fails closed before creating an outbox without an authenticated owner", async () => {
 		const directory = temporaryDirectory();
 		const store = new ActivityWindowDeliveryStore(

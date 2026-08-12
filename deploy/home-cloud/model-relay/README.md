@@ -34,11 +34,13 @@ bun run provision:relay-owner -- \
 ```
 
 This writes the personal relay key only to the local owner-only `config.yaml`
-and writes only `passwordHash` and `agentKeyHash` to
-`model-relay-users.json`. The compatibility-only reflection config entry is an
-ignored placeholder, not a credential. Copy only the users file to the server;
-never copy the desktop `config.yaml` or print the personal key. Existing users
-require the explicit `--replace` flag to avoid accidental overwrite.
+and writes the complete user record (`id`, `email`, `displayName`, `initials`,
+optional `disabled`) to `model-relay-users.json`; credential material is stored
+only as `passwordHash` and `agentKeyHash`. The compatibility-only reflection
+config entry is an ignored placeholder, not a credential. Copy only the users
+file to the server; never copy the desktop `config.yaml` or print the personal
+key. Existing users require the explicit `--replace` flag to avoid accidental
+overwrite.
 
 ## Install after merge
 

@@ -908,6 +908,10 @@ export class AgentRunCoordinator
 		} catch (error) {
 			return agentError(error);
 		}
+		const originatingRequestId = requiredId(
+			snapshot.requestId,
+			"originatingRequestId",
+		);
 		snapshot.revision += 1;
 		snapshot.status = "running";
 		await this.persistRun(run);
@@ -918,6 +922,7 @@ export class AgentRunCoordinator
 				{
 					runId: input.runId,
 					sessionId: snapshot.session.id,
+					originatingRequestId,
 					answers: input.answers,
 					...(run.sidecarPlanningVersion !== undefined
 						? { expectedVersion: run.sidecarPlanningVersion }
@@ -1035,12 +1040,17 @@ export class AgentRunCoordinator
 				input.decision === "approve-once"
 					? "agent.approveTool"
 					: "agent.declineTool";
+			const originatingRequestId = requiredId(
+				run.snapshot.requestId,
+				"originatingRequestId",
+			);
 			this.sidecar.trackRun(input.runId);
 			void this.sidecar
 				.request(
 					method,
 					{
 						runId: input.runId,
+						originatingRequestId,
 						toolCallId: input.toolCallId,
 						resumeData:
 							input.decision === "approve-once"

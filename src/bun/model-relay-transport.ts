@@ -213,7 +213,11 @@ function assertRelayRequest(request: ModelRelayRequest): void {
 		"user" in request.body ||
 		"user_id" in request.body ||
 		"accessToken" in request.body ||
-		"apiKey" in request.body
+		"apiKey" in request.body ||
+		"token" in request.body ||
+		"key" in request.body ||
+		"api_key" in request.body ||
+		"access_token" in request.body
 	) {
 		throw new ModelRelayError(
 			"invalid-request",

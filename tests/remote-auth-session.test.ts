@@ -320,6 +320,160 @@ describe("RemoteAuthSessionManager", () => {
 		expect(credentials.values.has("auth.refresh-token.current")).toBe(false);
 	});
 
+	test("does not let an account A refresh reactivate after account B signs in", async () => {
+		const credentials = new MemoryCredentials();
+		let releaseRefresh!: () => void;
+		let markRefreshStarted!: () => void;
+		const refreshStarted = new Promise<void>((resolve) => {
+			markRefreshStarted = resolve;
+		});
+		const refreshReleased = new Promise<void>((resolve) => {
+			releaseRefresh = resolve;
+		});
+		let signInCount = 0;
+		let modelCalls = 0;
+		const activations: string[] = [];
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionActivate: async (identity) => {
+				activations.push(identity.accountId);
+			},
+			fetch: (async (input: RequestInfo | URL) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/v1/auth/sessions") {
+					signInCount += 1;
+					return Response.json(
+						sessionPayload(
+							signInCount === 1 ? "account-a" : "account-b",
+							signInCount === 1 ? "account-a" : "account-b",
+						),
+					);
+				}
+				if (path === "/v1/auth/sessions/refresh") {
+					markRefreshStarted();
+					await refreshReleased;
+					return Response.json(
+						sessionPayload("account-a-refresh", "account-a"),
+					);
+				}
+				modelCalls += 1;
+				return new Response(null, { status: 401 });
+			}) as unknown as typeof fetch,
+		});
+
+		await manager.signIn({ email: "a@example.com", password: "password" });
+		const staleRequest = manager
+			.authorizedFetch("/v1/chat/completions", { method: "POST" }, "agent")
+			.then(
+				() => null,
+				(error: unknown) => error,
+			);
+		await refreshStarted;
+		await manager.signIn({ email: "b@example.com", password: "password" });
+		expect(manager.accountId).toBe("account-b");
+		releaseRefresh();
+
+		expect(await staleRequest).toMatchObject({ kind: "expired" });
+		expect(manager.accountId).toBe("account-b");
+		expect(manager.getSession()?.id).toBe("session-account-b");
+		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+			"refresh-token-account-b-0123456789",
+		);
+		expect(activations).toEqual(["account-a", "account-b"]);
+		expect(modelCalls).toBe(1);
+	});
+
+	test("rejects and clears a refresh response for a different account", async () => {
+		const credentials = new MemoryCredentials();
+		const activations: string[] = [];
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionActivate: async (identity) => {
+				activations.push(identity.accountId);
+			},
+			fetch: (async (input: RequestInfo | URL) => {
+				const path = new URL(String(input)).pathname;
+				return Response.json(
+					path === "/v1/auth/sessions"
+						? sessionPayload("account-a", "account-a")
+						: sessionPayload("mismatched", "account-b"),
+				);
+			}) as unknown as typeof fetch,
+		});
+
+		await manager.signIn({ email: "a@example.com", password: "password" });
+		await expect(manager.refreshSession()).rejects.toMatchObject({
+			kind: "expired",
+		});
+
+		expect(manager.getSession()).toBeNull();
+		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(activations).toEqual(["account-a"]);
+	});
+
+	test("never clears a winning same-account session after overlapping activations", async () => {
+		const credentials = new MemoryCredentials();
+		let releaseFirstActivation!: () => void;
+		let markFirstActivationStarted!: () => void;
+		const firstActivationStarted = new Promise<void>((resolve) => {
+			markFirstActivationStarted = resolve;
+		});
+		const firstActivationReleased = new Promise<void>((resolve) => {
+			releaseFirstActivation = resolve;
+		});
+		const events: string[] = [];
+		let activationCount = 0;
+		let sessionCount = 0;
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionActivate: async (identity) => {
+				activationCount += 1;
+				events.push(`activate:${identity.sessionId}`);
+				if (activationCount === 1) {
+					markFirstActivationStarted();
+					await firstActivationReleased;
+				}
+			},
+			onBeforeSessionClear: async (accountId) => {
+				events.push(
+					`clear:${String(accountId)}:${manager.getSession()?.id ?? "none"}`,
+				);
+			},
+			fetch: (async () => {
+				sessionCount += 1;
+				return Response.json(sessionPayload(`overlap-${sessionCount}`));
+			}) as unknown as typeof fetch,
+		});
+
+		const first = manager.signIn({
+			email: "first@example.com",
+			password: "password",
+		});
+		await firstActivationStarted;
+		const second = manager.signIn({
+			email: "second@example.com",
+			password: "password",
+		});
+		releaseFirstActivation();
+
+		await expect(first).rejects.toMatchObject({ kind: "expired" });
+		await expect(second).resolves.toMatchObject({ id: "session-overlap-2" });
+		expect(manager.getSession()?.id).toBe("session-overlap-2");
+		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+			"refresh-token-overlap-2-0123456789",
+		);
+		const winningActivation = events.lastIndexOf("activate:session-overlap-2");
+		expect(winningActivation).toBeGreaterThanOrEqual(0);
+		expect(
+			events
+				.slice(winningActivation + 1)
+				.some((event) => event.startsWith("clear:")),
+		).toBeFalse();
+	});
+
 	test("runs the old-account clear barrier before activating another subject", async () => {
 		const credentials = new MemoryCredentials();
 		const barriers: string[] = [];
@@ -404,7 +558,7 @@ describe("RemoteAuthSessionManager", () => {
 		await manager.signIn({ email: "test@example.com", password: "password" });
 
 		await expect(
-			manager.authorizedFetch("/v1/chat/completions"),
+			manager.authorizedFetch("/v1/chat/completions", {}, "agent"),
 		).rejects.toMatchObject({
 			kind: "expired",
 		});

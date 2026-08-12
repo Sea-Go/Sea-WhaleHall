@@ -162,8 +162,8 @@ export class LocalTestAuthSessionManager implements DesktopAuthSessionManager {
 
 	async authorizedFetch(
 		_path: string,
-		_init: RequestInit = {},
-		_purpose: ModelRelayPurpose = "agent",
+		_init: RequestInit,
+		_purpose: ModelRelayPurpose,
 	): Promise<Response> {
 		throw new LocalTestAuthError(
 			"service-unavailable",

@@ -126,6 +126,8 @@ export interface PlanningStartParams {
 export interface PlanningAnswerParams {
 	runId: string;
 	sessionId: string;
+	/** Durable request identity from the original persisted planning run. */
+	originatingRequestId: string;
 	answers: readonly TaskPlanningAnswer[];
 	expectedVersion?: number;
 }
@@ -164,11 +166,13 @@ export interface RunCancelParams extends RunTargetParams {
 }
 
 export interface RunResumeParams extends RunTargetParams {
+	originatingRequestId: string;
 	resumeData?: unknown;
 	toolCallId?: string;
 }
 
 export interface AgentToolDecisionParams extends RunTargetParams {
+	originatingRequestId: string;
 	toolCallId?: string;
 	resumeData?: unknown;
 	reason?: string;
@@ -275,7 +279,7 @@ export type AgentHostRequest =
 export interface ModelRelayOpenParams {
 	relayId: string;
 	runId: string | null;
-	originatingRequestId: string | null;
+	originatingRequestId: string;
 	provider: string;
 	modelId: string;
 	request: {

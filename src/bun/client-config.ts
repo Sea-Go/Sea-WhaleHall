@@ -298,9 +298,14 @@ function normalizeClientConfiguration(value: unknown): ClientConfiguration {
 	) {
 		throw new Error("Client configuration root is invalid.");
 	}
+	const agent = normalizeModelConfiguration(value.agent, "agent");
 	return {
-		reflection: normalizeModelConfiguration(value.reflection, "reflection"),
-		agent: normalizeModelConfiguration(value.agent, "agent"),
+		reflection: normalizeModelConfiguration(
+			value.reflection,
+			"reflection",
+			agent.baseurl,
+		),
+		agent,
 		cloudSync:
 			value.cloudSync === undefined
 				? structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync)
@@ -311,6 +316,7 @@ function normalizeClientConfiguration(value: unknown): ClientConfiguration {
 function normalizeModelConfiguration(
 	value: unknown,
 	role: "reflection" | "agent",
+	agentBaseUrl?: string,
 ): ModelConfiguration {
 	if (
 		!isRecord(value) ||
@@ -324,7 +330,7 @@ function normalizeModelConfiguration(
 	if (value.name.trim() !== WHALEHALL_RELAY_MODEL) {
 		throw new Error(`${role} model name is not approved.`);
 	}
-	const baseurl = normalizeRelayBaseUrl(value.baseurl, role);
+	const baseurl = normalizeRelayBaseUrl(value.baseurl, role, agentBaseUrl);
 	return {
 		name: WHALEHALL_RELAY_MODEL,
 		baseurl,
@@ -335,6 +341,7 @@ function normalizeModelConfiguration(
 function normalizeRelayBaseUrl(
 	value: string,
 	role: "reflection" | "agent",
+	agentBaseUrl?: string,
 ): string {
 	const endpoint = parseRemoteHttpsUrl(value, role);
 	if (endpoint.pathname !== "/" && endpoint.pathname !== "") {
@@ -352,9 +359,10 @@ function normalizeRelayBaseUrl(
 		}
 		// Old owner files remain parseable, but runtime reflection is always bound
 		// to the authenticated DataCenter origin selected by the agent role.
-		return endpoint.origin === WHALEHALL_RELAY_BASE_URL
-			? WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL
-			: endpoint.origin;
+		if (!agentBaseUrl) {
+			throw new Error("reflection model requires the normalized agent origin.");
+		}
+		return agentBaseUrl;
 	}
 	if (endpoint.origin === WHALEHALL_RELAY_BASE_URL) {
 		// Existing owner files used the model origin for both roles. Preserve the

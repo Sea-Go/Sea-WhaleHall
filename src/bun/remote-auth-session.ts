@@ -80,9 +80,15 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		identity: AuthSessionIdentity,
 	) => Promise<void>;
 	private readonly onSessionExpired: () => void;
-	private current: { session: RemoteAuthSession; accessToken: string } | null =
-		null;
-	private refreshPromise: Promise<RemoteAuthSession> | null = null;
+	private current: {
+		session: RemoteAuthSession;
+		accessToken: string;
+		generation: number;
+	} | null = null;
+	private refreshPromise: {
+		identity: AuthSessionIdentity;
+		operation: Promise<RemoteAuthSession>;
+	} | null = null;
 	private generation = 0;
 	private transitionTail = Promise.resolve();
 
@@ -107,11 +113,15 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	}
 
 	getSession(): RemoteAuthSession | null {
-		return this.current ? cloneSession(this.current.session) : null;
+		return this.current?.generation === this.generation
+			? cloneSession(this.current.session)
+			: null;
 	}
 
 	get accountId(): string | null {
-		return this.current?.session.user.id ?? null;
+		return this.current?.generation === this.generation
+			? this.current.session.user.id
+			: null;
 	}
 
 	get sessionGeneration(): number {
@@ -166,17 +176,19 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	}
 
 	captureCurrentSession(): AuthSessionIdentity | null {
-		if (!this.current) return null;
+		if (!this.current || this.current.generation !== this.generation)
+			return null;
 		return {
 			accountId: this.current.session.user.id,
 			sessionId: this.current.session.id,
-			generation: this.generation,
+			generation: this.current.generation,
 		};
 	}
 
 	isCurrentSession(identity: AuthSessionIdentity): boolean {
 		return (
 			this.generation === identity.generation &&
+			this.current?.generation === identity.generation &&
 			this.current?.session.id === identity.sessionId &&
 			this.current.session.user.id === identity.accountId
 		);
@@ -223,8 +235,8 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 
 	async authorizedFetch(
 		path: string,
-		init: RequestInit = {},
-		purpose: ModelRelayPurpose = "agent",
+		init: RequestInit,
+		purpose: ModelRelayPurpose,
 	): Promise<Response> {
 		if (path !== "/v1/chat/completions") {
 			throw new RemoteAuthError(
@@ -274,74 +286,112 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		init: RequestInit,
 		agentKey: string | null,
 	): Promise<Response> {
-		await this.getValidAccessToken();
-		const current = this.current;
-		if (!current) throw new RemoteAuthError("expired", "登录会话已过期。", 401);
+		const current = await this.getValidAuthorization();
 		const headers = new Headers(init.headers);
 		headers.set("authorization", `Bearer ${current.accessToken}`);
 		if (agentKey) headers.set("x-whalehall-agent-key", agentKey);
-		headers.set("x-session-generation", String(this.generation));
+		headers.set("x-session-generation", String(current.identity.generation));
 		const first = await this.request(path, { ...init, headers });
+		await this.assertResponseSession(first, current.identity);
 		if (first.status !== 401) return first;
 
-		await this.refreshSession();
-		const refreshed = this.current;
-		if (!refreshed)
-			throw new RemoteAuthError("expired", "登录会话已过期。", 401);
+		await this.refreshSessionFor(current.identity);
+		const refreshed = this.requireCurrentAuthorization();
 		const nextHeaders = new Headers(init.headers);
 		nextHeaders.set("authorization", `Bearer ${refreshed.accessToken}`);
 		if (agentKey) nextHeaders.set("x-whalehall-agent-key", agentKey);
-		nextHeaders.set("x-session-generation", String(this.generation));
+		nextHeaders.set(
+			"x-session-generation",
+			String(refreshed.identity.generation),
+		);
 		const second = await this.request(path, { ...init, headers: nextHeaders });
-		if (second.status === 401) await this.expireLocalSession();
+		await this.assertResponseSession(second, refreshed.identity);
+		if (second.status === 401) {
+			await this.clearSessionIfCurrent(refreshed.identity);
+		}
 		return second;
 	}
 
 	async refreshSession(): Promise<RemoteAuthSession> {
-		if (!this.current) {
-			throw new RemoteAuthError("expired", "没有可刷新的登录会话。", 401);
+		return this.refreshSessionFor(this.requireCurrentAuthorization().identity);
+	}
+
+	private async refreshSessionFor(
+		identity: AuthSessionIdentity,
+	): Promise<RemoteAuthSession> {
+		if (!this.isCurrentSession(identity)) {
+			throw new RemoteAuthError(
+				"expired",
+				"刷新会话已被新的登录操作取代。",
+				401,
+			);
 		}
-		if (this.refreshPromise) return this.refreshPromise;
+		if (this.refreshPromise) {
+			if (sameSessionIdentity(this.refreshPromise.identity, identity)) {
+				return this.refreshPromise.operation;
+			}
+			throw new RemoteAuthError(
+				"expired",
+				"刷新会话已被新的登录操作取代。",
+				401,
+			);
+		}
 		const operation = (async () => {
-			const generation = this.generation;
 			let token: string | null;
 			try {
 				token = await this.credentials.read(REFRESH_TOKEN_KEY);
 			} catch (error) {
 				throw credentialFailure(error);
 			}
+			if (!this.isCurrentSession(identity)) {
+				throw new RemoteAuthError(
+					"expired",
+					"刷新会话已被新的登录操作取代。",
+					401,
+				);
+			}
 			if (!token) {
-				await this.expireLocalSession();
+				await this.clearSessionIfCurrent(identity);
 				throw new RemoteAuthError("expired", "本地没有可用的刷新凭据。", 401);
 			}
-			return this.refreshWith(token, generation);
+			return this.refreshWith(token, identity.generation, identity);
 		})();
-		this.refreshPromise = operation;
+		this.refreshPromise = {
+			identity: { ...identity },
+			operation,
+		};
 		try {
 			return await operation;
 		} finally {
-			if (this.refreshPromise === operation) this.refreshPromise = null;
+			if (this.refreshPromise?.operation === operation) {
+				this.refreshPromise = null;
+			}
 		}
 	}
 
-	private async getValidAccessToken(): Promise<string> {
-		if (
-			this.current &&
-			this.current.session.expiresAtMs - Date.now() > 30_000
-		) {
-			return this.current.accessToken;
+	private async getValidAuthorization(): Promise<{
+		accessToken: string;
+		identity: AuthSessionIdentity;
+	}> {
+		const current = this.requireCurrentAuthorization();
+		const active = this.current;
+		if (active !== null && active.session.expiresAtMs - Date.now() > 30_000) {
+			return current;
 		}
-		await this.refreshSession();
-		if (!this.current) throw new RemoteAuthError("expired", "登录会话已过期。");
-		return this.current.accessToken;
+		await this.refreshSessionFor(current.identity);
+		return this.requireCurrentAuthorization();
 	}
 
 	private async refreshWith(
 		refreshToken: string,
 		generation: number,
+		sourceIdentity?: AuthSessionIdentity,
 	): Promise<RemoteAuthSession> {
 		this.requireConfigured();
-		if (generation !== this.generation) {
+		if (
+			generation !== this.generation ||
+			(sourceIdentity !== undefined && !this.isCurrentSession(sourceIdentity))
+		) {
 			throw new RemoteAuthError(
 				"expired",
 				"刷新操作已被新的会话操作取代。",
@@ -359,12 +409,27 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			throw transportFailure(error);
 		}
 		if (response.status === 401) {
-			await this.expireLocalSession(generation);
+			if (sourceIdentity) {
+				await this.clearSessionIfCurrent(sourceIdentity);
+			} else {
+				await this.expireLocalSession(generation);
+			}
 			throw new RemoteAuthError("expired", "刷新凭据已失效。", 401);
 		}
 		if (!response.ok) throw responseFailure(response);
 		const payload = parseSessionResponse(await readJson(response));
-		if (!(await this.persistAndActivate(payload, generation))) {
+		if (
+			sourceIdentity !== undefined &&
+			payload.user.id !== sourceIdentity.accountId
+		) {
+			await this.clearSessionIfCurrent(sourceIdentity);
+			throw new RemoteAuthError(
+				"expired",
+				"刷新响应与当前登录账号不一致。",
+				401,
+			);
+		}
+		if (!(await this.persistAndActivate(payload, generation, sourceIdentity))) {
 			throw new RemoteAuthError(
 				"expired",
 				"刷新操作已被新的会话操作取代。",
@@ -401,9 +466,17 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	private async persistAndActivate(
 		payload: SessionResponse,
 		generation: number,
+		expectedCurrent?: AuthSessionIdentity,
 	): Promise<boolean> {
 		return this.withTransitionLock(async () => {
 			if (generation !== this.generation) return false;
+			if (
+				expectedCurrent !== undefined &&
+				(!this.isCurrentSession(expectedCurrent) ||
+					payload.user.id !== expectedCurrent.accountId)
+			) {
+				return false;
+			}
 			const previousAccountId = this.current?.session.user.id ?? null;
 			if (previousAccountId && previousAccountId !== payload.user.id) {
 				this.current = null;
@@ -421,6 +494,13 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				generation,
 			};
 			const preparedNewOwner = previousAccountId !== payload.user.id;
+			const rollbackPreparedOwner = async (): Promise<void> => {
+				if (!preparedNewOwner) return;
+				// onBeforeSessionClear is a process-wide ownership barrier. A stale
+				// activation must never run it after any newer activation is live.
+				if (this.current !== null) return;
+				await this.onBeforeSessionClear(payload.user.id);
+			};
 			try {
 				// This hook is inside the same transition lock as logout cleanup. It
 				// must finish before current can expose the incoming account to any
@@ -429,7 +509,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			} catch (error) {
 				if (preparedNewOwner) {
 					try {
-						await this.onBeforeSessionClear(payload.user.id);
+						await rollbackPreparedOwner();
 					} catch (rollbackError) {
 						throw new AggregateError(
 							[error, rollbackError],
@@ -440,9 +520,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				throw error;
 			}
 			if (generation !== this.generation) {
-				if (preparedNewOwner) {
-					await this.onBeforeSessionClear(payload.user.id);
-				}
+				await rollbackPreparedOwner();
 				return false;
 			}
 			try {
@@ -450,7 +528,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			} catch (error) {
 				if (preparedNewOwner) {
 					try {
-						await this.onBeforeSessionClear(payload.user.id);
+						await rollbackPreparedOwner();
 					} catch (rollbackError) {
 						throw new AggregateError(
 							[credentialFailure(error), rollbackError],
@@ -461,18 +539,49 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				throw credentialFailure(error);
 			}
 			if (generation !== this.generation) {
-				await this.credentials.delete(REFRESH_TOKEN_KEY).catch(() => {});
-				if (preparedNewOwner) {
-					await this.onBeforeSessionClear(payload.user.id);
+				// The transition lock normally keeps current null here. Preserve the
+				// winning session's credential if that invariant ever changes.
+				if (this.current === null) {
+					await this.credentials.delete(REFRESH_TOKEN_KEY).catch(() => {});
 				}
+				await rollbackPreparedOwner();
 				return false;
 			}
 			this.current = {
 				session: cloneSession(payload),
 				accessToken: payload.accessToken,
+				generation,
 			};
 			return true;
 		});
+	}
+
+	private requireCurrentAuthorization(): {
+		accessToken: string;
+		identity: AuthSessionIdentity;
+	} {
+		const current = this.current;
+		if (current === null) {
+			throw new RemoteAuthError("expired", "没有可刷新的登录会话。", 401);
+		}
+		const identity: AuthSessionIdentity = {
+			accountId: current.session.user.id,
+			sessionId: current.session.id,
+			generation: current.generation,
+		};
+		if (!this.isCurrentSession(identity)) {
+			throw new RemoteAuthError("expired", "登录会话已被新的操作取代。", 401);
+		}
+		return { accessToken: current.accessToken, identity };
+	}
+
+	private async assertResponseSession(
+		response: Response,
+		identity: AuthSessionIdentity,
+	): Promise<void> {
+		if (this.isCurrentSession(identity)) return;
+		await response.body?.cancel().catch(() => undefined);
+		throw new RemoteAuthError("expired", "登录会话已被新的操作取代。", 401);
 	}
 
 	private async withTransitionLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -651,4 +760,15 @@ function cloneSession(session: RemoteAuthSession): RemoteAuthSession {
 		expiresAtMs: session.expiresAtMs,
 		user: { ...session.user },
 	};
+}
+
+function sameSessionIdentity(
+	left: AuthSessionIdentity,
+	right: AuthSessionIdentity,
+): boolean {
+	return (
+		left.accountId === right.accountId &&
+		left.sessionId === right.sessionId &&
+		left.generation === right.generation
+	);
 }

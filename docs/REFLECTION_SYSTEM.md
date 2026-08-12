@@ -560,10 +560,11 @@ cloudSync:
     presence: "off"
 ```
 
-运行时两个角色都使用 agent 选择的 production 或 staging DataCenter origin。旧
-reflection model-origin 值只为兼容解析并归一化，reflection `apikey` 被忽略；personal
-relay key 必须是 owner-only user-data 文件中的直接字面量密钥，不支持环境变量引用。无效、
-部分、symlink 或超大的配置会回退到安全默认值，且不会覆盖用户原文件。
+运行时两个角色都使用 agent 选择的 production 或 staging DataCenter origin。reflection
+中单独填写的已批准 origin 和旧 model-origin 值只为兼容解析，都会归一化到 agent origin；
+reflection `apikey` 被忽略。personal relay key 必须是 owner-only user-data 文件中的直接
+字面量密钥，不支持环境变量引用。无效、部分、symlink 或超大的配置会回退到安全默认值，且
+不会覆盖用户原文件。
 
 这份 YAML 配置家里云 Qwen 1.7B 的两个固定 relay 能力：reflection 及 Agent。内部 Teacher
 和可选 ModernBERT 仍是独立的 runtime trust boundary：Teacher lock 与 Timeline artifact pin 不会因为填写一个 URL 而被放宽；

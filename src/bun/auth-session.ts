@@ -18,8 +18,8 @@ export interface DesktopAuthSessionManager {
 	signOut(): Promise<void>;
 	authorizedFetch(
 		path: string,
-		init?: RequestInit,
-		purpose?: ModelRelayPurpose,
+		init: RequestInit,
+		purpose: ModelRelayPurpose,
 	): Promise<Response>;
 	captureCurrentSession(): AuthSessionIdentity | null;
 	isCurrentSession(identity: AuthSessionIdentity): boolean;

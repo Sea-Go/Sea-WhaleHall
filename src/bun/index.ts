@@ -203,6 +203,7 @@ const configuredModelId =
 	WHALEHALL_RELAY_MODEL;
 const reflectionModelId =
 	activityReflectionConfiguration?.modelName ?? WHALEHALL_RELAY_MODEL;
+const dataCenterModelApiBaseUrl = `${clientConfiguration.configuration.agent.baseurl}/v1`;
 const agentModelRelayProvider = "whalehall-relay";
 const reflectionModelRelayProvider = "whalehall-activity-reflection";
 let activeGoalStore!: AccountScopedActiveGoalStore;
@@ -367,7 +368,7 @@ const sidecar = new MastraSidecarClient({
 		reflectionModel: {
 			provider: reflectionModelRelayProvider,
 			modelId: reflectionModelId,
-			baseUrl: "https://data.sea-ridethewindbreakthewaves.xyz/v1",
+			baseUrl: dataCenterModelApiBaseUrl,
 			supportsStructuredOutputs: true,
 		},
 	},
