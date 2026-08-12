@@ -1,14 +1,14 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Database } from "bun:sqlite";
 import { SqliteReflectionRepository } from "../src/agent/reflection/sqlite-repository";
 import {
 	COLLECTOR_SNAPSHOT_SCHEMA_VERSION,
 	EVENT_WINDOW_SCHEMA_VERSION,
-	REFLECTION_SCHEMA_VERSION,
 	type EventWindowV1,
+	REFLECTION_SCHEMA_VERSION,
 	type ReflectionCollectorSnapshotV1,
 	type ReflectionV1,
 } from "../src/agent/reflection/types";
@@ -28,7 +28,7 @@ describe("SqliteReflectionRepository", () => {
 		await repository.saveCollector(initial, null);
 		const window = eventWindow();
 		const next = collectorSnapshot(1, "cursor-1");
-		const sealed = await repository.sealWindow(window, next, 0);
+		const sealed = await repository.sealWindow(window, next, 0, null);
 		expect(sealed.inserted).toBe(true);
 		expect(await repository.getQueueStats()).toEqual({
 			pendingJobs: 1,
@@ -43,18 +43,55 @@ describe("SqliteReflectionRepository", () => {
 		reopened.close();
 	});
 
+	test("persists cloud account attribution with the sealed window", async () => {
+		const { path, repository } = createRepository();
+		await repository.saveCollector(collectorSnapshot(0, null), null);
+		const accountA = eventWindow("window-account-a", "cursor-a", 1_100);
+		await repository.sealWindow(
+			accountA,
+			collectorSnapshot(1, "cursor-a"),
+			0,
+			"account-a",
+		);
+		const unowned = eventWindow("window-unowned", "cursor-b", 1_200);
+		await repository.sealWindow(
+			unowned,
+			collectorSnapshot(2, "cursor-b"),
+			1,
+			null,
+		);
+		repository.close();
+
+		const reopened = new SqliteReflectionRepository(path);
+		expect(await reopened.listWindowsForAccount("account-a")).toEqual([
+			accountA,
+		]);
+		expect(await reopened.listWindowsForAccount("account-b")).toEqual([]);
+		reopened.close();
+	});
+
 	test("journals one reflection per deterministic window and resumes commit", async () => {
 		const { repository } = createRepository();
 		await repository.saveCollector(collectorSnapshot(0, null), null);
 		const window = eventWindow();
-		await repository.sealWindow(window, collectorSnapshot(1, "cursor-1"), 0);
-		expect((await repository.claimNextRunnable(1_100, 30_000))?.state).toBe("RUNNING");
+		await repository.sealWindow(
+			window,
+			collectorSnapshot(1, "cursor-1"),
+			0,
+			null,
+		);
+		expect((await repository.claimNextRunnable(1_100, 30_000))?.state).toBe(
+			"RUNNING",
+		);
 
 		const reflection = reflectionFor(window);
-		expect((await repository.persistResult(window.windowId, reflection, 1_200)).state).toBe(
-			"RESULT_PERSISTED",
+		expect(
+			(await repository.persistResult(window.windowId, reflection, 1_200))
+				.state,
+		).toBe("RESULT_PERSISTED");
+		expect((await repository.claimNextRunnable(1_201, 30_000))?.state).toBe(
+			"COMMITTING",
 		);
-		expect((await repository.claimNextRunnable(1_201, 30_000))?.state).toBe("COMMITTING");
 		expect((await repository.markCommitted(window.windowId, 1_202)).state).toBe(
 			"COMMITTED",
 		);
@@ -66,7 +103,11 @@ describe("SqliteReflectionRepository", () => {
 			pendingEvents: 0,
 		});
 		await expect(
-			repository.persistResult(window.windowId, { ...reflection, confidence: 0.1 }, 1_300),
+			repository.persistResult(
+				window.windowId,
+				{ ...reflection, confidence: 0.1 },
+				1_300,
+			),
 		).rejects.toThrow("different reflection");
 		repository.close();
 	});
@@ -75,7 +116,12 @@ describe("SqliteReflectionRepository", () => {
 		const { repository } = createRepository();
 		await repository.saveCollector(collectorSnapshot(0, null), null);
 		const window = eventWindow();
-		await repository.sealWindow(window, collectorSnapshot(1, "cursor-1"), 0);
+		await repository.sealWindow(
+			window,
+			collectorSnapshot(1, "cursor-1"),
+			0,
+			null,
+		);
 		expect((await repository.claimNextRunnable(1_100, 100))?.attempt).toBe(1);
 		expect(await repository.claimNextRunnable(1_199, 100)).toBeNull();
 		const reclaimed = await repository.claimNextRunnable(1_200, 100);
@@ -91,13 +137,18 @@ describe("SqliteReflectionRepository", () => {
 			firstWindow,
 			collectorSnapshot(1, "cursor-1"),
 			0,
+			null,
 		);
 		await repository.claimNextRunnable(1_100, 30_000);
 		const firstReflection = {
 			...reflectionFor(firstWindow),
 			feedbackCode: "encourage" as const,
 		};
-		await repository.persistResult(firstWindow.windowId, firstReflection, 1_200);
+		await repository.persistResult(
+			firstWindow.windowId,
+			firstReflection,
+			1_200,
+		);
 		expect(
 			await repository.claimReminder(firstReflection, 1_200, 600_000),
 		).toMatchObject({ windowId: firstWindow.windowId, notifiedAtMs: 1_200 });
@@ -112,13 +163,18 @@ describe("SqliteReflectionRepository", () => {
 			secondWindow,
 			collectorSnapshot(2, "cursor-2"),
 			1,
+			null,
 		);
 		await repository.claimNextRunnable(1_300, 30_000);
 		const secondReflection = {
 			...reflectionFor(secondWindow),
 			feedbackCode: "encourage" as const,
 		};
-		await repository.persistResult(secondWindow.windowId, secondReflection, 1_301);
+		await repository.persistResult(
+			secondWindow.windowId,
+			secondReflection,
+			1_301,
+		);
 		expect(
 			await repository.claimReminder(secondReflection, 601_199, 600_000),
 		).toBeNull();
@@ -158,8 +214,10 @@ describe("SqliteReflectionRepository", () => {
 		repository.close();
 		const verified = new Database(path);
 		expect(
-			verified.query("SELECT version FROM reflection_schema WHERE singleton = 1").get(),
-		).toEqual({ version: 2 });
+			verified
+				.query("SELECT version FROM reflection_schema WHERE singleton = 1")
+				.get(),
+		).toEqual({ version: 3 });
 		expect(
 			verified
 				.query(
@@ -194,8 +252,10 @@ describe("SqliteReflectionRepository", () => {
 		repository.close();
 		const verified = new Database(path);
 		expect(
-			verified.query("SELECT version FROM reflection_schema WHERE singleton = 1").get(),
-		).toEqual({ version: 2 });
+			verified
+				.query("SELECT version FROM reflection_schema WHERE singleton = 1")
+				.get(),
+		).toEqual({ version: 3 });
 		expect(
 			verified
 				.query(
@@ -242,6 +302,7 @@ function collectorSnapshot(
 		state: "ACTIVE_EMPTY",
 		activeGoal: null,
 		goalRevision: 0,
+		cloudOwnerEpoch: { epoch: 0, accountId: null },
 		openWindow: null,
 		contextCandidates: [],
 		recentEventIds: [],

@@ -95,12 +95,16 @@ describe("Mastra Node sidecar", () => {
 			preferredDayPart: "morning" as const,
 			timeZone: "Asia/Shanghai",
 		};
-		await harness.request("planning.start", {
-			runId: "planning-run-1",
-			sessionId: "planning-session-1",
-			input: planningInput,
-			expectedVersion: 0,
-		});
+		await harness.request(
+			"planning.start",
+			{
+				runId: "planning-run-1",
+				sessionId: "planning-session-1",
+				input: planningInput,
+				expectedVersion: 0,
+			},
+			"host:planning.start:durable-1",
+		);
 		const clarification = await harness.waitForRunSuspended("planning-run-1");
 		expect(clarification.terminalState).toBeNull();
 		expect(clarification.event).toMatchObject({
@@ -113,9 +117,24 @@ describe("Mastra Node sidecar", () => {
 			},
 		});
 
+		const mismatchedOrigin = await harness.request("planning.answer", {
+			runId: "planning-run-1",
+			sessionId: "planning-session-1",
+			originatingRequestId: "host:planning.answer:random-command",
+			answers: [
+				{ questionKey: "expected_outcome", answerText: "不可接受的来源" },
+			],
+			expectedVersion: 1,
+		});
+		expect(mismatchedOrigin).toMatchObject({
+			ok: false,
+			error: { code: "RUN_CONFLICT" },
+		});
+
 		await harness.request("planning.answer", {
 			runId: "planning-run-1",
 			sessionId: "planning-session-1",
+			originatingRequestId: "host:planning.start:durable-1",
 			answers: [
 				{ questionKey: "expected_outcome", answerText: "可安装并通过核心验收" },
 			],
@@ -353,12 +372,16 @@ describe("Mastra Node sidecar", () => {
 			host.handle(request, (message) => firstHarness.send(message)),
 		);
 		await firstHarness.initialize();
-		await firstHarness.request("planning.start", {
-			runId: "planning-restart-run",
-			sessionId: "planning-restart-session",
-			input: planningInputFixture(),
-			expectedVersion: 0,
-		});
+		await firstHarness.request(
+			"planning.start",
+			{
+				runId: "planning-restart-run",
+				sessionId: "planning-restart-session",
+				input: planningInputFixture(),
+				expectedVersion: 0,
+			},
+			"planning-restart-origin",
+		);
 		await firstHarness.waitForRunSuspended("planning-restart-run");
 		const suspendedSnapshot = host.workflowSnapshotCalls.findLast(
 			(call) =>
@@ -388,6 +411,7 @@ describe("Mastra Node sidecar", () => {
 		await secondHarness.request("planning.answer", {
 			runId: "different-planning-run",
 			sessionId: "planning-restart-session",
+			originatingRequestId: "planning-restart-origin-different",
 			answers: [
 				{ questionKey: "expected_outcome", answerText: "尝试串用会话" },
 			],
@@ -404,6 +428,7 @@ describe("Mastra Node sidecar", () => {
 		const accepted = await secondHarness.request("planning.answer", {
 			runId: "planning-restart-run",
 			sessionId: "planning-restart-session",
+			originatingRequestId: "planning-restart-origin",
 			answers: [
 				{ questionKey: "expected_outcome", answerText: "可安装并通过核心验收" },
 			],
@@ -420,6 +445,7 @@ describe("Mastra Node sidecar", () => {
 			kind: "run.completed",
 			result: { status: "draft", draft: { phases: [{ id: "phase-1" }] } },
 		});
+		expect(host.modelOrigins.at(-1)).toBe("planning-restart-origin");
 		const recoveryCalls = host.workflowSnapshotCalls.slice(callsBeforeRestart);
 		expect(
 			recoveryCalls.filter(
@@ -438,13 +464,17 @@ describe("Mastra Node sidecar", () => {
 			host.handle(request, (message) => harness.send(message)),
 		);
 		await harness.initialize();
-		await harness.request("conversation.start", {
-			runId: "tool-run-1",
-			conversationId: "tool-conversation-1",
-			resourceId: "installation-1",
-			message: "请创建一个明天上午的日程。",
-			expectedVersion: 0,
-		});
+		await harness.request(
+			"conversation.start",
+			{
+				runId: "tool-run-1",
+				conversationId: "tool-conversation-1",
+				resourceId: "installation-1",
+				message: "请创建一个明天上午的日程。",
+				expectedVersion: 0,
+			},
+			"tool-run-origin",
+		);
 
 		const approvalEvent = (await harness.waitFor(
 			(message) =>
@@ -481,15 +511,26 @@ describe("Mastra Node sidecar", () => {
 		).toBe(true);
 		const bypass = await harness.request("run.resume", {
 			runId: "tool-run-1",
+			originatingRequestId: "tool-run-origin",
 			resumeData: { approved: true },
 		});
 		expect(bypass).toMatchObject({
 			ok: false,
 			error: { code: "RUN_NOT_RESUMABLE" },
 		});
+		const mismatchedOrigin = await harness.request("agent.approveTool", {
+			runId: "tool-run-1",
+			originatingRequestId: "tool-run-random-approval-command",
+			toolCallId: "tool-call-1",
+		});
+		expect(mismatchedOrigin).toMatchObject({
+			ok: false,
+			error: { code: "RUN_CONFLICT" },
+		});
 
 		await harness.request("agent.approveTool", {
 			runId: "tool-run-1",
+			originatingRequestId: "tool-run-origin",
 			toolCallId: "tool-call-1",
 		});
 		const terminal = await harness.waitForRunTerminal("tool-run-1");
@@ -500,6 +541,9 @@ describe("Mastra Node sidecar", () => {
 				message: { content: "我来处理。日程已经按你的要求创建。" },
 			},
 		});
+		expect(host.modelOrigins.every((value) => value === "tool-run-origin")).toBe(
+			true,
+		);
 		expect(host.calls).toContain("tool/call");
 		expect(
 			host.workflowSnapshotCalls.some(
@@ -592,16 +636,21 @@ describe("Mastra Node sidecar", () => {
 			host.handle(request, (message) => harness.send(message)),
 		);
 		await harness.initialize();
-		await harness.request("conversation.start", {
-			runId: "decline-tool-run",
-			conversationId: "decline-tool-conversation",
-			resourceId: "installation-1",
-			message: "请创建一个明天上午的日程。",
-			expectedVersion: 0,
-		});
+		await harness.request(
+			"conversation.start",
+			{
+				runId: "decline-tool-run",
+				conversationId: "decline-tool-conversation",
+				resourceId: "installation-1",
+				message: "请创建一个明天上午的日程。",
+				expectedVersion: 0,
+			},
+			"decline-tool-origin",
+		);
 		await harness.waitForRunSuspended("decline-tool-run");
 		await harness.request("agent.declineTool", {
 			runId: "decline-tool-run",
+			originatingRequestId: "decline-tool-origin",
 			toolCallId: "tool-call-1",
 			reason: "用户拒绝",
 		});
@@ -795,8 +844,8 @@ class SidecarHarness {
 	async request(
 		method: string,
 		params: Record<string, unknown>,
+		requestId = `host:${method}:${crypto.randomUUID()}`,
 	): Promise<Record<string, unknown>> {
-		const requestId = `host:${method}:${crypto.randomUUID()}`;
 		await this.send({
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
 			type: "request",
@@ -936,6 +985,7 @@ class SidecarHarness {
 class FakeHost {
 	readonly calls: string[] = [];
 	readonly modelBodies: Array<Record<string, unknown>> = [];
+	readonly modelOrigins: string[] = [];
 	readonly workflowSnapshotCalls: Array<{
 		method: string;
 		params: Record<string, unknown>;
@@ -1219,6 +1269,7 @@ class FakeHost {
 		send: (message: ProtocolMessage) => Promise<void>,
 	): Promise<void> {
 		const params = request.params as ModelRelayOpenParams;
+		this.modelOrigins.push(params.originatingRequestId);
 		const body = JSON.parse(
 			Buffer.from(params.request.bodyBase64 ?? "", "base64").toString("utf8"),
 		) as Record<string, unknown>;

@@ -41,24 +41,6 @@ export async function startModelRelayFromEnvironment(
 				1,
 				10_000,
 			),
-			reflectionRequestsPerMinute: optionalInteger(
-				environment.WHALEHALL_REFLECTION_REQUESTS_PER_MINUTE,
-				20,
-				1,
-				10_000,
-			),
-			reflectionAuthenticationAttemptsPerMinute: optionalInteger(
-				environment.WHALEHALL_REFLECTION_AUTH_ATTEMPTS_PER_MINUTE,
-				20,
-				1,
-				10_000,
-			),
-			reflectionUpstreamTimeoutMs: optionalInteger(
-				environment.WHALEHALL_REFLECTION_UPSTREAM_TIMEOUT_MS,
-				195_000,
-				1,
-				10 * 60_000,
-			),
 			loginAttemptsPerMinute: optionalInteger(
 				environment.WHALEHALL_LOGIN_ATTEMPTS_PER_MINUTE,
 				10,

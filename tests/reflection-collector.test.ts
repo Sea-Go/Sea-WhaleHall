@@ -1,14 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
+	type ActiveGoalContextV1,
+	COLLECTOR_SNAPSHOT_SCHEMA_VERSION,
 	DESKTOP_EVENT_SCHEMA_VERSION,
+	type DesktopEventForKind,
 	DeterministicWindowBuilder,
+	type EventWindowV1,
 	GoalVersionMismatchError,
 	InMemoryReflectionRepository,
-	ReflectionCollector,
-	type ActiveGoalContextV1,
-	type DesktopEventForKind,
-	type EventWindowV1,
 	type ReflectionClock,
+	ReflectionCollector,
+	type ReflectionCollectorSnapshotV1,
 	type ReflectionTimerHandle,
 	WebCryptoReflectionHasher,
 } from "../src/agent/reflection";
@@ -217,7 +219,9 @@ function createCollector(options: {
 		deviceId: "device-1",
 		sessionId: "session-1",
 		repository,
-		windowBuilder: new DeterministicWindowBuilder(new WebCryptoReflectionHasher()),
+		windowBuilder: new DeterministicWindowBuilder(
+			new WebCryptoReflectionHasher(),
+		),
 		clock,
 		initialGoal: options.initialGoal,
 		semanticEventThreshold: options.threshold,
@@ -240,7 +244,9 @@ describe("ReflectionCollector count and deadline triggers", () => {
 			expect(await collector.ingest(foregroundEvent(index, 0))).toBeNull();
 		}
 		expect(collector.getState()).toBe("ACTIVE_COLLECTING");
-		expect(collector.getSnapshot().openWindow?.finalizedSemanticEventCount).toBe(63);
+		expect(
+			collector.getSnapshot().openWindow?.finalizedSemanticEventCount,
+		).toBe(63);
 		expect(clock.timerCount).toBe(1);
 		expect((await repository.getQueueStats()).pendingJobs).toBe(0);
 
@@ -467,9 +473,9 @@ describe("ReflectionCollector boundaries and goal isolation", () => {
 		const { collector } = createCollector({ initialGoal: goal(1) });
 		await collector.recover();
 		await collector.ingest(foregroundEvent(1, 0, 1));
-		await expect(collector.ingest(foregroundEvent(2, 100, 2))).rejects.toBeInstanceOf(
-			GoalVersionMismatchError,
-		);
+		await expect(
+			collector.ingest(foregroundEvent(2, 100, 2)),
+		).rejects.toBeInstanceOf(GoalVersionMismatchError);
 		expect(collector.getSnapshot().openWindow).toMatchObject({
 			goalVersion: 1,
 			finalizedSemanticEventCount: 1,
@@ -489,6 +495,75 @@ describe("ReflectionCollector boundaries and goal isolation", () => {
 });
 
 describe("ReflectionCollector recovery, context, and idempotency", () => {
+	test("migrates a legacy open snapshot to an anonymous empty epoch", async () => {
+		const repository = new InMemoryReflectionRepository();
+		const oldEvent = foregroundEvent(1, 1_000);
+		const legacySnapshot = {
+			schemaVersion: COLLECTOR_SNAPSHOT_SCHEMA_VERSION,
+			collectorId: "collector-1",
+			deviceId: "device-1",
+			sessionId: "session-1",
+			state: "ACTIVE_COLLECTING",
+			activeGoal: null,
+			goalRevision: 0,
+			openWindow: {
+				goal: null,
+				goalVersion: null,
+				startedAtMs: 1_000,
+				deadlineAtMs: 301_000,
+				events: [oldEvent],
+				finalizedSemanticEventCount: 1,
+			},
+			contextCandidates: [oldEvent],
+			recentEventIds: [oldEvent.eventId],
+			revokedPermissions: [],
+			materializedCursor: oldEvent.cursor,
+			revision: 0,
+			updatedAtMs: 1_000,
+		} as unknown as ReflectionCollectorSnapshotV1;
+		await repository.saveCollector(legacySnapshot, null);
+
+		const collector = createCollector({ repository }).collector;
+		await collector.recover();
+
+		expect(await repository.loadCollector("collector-1")).toMatchObject({
+			state: "ACTIVE_EMPTY",
+			cloudOwnerEpoch: { epoch: 0, accountId: null },
+			openWindow: null,
+			contextCandidates: [],
+			revision: 1,
+		});
+	});
+
+	test("recovers an open owner epoch and seals it for the same account", async () => {
+		const repository = new InMemoryReflectionRepository();
+		const clock = new FakeClock();
+		const first = createCollector({
+			repository,
+			clock,
+			threshold: 2,
+		}).collector;
+		await first.recover();
+		await first.cutoverCloudOwner("account-a");
+		await first.ingest(foregroundEvent(1, 0));
+		first.dispose();
+
+		const second = createCollector({
+			repository,
+			clock,
+			threshold: 2,
+		}).collector;
+		await second.recover();
+		await second.ingest(foregroundEvent(2, 1));
+
+		const windows = await repository.listWindowsForAccount("account-a");
+		expect(windows).toHaveLength(1);
+		expect(windows[0]?.events.map((event) => event.eventId)).toEqual([
+			"event-1",
+			"event-2",
+		]);
+	});
+
 	test("reflection/tool lifecycle input cannot trigger reflection", async () => {
 		const { collector, repository, clock } = createCollector({});
 		await collector.recover();
@@ -532,7 +607,9 @@ describe("ReflectionCollector recovery, context, and idempotency", () => {
 		const second = createCollector({ repository, clock }).collector;
 		await second.recover();
 		await second.ingest(event);
-		expect(second.getSnapshot().openWindow?.finalizedSemanticEventCount).toBe(1);
+		expect(second.getSnapshot().openWindow?.finalizedSemanticEventCount).toBe(
+			1,
+		);
 	});
 
 	test("deterministic identity produces the same windowId when sealing is replayed", async () => {
@@ -564,7 +641,9 @@ describe("ReflectionCollector recovery, context, and idempotency", () => {
 		expect(secondWindow?.contextOnly.length).toBeGreaterThan(0);
 		expect(secondWindow?.contextOnly.length).toBeLessThanOrEqual(5);
 		expect(
-			secondWindow?.contextOnly.every((event) => event.eventId === "event-1" || event.eventId === "event-2"),
+			secondWindow?.contextOnly.every(
+				(event) => event.eventId === "event-1" || event.eventId === "event-2",
+			),
 		).toBe(true);
 	});
 });
@@ -574,7 +653,9 @@ describe("ReflectionCollector authorization gates", () => {
 		const { collector } = createCollector({});
 		await collector.recover();
 		await collector.ingest(inputActivityEvent(1, 5_000));
-		await collector.ingest(authorizationEvent(2, 5_001, "authorization.revoked"));
+		await collector.ingest(
+			authorizationEvent(2, 5_001, "authorization.revoked"),
+		);
 
 		expect(collector.getSnapshot()).toMatchObject({
 			openWindow: null,
@@ -584,8 +665,12 @@ describe("ReflectionCollector authorization gates", () => {
 		expect(collector.getSnapshot().openWindow).toBeNull();
 
 		await collector.ingest(foregroundEvent(4, 10_001));
-		expect(collector.getSnapshot().openWindow?.finalizedSemanticEventCount).toBe(1);
-		await collector.ingest(authorizationEvent(5, 10_002, "authorization.granted"));
+		expect(
+			collector.getSnapshot().openWindow?.finalizedSemanticEventCount,
+		).toBe(1);
+		await collector.ingest(
+			authorizationEvent(5, 10_002, "authorization.granted"),
+		);
 		await collector.ingest(inputActivityEvent(6, 15_000));
 		expect(collector.getSnapshot()).toMatchObject({
 			revokedPermissions: [],
@@ -606,6 +691,8 @@ describe("ReflectionCollector authorization gates", () => {
 		expect(second.getSnapshot().openWindow).toBeNull();
 		await second.ingest(authorizationEvent(3, 5_001, "authorization.granted"));
 		await second.ingest(inputActivityEvent(4, 10_000));
-		expect(second.getSnapshot().openWindow?.finalizedSemanticEventCount).toBe(1);
+		expect(second.getSnapshot().openWindow?.finalizedSemanticEventCount).toBe(
+			1,
+		);
 	});
 });

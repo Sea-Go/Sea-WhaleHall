@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
 	type AgentHostErrorPayload,
@@ -6,7 +7,6 @@ import {
 	type ModelRelayOpenParams,
 	type ModelRelayOpenResult,
 } from "../agent/mastra-host/protocol";
-import { createHash } from "node:crypto";
 import {
 	ModelRelayError,
 	type ModelRelayResponseMetadata,
@@ -46,11 +46,20 @@ export class SidecarModelRelayBridge {
 	): Promise<ModelRelayOpenResult> {
 		const input = requireOpenParams(params);
 		if (input.modelId !== this.options.modelId) {
-			throw new Error("Sidecar requested a model outside the configured allowlist.");
+			throw new Error(
+				"Sidecar requested a model outside the configured allowlist.",
+			);
 		}
-		if (this.active.has(input.relayId)) throw new Error("Duplicate model relay ID.");
+		if (this.active.has(input.relayId))
+			throw new Error("Duplicate model relay ID.");
 		const body = decodeBody(input.request.bodyBase64);
-		if (!isRecord(body)) throw new Error("Model relay body must be a JSON object.");
+		if (!isRecord(body))
+			throw new Error("Model relay body must be a JSON object.");
+		if (body.model !== this.options.modelId) {
+			throw new Error(
+				"Model relay body requested a model outside the configured allowlist.",
+			);
+		}
 		const transportRunId = input.runId ?? input.relayId;
 		const relay: ActiveRelay = {
 			requestId,
@@ -63,16 +72,18 @@ export class SidecarModelRelayBridge {
 		let resolveMetadata!: (value: ModelRelayResponseMetadata) => void;
 		let rejectMetadata!: (error: Error) => void;
 		let metadataSettled = false;
-		const metadata = new Promise<ModelRelayResponseMetadata>((resolve, reject) => {
-			resolveMetadata = (value) => {
-				metadataSettled = true;
-				resolve(value);
-			};
-			rejectMetadata = (error) => {
-				metadataSettled = true;
-				reject(error);
-			};
-		});
+		const metadata = new Promise<ModelRelayResponseMetadata>(
+			(resolve, reject) => {
+				resolveMetadata = (value) => {
+					metadataSettled = true;
+					resolve(value);
+				};
+				rejectMetadata = (error) => {
+					metadataSettled = true;
+					reject(error);
+				};
+			},
+		);
 
 		// Give MastraSidecarClient a turn to serialize the open response before
 		// any byte events. Its writer is also ordered, so later frames cannot pass it.
@@ -81,39 +92,47 @@ export class SidecarModelRelayBridge {
 			releaseEvents = resolve;
 		});
 
-		void this.options.transport.open(
-			{
-				runId: transportRunId,
-				body,
-				idempotencyKey: relayIdempotencyKey(
-					input.originatingRequestId,
-					input.relayId,
-				),
-			},
-			{
-				onResponse: (value) => resolveMetadata(value),
-				onChunk: async (chunk) => {
-					await responseWrittenTurn;
-					await this.send(relay, {
-						kind: "model/relay.chunk",
-						bodyBase64: Buffer.from(chunk).toString("base64"),
-					});
+		void this.options.transport
+			.open(
+				{
+					runId: transportRunId,
+					body,
+					idempotencyKey: relayIdempotencyKey(input.originatingRequestId, body),
 				},
-			},
-		).then(async () => {
-			await responseWrittenTurn;
-			await this.send(relay, { kind: "model/relay.end" });
-		}).catch(async (error: unknown) => {
-			const failure = relayFailure(error);
-			if (!metadataSettled) {
-				rejectMetadata(error instanceof ModelRelayError ? error : new Error(failure.message));
-				return;
-			}
-			await responseWrittenTurn;
-			await this.send(relay, { kind: "model/relay.error", error: failure }).catch(() => undefined);
-		}).finally(() => {
-			this.active.delete(input.relayId);
-		});
+				{
+					onResponse: (value) => resolveMetadata(value),
+					onChunk: async (chunk) => {
+						await responseWrittenTurn;
+						await this.send(relay, {
+							kind: "model/relay.chunk",
+							bodyBase64: Buffer.from(chunk).toString("base64"),
+						});
+					},
+				},
+			)
+			.then(async () => {
+				await responseWrittenTurn;
+				await this.send(relay, { kind: "model/relay.end" });
+			})
+			.catch(async (error: unknown) => {
+				const failure = relayFailure(error);
+				if (!metadataSettled) {
+					rejectMetadata(
+						error instanceof ModelRelayError
+							? error
+							: new Error(failure.message),
+					);
+					return;
+				}
+				await responseWrittenTurn;
+				await this.send(relay, {
+					kind: "model/relay.error",
+					error: failure,
+				}).catch(() => undefined);
+			})
+			.finally(() => {
+				this.active.delete(input.relayId);
+			});
 
 		try {
 			const response = await metadata;
@@ -171,37 +190,50 @@ export class SidecarModelRelayBridge {
 	}
 }
 
-function requireOpenParams(value: Record<string, unknown>): ModelRelayOpenParams {
+function requireOpenParams(
+	value: Record<string, unknown>,
+): ModelRelayOpenParams {
 	if (
 		!boundedId(value.relayId) ||
 		(value.runId !== null && !boundedId(value.runId)) ||
-		(value.originatingRequestId !== null && !boundedId(value.originatingRequestId)) ||
+		!boundedId(value.originatingRequestId) ||
 		!boundedId(value.provider) ||
 		!boundedId(value.modelId) ||
 		!isRecord(value.request) ||
 		value.request.method !== "POST" ||
 		typeof value.request.url !== "string" ||
 		!isRecord(value.request.headers) ||
-		(value.request.bodyBase64 !== null && typeof value.request.bodyBase64 !== "string")
+		(value.request.bodyBase64 !== null &&
+			typeof value.request.bodyBase64 !== "string")
 	) {
 		throw new Error("Invalid model relay open request.");
 	}
 	return value as unknown as ModelRelayOpenParams;
 }
 
-function requireAbortParams(value: Record<string, unknown>): ModelRelayAbortParams {
-	if (!boundedId(value.relayId) || (value.runId !== null && !boundedId(value.runId))) {
+function requireAbortParams(
+	value: Record<string, unknown>,
+): ModelRelayAbortParams {
+	if (
+		!boundedId(value.relayId) ||
+		(value.runId !== null && !boundedId(value.runId))
+	) {
 		throw new Error("Invalid model relay abort request.");
 	}
 	return value as unknown as ModelRelayAbortParams;
 }
 
 function decodeBody(value: string | null): unknown {
-	if (!value || value.length > MAX_ENCODED_BODY_CHARACTERS || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+	if (
+		!value ||
+		value.length > MAX_ENCODED_BODY_CHARACTERS ||
+		!/^[A-Za-z0-9+/]*={0,2}$/.test(value)
+	) {
 		throw new Error("Model relay request body is missing or too large.");
 	}
 	const bytes = Buffer.from(value, "base64");
-	if (bytes.toString("base64") !== value) throw new Error("Model relay request body is not canonical base64.");
+	if (bytes.toString("base64") !== value)
+		throw new Error("Model relay request body is not canonical base64.");
 	try {
 		return JSON.parse(bytes.toString("utf8"));
 	} finally {
@@ -212,11 +244,12 @@ function decodeBody(value: string | null): unknown {
 function relayFailure(error: unknown): AgentHostErrorPayload {
 	if (error instanceof ModelRelayError) {
 		return {
-			code: error.code === "cancelled"
-				? "CANCELLED"
-				: error.code === "service-unavailable"
-					? "MODEL_RELAY_UNAVAILABLE"
-					: "MODEL_RELAY_ERROR",
+			code:
+				error.code === "cancelled"
+					? "CANCELLED"
+					: error.code === "service-unavailable"
+						? "MODEL_RELAY_UNAVAILABLE"
+						: "MODEL_RELAY_ERROR",
 			message: error.message,
 			retryable: error.code === "remote-failure" || error.code === "cancelled",
 		};
@@ -228,11 +261,14 @@ function relayFailure(error: unknown): AgentHostErrorPayload {
 	};
 }
 
-function relayIdempotencyKey(originatingRequestId: string | null, relayId: string): string {
+function relayIdempotencyKey(
+	originatingRequestId: string,
+	body: Record<string, unknown>,
+): string {
 	return `relay-${createHash("sha256")
-		.update(originatingRequestId ?? "")
+		.update(originatingRequestId)
 		.update("\0")
-		.update(relayId)
+		.update(JSON.stringify(body))
 		.digest("hex")}`;
 }
 

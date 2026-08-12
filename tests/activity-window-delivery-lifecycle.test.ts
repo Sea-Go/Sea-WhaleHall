@@ -13,6 +13,7 @@ import {
 	type ActivityReflectionSidecar,
 	MastraActivityReflectionAnalyzer,
 } from "../src/bun/mastra-activity-reflection";
+import type { AuthSessionIdentity } from "../src/shared/session-identity";
 
 const directories: string[] = [];
 
@@ -85,11 +86,21 @@ describe("activity window delivery shutdown", () => {
 				abortedInvocations.push(invocationId),
 		});
 		const store = new ActivityWindowDeliveryStore(databasePath);
+		const owner: AuthSessionIdentity = {
+			accountId: "account-shutdown",
+			sessionId: "session-shutdown",
+			generation: 1,
+		};
 		const delivery = new ActivityWindowDeliveryService({
 			source,
 			analyzer,
 			store,
 			retryDelaysMs: [60_000],
+			currentSession: () => ({ ...owner }),
+			isCurrentSession: (candidate) =>
+				candidate.accountId === owner.accountId &&
+				candidate.sessionId === owner.sessionId &&
+				candidate.generation === owner.generation,
 		});
 		await delivery.start();
 		const window = sealedWindow("shutdown-window");
@@ -120,8 +131,8 @@ describe("activity window delivery shutdown", () => {
 class MutableWindowSource implements ActivityWindowSource {
 	constructor(readonly windows: EventWindowV1[]) {}
 
-	async listWindows(): Promise<readonly EventWindowV1[]> {
-		return structuredClone(this.windows);
+	async listWindowsForAccount(): Promise<readonly EventWindowV1[]> {
+		return [];
 	}
 }
 

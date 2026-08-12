@@ -1,6 +1,6 @@
+import { Database } from "bun:sqlite";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { Database } from "bun:sqlite";
 import {
 	CollectorRevisionConflictError,
 	InvalidReflectionJobTransitionError,
@@ -8,8 +8,8 @@ import {
 	type SealWindowResult,
 } from "./repository";
 import {
-	REFLECTION_JOB_SCHEMA_VERSION,
 	type EventWindowV1,
+	REFLECTION_JOB_SCHEMA_VERSION,
 	type ReflectionCollectorSnapshotV1,
 	type ReflectionJobFailureV1,
 	type ReflectionJobState,
@@ -18,7 +18,7 @@ import {
 	type ReflectionV1,
 } from "./types";
 
-const SQLITE_SCHEMA_VERSION = 2;
+const SQLITE_SCHEMA_VERSION = 3;
 
 type CollectorRow = {
 	revision: number;
@@ -87,9 +87,13 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 		collectorId: string,
 	): Promise<ReflectionCollectorSnapshotV1 | null> {
 		const row = this.database
-			.query("SELECT revision, snapshot_json FROM reflection_collectors WHERE collector_id = ?")
+			.query(
+				"SELECT revision, snapshot_json FROM reflection_collectors WHERE collector_id = ?",
+			)
 			.get(collectorId) as CollectorRow | null;
-		return row ? parseJson<ReflectionCollectorSnapshotV1>(row.snapshot_json) : null;
+		return row
+			? parseJson<ReflectionCollectorSnapshotV1>(row.snapshot_json)
+			: null;
 	}
 
 	async saveCollector(
@@ -139,7 +143,9 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 		window: EventWindowV1,
 		nextSnapshot: ReflectionCollectorSnapshotV1,
 		expectedRevision: number,
+		cloudOwnerAccountId: string | null,
 	): Promise<SealWindowResult> {
+		const cloudOwner = normalizeCloudOwnerAccountId(cloudOwnerAccountId);
 		const transaction = this.database.transaction((): SealWindowResult => {
 			const existingWindow = this.windowRow(window.windowId);
 			const existingJob = this.jobRow(window.windowId);
@@ -152,11 +158,18 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 						`Deterministic window id collision for ${window.windowId}.`,
 					);
 				}
+				if (this.cloudOwnerAccountId(window.windowId) !== cloudOwner) {
+					throw new Error(
+						"Idempotent reflection seal changed cloud ownership.",
+					);
+				}
 				const snapshot = this.requireCollector(nextSnapshot.collectorId);
 				return {
 					inserted: false,
 					window: parseJson<EventWindowV1>(existingWindow.window_json),
-					snapshot: parseJson<ReflectionCollectorSnapshotV1>(snapshot.snapshot_json),
+					snapshot: parseJson<ReflectionCollectorSnapshotV1>(
+						snapshot.snapshot_json,
+					),
 					job: jobFromRow(existingJob),
 				};
 			}
@@ -198,6 +211,15 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 					createdAtMs,
 					JSON.stringify(window),
 				);
+			if (cloudOwner !== null) {
+				this.database
+					.query(
+						`INSERT INTO reflection_window_cloud_owners
+						 (window_id, owner_account_id, attributed_at_ms)
+						 VALUES (?, ?, ?)`,
+					)
+					.run(window.windowId, cloudOwner, createdAtMs);
+			}
 			this.insertJob(job);
 			const result = this.database
 				.query(
@@ -239,6 +261,21 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 				 ORDER BY created_at_ms, window_id`,
 			)
 			.all() as Array<{ window_json: string }>;
+		return rows.map((row) => parseJson<EventWindowV1>(row.window_json));
+	}
+
+	async listWindowsForAccount(accountId: string): Promise<EventWindowV1[]> {
+		const owner = normalizeCloudOwnerAccountId(accountId);
+		if (owner === null) return [];
+		const rows = this.database
+			.query(
+				`SELECT w.window_json
+				 FROM reflection_windows AS w
+				 JOIN reflection_window_cloud_owners AS o ON o.window_id = w.window_id
+				 WHERE o.owner_account_id = ?
+				 ORDER BY w.created_at_ms, w.window_id`,
+			)
+			.all(owner) as Array<{ window_json: string }>;
 		return rows.map((row) => parseJson<EventWindowV1>(row.window_json));
 	}
 
@@ -317,7 +354,9 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 			const current = this.requireJob(windowId);
 			if (current.reflection) {
 				if (!sameJson(current.reflection, reflection)) {
-					throw new Error(`A different reflection is already persisted for ${windowId}.`);
+					throw new Error(
+						`A different reflection is already persisted for ${windowId}.`,
+					);
 				}
 				return current;
 			}
@@ -346,9 +385,13 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 				)
 				.run(windowId, nowMs, JSON.stringify(reflection));
 			const journal = this.database
-				.query("SELECT reflection_json FROM reflection_journal WHERE window_id = ?")
+				.query(
+					"SELECT reflection_json FROM reflection_journal WHERE window_id = ?",
+				)
 				.get(windowId) as { reflection_json: string };
-			if (!sameJson(parseJson<ReflectionV1>(journal.reflection_json), reflection)) {
+			if (
+				!sameJson(parseJson<ReflectionV1>(journal.reflection_json), reflection)
+			) {
 				throw new Error(`Reflection journal collision for ${windowId}.`);
 			}
 			this.updateJob(next);
@@ -417,7 +460,10 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 		return structuredClone(transaction.immediate());
 	}
 
-	async markCommitted(windowId: string, nowMs: number): Promise<ReflectionJobV1> {
+	async markCommitted(
+		windowId: string,
+		nowMs: number,
+	): Promise<ReflectionJobV1> {
 		const transaction = this.database.transaction(() => {
 			const current = this.requireJob(windowId);
 			if (current.state === "COMMITTED") return current;
@@ -437,7 +483,10 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 		return structuredClone(transaction.immediate());
 	}
 
-	async replayTerminal(windowId: string, nowMs: number): Promise<ReflectionJobV1> {
+	async replayTerminal(
+		windowId: string,
+		nowMs: number,
+	): Promise<ReflectionJobV1> {
 		const transaction = this.database.transaction(() => {
 			const current = this.requireJob(windowId);
 			if (current.state !== "TERMINAL_FAILED") {
@@ -497,7 +546,9 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 	): Promise<ReflectionReminderClaim | null> {
 		if (reflection.feedbackCode === "silent") return null;
 		if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
-			throw new Error("Reminder timestamp must be a non-negative safe integer.");
+			throw new Error(
+				"Reminder timestamp must be a non-negative safe integer.",
+			);
 		}
 		if (!Number.isSafeInteger(deduplicationMs) || deduplicationMs < 1) {
 			throw new Error("Reminder deduplication window must be positive.");
@@ -509,13 +560,19 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 		].join("\u0000");
 		const transaction = this.database.transaction(() => {
 			const journal = this.database
-				.query("SELECT 1 AS present FROM reflection_journal WHERE window_id = ?")
+				.query(
+					"SELECT 1 AS present FROM reflection_journal WHERE window_id = ?",
+				)
 				.get(reflection.windowId) as { present: number } | null;
 			if (!journal) {
-				throw new Error("A reminder can only be claimed for a persisted reflection.");
+				throw new Error(
+					"A reminder can only be claimed for a persisted reflection.",
+				);
 			}
 			const sameWindow = this.database
-				.query("SELECT 1 AS present FROM reflection_notifications WHERE window_id = ?")
+				.query(
+					"SELECT 1 AS present FROM reflection_notifications WHERE window_id = ?",
+				)
 				.get(reflection.windowId) as { present: number } | null;
 			if (sameWindow) return null;
 			const cutoffAtMs = Math.max(0, nowMs - deduplicationMs);
@@ -607,6 +664,15 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 				CREATE INDEX IF NOT EXISTS reflection_jobs_runnable
 				ON reflection_jobs(state, next_attempt_at_ms, lease_expires_at_ms, created_at_ms);
 
+				CREATE TABLE IF NOT EXISTS reflection_window_cloud_owners (
+					window_id TEXT PRIMARY KEY,
+					owner_account_id TEXT NOT NULL,
+					attributed_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (window_id) REFERENCES reflection_windows(window_id)
+				);
+				CREATE INDEX IF NOT EXISTS reflection_window_cloud_owners_account
+				ON reflection_window_cloud_owners(owner_account_id, attributed_at_ms, window_id);
+
 				CREATE TABLE IF NOT EXISTS reflection_journal (
 					window_id TEXT PRIMARY KEY,
 					persisted_at_ms INTEGER NOT NULL,
@@ -640,7 +706,9 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 
 	private collectorRow(collectorId: string): CollectorRow | null {
 		return this.database
-			.query("SELECT revision, snapshot_json FROM reflection_collectors WHERE collector_id = ?")
+			.query(
+				"SELECT revision, snapshot_json FROM reflection_collectors WHERE collector_id = ?",
+			)
 			.get(collectorId) as CollectorRow | null;
 	}
 
@@ -656,6 +724,15 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 				"SELECT input_hash, window_json FROM reflection_windows WHERE window_id = ?",
 			)
 			.get(windowId) as WindowRow | null;
+	}
+
+	private cloudOwnerAccountId(windowId: string): string | null {
+		const row = this.database
+			.query(
+				"SELECT owner_account_id FROM reflection_window_cloud_owners WHERE window_id = ?",
+			)
+			.get(windowId) as { owner_account_id: string } | null;
+		return row?.owner_account_id ?? null;
 	}
 
 	private jobRow(windowId: string): JobRow | null {
@@ -707,7 +784,8 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 				job.terminalCursorReleasedAtMs,
 				job.windowId,
 			);
-		if (result.changes !== 1) throw new Error(`Unknown reflection job: ${job.windowId}`);
+		if (result.changes !== 1)
+			throw new Error(`Unknown reflection job: ${job.windowId}`);
 	}
 }
 
@@ -720,7 +798,9 @@ function hardenPath(path: string, mode: number): void {
 	}
 }
 
-function jobParameters(job: ReflectionJobV1): [
+function jobParameters(
+	job: ReflectionJobV1,
+): [
 	string,
 	ReflectionJobState,
 	number,
@@ -776,7 +856,8 @@ function assertExpectedRevision(
 	actualRevision: number | null,
 	expectedRevision: number | null,
 ): void {
-	if (actualRevision !== expectedRevision) throw new CollectorRevisionConflictError();
+	if (actualRevision !== expectedRevision)
+		throw new CollectorRevisionConflictError();
 }
 
 function assertNextRevision(
@@ -797,4 +878,12 @@ function parseJson<T>(value: string): T {
 
 function sameJson(left: unknown, right: unknown): boolean {
 	return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function normalizeCloudOwnerAccountId(value: string | null): string | null {
+	if (value === null) return null;
+	if (value.length < 1 || value.length > 256 || value.trim() !== value) {
+		throw new Error("Reflection cloud owner account id is invalid.");
+	}
+	return value;
 }

@@ -18,7 +18,9 @@ describe("local Agent production boundary", () => {
 		const activityRuntime = source("src/agent/mastra-host/runtime.ts");
 
 		expect(bunComposition).toContain("ActivityWindowDeliveryService");
-		expect(clientConfiguration).toContain("REFLECTION_RELAY_COMPLETIONS_PATH");
+		expect(clientConfiguration).toContain(
+			"WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL",
+		);
 		expect(clientConfiguration).not.toContain("/v1/activity/analyze");
 		expect(activityPrompt).toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
 		expect(activityPrompt).toContain("COMPRESSED_ACTIVITY_EVENTS_JSON");
@@ -55,7 +57,6 @@ describe("local Agent production boundary", () => {
 			"/v1/auth/sessions/refresh",
 			"/v1/auth/sessions/current",
 			"/v1/auth/me",
-			"/v1/activity/completions",
 			"/v1/chat/completions",
 		]);
 		expect(relayServer).not.toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");

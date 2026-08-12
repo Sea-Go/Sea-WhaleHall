@@ -4,10 +4,9 @@ This directory is deployment material only. Do not deploy it until the
 corresponding PR is merged into `main`. It intentionally contains no Docker,
 FRP, Cloudflare, GPU, activity-Worker, or other-project changes.
 
-The public model origin routes only `POST /v1/activity/completions` to this
-service. Authentication, chat, Agent registration, consent, crypto context and
-desktop event ingestion belong to the DataCenter data origin and must not be
-added to this Caddy handler.
+The public model origin no longer routes model completions for WhaleHall.
+`/v1/activity/completions` is explicitly retired with `410`; all authenticated
+model interactions belong to the DataCenter data origin.
 
 ## Preconditions
 
@@ -34,10 +33,12 @@ bun run provision:relay-owner -- \
   --users /absolute/local/model-relay-users.json
 ```
 
-This writes literal reflection and personal relay keys to the local owner-only
-`config.yaml`, but writes only `passwordHash`, `reflectionKeyId`,
-`reflectionKeyHash` and `agentKeyHash` to `model-relay-users.json`. Copy only
-the latter to the server; never copy the desktop `config.yaml` or print either
+This writes the personal relay key only to the local owner-only `config.yaml`
+and writes the complete user record (`id`, `email`, `displayName`, `initials`,
+optional `disabled`) to `model-relay-users.json`; credential material is stored
+only as `passwordHash` and `agentKeyHash`. The compatibility-only reflection
+config entry is an ignored placeholder, not a credential. Copy only the users
+file to the server; never copy the desktop `config.yaml` or print the personal
 key. Existing users require the explicit `--replace` flag to avoid accidental
 overwrite.
 
@@ -58,8 +59,9 @@ overwrite.
 4. Install `whalehall-model-relay.service` under
    `/etc/systemd/system/`. Its `ExecStart` expects `/usr/bin/node`; confirm that
    path resolves to Node 22 before enabling it.
-5. Add the exact allow and deny handlers in `Caddyfile.fragment` above generic
-   model routing. Preserve the existing `/v1/activity/analyze` handler verbatim.
+5. Add the exact retirement and deny handlers in `Caddyfile.fragment` above
+   generic model routing. Preserve the existing unrelated
+   `/v1/activity/analyze` handler verbatim.
 6. Only reload the two affected services:
 
 ```sh
@@ -71,21 +73,18 @@ sudo systemctl reload caddy
 ```
 
 The relay binds only to `127.0.0.1:8787`; Caddy is the public TLS boundary.
-It retains encrypted-on-disk chat request/response records for 30 days, while
-reflection bodies are forwarded transiently and never written to relay storage.
+It retains encrypted-on-disk legacy chat request/response records for 30 days.
 
 ## Verification and rollback
 
-Verify `/v1/activity/completions` with only the provisioned
-`X-WhaleHall-Reflection-Key`, a non-streaming scrubbed body, and an empty relay
-record directory. Confirm the existing `/v1/activity/analyze` endpoint still
-answers through its previous handler. Then verify the model origin fails closed
+Confirm the existing `/v1/activity/analyze` endpoint still answers through its
+previous handler. Then verify the retired completion route and other DataCenter paths fail closed
 before any generic `/v1/*` model handler can receive the request:
 
 ```sh
 model_origin=https://model.sea-ridethewindbreakthewaves.xyz
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --request GET "$model_origin/v1/activity/completions")" = 405
+	--request POST "$model_origin/v1/activity/completions")" = 410
 for data_path in \
   /v1/auth/me \
   /v1/chat/completions \

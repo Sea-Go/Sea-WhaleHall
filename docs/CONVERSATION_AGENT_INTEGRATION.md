@@ -25,9 +25,9 @@ flowchart LR
   Window["已封闭活动窗口"] --> Bridge["Bun: 完整 prompt、时间片/分数校验"]
   Bridge -->|"完整本地 prompt"| Sidecar["Mastra Workflow + 原生本地 Skills"]
   Sidecar -->|"OpenAI-compatible body"| Bridge
-  Bridge -->|"reflection key + HTTPS"| ModelOrigin["Model origin\n仅 reflection completion relay"]
-  ModelOrigin -->|"原样转发"| Qwen["CPU qwen3:1.7b"]
-  Qwen --> ModelOrigin --> Bridge
+  Bridge -->|"bearer + personal key\npurpose=activity"| DataCenter["DataCenter /v1/chat/completions\n内测模型交互审计"]
+  DataCenter -->|"转发"| Qwen["CPU qwen3:1.7b"]
+  Qwen --> DataCenter --> Bridge
 ```
 
 Sidecar 是客户端的一部分：它会在一次调用的内存中看到完整 `userPrompt`，并用
@@ -60,9 +60,9 @@ Vault Broker 负责敏感 observation content；新增的 credential helper 只�
 
 - React 不导入 Mastra、AI SDK、数据库、Rust 协议或 native API；Renderer 不提交 `userId`。
 - Sidecar 不接触 access token、refresh token、厂商 API Key或 OS 凭据库，不监听 HTTP 端口，也不启用 Mastra Server、Studio、Cloud 或遥测。
-- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。聊天/下一步 Agent relay 要求同一账号的短期 bearer 加个人 relay key；独立 reflection route 只接受 owner-provisioned reflection key。
+- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。所有远端模型调用要求同一账号的短期 bearer 加个人 relay key，并由 Bun 添加代码所有的 `agent|activity` purpose；不存在可绕过 session 的独立 reflection route。
 - `reflection.analyze` 协议包含由 Bun 生成的完整 `userPrompt` 和 opaque invocation ID；它只在本地 Bun/Sidecar 内存中流转。原始窗口、模型输出、事件和分数都不得回传 Renderer 或 Agent Tool。
-- 远端 relay 不添加 system prompt、不聚合事件、不格式化时间/action、不计算分数、不保存反思请求/响应、不执行 Tool，也没有读取历史的接口。
+- DataCenter 不添加 system prompt、不聚合事件、不格式化时间/action、不计算分数，也不执行 Tool。内测版会按认证 user 保存 exact request/response，并提供开发成员的受控查询；这是 internal-only 审计能力。
 - Rust Local Tool Host 继续拥有传感器和本地能力。首版 Mastra Agent 不注册 browser、accessibility、activity、cleanup 或完整 Rust Tool catalogue。
 
 ## 本地运行时
@@ -115,10 +115,6 @@ Bun 在模型后验证 schema、引用、日期、IANA 时区、时长、截止�
 
 ## 远端服务
 
-生产公网按 origin 分离：model origin 只公开：
-
-- `POST /v1/activity/completions`
-
 DataCenter data origin 公开桌面所需的：
 
 - `POST /v1/auth/sessions`
@@ -132,12 +128,10 @@ DataCenter Chat endpoint 同时验证 bearer subject 和该 subject 的 personal
 body/header 中的自报身份与供应商凭据，执行 16 MiB 大小限制、精确模型 allowlist、
 限流和幂等检查，然后把原始 OpenAI-compatible 字节转发到固定 CPU-only Ollama
 loopback。SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，
-流式中断不会续传。model origin 的 Caddy 部署说明见
-`deploy/home-cloud/model-relay/README.md`；该 handler 不得匹配 auth/chat/agent/events。
-
-Reflection endpoint 只接受 `X-WhaleHall-Reflection-Key`，拒绝 bearer 与 agent key，
-只允许非流式请求。它验证 key 的 scrypt hash、执行模型 allowlist 和限流后，原样转发到
-相同 CPU-only loopback；不创建 request/response record，也不理解 prompt、事件或分数。
+流式中断不会续传。请求幂等键保持由 run ID 与 exact body 派生；
+`X-WhaleHall-Model-Purpose` 只由 Bun bridge 设置，Sidecar、Renderer 和 body 都不能覆盖。
+raw activity outbox、receipt、score 与 Agent job 使用账号专属 ledger；未登录窗口不上传，
+A 的 pending 只能由 A 重登恢复，B 无法接管。
 
 ## 本地联调和验证
 

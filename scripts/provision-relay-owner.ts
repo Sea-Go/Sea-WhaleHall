@@ -13,8 +13,8 @@ import { createScryptPasswordHash } from "../services/model-relay/password";
 import type { RelayUser } from "../services/model-relay/types";
 import {
 	DEFAULT_CLIENT_CONFIGURATION,
+	UNPROVISIONED_REFLECTION_RELAY_KEY,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-	WHALEHALL_RELAY_BASE_URL,
 	WHALEHALL_RELAY_MODEL,
 	writeProvisionedClientConfiguration,
 } from "../src/bun/client-config";
@@ -35,12 +35,9 @@ async function main(): Promise<void> {
 	if (password !== passwordConfirmation)
 		throw new Error("两次输入的登录密码不一致。");
 	const personalRelayKey = `whk_${randomBytes(32).toString("base64url")}`;
-	const reflectionKeyId = `whref_${randomUUID().replaceAll("-", "")}`;
-	const reflectionRelayKey = `${reflectionKeyId}.${randomBytes(32).toString("base64url")}`;
-	const [passwordHash, agentKeyHash, reflectionKeyHash] = await Promise.all([
+	const [passwordHash, agentKeyHash] = await Promise.all([
 		createScryptPasswordHash(password),
 		createScryptPasswordHash(personalRelayKey),
-		createScryptPasswordHash(reflectionRelayKey),
 	]);
 	const user: RelayUser = {
 		id: `user-${randomUUID()}`,
@@ -49,8 +46,6 @@ async function main(): Promise<void> {
 		initials,
 		passwordHash,
 		agentKeyHash,
-		reflectionKeyId,
-		reflectionKeyHash,
 	};
 
 	writeRelayUsersFile(args.usersPath, user, args.replace);
@@ -59,8 +54,8 @@ async function main(): Promise<void> {
 		configuration: {
 			reflection: {
 				name: WHALEHALL_RELAY_MODEL,
-				baseurl: WHALEHALL_RELAY_BASE_URL,
-				apikey: reflectionRelayKey,
+				baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+				apikey: UNPROVISIONED_REFLECTION_RELAY_KEY,
 			},
 			agent: {
 				name: WHALEHALL_RELAY_MODEL,
@@ -76,7 +71,7 @@ async function main(): Promise<void> {
 			"已写入 owner-only 本机 config.yaml 与仅含哈希的 relay 用户文件。",
 			`本机配置：${args.configPath}`,
 			`待部署用户文件：${args.usersPath}`,
-			"反思 relay key 与个人 relay key 仅保存在本机 config.yaml，未打印、未写入用户文件。",
+			"个人 relay key 仅保存在本机 config.yaml，未打印、未写入用户文件；用户文件不再包含 reflection 凭据字段。",
 		].join("\n")}\n`,
 	);
 }

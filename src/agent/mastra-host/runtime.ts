@@ -209,12 +209,12 @@ export class AgentHostRuntime {
 			case "reflection.analyze":
 				return this.analyzeActivityReflection(request.params);
 			case "planning.answer":
-				return this.answerPlanning(request.requestId, request.params);
+				return this.answerPlanning(request.params);
 			case "run.cancel":
 				return this.cancelRun(request.params.runId, request.params.reason);
 			case "run.resume":
 				return this.resumeRun(
-					request.requestId,
+					request.params.originatingRequestId,
 					request.params.runId,
 					request.params.resumeData,
 					request.params.toolCallId,
@@ -222,7 +222,7 @@ export class AgentHostRuntime {
 				);
 			case "agent.approveTool":
 				return this.resumeRun(
-					request.requestId,
+					request.params.originatingRequestId,
 					request.params.runId,
 					request.params.resumeData,
 					request.params.toolCallId,
@@ -230,7 +230,7 @@ export class AgentHostRuntime {
 				);
 			case "agent.declineTool":
 				return this.resumeRun(
-					request.requestId,
+					request.params.originatingRequestId,
 					request.params.runId,
 					{
 						...(isRecord(request.params.resumeData)
@@ -492,18 +492,23 @@ export class AgentHostRuntime {
 		);
 	}
 
-	private answerPlanning(
-		requestId: string,
-		params: PlanningAnswerParams,
-	): RunAcceptedResult {
+	private answerPlanning(params: PlanningAnswerParams): RunAcceptedResult {
 		this.ensureReady();
 		const runId = requiredString(params.runId, "runId");
 		const sessionId = requiredString(params.sessionId, "sessionId");
+		const originatingRequestId = requiredString(
+			params.originatingRequestId,
+			"originatingRequestId",
+		);
 		const answers = validatePlanningAnswers(params.answers);
 		const expectedVersion = optionalVersion(params.expectedVersion);
 		const record = this.runs.get(runId);
 		if (!record) {
-			const rehydrating = this.createRun(requestId, runId, "planning");
+			const rehydrating = this.createRun(
+				originatingRequestId,
+				runId,
+				"planning",
+			);
 			rehydrating.snapshot.sessionId = sessionId;
 			this.schedule(rehydrating, () =>
 				this.executeRehydratedPlanningAnswer(
@@ -527,6 +532,12 @@ export class AgentHostRuntime {
 				`Planning run ${runId} does not own session ${sessionId}.`,
 			);
 		}
+		if (record.snapshot.requestId !== originatingRequestId) {
+			throw conflictError(
+				"Planning run originating request identity changed during resume.",
+				{ runId },
+			);
+		}
 		if (record.snapshot.status !== "suspended") {
 			throw runtimeError("RUN_NOT_RESUMABLE", `Run ${runId} is not suspended.`);
 		}
@@ -542,7 +553,6 @@ export class AgentHostRuntime {
 				},
 			);
 		}
-		record.snapshot.requestId = requestId;
 		record.snapshot.status = "running";
 		record.snapshot.suspendPayload = undefined;
 		record.snapshot.updatedAtMs = this.now();
@@ -1337,7 +1347,7 @@ export class AgentHostRuntime {
 	}
 
 	private resumeRun(
-		requestId: string,
+		originatingRequestId: string,
 		runId: string,
 		resumeData: unknown,
 		toolCallId: string | undefined,
@@ -1345,6 +1355,15 @@ export class AgentHostRuntime {
 	): RunAcceptedResult {
 		this.ensureReady();
 		const record = this.requireRun(runId);
+		if (
+			record.snapshot.requestId !==
+			requiredString(originatingRequestId, "originatingRequestId")
+		) {
+			throw conflictError(
+				"Agent run originating request identity changed during resume.",
+				{ runId },
+			);
+		}
 		if (record.snapshot.status !== "suspended") {
 			throw runtimeError("RUN_NOT_RESUMABLE", `Run ${runId} is not suspended.`);
 		}
@@ -1375,7 +1394,6 @@ export class AgentHostRuntime {
 				);
 			}
 		}
-		record.snapshot.requestId = requestId;
 		record.snapshot.status = "running";
 		record.snapshot.suspendPayload = undefined;
 		record.snapshot.updatedAtMs = this.now();

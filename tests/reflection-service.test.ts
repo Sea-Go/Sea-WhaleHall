@@ -6,28 +6,111 @@ import type {
 	LocalEventQuery,
 	LocalEventQueryResult,
 } from "../src/agent/local-protocol";
+import type { ReflectionClock } from "../src/agent/reflection/collector";
 import {
 	InMemoryReflectionRepository,
 	type SealWindowResult,
 } from "../src/agent/reflection/repository";
 import {
-	DesktopReflectionService,
 	type DesktopEventTransport,
+	DesktopReflectionService,
 	type TelemetryEnvelopeV1,
 	type TelemetrySink,
 } from "../src/agent/reflection/service";
 import {
-	COLLECTOR_SNAPSHOT_SCHEMA_VERSION,
-	REFLECTION_SCHEMA_VERSION,
 	type ActiveGoalContextV1,
+	COLLECTOR_SNAPSHOT_SCHEMA_VERSION,
 	type DesktopEventV1,
 	type EventWindowV1,
+	REFLECTION_SCHEMA_VERSION,
 	type ReflectionCollectorSnapshotV1,
 	type ReflectionV1,
 } from "../src/agent/reflection/types";
-import type { ReflectionClock } from "../src/agent/reflection/collector";
 
 describe("DesktopReflectionService", () => {
+	test("anonymous backlog is discarded before account B opens its durable epoch", async () => {
+		const transport = new FakeTransport([foregroundEvent(1, "Anonymous")]);
+		const repository = new InMemoryReflectionRepository();
+		const service = new DesktopReflectionService({
+			transport,
+			repository,
+			inference: { infer: async (window) => reflectionFor(window) },
+			identity: identity(),
+			clock: new FakeClock(10_000),
+			semanticEventThreshold: 2,
+			jobPollMs: 60_000,
+			eventPollMs: 60_000,
+		});
+
+		await service.start();
+		await service.cutoverCloudOwner("account-b");
+		transport.appendDurable(foregroundEvent(2, "B-Editor"));
+		transport.appendDurable(foregroundEvent(3, "B-Terminal"));
+		await service.pullNow();
+		await service.pullNow();
+
+		const windows = await repository.listWindowsForAccount("account-b");
+		expect(windows).toHaveLength(1);
+		expect(windows[0]?.events.map((event) => event.eventId)).toEqual([
+			"event-2",
+			"event-3",
+		]);
+		expect(
+			windows[0]?.events.some((event) => event.eventId === "event-1"),
+		).toBeFalse();
+		await service.stop();
+	});
+
+	test("A to B to A cutovers never reassign open or context evidence", async () => {
+		const transport = new FakeTransport([]);
+		const repository = new InMemoryReflectionRepository();
+		const service = new DesktopReflectionService({
+			transport,
+			repository,
+			inference: { infer: async (window) => reflectionFor(window) },
+			identity: identity(),
+			clock: new FakeClock(10_000),
+			semanticEventThreshold: 2,
+			jobPollMs: 60_000,
+			eventPollMs: 60_000,
+			cloudOwnerAccountId: () => "account-a",
+		});
+
+		await service.start();
+		transport.appendDurable(foregroundEvent(1, "A-Open"));
+		await service.pullNow();
+		await service.cutoverCloudOwner(null);
+		transport.appendDurable(foregroundEvent(2, "Transition"));
+		await service.pullNow();
+		await service.cutoverCloudOwner("account-b");
+		transport.appendDurable(foregroundEvent(3, "B-Editor"));
+		transport.appendDurable(foregroundEvent(4, "B-Terminal"));
+		await service.pullNow();
+		await service.pullNow();
+		await service.cutoverCloudOwner(null);
+		transport.appendDurable(foregroundEvent(5, "Transition-Back"));
+		await service.pullNow();
+		await service.cutoverCloudOwner("account-a");
+		transport.appendDurable(foregroundEvent(6, "A-Editor"));
+		transport.appendDurable(foregroundEvent(7, "A-Terminal"));
+		await service.pullNow();
+		await service.pullNow();
+
+		const bWindows = await repository.listWindowsForAccount("account-b");
+		const aWindows = await repository.listWindowsForAccount("account-a");
+		expect(
+			bWindows.flatMap((window) => window.events.map((event) => event.eventId)),
+		).toEqual(["event-3", "event-4"]);
+		expect(
+			aWindows.flatMap((window) => window.events.map((event) => event.eventId)),
+		).toEqual(["event-6", "event-7"]);
+		expect(await repository.loadCollector("collector-1")).toMatchObject({
+			activeGoal: null,
+			cloudOwnerEpoch: { epoch: 5, accountId: "account-a" },
+		});
+		await service.stop();
+	});
+
 	test("pulls from the durable consumer, commits each cursor, and runs a sealed job", async () => {
 		const clock = new FakeClock(10_000);
 		const transport = new FakeTransport([
@@ -80,7 +163,9 @@ describe("DesktopReflectionService", () => {
 		});
 		await service.start();
 		expect(transport.commits).toEqual(["ec1_0000000000000001"]);
-		expect((await service.getStatus()).collectorState).toBe("ACTIVE_COLLECTING");
+		expect((await service.getStatus()).collectorState).toBe(
+			"ACTIVE_COLLECTING",
+		);
 		await service.stop();
 	});
 
@@ -231,6 +316,79 @@ describe("DesktopReflectionService", () => {
 		await service.stop();
 	});
 
+	test("a count seal racing B cutover cannot leak A event ids into B", async () => {
+		const transport = new FakeTransport([]);
+		const repository = new GatedSealRepository();
+		const service = new DesktopReflectionService({
+			transport,
+			repository,
+			inference: { infer: async (window) => reflectionFor(window) },
+			identity: identity(),
+			clock: new FakeClock(10_000),
+			semanticEventThreshold: 2,
+			jobPollMs: 60_000,
+			eventPollMs: 60_000,
+			cloudOwnerAccountId: () => "account-a",
+		});
+		await service.start();
+		transport.appendDurable(foregroundEvent(1, "A-Editor"));
+		transport.appendDurable(foregroundEvent(2, "A-Terminal"));
+		void service.pullNow();
+		await repository.sealStarted;
+
+		const cutover = service.cutoverCloudOwner("account-b");
+		repository.releaseSeal();
+		await cutover;
+		transport.appendDurable(foregroundEvent(3, "B-Editor"));
+		transport.appendDurable(foregroundEvent(4, "B-Terminal"));
+		await service.pullNow();
+		await service.pullNow();
+
+		const bEventIds = (
+			await repository.listWindowsForAccount("account-b")
+		).flatMap((window) => window.events.map((event) => event.eventId));
+		expect(bEventIds).toEqual(["event-3", "event-4"]);
+		expect(bEventIds).not.toContain("event-1");
+		expect(bEventIds).not.toContain("event-2");
+		await service.stop();
+	});
+
+	test("a deadline seal racing B cutover cannot leak A event ids into B", async () => {
+		const clock = new FakeClock(0);
+		const transport = new FakeTransport([]);
+		const repository = new GatedSealRepository();
+		const service = new DesktopReflectionService({
+			transport,
+			repository,
+			inference: { infer: async (window) => reflectionFor(window) },
+			identity: identity(),
+			clock,
+			semanticEventThreshold: 64,
+			jobPollMs: 60_000,
+			eventPollMs: 60_000,
+			cloudOwnerAccountId: () => "account-a",
+		});
+		await service.start();
+		transport.appendDurable(foregroundEvent(1, "A-Editor", 1_000));
+		await service.pullNow();
+		clock.advance(301_000);
+		await repository.sealStarted;
+
+		const cutover = service.cutoverCloudOwner("account-b");
+		repository.releaseSeal();
+		await cutover;
+		transport.appendDurable(foregroundEvent(2, "B-Editor", 302_000));
+		transport.appendDurable(presenceEvent(3, 303_000));
+		await service.pullNow();
+
+		const bEventIds = (
+			await repository.listWindowsForAccount("account-b")
+		).flatMap((window) => window.events.map((event) => event.eventId));
+		expect(bEventIds).toEqual(["event-2", "event-3"]);
+		expect(bEventIds).not.toContain("event-1");
+		await service.stop();
+	});
+
 	test("periodic durable polling recovers events even when no push wakes the service", async () => {
 		const clock = new FakeClock(20_000);
 		const transport = new FakeTransport([]);
@@ -329,9 +487,7 @@ describe("DesktopReflectionService", () => {
 
 	test("the native goal cursor orders racing sensor events on the correct goal side", async () => {
 		const clock = new FakeClock(30_000);
-		const transport = new FakeTransport([
-			foregroundEvent(1, "Code", 1_000),
-		]);
+		const transport = new FakeTransport([foregroundEvent(1, "Code", 1_000)]);
 		transport.beforeGoalAppend = () => {
 			transport.appendDurable(foregroundEvent(2, "Terminal", 29_999));
 		};
@@ -410,7 +566,9 @@ describe("DesktopReflectionService", () => {
 			triggerReason: "presence_boundary",
 			eventCount: 2,
 		});
-		expect(envelopes[0]?.window.events.at(-1)?.kind).toBe("presence.afkStarted");
+		expect(envelopes[0]?.window.events.at(-1)?.kind).toBe(
+			"presence.afkStarted",
+		);
 		await service.stop();
 	});
 
@@ -588,7 +746,9 @@ describe("DesktopReflectionService", () => {
 				state: "ACTIVE_COLLECTING",
 				activeGoal: oldGoal,
 				goalRevision: 1,
+				cloudOwnerEpoch: { epoch: 1, accountId: null },
 				openWindow: {
+					cloudOwnerEpoch: { epoch: 1, accountId: null },
 					goal: oldGoal,
 					goalVersion: 1,
 					startedAtMs: 1_000,
@@ -713,10 +873,7 @@ describe("DesktopReflectionService", () => {
 			next: null,
 		});
 		expect(
-			transport.allEvents().map((event) => [
-				event.kind,
-				event.goalVersion,
-			]),
+			transport.allEvents().map((event) => [event.kind, event.goalVersion]),
 		).toEqual([
 			["goal.contextChanged", null],
 			["goal.contextChanged", 1],
@@ -799,7 +956,11 @@ describe("DesktopReflectionService", () => {
 	test("pulls the durable watermark before a live deadline can win", async () => {
 		const clock = new FakeClock(0);
 		const initialEvents = Array.from({ length: 63 }, (_, index) =>
-			foregroundEvent(index + 1, `App ${index + 1}`, index === 0 ? 0 : index + 1),
+			foregroundEvent(
+				index + 1,
+				`App ${index + 1}`,
+				index === 0 ? 0 : index + 1,
+			),
 		);
 		const transport = new FakeTransport(initialEvents);
 		const repository = new InMemoryReflectionRepository();
@@ -871,7 +1032,9 @@ class FakeTransport implements DesktopEventTransport {
 		if (this.emitDuringStart) this.emit(this.emitDuringStart);
 	}
 
-	async queryDesktopEvents(query: LocalEventQuery): Promise<LocalEventQueryResult> {
+	async queryDesktopEvents(
+		query: LocalEventQuery,
+	): Promise<LocalEventQueryResult> {
 		this.queries.push({ ...query });
 		const events = this.events.slice(this.committedIndex);
 		return {
@@ -891,7 +1054,8 @@ class FakeTransport implements DesktopEventTransport {
 		}
 		this.commits.push(cursor);
 		const index = this.events.findIndex((event) => event.cursor === cursor);
-		if (index >= 0) this.committedIndex = Math.max(this.committedIndex, index + 1);
+		if (index >= 0)
+			this.committedIndex = Math.max(this.committedIndex, index + 1);
 		return { consumerId, cursor, advanced: true };
 	}
 
@@ -1007,13 +1171,19 @@ class GatedSealRepository extends FailOnceSaveRepository {
 		window: EventWindowV1,
 		nextSnapshot: ReflectionCollectorSnapshotV1,
 		expectedRevision: number,
+		cloudOwnerAccountId: string | null,
 	): Promise<SealWindowResult> {
 		if (!this.gateUsed) {
 			this.gateUsed = true;
 			this.sealSignal.resolve(undefined);
 			await this.sealRelease.promise;
 		}
-		return super.sealWindow(window, nextSnapshot, expectedRevision);
+		return super.sealWindow(
+			window,
+			nextSnapshot,
+			expectedRevision,
+			cloudOwnerAccountId,
+		);
 	}
 }
 
@@ -1030,7 +1200,10 @@ class FakeClock implements ReflectionClock {
 		return this.value;
 	}
 
-	setTimer(callback: () => void, delayMs: number): ReturnType<typeof setTimeout> {
+	setTimer(
+		callback: () => void,
+		delayMs: number,
+	): ReturnType<typeof setTimeout> {
 		const id = this.nextTimerId;
 		this.nextTimerId += 1;
 		this.timers.set(id, {
@@ -1181,7 +1354,9 @@ async function seedOpenCollector(
 		state: "ACTIVE_COLLECTING",
 		activeGoal: null,
 		goalRevision: 0,
+		cloudOwnerEpoch: { epoch: 0, accountId: null },
 		openWindow: {
+			cloudOwnerEpoch: { epoch: 0, accountId: null },
 			goal: null,
 			goalVersion: null,
 			startedAtMs: 1_000,

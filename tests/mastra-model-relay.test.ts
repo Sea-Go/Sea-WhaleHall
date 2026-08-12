@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ModelRelay } from "../src/agent/mastra-host/model-relay";
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
 	type ModelRelayEvent,
@@ -6,13 +7,46 @@ import {
 	type ModelRelayOpenResult,
 	type SidecarHostMethod,
 } from "../src/agent/mastra-host/protocol";
-import { ModelRelay } from "../src/agent/mastra-host/model-relay";
 import type {
 	HostRequestOptions,
 	HostRequestPeer,
 } from "../src/agent/mastra-host/transport";
 
 describe("Mastra ModelRelay event sequencing", () => {
+	test("fails closed without a durable originating request context", async () => {
+		const peer = new FakeRelayPeer();
+		const relay = new ModelRelay(peer, "whalehall-relay", "approved-model");
+
+		await expect(
+			relay.fetch("https://model-relay.whalehall.invalid/v1/chat/completions", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model: "approved-model",
+					messages: [{ role: "user", content: "test" }],
+					stream: true,
+				}),
+			}),
+		).rejects.toThrow("durable originating request context");
+		expect(peer.openRelayId).toBeNull();
+	});
+
+	test("fails closed for an empty originating request ID inside a relay context", async () => {
+		const peer = new FakeRelayPeer();
+		const relay = new ModelRelay(peer, "whalehall-relay", "approved-model");
+
+		await expect(
+			relay.runInContext(
+				{ runId: "run-missing-origin", originatingRequestId: "" },
+				() =>
+					relay.fetch(
+						"https://model-relay.whalehall.invalid/v1/chat/completions",
+					),
+			),
+		).rejects.toThrow("durable originating request context");
+		expect(peer.openRelayId).toBeNull();
+	});
+
 	test("accepts a strictly contiguous chunk stream ending at the next sequence", async () => {
 		const { peer, response, relayId } = await openRelay();
 		const reading = response.text();
@@ -71,15 +105,16 @@ async function openRelay(): Promise<{
 			runId: "run-sequence-test",
 			originatingRequestId: "request-sequence-test",
 		},
-		() => relay.fetch("https://model-relay.whalehall.invalid/v1/chat/completions", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				model: "approved-model",
-				messages: [{ role: "user", content: "test" }],
-				stream: true,
+		() =>
+			relay.fetch("https://model-relay.whalehall.invalid/v1/chat/completions", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model: "approved-model",
+					messages: [{ role: "user", content: "test" }],
+					stream: true,
+				}),
 			}),
-		}),
 	);
 	const relayId = peer.openRelayId;
 	if (!relayId) throw new Error("Model relay did not open.");

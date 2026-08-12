@@ -1,9 +1,10 @@
-# Packaged placeholder only. The owner provisioning command writes literal
-# keys to the private user-data/config.yaml file; do not put usable keys here.
+# Internal-test model content is sent through the authenticated DataCenter
+# session. Reflection keeps its legacy shape for compatible owner files, but
+# its apikey is ignored; only agent.apikey is a personal relay credential.
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
-  apikey: "REPLACE_WITH_REFLECTION_RELAY_KEY"
+  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
+  apikey: "IGNORED_USE_AUTHENTICATED_SESSION"
 
 agent:
   name: "qwen3:1.7b"

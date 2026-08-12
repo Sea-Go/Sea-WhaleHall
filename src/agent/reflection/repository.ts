@@ -1,6 +1,6 @@
 import {
-	REFLECTION_JOB_SCHEMA_VERSION,
 	type EventWindowV1,
+	REFLECTION_JOB_SCHEMA_VERSION,
 	type ReflectionCollectorSnapshotV1,
 	type ReflectionJobFailureV1,
 	type ReflectionJobV1,
@@ -30,7 +30,9 @@ export type SealWindowResult = {
 };
 
 export interface ReflectionCollectorRepository {
-	loadCollector(collectorId: string): Promise<ReflectionCollectorSnapshotV1 | null>;
+	loadCollector(
+		collectorId: string,
+	): Promise<ReflectionCollectorSnapshotV1 | null>;
 	saveCollector(
 		snapshot: ReflectionCollectorSnapshotV1,
 		expectedRevision: number | null,
@@ -43,7 +45,13 @@ export interface ReflectionCollectorRepository {
 		window: EventWindowV1,
 		nextSnapshot: ReflectionCollectorSnapshotV1,
 		expectedRevision: number,
+		cloudOwnerAccountId: string | null,
 	): Promise<SealWindowResult>;
+}
+
+export interface ReflectionCloudHandoffRepository {
+	/** Returns only windows durably attributed to this authenticated account. */
+	listWindowsForAccount(accountId: string): Promise<EventWindowV1[]>;
 }
 
 export interface DurableReflectionJobRepository {
@@ -54,7 +62,10 @@ export interface DurableReflectionJobRepository {
 	 * Claims the oldest runnable unit atomically. READY/RETRY_WAIT jobs without
 	 * results become RUNNING; jobs with persisted results become COMMITTING.
 	 */
-	claimNextRunnable(nowMs: number, leaseDurationMs: number): Promise<ReflectionJobV1 | null>;
+	claimNextRunnable(
+		nowMs: number,
+		leaseDurationMs: number,
+	): Promise<ReflectionJobV1 | null>;
 	persistResult(
 		windowId: string,
 		reflection: ReflectionV1,
@@ -77,7 +88,8 @@ export interface DurableReflectionJobRepository {
 
 export interface ReflectionRepository
 	extends ReflectionCollectorRepository,
-		DurableReflectionJobRepository {}
+		DurableReflectionJobRepository,
+		ReflectionCloudHandoffRepository {}
 
 /**
  * Deterministic reference repository for tests and embedding. Production must
@@ -85,11 +97,17 @@ export interface ReflectionRepository
  * intentionally not durable across process exits.
  */
 export class InMemoryReflectionRepository implements ReflectionRepository {
-	private readonly collectors = new Map<string, ReflectionCollectorSnapshotV1>();
+	private readonly collectors = new Map<
+		string,
+		ReflectionCollectorSnapshotV1
+	>();
 	private readonly windows = new Map<string, EventWindowV1>();
 	private readonly jobs = new Map<string, ReflectionJobV1>();
+	private readonly cloudOwners = new Map<string, string>();
 
-	async loadCollector(collectorId: string): Promise<ReflectionCollectorSnapshotV1 | null> {
+	async loadCollector(
+		collectorId: string,
+	): Promise<ReflectionCollectorSnapshotV1 | null> {
 		return clone(this.collectors.get(collectorId) ?? null);
 	}
 
@@ -113,12 +131,19 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 		window: EventWindowV1,
 		nextSnapshot: ReflectionCollectorSnapshotV1,
 		expectedRevision: number,
+		cloudOwnerAccountId: string | null,
 	): Promise<SealWindowResult> {
 		const existingWindow = this.windows.get(window.windowId);
 		const existingJob = this.jobs.get(window.windowId);
 		if (existingWindow && existingJob) {
 			const currentSnapshot = this.collectors.get(nextSnapshot.collectorId);
-			if (!currentSnapshot) throw new Error("Idempotent seal is missing collector state.");
+			if (!currentSnapshot)
+				throw new Error("Idempotent seal is missing collector state.");
+			const requestedOwner =
+				normalizeOptionalCloudOwnerAccountId(cloudOwnerAccountId);
+			if ((this.cloudOwners.get(window.windowId) ?? null) !== requestedOwner) {
+				throw new Error("Idempotent reflection seal changed cloud ownership.");
+			}
 			return {
 				inserted: false,
 				window: clone(existingWindow),
@@ -128,7 +153,8 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 		}
 
 		const current = this.collectors.get(nextSnapshot.collectorId);
-		if (current?.revision !== expectedRevision) throw new CollectorRevisionConflictError();
+		if (current?.revision !== expectedRevision)
+			throw new CollectorRevisionConflictError();
 
 		const createdAtMs = window.endedAtMs;
 		const job: ReflectionJobV1 = {
@@ -151,6 +177,12 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 		const savedJob = clone(job);
 		this.windows.set(window.windowId, savedWindow);
 		this.jobs.set(window.windowId, savedJob);
+		if (cloudOwnerAccountId !== null) {
+			this.cloudOwners.set(
+				window.windowId,
+				normalizeRequiredCloudOwnerAccountId(cloudOwnerAccountId),
+			);
+		}
 		this.collectors.set(savedSnapshot.collectorId, savedSnapshot);
 		return {
 			inserted: true,
@@ -158,6 +190,18 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 			snapshot: clone(savedSnapshot),
 			job: clone(savedJob),
 		};
+	}
+
+	async listWindowsForAccount(accountId: string): Promise<EventWindowV1[]> {
+		const owner = normalizeRequiredCloudOwnerAccountId(accountId);
+		return [...this.windows.values()]
+			.filter((window) => this.cloudOwners.get(window.windowId) === owner)
+			.sort(
+				(left, right) =>
+					left.endedAtMs - right.endedAtMs ||
+					left.windowId.localeCompare(right.windowId),
+			)
+			.map((window) => clone(window));
 	}
 
 	async getWindow(windowId: string): Promise<EventWindowV1 | null> {
@@ -172,7 +216,8 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 		let pendingJobs = 0;
 		let pendingEvents = 0;
 		for (const job of this.jobs.values()) {
-			if (job.state === "COMMITTED" || job.state === "TERMINAL_FAILED") continue;
+			if (job.state === "COMMITTED" || job.state === "TERMINAL_FAILED")
+				continue;
 			pendingJobs += 1;
 			pendingEvents += this.windows.get(job.windowId)?.eventCount ?? 0;
 		}
@@ -216,12 +261,17 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 		const current = this.requireJob(windowId);
 		if (current.reflection) {
 			if (current.reflection.windowId !== reflection.windowId) {
-				throw new Error("A different reflection is already persisted for this window.");
+				throw new Error(
+					"A different reflection is already persisted for this window.",
+				);
 			}
 			return clone(current);
 		}
 		if (current.state !== "RUNNING") {
-			throw new InvalidReflectionJobTransitionError(current.state, "persist result for");
+			throw new InvalidReflectionJobTransitionError(
+				current.state,
+				"persist result for",
+			);
 		}
 		if (reflection.windowId !== windowId) {
 			throw new Error("Reflection result does not match its window.");
@@ -247,7 +297,10 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 			return clone(current);
 		}
 		if (current.state !== "RESULT_PERSISTED") {
-			throw new InvalidReflectionJobTransitionError(current.state, "begin commit for");
+			throw new InvalidReflectionJobTransitionError(
+				current.state,
+				"begin commit for",
+			);
 		}
 		const next: ReflectionJobV1 = {
 			...current,
@@ -267,7 +320,10 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 	): Promise<ReflectionJobV1> {
 		const current = this.requireJob(windowId);
 		if (current.state !== "RUNNING" && current.state !== "COMMITTING") {
-			throw new InvalidReflectionJobTransitionError(current.state, "record failure for");
+			throw new InvalidReflectionJobTransitionError(
+				current.state,
+				"record failure for",
+			);
 		}
 		const next: ReflectionJobV1 = {
 			...current,
@@ -282,7 +338,10 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 		return clone(next);
 	}
 
-	async markCommitted(windowId: string, nowMs: number): Promise<ReflectionJobV1> {
+	async markCommitted(
+		windowId: string,
+		nowMs: number,
+	): Promise<ReflectionJobV1> {
 		const current = this.requireJob(windowId);
 		if (current.state === "COMMITTED") return clone(current);
 		if (current.state !== "COMMITTING") {
@@ -299,7 +358,10 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 		return clone(next);
 	}
 
-	async replayTerminal(windowId: string, nowMs: number): Promise<ReflectionJobV1> {
+	async replayTerminal(
+		windowId: string,
+		nowMs: number,
+	): Promise<ReflectionJobV1> {
 		const current = this.requireJob(windowId);
 		if (current.state !== "TERMINAL_FAILED") {
 			throw new InvalidReflectionJobTransitionError(current.state, "replay");
@@ -347,4 +409,17 @@ function isRunnable(job: ReflectionJobV1, nowMs: number): boolean {
 
 function clone<T>(value: T): T {
 	return structuredClone(value);
+}
+
+function normalizeRequiredCloudOwnerAccountId(value: string): string {
+	if (value.length < 1 || value.length > 256 || value.trim() !== value) {
+		throw new Error("Reflection cloud owner account id is invalid.");
+	}
+	return value;
+}
+
+function normalizeOptionalCloudOwnerAccountId(
+	value: string | null,
+): string | null {
+	return value === null ? null : normalizeRequiredCloudOwnerAccountId(value);
 }

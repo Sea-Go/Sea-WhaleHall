@@ -13,14 +13,12 @@ import type {
 export class InMemoryUserStore implements UserStore {
 	private readonly byId = new Map<string, RelayUser>();
 	private readonly byEmail = new Map<string, RelayUser>();
-	private readonly byReflectionKeyId = new Map<string, RelayUser>();
 
 	constructor(users: readonly RelayUser[]) {
 		for (const user of users) {
 			const value = cloneUser(user);
 			this.byId.set(value.id, value);
 			this.byEmail.set(value.email.trim().toLowerCase(), value);
-			this.byReflectionKeyId.set(value.reflectionKeyId, value);
 		}
 	}
 
@@ -33,11 +31,6 @@ export class InMemoryUserStore implements UserStore {
 		const user = this.byId.get(id);
 		return user ? cloneUser(user) : null;
 	}
-
-	async findByReflectionKeyId(reflectionKeyId: string): Promise<RelayUser | null> {
-		const user = this.byReflectionKeyId.get(reflectionKeyId);
-		return user ? cloneUser(user) : null;
-	}
 }
 
 export class InMemorySessionStore implements SessionStore {
@@ -48,12 +41,15 @@ export class InMemorySessionStore implements SessionStore {
 		this.sessions.set(session.id, cloneSession(session));
 	}
 
-	async findActiveByAccessDigest(digest: string, nowMs: number): Promise<StoredSession | null> {
+	async findActiveByAccessDigest(
+		digest: string,
+		nowMs: number,
+	): Promise<StoredSession | null> {
 		for (const session of this.sessions.values()) {
 			if (
-				session.accessDigest === digest
-				&& session.revokedAtMs === null
-				&& session.accessExpiresAtMs > nowMs
+				session.accessDigest === digest &&
+				session.revokedAtMs === null &&
+				session.accessExpiresAtMs > nowMs
 			) {
 				return cloneSession(session);
 			}
@@ -61,12 +57,15 @@ export class InMemorySessionStore implements SessionStore {
 		return null;
 	}
 
-	async consumeRefresh(digest: string, nowMs: number): Promise<StoredSession | null> {
+	async consumeRefresh(
+		digest: string,
+		nowMs: number,
+	): Promise<StoredSession | null> {
 		for (const session of this.sessions.values()) {
 			if (
-				session.refreshDigest === digest
-				&& session.revokedAtMs === null
-				&& session.refreshExpiresAtMs > nowMs
+				session.refreshDigest === digest &&
+				session.revokedAtMs === null &&
+				session.refreshExpiresAtMs > nowMs
 			) {
 				session.revokedAtMs = nowMs;
 				return cloneSession(session);
@@ -195,14 +194,19 @@ export class InMemoryRelayRecordStore implements RelayRecordStore {
 }
 
 export class FixedWindowRateLimiter implements RateLimiter {
-	private readonly windows = new Map<string, { startMs: number; count: number }>();
+	private readonly windows = new Map<
+		string,
+		{ startMs: number; count: number }
+	>();
 
 	constructor(
 		private readonly limit: number,
 		private readonly windowMs: number,
 	) {
-		if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("Rate limit must be positive.");
-		if (!Number.isSafeInteger(windowMs) || windowMs < 1_000) throw new Error("Rate window is invalid.");
+		if (!Number.isSafeInteger(limit) || limit < 1)
+			throw new Error("Rate limit must be positive.");
+		if (!Number.isSafeInteger(windowMs) || windowMs < 1_000)
+			throw new Error("Rate window is invalid.");
 	}
 
 	async consume(key: string, nowMs: number) {
@@ -214,7 +218,10 @@ export class FixedWindowRateLimiter implements RateLimiter {
 		if (window.count >= this.limit) {
 			return {
 				allowed: false,
-				retryAfterSeconds: Math.max(1, Math.ceil((window.startMs + this.windowMs - nowMs) / 1_000)),
+				retryAfterSeconds: Math.max(
+					1,
+					Math.ceil((window.startMs + this.windowMs - nowMs) / 1_000),
+				),
 			};
 		}
 		window.count += 1;
@@ -223,7 +230,8 @@ export class FixedWindowRateLimiter implements RateLimiter {
 }
 
 function memoryResponse(record: MemoryRelayRecord): StoredRelayResponse {
-	if (record.responseStatus === null) throw new Error("Completed relay record has no response status.");
+	if (record.responseStatus === null)
+		throw new Error("Completed relay record has no response status.");
 	return {
 		status: record.responseStatus,
 		headers: { ...record.responseHeaders },
@@ -232,7 +240,9 @@ function memoryResponse(record: MemoryRelayRecord): StoredRelayResponse {
 }
 
 function concatenate(chunks: readonly Uint8Array[]): Uint8Array {
-	const output = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+	const output = new Uint8Array(
+		chunks.reduce((total, chunk) => total + chunk.byteLength, 0),
+	);
 	let offset = 0;
 	for (const chunk of chunks) {
 		output.set(chunk, offset);

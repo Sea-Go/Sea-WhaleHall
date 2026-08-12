@@ -9,6 +9,7 @@ import {
 	type ActivityAnalysisWorkerResult as SharedActivityAnalysisWorkerResult,
 	serializedActivityAnalysisLength,
 } from "../shared/activity-analysis-contract";
+import type { AuthSessionIdentity } from "../shared/session-identity";
 import {
 	ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION,
 	ACTIVITY_EVENT_WORKER_RESPONSE_SCHEMA_VERSION,
@@ -35,6 +36,7 @@ type ActivityWindowStateRow = {
 	accumulated_score: number;
 	trigger_pending: number;
 	baseline_initialized: number;
+	owner_account_id: string | null;
 };
 
 type ActivityWindowReceiptRow = {
@@ -67,6 +69,9 @@ type ActivityWindowOutboxRow = {
 	window_id: string;
 	request_id: string;
 	window_json: string;
+	owner_account_id: string | null;
+	owner_session_id: string | null;
+	owner_generation: number | null;
 	queued_at_ms: number;
 	attempt: number;
 	next_attempt_at_ms: number;
@@ -77,6 +82,7 @@ type ActivityWindowOutboxRow = {
 type QueuedActivityWindow = {
 	window: EventWindowV1;
 	requestId: string;
+	owner: AuthSessionIdentity;
 	attempt: number;
 	nextAttemptAtMs: number;
 };
@@ -110,8 +116,8 @@ export type ActivityAnalysisJobNext =
 	| { kind: "ready"; job: ActivityAnalysisJob };
 
 export interface ActivityWindowSource {
-	/** Returns the immutable windows already sealed by the reflection collector. */
-	listWindows(): Promise<readonly EventWindowV1[]>;
+	/** Returns only immutable windows durably attributed to this account. */
+	listWindowsForAccount(accountId: string): Promise<readonly EventWindowV1[]>;
 }
 
 export type ActivityWindowDeliveryState =
@@ -154,6 +160,9 @@ export type ActivityWindowDeliveryServiceOptions = {
 		status: ActivityScoreStatus,
 	) => void | Promise<void>;
 	onError?: (error: unknown) => void;
+	/** Captures and revalidates the exact Bun-authenticated owner. */
+	currentSession?: () => AuthSessionIdentity | null;
+	isCurrentSession?: (identity: AuthSessionIdentity) => boolean;
 };
 
 /**
@@ -174,6 +183,7 @@ export class ActivityWindowDeliveryStore {
 		this.database.exec(`
 			CREATE TABLE IF NOT EXISTS activity_window_worker_state (
 				id INTEGER PRIMARY KEY CHECK (id = 1),
+				owner_account_id TEXT,
 				accumulated_score REAL NOT NULL,
 				trigger_pending INTEGER NOT NULL CHECK (trigger_pending IN (0, 1)),
 				baseline_initialized INTEGER NOT NULL CHECK (baseline_initialized IN (0, 1)),
@@ -192,6 +202,9 @@ export class ActivityWindowDeliveryStore {
 				window_id TEXT PRIMARY KEY,
 				request_id TEXT NOT NULL UNIQUE,
 				window_json TEXT NOT NULL,
+				owner_account_id TEXT,
+				owner_session_id TEXT,
+				owner_generation INTEGER,
 				queued_at_ms INTEGER NOT NULL,
 				attempt INTEGER NOT NULL CHECK (attempt >= 0),
 				next_attempt_at_ms INTEGER NOT NULL,
@@ -223,6 +236,8 @@ export class ActivityWindowDeliveryStore {
 				UNIQUE (request_id)
 			);
 		`);
+		this.ensureStateOwnerColumn();
+		this.ensureOutboxOwnerColumns();
 		this.database
 			.query(
 				`INSERT OR IGNORE INTO activity_window_worker_state
@@ -243,11 +258,26 @@ export class ActivityWindowDeliveryStore {
 	 * The first activation establishes a local cutover before Reflection starts.
 	 * Earlier sealed windows remain on-device and are never backfilled to cloud.
 	 */
-	initializeBaseline(windows: readonly EventWindowV1[]): boolean {
+	initializeBaseline(
+		windows: readonly EventWindowV1[],
+		owner: AuthSessionIdentity,
+	): boolean {
 		const normalized = uniqueWindows(windows);
+		const normalizedOwner = validateSessionIdentity(owner);
 		const transaction = this.database.transaction(() => {
 			const state = this.stateRow();
-			if (state.baseline_initialized === 1) return false;
+			if (state.baseline_initialized === 1) {
+				if (state.owner_account_id !== normalizedOwner.accountId) {
+					throw new Error("Activity window ledger belongs to another account.");
+				}
+				return false;
+			}
+			if (
+				state.owner_account_id !== null &&
+				state.owner_account_id !== normalizedOwner.accountId
+			) {
+				throw new Error("Activity window ledger belongs to another account.");
+			}
 			for (const window of normalized) {
 				this.database
 					.query(
@@ -258,9 +288,10 @@ export class ActivityWindowDeliveryStore {
 			this.database
 				.query(
 					`UPDATE activity_window_worker_state
-					 SET baseline_initialized = 1, updated_at_ms = ? WHERE id = 1`,
+					 SET baseline_initialized = 1, owner_account_id = ?, updated_at_ms = ?
+					 WHERE id = 1`,
 				)
-				.run(Date.now());
+				.run(normalizedOwner.accountId, Date.now());
 			return true;
 		});
 		return transaction.immediate();
@@ -270,17 +301,22 @@ export class ActivityWindowDeliveryStore {
 		window: EventWindowV1,
 		requestId: string,
 		queuedAtMs: number,
+		owner: AuthSessionIdentity,
 	): boolean {
 		const normalized = validateWindow(window);
 		const id = boundedString(requestId, "requestId", MAXIMUM_REQUEST_ID_LENGTH);
 		const queuedAt = nonNegativeSafeInteger(queuedAtMs, "queuedAtMs");
 		const serialized = serializeWindow(normalized);
+		const normalizedOwner = validateSessionIdentity(owner);
 		const transaction = this.database.transaction(() => {
 			const state = this.stateRow();
 			if (state.baseline_initialized !== 1) {
 				throw new Error(
 					"Activity window delivery baseline is not initialized.",
 				);
+			}
+			if (state.owner_account_id !== normalizedOwner.accountId) {
+				throw new Error("Activity window ledger belongs to another account.");
 			}
 			if (this.isBaselineWindow(normalized.windowId)) return false;
 			const receipt = this.receiptByWindowId(normalized.windowId);
@@ -292,7 +328,11 @@ export class ActivityWindowDeliveryStore {
 			}
 			const existing = this.outboxByWindowId(normalized.windowId);
 			if (existing !== null) {
-				if (existing.request_id !== id || existing.window_json !== serialized) {
+				if (
+					existing.request_id !== id ||
+					existing.window_json !== serialized ||
+					existing.owner_account_id !== normalizedOwner.accountId
+				) {
 					throw new Error("Activity window outbox collision.");
 				}
 				return false;
@@ -300,11 +340,21 @@ export class ActivityWindowDeliveryStore {
 			this.database
 				.query(
 					`INSERT INTO activity_window_worker_outbox
-					 (window_id, request_id, window_json, queued_at_ms, attempt,
+					 (window_id, request_id, window_json, owner_account_id,
+					  owner_session_id, owner_generation, queued_at_ms, attempt,
 					  next_attempt_at_ms, terminal, last_error)
-					 VALUES (?, ?, ?, ?, 0, ?, 0, NULL)`,
+					 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, NULL)`,
 				)
-				.run(normalized.windowId, id, serialized, queuedAt, queuedAt);
+				.run(
+					normalized.windowId,
+					id,
+					serialized,
+					normalizedOwner.accountId,
+					normalizedOwner.sessionId,
+					normalizedOwner.generation,
+					queuedAt,
+					queuedAt,
+				);
 			return true;
 		});
 		return transaction.immediate();
@@ -312,21 +362,27 @@ export class ActivityWindowDeliveryStore {
 
 	nextWindow(
 		nowMs: number,
+		owner: AuthSessionIdentity,
 	):
 		| { kind: "none" }
 		| { kind: "not_due"; nextAttemptAtMs: number }
 		| { kind: "ready"; queued: QueuedActivityWindow } {
 		const now = nonNegativeSafeInteger(nowMs, "nowMs");
+		const normalizedOwner = validateSessionIdentity(owner);
+		if (this.stateRow().owner_account_id !== normalizedOwner.accountId) {
+			throw new Error("Activity window ledger belongs to another account.");
+		}
 		const row = this.database
 			.query(
-				`SELECT window_id, request_id, window_json, queued_at_ms, attempt,
+				`SELECT window_id, request_id, window_json, owner_account_id,
+				 owner_session_id, owner_generation, queued_at_ms, attempt,
 				 next_attempt_at_ms, terminal, last_error
 				 FROM activity_window_worker_outbox
-				 WHERE terminal = 0
+				 WHERE terminal = 0 AND owner_account_id = ?
 				 ORDER BY queued_at_ms, window_id
 				 LIMIT 1`,
 			)
-			.get() as ActivityWindowOutboxRow | null;
+			.get(normalizedOwner.accountId) as ActivityWindowOutboxRow | null;
 		if (row === null) return { kind: "none" };
 		if (row.next_attempt_at_ms > now) {
 			return { kind: "not_due", nextAttemptAtMs: row.next_attempt_at_ms };
@@ -336,6 +392,7 @@ export class ActivityWindowDeliveryStore {
 			queued: {
 				window: parseStoredWindow(row.window_json, row.window_id),
 				requestId: row.request_id,
+				owner: normalizedOwner,
 				attempt: row.attempt,
 				nextAttemptAtMs: row.next_attempt_at_ms,
 			},
@@ -464,7 +521,7 @@ export class ActivityWindowDeliveryStore {
 		const outbox = this.database
 			.query(
 				`SELECT
-					SUM(CASE WHEN terminal = 0 THEN 1 ELSE 0 END) AS pending_count,
+					SUM(CASE WHEN terminal = 0 AND owner_account_id IS NOT NULL THEN 1 ELSE 0 END) AS pending_count,
 					SUM(CASE WHEN terminal = 1 THEN 1 ELSE 0 END) AS terminal_count
 				 FROM activity_window_worker_outbox`,
 			)
@@ -513,6 +570,9 @@ export class ActivityWindowDeliveryStore {
 			"accountId",
 			MAXIMUM_ACCOUNT_ID_LENGTH,
 		);
+		if (this.stateRow().owner_account_id !== account) {
+			return { kind: "account_mismatch" };
+		}
 		const now = nonNegativeSafeInteger(nowMs, "nowMs");
 		const row = this.activeActivityAnalysisJob();
 		if (row === null) return { kind: "none" };
@@ -542,6 +602,9 @@ export class ActivityWindowDeliveryStore {
 			"accountId",
 			MAXIMUM_ACCOUNT_ID_LENGTH,
 		);
+		if (this.stateRow().owner_account_id !== account) {
+			throw new Error("Activity analysis job belongs to another account.");
+		}
 		const run = boundedString(runId, "runId", MAXIMUM_RUN_ID_LENGTH);
 		const claimedAt = nonNegativeSafeInteger(claimedAtMs, "claimedAtMs");
 		const transaction = this.database.transaction(() => {
@@ -587,6 +650,9 @@ export class ActivityWindowDeliveryStore {
 			"accountId",
 			MAXIMUM_ACCOUNT_ID_LENGTH,
 		);
+		if (this.stateRow().owner_account_id !== account) {
+			throw new Error("Activity analysis job belongs to another account.");
+		}
 		const run = boundedString(runId, "runId", MAXIMUM_RUN_ID_LENGTH);
 		const threshold = validScoreThreshold(scoreThreshold);
 		const completedAt = nonNegativeSafeInteger(completedAtMs, "completedAtMs");
@@ -643,6 +709,9 @@ export class ActivityWindowDeliveryStore {
 			"accountId",
 			MAXIMUM_ACCOUNT_ID_LENGTH,
 		);
+		if (this.stateRow().owner_account_id !== account) {
+			throw new Error("Activity analysis job belongs to another account.");
+		}
 		const run = boundedString(runId, "runId", MAXIMUM_RUN_ID_LENGTH);
 		const next = nonNegativeSafeInteger(nextAttemptAtMs, "nextAttemptAtMs");
 		const updatedAt = nonNegativeSafeInteger(updatedAtMs, "updatedAtMs");
@@ -739,9 +808,17 @@ export class ActivityWindowDeliveryStore {
 				`INSERT INTO activity_window_worker_agent_jobs
 				 (job_id, account_id, run_id, status, analyses_json, consumed_score,
 				  attempt, next_attempt_at_ms, created_at_ms, updated_at_ms, last_error)
-				 VALUES (?, NULL, NULL, 'pending', ?, ?, 0, ?, ?, ?, NULL)`,
+				 VALUES (?, ?, NULL, 'pending', ?, ?, 0, ?, ?, ?, NULL)`,
 			)
-			.run(jobId, serialized, consumedScore, nowMs, nowMs, nowMs);
+			.run(
+				jobId,
+				this.requireLedgerAccount(),
+				serialized,
+				consumedScore,
+				nowMs,
+				nowMs,
+				nowMs,
+			);
 		const assign = this.database.query(
 			`INSERT INTO activity_window_worker_agent_job_receipts (job_id, request_id)
 			 VALUES (?, ?)`,
@@ -785,7 +862,8 @@ export class ActivityWindowDeliveryStore {
 	private stateRow(): ActivityWindowStateRow {
 		const row = this.database
 			.query(
-				`SELECT accumulated_score, trigger_pending, baseline_initialized
+				`SELECT accumulated_score, trigger_pending, baseline_initialized,
+				        owner_account_id
 				 FROM activity_window_worker_state WHERE id = 1`,
 			)
 			.get() as ActivityWindowStateRow | null;
@@ -799,6 +877,14 @@ export class ActivityWindowDeliveryStore {
 			throw new Error("Activity window score state is corrupt.");
 		}
 		return row;
+	}
+
+	private requireLedgerAccount(): string {
+		const account = this.stateRow().owner_account_id;
+		if (account === null) {
+			throw new Error("Activity window ledger has no authenticated owner.");
+		}
+		return account;
 	}
 
 	private receiptByRequestId(
@@ -824,11 +910,43 @@ export class ActivityWindowDeliveryStore {
 	private outboxByWindowId(windowId: string): ActivityWindowOutboxRow | null {
 		return this.database
 			.query(
-				`SELECT window_id, request_id, window_json, queued_at_ms, attempt,
+				`SELECT window_id, request_id, window_json, owner_account_id,
+				 owner_session_id, owner_generation, queued_at_ms, attempt,
 				 next_attempt_at_ms, terminal, last_error
 				 FROM activity_window_worker_outbox WHERE window_id = ?`,
 			)
 			.get(windowId) as ActivityWindowOutboxRow | null;
+	}
+
+	private ensureOutboxOwnerColumns(): void {
+		const columns = this.database
+			.query("PRAGMA table_info(activity_window_worker_outbox)")
+			.all() as Array<{ name: string }>;
+		const names = new Set(columns.map((column) => column.name));
+		for (const [name, type] of [
+			["owner_account_id", "TEXT"],
+			["owner_session_id", "TEXT"],
+			["owner_generation", "INTEGER"],
+		] as const) {
+			if (!names.has(name)) {
+				this.database.exec(
+					`ALTER TABLE activity_window_worker_outbox ADD COLUMN ${name} ${type}`,
+				);
+			}
+		}
+		// Legacy unowned raw windows deliberately remain durable but can never be
+		// auto-claimed by a later login.
+	}
+
+	private ensureStateOwnerColumn(): void {
+		const columns = this.database
+			.query("PRAGMA table_info(activity_window_worker_state)")
+			.all() as Array<{ name: string }>;
+		if (!columns.some((column) => column.name === "owner_account_id")) {
+			this.database.exec(
+				"ALTER TABLE activity_window_worker_state ADD COLUMN owner_account_id TEXT",
+			);
+		}
 	}
 
 	private isBaselineWindow(windowId: string): boolean {
@@ -857,6 +975,20 @@ export class ActivityWindowDeliveryStore {
 	}
 }
 
+function validateSessionIdentity(
+	identity: AuthSessionIdentity,
+): AuthSessionIdentity {
+	return {
+		accountId: boundedString(
+			identity.accountId,
+			"owner.accountId",
+			MAXIMUM_ACCOUNT_ID_LENGTH,
+		),
+		sessionId: boundedString(identity.sessionId, "owner.sessionId", 256),
+		generation: nonNegativeSafeInteger(identity.generation, "owner.generation"),
+	};
+}
+
 /**
  * Sends one request per sealed reflection window. New windows are first
  * committed to the local outbox, so transient cloud errors never block the
@@ -876,6 +1008,8 @@ export class ActivityWindowDeliveryService {
 		status: ActivityScoreStatus,
 	) => void | Promise<void>;
 	private readonly onError: (error: unknown) => void;
+	private readonly currentSession: () => AuthSessionIdentity | null;
+	private readonly isCurrentSession: (identity: AuthSessionIdentity) => boolean;
 
 	private started = false;
 	private state: ActivityWindowDeliveryState = "stopped";
@@ -884,6 +1018,7 @@ export class ActivityWindowDeliveryService {
 	private retryAtMs: number | null = null;
 	private drainScheduled = false;
 	private operationTail: Promise<void> = Promise.resolve();
+	private activationPromise: Promise<void> | null = null;
 
 	constructor(options: ActivityWindowDeliveryServiceOptions) {
 		this.source = options.source;
@@ -899,17 +1034,36 @@ export class ActivityWindowDeliveryService {
 		this.onAcceptedAnalysis = options.onAcceptedAnalysis ?? (() => {});
 		this.onAgentTriggerRequired = options.onAgentTriggerRequired ?? (() => {});
 		this.onError = options.onError ?? (() => {});
+		this.currentSession = options.currentSession ?? (() => null);
+		this.isCurrentSession = options.isCurrentSession ?? (() => false);
 	}
 
 	async start(): Promise<void> {
 		if (this.started) return;
 		this.started = true;
 		this.state = "starting";
-		try {
-			const windows = await this.source.listWindows();
-			const isFirstActivation = this.store.initializeBaseline(windows);
-			if (!isFirstActivation) {
-				for (const window of windows) await this.persistWindow(window);
+		const activation = (async () => {
+			const requestedOwner = this.currentSession();
+			if (requestedOwner === null) {
+				throw new Error(
+					"Activity window delivery requires an authenticated account.",
+				);
+			}
+			const windows = await this.source.listWindowsForAccount(
+				requestedOwner.accountId,
+			);
+			if (!this.started) return;
+			if (!this.isCurrentSession(requestedOwner)) {
+				throw new Error(
+					"Activity window delivery session changed during activation.",
+				);
+			}
+			this.store.initializeBaseline([], requestedOwner);
+			// Reconcile only the windows attributed in Reflection's seal transaction.
+			// This closes a crash gap between that database and this account outbox
+			// without claiming windows from another account or from logged-out time.
+			for (const window of windows) {
+				await this.persistWindow(window, requestedOwner);
 			}
 			const recoveredJob = this.store.recoverActivityAnalysisJobs(
 				this.scoreThreshold,
@@ -925,10 +1079,18 @@ export class ActivityWindowDeliveryService {
 				);
 			}
 			this.kickDrain();
+		})();
+		this.activationPromise = activation;
+		try {
+			await activation;
 		} catch (error) {
 			this.started = false;
 			this.state = "stopped";
 			throw error;
+		} finally {
+			if (this.activationPromise === activation) {
+				this.activationPromise = null;
+			}
 		}
 	}
 
@@ -940,16 +1102,20 @@ export class ActivityWindowDeliveryService {
 			this.retryTimer = null;
 		}
 		this.retryAtMs = null;
+		await this.activationPromise?.catch(() => {});
 		await this.operationTail;
 	}
 
 	/** Persist a new sealed window before any network activity begins. */
 	async enqueueWindow(window: EventWindowV1): Promise<void> {
+		await this.activationPromise;
 		await this.enqueue(async () => {
 			if (!this.started) {
 				throw new Error("Activity window delivery is not started.");
 			}
-			await this.persistWindow(window);
+			const owner = this.currentSession();
+			if (owner === null) return;
+			await this.persistWindow(window, owner);
 		});
 		this.kickDrain();
 	}
@@ -974,9 +1140,12 @@ export class ActivityWindowDeliveryService {
 		);
 	}
 
-	private async persistWindow(window: EventWindowV1): Promise<void> {
+	private async persistWindow(
+		window: EventWindowV1,
+		owner: AuthSessionIdentity,
+	): Promise<void> {
 		const requestId = await activityWindowRequestId(window);
-		this.store.enqueue(window, requestId, this.nowMs());
+		this.store.enqueue(window, requestId, this.nowMs(), owner);
 	}
 
 	private kickDrain(): void {
@@ -993,7 +1162,12 @@ export class ActivityWindowDeliveryService {
 
 	private async drain(): Promise<void> {
 		while (this.started) {
-			const next = this.store.nextWindow(this.nowMs());
+			const owner = this.currentSession();
+			if (owner === null) {
+				this.state = "ready";
+				return;
+			}
+			const next = this.store.nextWindow(this.nowMs(), owner);
 			if (next.kind === "none") {
 				this.state = "ready";
 				return;
@@ -1009,12 +1183,14 @@ export class ActivityWindowDeliveryService {
 
 	private async deliver(queued: QueuedActivityWindow): Promise<void> {
 		try {
+			if (!this.isCurrentSession(queued.owner)) return;
 			const response = await this.analyzer.analyze({
 				schema_version: ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION,
 				request_id: queued.requestId,
 				raw_event: structuredClone(queued.window),
 				context: responseContextFor(queued.window, queued.requestId),
 			});
+			if (!this.isCurrentSession(queued.owner)) return;
 			const normalizedResponse = normalizeResponseReferences(
 				response,
 				queued.window,
@@ -1242,8 +1418,7 @@ function responseContextFor(
 			window_ended_at_ms: window.endedAtMs,
 			// The client owns human-readable review time. It is included in the
 			// local prompt/context, never delegated to the remote relay.
-			time_zone:
-				Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+			time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
 		},
 	};
 }

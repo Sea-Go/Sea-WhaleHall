@@ -2,9 +2,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { OpenAICompatibleProviderSettings } from "@ai-sdk/openai-compatible";
 import {
-	MAX_MODEL_RELAY_CHUNK_BYTES,
-	isRecord,
 	type AgentHostErrorPayload,
+	isRecord,
+	MAX_MODEL_RELAY_CHUNK_BYTES,
 	type ModelRelayEventFrame,
 	type ModelRelayOpenResult,
 } from "./protocol";
@@ -41,6 +41,19 @@ export class ModelRelay {
 		input: RequestInfo | URL,
 		init?: RequestInit,
 	): Promise<Response> {
+		const activeContext = this.context.getStore();
+		if (
+			!activeContext ||
+			!isBoundedContextId(activeContext.runId) ||
+			!isBoundedContextId(activeContext.originatingRequestId)
+		) {
+			throw new AgentHostRuntimeError({
+				code: "MODEL_RELAY_ERROR",
+				message:
+					"Model relay requests require a durable originating request context.",
+				retryable: false,
+			});
+		}
 		const request = new Request(input, init);
 		const relayId = `relay:${randomUUID()}`;
 		let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -49,15 +62,22 @@ export class ModelRelay {
 				controller = streamController;
 			},
 		});
-		const streamState: RelayStreamState = { controller, lastSequence: 0, closed: false };
-		const activeContext = this.context.getStore();
+		const streamState: RelayStreamState = {
+			controller,
+			lastSequence: 0,
+			closed: false,
+		};
 		const requestAbort = (reason: string | undefined): void => {
 			void this.peer
-				.requestHost("model/relay.abort", {
-					relayId,
-					runId: activeContext?.runId ?? null,
-					reason,
-				}, activeContext ? { ownerRunId: activeContext.runId } : undefined)
+				.requestHost(
+					"model/relay.abort",
+					{
+						relayId,
+						runId: activeContext.runId,
+						reason,
+					},
+					{ ownerRunId: activeContext.runId },
+				)
 				.catch(() => undefined);
 		};
 		let removeAbortListener = (): void => undefined;
@@ -65,7 +85,9 @@ export class ModelRelay {
 		unsubscribe = this.peer.subscribeRelay(relayId, (event) => {
 			const disposition = acceptRelayEvent(streamState, event);
 			if (disposition === "abort-upstream") {
-				requestAbort("Model relay event sequence or payload validation failed.");
+				requestAbort(
+					"Model relay event sequence or payload validation failed.",
+				);
 			}
 			if (disposition !== "continue") {
 				unsubscribe();
@@ -87,7 +109,8 @@ export class ModelRelay {
 			unsubscribe();
 		};
 		request.signal.addEventListener("abort", abort, { once: true });
-		removeAbortListener = () => request.signal.removeEventListener("abort", abort);
+		removeAbortListener = () =>
+			request.signal.removeEventListener("abort", abort);
 
 		let metadata: ModelRelayOpenResult;
 		try {
@@ -95,8 +118,8 @@ export class ModelRelay {
 				"model/relay.open",
 				{
 					relayId,
-					runId: activeContext?.runId ?? null,
-					originatingRequestId: activeContext?.originatingRequestId ?? null,
+					runId: activeContext.runId,
+					originatingRequestId: activeContext.originatingRequestId,
 					provider: this.provider,
 					modelId: this.modelId,
 					request: {
@@ -109,7 +132,7 @@ export class ModelRelay {
 				{
 					requestId: relayId,
 					signal: request.signal,
-					...(activeContext ? { ownerRunId: activeContext.runId } : {}),
+					ownerRunId: activeContext.runId,
 				},
 			);
 			validateOpenResult(metadata, relayId);
@@ -124,9 +147,14 @@ export class ModelRelay {
 		}
 
 		if (metadata.bodyBase64 !== undefined && !streamState.closed) {
-			streamState.controller.enqueue(Buffer.from(metadata.bodyBase64, "base64"));
+			streamState.controller.enqueue(
+				Buffer.from(metadata.bodyBase64, "base64"),
+			);
 		}
-		if ((metadata.completed || metadata.bodyBase64 !== undefined) && !streamState.closed) {
+		if (
+			(metadata.completed || metadata.bodyBase64 !== undefined) &&
+			!streamState.closed
+		) {
 			streamState.closed = true;
 			streamState.controller.close();
 			unsubscribe();
@@ -188,7 +216,10 @@ function acceptRelayEvent(
 	return "complete";
 }
 
-function validateOpenResult(value: unknown, relayId: string): asserts value is ModelRelayOpenResult {
+function validateOpenResult(
+	value: unknown,
+	relayId: string,
+): asserts value is ModelRelayOpenResult {
 	if (
 		!isRecord(value) ||
 		value.relayId !== relayId ||
@@ -197,7 +228,9 @@ function validateOpenResult(value: unknown, relayId: string): asserts value is M
 		value.status < 100 ||
 		value.status > 599 ||
 		!isRecord(value.headers) ||
-		!Object.values(value.headers).every((header) => typeof header === "string") ||
+		!Object.values(value.headers).every(
+			(header) => typeof header === "string",
+		) ||
 		(value.bodyBase64 !== undefined && typeof value.bodyBase64 !== "string")
 	) {
 		throw new AgentHostRuntimeError({
@@ -214,6 +247,18 @@ function abortReason(reason: unknown): string | undefined {
 	return undefined;
 }
 
-export function relayError(message: string, retryable = true): AgentHostErrorPayload {
+export function relayError(
+	message: string,
+	retryable = true,
+): AgentHostErrorPayload {
 	return { code: "MODEL_RELAY_ERROR", message, retryable };
+}
+
+function isBoundedContextId(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 256 &&
+		value.trim().length > 0
+	);
 }

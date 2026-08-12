@@ -1,7 +1,8 @@
 export const DESKTOP_EVENT_SCHEMA_VERSION = "desktop-event.v1" as const;
 export const EVENT_WINDOW_SCHEMA_VERSION = "event-window.v1" as const;
 export const REFLECTION_SCHEMA_VERSION = "reflection.v1" as const;
-export const COLLECTOR_SNAPSHOT_SCHEMA_VERSION = "reflection-collector-snapshot.v1" as const;
+export const COLLECTOR_SNAPSHOT_SCHEMA_VERSION =
+	"reflection-collector-snapshot.v1" as const;
 export const REFLECTION_JOB_SCHEMA_VERSION = "reflection-job.v1" as const;
 
 export type EventSensitivity = "metadata" | "content";
@@ -191,7 +192,11 @@ export type ActivityLabel =
 	| "idle_transition"
 	| "other_unknown";
 
-export type GoalRelevanceLabel = "direct" | "supporting" | "unrelated" | "uncertain";
+export type GoalRelevanceLabel =
+	| "direct"
+	| "supporting"
+	| "unrelated"
+	| "uncertain";
 
 export type FeedbackCode =
 	| "silent"
@@ -232,12 +237,23 @@ export type CollectorRuntimeState =
 	| "SEALED";
 
 export type OpenEventWindowV1 = {
+	cloudOwnerEpoch: ReflectionCloudOwnerEpochV1;
 	goal: ActiveGoalContextV1 | null;
 	goalVersion: number | null;
 	startedAtMs: number;
 	deadlineAtMs: number;
 	events: DesktopEventV1[];
 	finalizedSemanticEventCount: number;
+};
+
+/**
+ * Durable account boundary for cloud handoff. The monotonically increasing
+ * epoch makes an explicit anonymous interval distinguishable even when the
+ * same account signs in again later.
+ */
+export type ReflectionCloudOwnerEpochV1 = {
+	epoch: number;
+	accountId: string | null;
 };
 
 export type ReflectionCollectorSnapshotV1 = {
@@ -248,6 +264,7 @@ export type ReflectionCollectorSnapshotV1 = {
 	state: Exclude<CollectorRuntimeState, "RECOVERING" | "SEALED">;
 	activeGoal: ActiveGoalContextV1 | null;
 	goalRevision: number;
+	cloudOwnerEpoch: ReflectionCloudOwnerEpochV1;
 	openWindow: OpenEventWindowV1 | null;
 	contextCandidates: DesktopEventV1[];
 	recentEventIds: string[];

@@ -43,18 +43,12 @@ export class JsonFileUserStore implements UserStore {
 		const users = items.map(validateUser);
 		const ids = new Set<string>();
 		const emails = new Set<string>();
-		const reflectionKeyIds = new Set<string>();
 		for (const user of users) {
 			const email = user.email.toLowerCase();
-			if (
-				ids.has(user.id) ||
-				emails.has(email) ||
-				reflectionKeyIds.has(user.reflectionKeyId)
-			)
+			if (ids.has(user.id) || emails.has(email))
 				throw new Error("Relay users file contains duplicates.");
 			ids.add(user.id);
 			emails.add(email);
-			reflectionKeyIds.add(user.reflectionKeyId);
 		}
 		return new JsonFileUserStore(users);
 	}
@@ -68,13 +62,6 @@ export class JsonFileUserStore implements UserStore {
 
 	async findById(id: string): Promise<RelayUser | null> {
 		const user = this.users.find((item) => item.id === id);
-		return user ? { ...user } : null;
-	}
-
-	async findByReflectionKeyId(reflectionKeyId: string): Promise<RelayUser | null> {
-		const user = this.users.find(
-			(item) => item.reflectionKeyId === reflectionKeyId,
-		);
 		return user ? { ...user } : null;
 	}
 }
@@ -419,8 +406,6 @@ function validateUser(value: unknown): RelayUser {
 		initials: boundedString(value.initials, 16),
 		passwordHash: boundedString(value.passwordHash, 4_096),
 		agentKeyHash: boundedString(value.agentKeyHash, 4_096),
-		reflectionKeyId: reflectionKeyId(value.reflectionKeyId),
-		reflectionKeyHash: boundedString(value.reflectionKeyHash, 4_096),
 		disabled: value.disabled === true,
 	};
 }
@@ -510,14 +495,6 @@ function boundedString(value: unknown, maximum: number): string {
 		throw new Error("Stored string is invalid.");
 	}
 	return value;
-}
-
-function reflectionKeyId(value: unknown): string {
-	const id = boundedString(value, 64);
-	if (!/^whref_[a-f0-9]{32}$/u.test(id)) {
-		throw new Error("Reflection key ID is invalid.");
-	}
-	return id;
 }
 
 function finiteNumber(value: unknown): number {

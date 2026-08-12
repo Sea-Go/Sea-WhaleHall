@@ -443,13 +443,13 @@ receipt；发生在窗口内但迟到的边界仍优先于 count，并以观测�
 
 默认位于 Electrobun 的应用数据目录；开发/测试可用 `WHALEHALL_DATA_DIR` 隔离：
 
-| 文件 | 内容 |
-| --- | --- |
-| `events.sqlite3` | Rust 原始语义事件、cursor、consumer commit |
-| `reflections.sqlite3` | collector snapshot、EventWindow、jobs、ReflectionJournal |
-| `reflection-identity.v1.json` | 非秘密的稳定 installation/window identity，权限 `0600` |
-| `usage.sqlite3` | 前台应用 session |
-| `accessibility.sqlite3` | 明确授权后的 UI tree、语义状态与 durable outbox |
+| 文件                           | 内容                                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `events.sqlite3`               | Rust 原始语义事件、cursor、consumer commit                                                    |
+| `reflections.sqlite3`          | collector snapshot、EventWindow、jobs、ReflectionJournal                                      |
+| `reflection-identity.v1.json`  | 非秘密的稳定 installation/window identity，权限 `0600`                                        |
+| `usage.sqlite3`                | 前台应用 session                                                                              |
+| `accessibility.sqlite3`        | 明确授权后的 UI tree、语义状态与 durable outbox                                               |
 | `editor-bridge/editor.sqlite3` | VS Code claimed segment、durable open burst 与幂等 outbox；目录 `0700`、SQLite/WAL/SHM `0600` |
 
 键鼠聚合器只在内存中累计当前五秒桶；非空桶直接写入
@@ -543,8 +543,8 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 ```yaml
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://model.sea-ridethewindbreakthewaves.xyz"
-  apikey: "REPLACE_WITH_REFLECTION_RELAY_KEY"
+  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
+  apikey: "IGNORED_USE_AUTHENTICATED_SESSION"
 
 agent:
   name: "qwen3:1.7b"
@@ -560,10 +560,11 @@ cloudSync:
     presence: "off"
 ```
 
-`reflection.baseurl` 必须是固定 model origin；`agent.baseurl` 必须是 production 或 staging
-DataCenter origin。两者都不得含 credentials、query 或 fragment。
-`apikey` 必须是 owner-only user-data 文件中的直接字面量密钥；不支持环境变量引用。无效、
-部分、symlink 或超大的配置会回退到安全默认值，且不会覆盖用户原文件。
+运行时两个角色都使用 agent 选择的 production 或 staging DataCenter origin。reflection
+中单独填写的已批准 origin 和旧 model-origin 值只为兼容解析，都会归一化到 agent origin；
+reflection `apikey` 被忽略。personal relay key 必须是 owner-only user-data 文件中的直接
+字面量密钥，不支持环境变量引用。无效、部分、symlink 或超大的配置会回退到安全默认值，且
+不会覆盖用户原文件。
 
 这份 YAML 配置家里云 Qwen 1.7B 的两个固定 relay 能力：reflection 及 Agent。内部 Teacher
 和可选 ModernBERT 仍是独立的 runtime trust boundary：Teacher lock 与 Timeline artifact pin 不会因为填写一个 URL 而被放宽；
@@ -585,36 +586,38 @@ action、短时间片与隐私边界，后者负责目标相关有效投入的�
 两个 Skill 的文件和执行结果只存在于本地 Sidecar，不属于远端 relay，也不会成为产品 Tool。`context.response_contract` 锚定 request ID、
 window ID、唯一稳定的 window source anchor、完整 source cursor 清单、封窗原因、时间范围和时区，
 不替换或裁剪原始窗口。这个 prompt 只在客户端 Bun/Sidecar 的单次调用中存在；Sidecar 经 Mastra
-生成 OpenAI-compatible body，再由 Bun 使用 reflection key 请求固定 `/v1/activity/completions`。
+生成 OpenAI-compatible body，再由 Bun 使用当前 session bearer + personal relay key 请求固定
+DataCenter `/v1/chat/completions`，并添加 code-owned `purpose=activity`。
 
-远端 relay 只验证 reflection key、模型 allowlist、大小、限流与 CPU loopback 转发；它不含 system
-prompt、事件聚合、时间/action 格式化、分数计算或反思记录逻辑。模型 JSON 回到客户端后，Bun 才将它
+DataCenter 验证当前 user、模型 allowlist、大小、限流与转发；它不含 system prompt、事件聚合、
+时间/action 格式化或分数计算。内测版按认证 user 保存 exact request/response，模型 JSON 回到客户端后，Bun 才将它
 严格校验并映射为 `activity-event-analysis-response.v1`：每项可含中文 `time` 和 `action`，来源安全
 归一化为本次 window anchor，不能形成窗口外引用。有效的模型短时间片会保留，客户端只补齐缺失端点；
 `score_reason` 必须为不含原始敏感信息的简短中文。事件列表仅保留在 Bun 主进程及 owner-only
-`activity-window-worker.sqlite3` 收据/出站库，模型返回的 `[0,1]` `score` 通过范围、空事件为零等契约校验后
+账号专属的 activity-window worker 收据/出站库，模型返回的 `[0,1]` `score` 通过范围、空事件为零等契约校验后
 直接进入本地累加器，客户端不会重算、平均或改写它。窗口先写入本地出站库，
 成功响应和分数在同一 SQLite 事务中落收据；因此重启、重复封窗通知或“远端已响应但进程尚未落库”的
 情况都不会重复加分。首次启用时会在 Reflection 启动前建立本地 cutover，先前已经封闭的窗口不会被
-补传；之后若进程恰好在封窗与通知之间崩溃，下一次启动会从 Reflection 的窗口索引补入尚未处理的窗口。
+补传。之后只恢复已经耐久进入该账号 outbox 的窗口；不会从全局 Reflection 窗口索引回扫，因为其中没有
+可证明的账号 owner。封窗与 owner-aware enqueue 之间的极小崩溃窗口在 P0 选择不上传，避免错误归属。
 累计值达到固定阈值 `1` 后，账本会将全部尚未消费的回执合并为一个串行后台 Agent job；只有该 job 成功后才
 扣除它精确的 `consumedScore`，失败、退出、断电或账号不匹配均不扣分且可恢复。模型和投递器都不会自行调用
-未定义的 Agent。`agent`
-角色独立使用个人 relay key 和 bearer 的聊天路径，不能用于 reflection。网络、超时或服务端暂不可用时
+未定义的 Agent。reflection 与 `agent` 角色共用当前账号认证能力，但分别使用代码所有的 activity/agent
+purpose。未登录窗口不进入云 outbox；A 的 outbox、receipt、score/job ledger 与 B 隔离。网络、超时或服务端暂不可用时
 窗口停留在出站库并按退避重试，不会阻塞 Reflection 的 native cursor。密钥绝不交给 Rust 传感器、
 SQLite 收据、日志或 renderer，只能保存在 owner-only user-data YAML。
 
 本机 Qwen Teacher lock：
 
-| 配置 | 值 |
-| --- | --- |
-| Ollama | `0.24.0` |
-| 模型 | `qwen3:4b` |
-| digest | `359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7` |
-| 参数/量化 | `4.0B` / `Q4_K_M` |
-| context | `4096` |
-| 并发 | `1` |
-| keep alive | `30m` |
+| 配置       | 值                                                                 |
+| ---------- | ------------------------------------------------------------------ |
+| Ollama     | `0.24.0`                                                           |
+| 模型       | `qwen3:4b`                                                         |
+| digest     | `359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7` |
+| 参数/量化  | `4.0B` / `Q4_K_M`                                                  |
+| context    | `4096`                                                             |
+| 并发       | `1`                                                                |
+| keep alive | `30m`                                                              |
 
 运行时在发送任何窗口前只读检查 `/api/version` 和 `/api/tags`；版本、digest、参数规模或量化不匹配时 fail closed，不会静默换模型。请求固定使用 `/api/chat`、structured output、`think:false` 和 `temperature:0`。
 
@@ -629,9 +632,10 @@ expectedArtifact, ... }` 才做一次纯元数据验证；未配置、显式关�
 artifact tree manifest；若加载期间目录发生替换则拒绝启动，不能以旧 digest
 身份运行新权重。
 Timeline 默认保持 cold-start，绝不自动发现或连接任何 loopback HTTP/HTTPS
-服务。仅在受信任部署显式提供完整 runtime 配置时，才可使用本机 loopback HTTP；
-跨主机部署必须使用 allowlisted HTTPS，并应使用认证传输（例如 mTLS、证书固定或
-受保护的 Unix socket/SSH 转发），不向运行时暴露 `allowInsecureRemote`。推理 URL
+服务。P0 生产 composition 仅在受信任部署显式提供完整 runtime 配置时，才可使用
+本机 loopback HTTP/HTTPS；所有远端地址（包括 allowlisted HTTPS）均 fail closed，
+避免绕过 DataCenter 模型审计边界。跨主机服务必须先经受保护的 SSH/Unix socket
+转发为本机 loopback；运行时不暴露 `allowInsecureRemote`。推理 URL
 与 manifest URL 必须同 origin，禁止 credentials、query、fragment 和 redirect。
 
 authorization token 只能通过 runtime options 注入，不得写入仓库、训练
@@ -644,7 +648,8 @@ runtime/manifest 或日志。独立 v2 server 的标准入口从同名
 
 当前 Bun composition 从显式的 `WHALEHALL_TIMELINE_MODERNBERT_*` runtime 环境读取
 Timeline deployment 与 artifact pin；它不再占用两模型 `config.yaml`。缺项、相对路径、
-symlink、坏 manifest 或不安全远端都会明确保持 cold-start，不接通通用 classifier 的 insecure 选项。
+symlink、坏 manifest 或任意远端 origin 都会明确保持 cold-start，不接通通用
+classifier 的 remote/insecure 选项。
 
 截至 2026-07-30 的只读基线核对中，独立 `WhaleHall-Training` 工作区可从
 `episode_training_v2.py` 导出 v2 `runtime.json` 和模型/tokenizer 文件；

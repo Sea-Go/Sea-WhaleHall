@@ -1,30 +1,34 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelRelayEventFrame } from "../src/agent/mastra-host/protocol";
-import { ModelRelayError, ModelRelayTransport } from "../src/bun/model-relay-transport";
-import type { RemoteAuthSessionManager } from "../src/bun/remote-auth-session";
+import {
+	type ModelRelayAuthorization,
+	ModelRelayError,
+	ModelRelayTransport,
+} from "../src/bun/model-relay-transport";
 import { SidecarModelRelayBridge } from "../src/bun/sidecar-model-relay-bridge";
 
 describe("SidecarModelRelayBridge", () => {
 	test("returns upstream metadata before emitting ordered model bytes", async () => {
 		const first = new TextEncoder().encode("data: first\n\n");
 		const second = new TextEncoder().encode("data: second\n\ndata: [DONE]\n\n");
-		const auth = authWithResponse(() =>
-			new Response(
-				new ReadableStream<Uint8Array>({
-					start(controller) {
-						controller.enqueue(first);
-						controller.enqueue(second);
-						controller.close();
+		const auth = authWithResponse(
+			() =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(first);
+							controller.enqueue(second);
+							controller.close();
+						},
+					}),
+					{
+						status: 200,
+						headers: {
+							"content-type": "text/event-stream",
+							"x-request-id": "upstream-request-1",
+						},
 					},
-				}),
-				{
-					status: 200,
-					headers: {
-						"content-type": "text/event-stream",
-						"x-request-id": "upstream-request-1",
-					},
-				},
-			),
+				),
 		);
 		const events: ModelRelayEventFrame[] = [];
 		const bridge = new SidecarModelRelayBridge({
@@ -59,12 +63,22 @@ describe("SidecarModelRelayBridge", () => {
 			"model/relay.chunk",
 			"model/relay.end",
 		]);
-		expect(events.every((event) => event.requestId === "host-request-1")).toBe(true);
+		expect(events.every((event) => event.requestId === "host-request-1")).toBe(
+			true,
+		);
 		expect(events.every((event) => event.relayId === "relay-1")).toBe(true);
 		const restored = events
 			.filter((event) => event.event.kind === "model/relay.chunk")
-			.map((event) => Buffer.from((event.event as { bodyBase64: string }).bodyBase64, "base64"))
-			.reduce((output, chunk) => Buffer.concat([output, chunk]), Buffer.alloc(0));
+			.map((event) =>
+				Buffer.from(
+					(event.event as { bodyBase64: string }).bodyBase64,
+					"base64",
+				),
+			)
+			.reduce(
+				(output, chunk) => Buffer.concat([output, chunk]),
+				Buffer.alloc(0),
+			);
 		expect(restored).toEqual(Buffer.concat([first, second]));
 	});
 
@@ -98,10 +112,14 @@ describe("SidecarModelRelayBridge", () => {
 			"host-request-abort",
 			relayOpenParams("relay-abort", "run-abort", validBody()),
 		);
-		expect(bridge.abort({ relayId: "relay-abort", runId: "another-run" })).toEqual({
+		expect(
+			bridge.abort({ relayId: "relay-abort", runId: "another-run" }),
+		).toEqual({
 			aborted: false,
 		});
-		expect(bridge.abort({ relayId: "relay-abort", runId: "run-abort" })).toEqual({
+		expect(
+			bridge.abort({ relayId: "relay-abort", runId: "run-abort" }),
+		).toEqual({
 			aborted: true,
 		});
 		expect(upstreamSignal.value?.aborted).toBe(true);
@@ -113,11 +131,16 @@ describe("SidecarModelRelayBridge", () => {
 				sequence: 1,
 				event: {
 					kind: "model/relay.error",
-					error: expect.objectContaining({ code: "CANCELLED", retryable: true }),
+					error: expect.objectContaining({
+						code: "CANCELLED",
+						retryable: true,
+					}),
 				},
 			}),
 		);
-		expect(bridge.abort({ relayId: "relay-abort", runId: "run-abort" })).toEqual({
+		expect(
+			bridge.abort({ relayId: "relay-abort", runId: "run-abort" }),
+		).toEqual({
 			aborted: false,
 		});
 	});
@@ -132,9 +155,11 @@ describe("SidecarModelRelayBridge", () => {
 			upstreamSignal.value = init.signal ?? null;
 			markStarted();
 			return new Promise<Response>((_resolve, reject) => {
-				const rejectAbort = () => reject(new DOMException("aborted", "AbortError"));
+				const rejectAbort = () =>
+					reject(new DOMException("aborted", "AbortError"));
 				if (init.signal?.aborted) rejectAbort();
-				else init.signal?.addEventListener("abort", rejectAbort, { once: true });
+				else
+					init.signal?.addEventListener("abort", rejectAbort, { once: true });
 			});
 		});
 		const events: ModelRelayEventFrame[] = [];
@@ -145,13 +170,15 @@ describe("SidecarModelRelayBridge", () => {
 				events.push(structuredClone(event));
 			},
 		});
-		const outcome = bridge.open(
-			"host-request-preheaders",
-			relayOpenParams("relay-preheaders", "run-preheaders", validBody()),
-		).then(
-			(value) => ({ ok: true as const, value }),
-			(error: unknown) => ({ ok: false as const, error }),
-		);
+		const outcome = bridge
+			.open(
+				"host-request-preheaders",
+				relayOpenParams("relay-preheaders", "run-preheaders", validBody()),
+			)
+			.then(
+				(value) => ({ ok: true as const, value }),
+				(error: unknown) => ({ ok: false as const, error }),
+			);
 
 		await started;
 		expect(bridge.abortRun("run-preheaders")).toBe(true);
@@ -159,7 +186,9 @@ describe("SidecarModelRelayBridge", () => {
 		const result = await outcome;
 		expect(result.ok).toBe(false);
 		if (result.ok) throw new Error("pre-header relay unexpectedly completed");
-		expect(result.error).toEqual(expect.objectContaining({ message: "模型请求已取消。" }));
+		expect(result.error).toEqual(
+			expect.objectContaining({ message: "模型请求已取消。" }),
+		);
 		expect(events).toEqual([]);
 		expect(bridge.abortRun("run-preheaders")).toBe(false);
 	});
@@ -174,9 +203,11 @@ describe("SidecarModelRelayBridge", () => {
 			upstreamSignal.value = init.signal ?? null;
 			markStarted();
 			return new Promise<Response>((_resolve, reject) => {
-				const rejectAbort = () => reject(new DOMException("aborted", "AbortError"));
+				const rejectAbort = () =>
+					reject(new DOMException("aborted", "AbortError"));
 				if (init.signal?.aborted) rejectAbort();
-				else init.signal?.addEventListener("abort", rejectAbort, { once: true });
+				else
+					init.signal?.addEventListener("abort", rejectAbort, { once: true });
 			});
 		});
 		const bridge = new SidecarModelRelayBridge({
@@ -184,36 +215,46 @@ describe("SidecarModelRelayBridge", () => {
 			modelId: "approved-model",
 			send: async () => {},
 		});
-		const outcome = bridge.open(
-			"host-request-crash",
-			relayOpenParams("relay-crash", "run-crash", validBody()),
-		).then(
-			() => "completed" as const,
-			() => "aborted" as const,
-		);
+		const outcome = bridge
+			.open(
+				"host-request-crash",
+				relayOpenParams("relay-crash", "run-crash", validBody()),
+			)
+			.then(
+				() => "completed" as const,
+				() => "aborted" as const,
+			);
 
 		await started;
 		bridge.abortAll();
 		expect(upstreamSignal.value?.aborted).toBe(true);
 		await expect(outcome).resolves.toBe("aborted");
-		expect(bridge.abort({ relayId: "relay-crash", runId: "run-crash" })).toEqual({
+		expect(
+			bridge.abort({ relayId: "relay-crash", runId: "run-crash" }),
+		).toEqual({
 			aborted: false,
 		});
 	});
 
 	test("emits an explicit non-retryable capability error when relay authorization is unavailable", async () => {
 		let failProviderStream!: () => void;
-		const auth = authWithResponse(() => new Response(
-			new ReadableStream<Uint8Array>({
-				start(controller) {
-					failProviderStream = () => controller.error(new ModelRelayError(
-						"service-unavailable",
-						"当前测试账号没有模型转发能力。",
-					));
-				},
-			}),
-			{ status: 200, headers: { "content-type": "text/event-stream" } },
-		));
+		const auth = authWithResponse(
+			() =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							failProviderStream = () =>
+								controller.error(
+									new ModelRelayError(
+										"service-unavailable",
+										"当前测试账号没有模型转发能力。",
+									),
+								);
+						},
+					}),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				),
+		);
 		const events: ModelRelayEventFrame[] = [];
 		const bridge = new SidecarModelRelayBridge({
 			transport: new ModelRelayTransport(auth),
@@ -251,13 +292,47 @@ describe("SidecarModelRelayBridge", () => {
 			send: async () => {},
 		});
 
-		await expect(bridge.open(
-			"host-request-unavailable-preheaders",
-			relayOpenParams("relay-unavailable-preheaders", "run-unavailable-preheaders", validBody()),
-		)).rejects.toEqual(expect.objectContaining({
-			code: "service-unavailable",
-			message: "当前测试账号没有模型转发能力。",
-		}));
+		await expect(
+			bridge.open(
+				"host-request-unavailable-preheaders",
+				relayOpenParams(
+					"relay-unavailable-preheaders",
+					"run-unavailable-preheaders",
+					validBody(),
+				),
+			),
+		).rejects.toEqual(
+			expect.objectContaining({
+				code: "service-unavailable",
+				message: "当前测试账号没有模型转发能力。",
+			}),
+		);
+	});
+
+	test("rejects a wire body model that differs from the host allowlist", async () => {
+		let remoteCalls = 0;
+		const bridge = new SidecarModelRelayBridge({
+			transport: new ModelRelayTransport(
+				authWithResponse(() => {
+					remoteCalls += 1;
+					return Response.json({ ok: true });
+				}),
+			),
+			modelId: "approved-model",
+			send: async () => {},
+		});
+		await expect(
+			bridge.open(
+				"host-request-wrong-wire-model",
+				relayOpenParams("relay-wrong-wire-model", "run-wrong-wire-model", {
+					...validBody(),
+					model: "unapproved-model",
+				}),
+			),
+		).rejects.toThrow(
+			"body requested a model outside the configured allowlist",
+		);
+		expect(remoteCalls).toBe(0);
 	});
 
 	test("rejects sidecar-supplied identity and credentials before any remote request", async () => {
@@ -272,38 +347,120 @@ describe("SidecarModelRelayBridge", () => {
 			send: async () => {},
 		});
 
-		await expect(
-			bridge.open(
-				"host-request-identity",
-				relayOpenParams("relay-identity", "run-identity", {
-					...validBody(),
-					userId: "forged-account",
-					accessToken: "renderer-token",
-					apiKey: "provider-key",
+		for (const [index, key] of [
+			"userId",
+			"user",
+			"user_id",
+			"accessToken",
+			"apiKey",
+			"token",
+			"key",
+			"api_key",
+			"access_token",
+		].entries()) {
+			await expect(
+				bridge.open(
+					`host-request-identity-${index}`,
+					relayOpenParams(`relay-identity-${index}`, `run-identity-${index}`, {
+						...validBody(),
+						[key]: "forged-value",
+					}),
+				),
+			).rejects.toThrow("不得携带自报身份或供应商凭据");
+		}
+		expect(remoteCalls).toBe(0);
+	});
+
+	test("rejects a missing durable originating request ID before any remote request", async () => {
+		let remoteCalls = 0;
+		const bridge = new SidecarModelRelayBridge({
+			transport: new ModelRelayTransport(
+				authWithResponse(() => {
+					remoteCalls += 1;
+					return Response.json({ ok: true });
 				}),
 			),
-		).rejects.toThrow("不得携带自报身份或供应商凭据");
+			modelId: "approved-model",
+			send: async () => {},
+		});
+		const params = relayOpenParams(
+			"relay-missing-origin",
+			"run-missing-origin",
+			validBody(),
+		);
+		params.originatingRequestId = null;
+
+		await expect(
+			bridge.open("host-request-missing-origin", params),
+		).rejects.toThrow("Invalid model relay open request");
 		expect(remoteCalls).toBe(0);
+	});
+
+	test("keeps the idempotency key stable across relay retries", async () => {
+		const keys: string[] = [];
+		const auth = authWithResponse((_path, init) => {
+			keys.push(new Headers(init.headers).get("idempotency-key") ?? "");
+			return Response.json({ ok: true });
+		});
+		const bridge = new SidecarModelRelayBridge({
+			transport: new ModelRelayTransport(auth),
+			modelId: "approved-model",
+			send: async () => {},
+		});
+		const body = validBody();
+		await bridge.open(
+			"host-request-stable-1",
+			relayOpenParams("relay-stable-1", "run-stable-1", body, "origin-stable"),
+		);
+		await bridge.open(
+			"host-request-stable-2",
+			relayOpenParams("relay-stable-2", "run-stable-2", body, "origin-stable"),
+		);
+		await bridge.open(
+			"host-request-stable-3",
+			relayOpenParams(
+				"relay-stable-3",
+				"run-stable-3",
+				{ ...body, temperature: 0.2 },
+				"origin-stable",
+			),
+		);
+		await bridge.open(
+			"host-request-stable-4",
+			relayOpenParams(
+				"relay-stable-4",
+				"run-stable-4",
+				body,
+				"origin-distinct",
+			),
+		);
+
+		expect(keys).toHaveLength(4);
+		expect(keys[0]).toMatch(/^relay-[0-9a-f]{64}$/);
+		expect(keys[1]).toBe(keys[0]);
+		expect(keys[2]).not.toBe(keys[0]);
+		expect(keys[3]).not.toBe(keys[0]);
 	});
 });
 
 function authWithResponse(
 	respond: (path: string, init: RequestInit) => Response | Promise<Response>,
-): RemoteAuthSessionManager {
+): ModelRelayAuthorization {
 	return {
-		authorizedFetch: respond,
-	} as RemoteAuthSessionManager;
+		authorizedFetch: async (path, init) => respond(path, init),
+	};
 }
 
 function relayOpenParams(
 	relayId: string,
 	runId: string,
 	body: Record<string, unknown>,
+	originatingRequestId = `origin-${relayId}`,
 ): Record<string, unknown> {
 	return {
 		relayId,
 		runId,
-		originatingRequestId: `origin-${relayId}`,
+		originatingRequestId,
 		provider: "whalehall-relay",
 		modelId: "approved-model",
 		request: {
@@ -326,10 +483,14 @@ function validBody(): Record<string, unknown> {
 	};
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+async function waitFor(
+	predicate: () => boolean,
+	timeoutMs = 2_000,
+): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for relay events.");
+		if (Date.now() >= deadline)
+			throw new Error("Timed out waiting for relay events.");
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
 }

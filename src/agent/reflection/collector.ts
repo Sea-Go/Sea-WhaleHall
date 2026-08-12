@@ -1,20 +1,21 @@
 import type { ReflectionCollectorRepository } from "./repository";
 import {
-	COLLECTOR_SNAPSHOT_SCHEMA_VERSION,
 	type ActiveGoalContextV1,
+	COLLECTOR_SNAPSHOT_SCHEMA_VERSION,
 	type CollectorRuntimeState,
 	type DesktopEventV1,
 	type EventWindowV1,
-	type OpenEventWindowV1,
-	type ReflectionCollectorSnapshotV1,
-	type ReflectionTriggerReason,
 	isCountedSemanticEvent,
 	isIgnoredReflectionInput,
 	isPresenceFlushBoundary,
+	type OpenEventWindowV1,
+	type ReflectionCloudOwnerEpochV1,
+	type ReflectionCollectorSnapshotV1,
+	type ReflectionTriggerReason,
 } from "./types";
 import {
-	DeterministicWindowBuilder,
 	contextCandidatesFromWindow,
+	type DeterministicWindowBuilder,
 } from "./window-builder";
 
 export const DEFAULT_SEMANTIC_EVENT_THRESHOLD = 64;
@@ -44,7 +45,10 @@ export class SystemReflectionClock implements ReflectionClock {
 }
 
 export class GoalVersionMismatchError extends Error {
-	constructor(eventGoalVersion: number | null, activeGoalVersion: number | null) {
+	constructor(
+		eventGoalVersion: number | null,
+		activeGoalVersion: number | null,
+	) {
 		super(
 			`Event goal version ${String(eventGoalVersion)} does not match active goal version ${String(activeGoalVersion)}. Ingest goal.contextChanged first.`,
 		);
@@ -98,7 +102,9 @@ export class ReflectionCollector {
 	private readonly onBackgroundError: (error: unknown) => void;
 	private readonly onDeadlineReady: ((deadlineAtMs: number) => void) | null;
 	private readonly onCountReady: ((reachedAtMs: number) => void) | null;
-	private readonly onWindowSealed: ((window: EventWindowV1) => void | Promise<void>) | null;
+	private readonly onWindowSealed:
+		| ((window: EventWindowV1) => void | Promise<void>)
+		| null;
 	private readonly collectorId: string;
 	private readonly deviceId: string;
 	private readonly sessionId: string;
@@ -114,9 +120,11 @@ export class ReflectionCollector {
 		this.repository = options.repository;
 		this.windowBuilder = options.windowBuilder;
 		this.clock = options.clock ?? new SystemReflectionClock();
-		this.threshold = options.semanticEventThreshold ?? DEFAULT_SEMANTIC_EVENT_THRESHOLD;
+		this.threshold =
+			options.semanticEventThreshold ?? DEFAULT_SEMANTIC_EVENT_THRESHOLD;
 		this.maxWaitMs = options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS;
-		this.recentEventIdLimit = options.recentEventIdLimit ?? DEFAULT_RECENT_EVENT_ID_LIMIT;
+		this.recentEventIdLimit =
+			options.recentEventIdLimit ?? DEFAULT_RECENT_EVENT_ID_LIMIT;
 		this.onBackgroundError = options.onBackgroundError ?? (() => {});
 		this.onDeadlineReady = options.onDeadlineReady ?? null;
 		this.onCountReady = options.onCountReady ?? null;
@@ -141,7 +149,18 @@ export class ReflectionCollector {
 			const recovered = await this.repository.loadCollector(this.collectorId);
 			if (recovered) {
 				this.assertSnapshotIdentity(recovered);
-				this.snapshot = normalizeRecoveredSnapshot(recovered);
+				const normalized = normalizeRecoveredSnapshot(recovered);
+				this.snapshot = normalized.snapshot;
+				if (normalized.migratedCloudOwnerEpoch) {
+					this.snapshot = await this.repository.saveCollector(
+						{
+							...this.snapshot,
+							revision: recovered.revision + 1,
+							updatedAtMs: this.clock.nowMs(),
+						},
+						recovered.revision,
+					);
+				}
 			} else {
 				const nowMs = this.clock.nowMs();
 				const initial: ReflectionCollectorSnapshotV1 = {
@@ -152,6 +171,7 @@ export class ReflectionCollector {
 					state: "ACTIVE_EMPTY",
 					activeGoal: cloneGoal(this.initialGoal),
 					goalRevision: this.initialGoal?.version ?? 0,
+					cloudOwnerEpoch: { epoch: 0, accountId: null },
 					openWindow: null,
 					contextCandidates: [],
 					recentEventIds: [],
@@ -165,7 +185,7 @@ export class ReflectionCollector {
 
 			const openWindow = this.snapshot.openWindow;
 			if (openWindow) {
-				this.assertValidOpenWindow(openWindow);
+				this.assertValidOpenWindow(openWindow, this.snapshot.cloudOwnerEpoch);
 				this.runtimeState = "ACTIVE_COLLECTING";
 				if (this.deadlinesDeferred) {
 					return;
@@ -256,6 +276,35 @@ export class ReflectionCollector {
 		}).then(() => sealed);
 	}
 
+	/**
+	 * Atomically changes the durable cloud owner epoch. Evidence collected under
+	 * the previous epoch is discarded rather than reassigned to a later login.
+	 * Every collector mutation, including count/deadline sealing, uses the same
+	 * serial queue, so a racing window is wholly old-owned or wholly discarded.
+	 */
+	cutoverCloudOwner(accountId: string | null): Promise<void> {
+		const normalizedAccountId = normalizeCloudOwnerAccountId(accountId);
+		return this.enqueue(async () => {
+			const snapshot = this.requireSnapshot();
+			if (snapshot.cloudOwnerEpoch.accountId === normalizedAccountId) return;
+			if (snapshot.cloudOwnerEpoch.epoch >= Number.MAX_SAFE_INTEGER) {
+				throw new Error("Reflection cloud owner epoch is exhausted.");
+			}
+			this.cancelTimer();
+			await this.saveSnapshot({
+				...snapshot,
+				state: "ACTIVE_EMPTY",
+				cloudOwnerEpoch: {
+					epoch: snapshot.cloudOwnerEpoch.epoch + 1,
+					accountId: normalizedAccountId,
+				},
+				openWindow: null,
+				contextCandidates: [],
+			});
+			this.runtimeState = "ACTIVE_EMPTY";
+		});
+	}
+
 	whenIdle(): Promise<void> {
 		return this.operationTail;
 	}
@@ -273,7 +322,9 @@ export class ReflectionCollector {
 		this.cancelTimer();
 	}
 
-	private async ingestSerialized(event: DesktopEventV1): Promise<EventWindowV1 | null> {
+	private async ingestSerialized(
+		event: DesktopEventV1,
+	): Promise<EventWindowV1 | null> {
 		const snapshot = this.requireSnapshot();
 		if (snapshot.recentEventIds.includes(event.eventId)) return null;
 		if (isIgnoredReflectionInput(event)) return null;
@@ -409,7 +460,12 @@ export class ReflectionCollector {
 
 		const openWindow = snapshot.openWindow
 			? appendCountedEvent(snapshot.openWindow, event)
-			: startOpenWindow(event, snapshot.activeGoal, this.maxWaitMs);
+			: startOpenWindow(
+					event,
+					snapshot.activeGoal,
+					this.maxWaitMs,
+					snapshot.cloudOwnerEpoch,
+				);
 
 		const candidateSnapshot: ReflectionCollectorSnapshotV1 = {
 			...snapshot,
@@ -452,7 +508,10 @@ export class ReflectionCollector {
 		const snapshot = this.requireSnapshot();
 		const activeVersion = snapshot.activeGoal?.version ?? null;
 		const previousVersion = event.payload.previous?.version ?? null;
-		if (activeVersion !== previousVersion || event.goalVersion !== activeVersion) {
+		if (
+			activeVersion !== previousVersion ||
+			event.goalVersion !== activeVersion
+		) {
 			throw new GoalVersionMismatchError(previousVersion, activeVersion);
 		}
 		const nextRevision = snapshot.goalRevision + 1;
@@ -494,7 +553,9 @@ export class ReflectionCollector {
 		);
 	}
 
-	private async handlePresenceBoundary(event: DesktopEventV1): Promise<EventWindowV1 | null> {
+	private async handlePresenceBoundary(
+		event: DesktopEventV1,
+	): Promise<EventWindowV1 | null> {
 		const snapshot = this.requireSnapshot();
 		const recentEventIds = this.withRecentEventId(snapshot, event.eventId);
 		if (!snapshot.openWindow) {
@@ -514,7 +575,11 @@ export class ReflectionCollector {
 			recentEventIds,
 			materializedCursor: event.cursor,
 		};
-		return this.sealCandidate(candidate, "presence_boundary", event.occurredAtMs);
+		return this.sealCandidate(
+			candidate,
+			"presence_boundary",
+			event.occurredAtMs,
+		);
 	}
 
 	private async handleRetroactivePresenceBoundary(
@@ -541,10 +606,7 @@ export class ReflectionCollector {
 		// count-ready window, but its observed time (and all already-materialized
 		// evidence) determines a non-regressing window end. This avoids moving a
 		// cursor backwards into the next window.
-		const endedAtMs = Math.max(
-			event.observedAtMs,
-			latestEventTime(openWindow),
-		);
+		const endedAtMs = Math.max(event.observedAtMs, latestEventTime(openWindow));
 		const candidate: ReflectionCollectorSnapshotV1 = {
 			...snapshot,
 			openWindow: {
@@ -554,11 +616,7 @@ export class ReflectionCollector {
 			recentEventIds,
 			materializedCursor: event.cursor,
 		};
-		return this.sealCandidate(
-			candidate,
-			"presence_boundary",
-			endedAtMs,
-		);
+		return this.sealCandidate(candidate, "presence_boundary", endedAtMs);
 	}
 
 	private async sealOpenWindow(
@@ -575,7 +633,8 @@ export class ReflectionCollector {
 		nextGoal: ActiveGoalContextV1 | null = candidateSnapshot.activeGoal,
 	): Promise<EventWindowV1> {
 		const openWindow = candidateSnapshot.openWindow;
-		if (!openWindow) throw new Error("Cannot seal without an open reflection window.");
+		if (!openWindow)
+			throw new Error("Cannot seal without an open reflection window.");
 		this.cancelTimer();
 		this.runtimeState = "SEALED";
 		const window = await this.windowBuilder.build({
@@ -597,7 +656,12 @@ export class ReflectionCollector {
 			revision: current.revision + 1,
 			updatedAtMs: this.clock.nowMs(),
 		};
-		const result = await this.repository.sealWindow(window, nextSnapshot, current.revision);
+		const result = await this.repository.sealWindow(
+			window,
+			nextSnapshot,
+			current.revision,
+			openWindow.cloudOwnerEpoch.accountId,
+		);
 		this.snapshot = result.snapshot;
 		this.runtimeState = "ACTIVE_EMPTY";
 		if (result.inserted && this.onWindowSealed !== null) {
@@ -605,8 +669,8 @@ export class ReflectionCollector {
 				await this.onWindowSealed(structuredClone(result.window));
 			} catch (error) {
 				// A downstream outbox must never reopen a sealed collector window or
-				// block the durable Reflection cursor. Its own recovery scan repairs
-				// a notification lost between the two SQLite databases.
+				// block the durable Reflection cursor. The account attribution stored
+				// with the window lets its recovery scan repair this notification gap.
 				this.onBackgroundError(error);
 			}
 		}
@@ -632,7 +696,9 @@ export class ReflectionCollector {
 		snapshot: ReflectionCollectorSnapshotV1,
 		eventId: string,
 	): string[] {
-		return [...snapshot.recentEventIds, eventId].slice(-this.recentEventIdLimit);
+		return [...snapshot.recentEventIds, eventId].slice(
+			-this.recentEventIdLimit,
+		);
 	}
 
 	private armDeadline(deadlineAtMs: number): void {
@@ -672,29 +738,40 @@ export class ReflectionCollector {
 	}
 
 	private requireSnapshot(): ReflectionCollectorSnapshotV1 {
-		if (!this.snapshot) throw new Error("ReflectionCollector.recover() must finish first.");
+		if (!this.snapshot)
+			throw new Error("ReflectionCollector.recover() must finish first.");
 		return this.snapshot;
 	}
 
-	private assertSnapshotIdentity(snapshot: ReflectionCollectorSnapshotV1): void {
+	private assertSnapshotIdentity(
+		snapshot: ReflectionCollectorSnapshotV1,
+	): void {
 		if (
 			snapshot.collectorId !== this.collectorId ||
 			snapshot.deviceId !== this.deviceId ||
 			snapshot.sessionId !== this.sessionId
 		) {
-			throw new Error("Recovered reflection collector identity does not match configuration.");
+			throw new Error(
+				"Recovered reflection collector identity does not match configuration.",
+			);
 		}
 	}
 
-	private assertValidOpenWindow(openWindow: OpenEventWindowV1): void {
+	private assertValidOpenWindow(
+		openWindow: OpenEventWindowV1,
+		cloudOwnerEpoch: ReflectionCloudOwnerEpochV1,
+	): void {
 		if (
+			!sameCloudOwnerEpoch(openWindow.cloudOwnerEpoch, cloudOwnerEpoch) ||
 			openWindow.events.length === 0 ||
 			openWindow.finalizedSemanticEventCount < 1 ||
 			openWindow.finalizedSemanticEventCount > this.threshold ||
 			openWindow.finalizedSemanticEventCount !==
 				openWindow.events.filter(isCountedSemanticEvent).length
 		) {
-			throw new Error("Recovered reflection collector has an invalid open window.");
+			throw new Error(
+				"Recovered reflection collector has an invalid open window.",
+			);
 		}
 	}
 }
@@ -703,8 +780,10 @@ function startOpenWindow(
 	event: DesktopEventV1,
 	goal: ActiveGoalContextV1 | null,
 	maxWaitMs: number,
+	cloudOwnerEpoch: ReflectionCloudOwnerEpochV1,
 ): OpenEventWindowV1 {
 	return {
+		cloudOwnerEpoch: { ...cloudOwnerEpoch },
 		goal: cloneGoal(goal),
 		goalVersion: goal?.version ?? null,
 		startedAtMs: event.occurredAtMs,
@@ -737,29 +816,120 @@ function latestEventTime(openWindow: OpenEventWindowV1): number {
 	return Math.max(...openWindow.events.map((event) => event.occurredAtMs));
 }
 
-function cloneGoal(goal: ActiveGoalContextV1 | null): ActiveGoalContextV1 | null {
+function cloneGoal(
+	goal: ActiveGoalContextV1 | null,
+): ActiveGoalContextV1 | null {
 	return goal ? { ...goal } : null;
 }
 
-function normalizeRecoveredSnapshot(
-	snapshot: ReflectionCollectorSnapshotV1,
-): ReflectionCollectorSnapshotV1 {
+function normalizeRecoveredSnapshot(snapshot: ReflectionCollectorSnapshotV1): {
+	snapshot: ReflectionCollectorSnapshotV1;
+	migratedCloudOwnerEpoch: boolean;
+} {
 	const legacy = snapshot as ReflectionCollectorSnapshotV1 & {
 		revokedPermissions?: unknown;
 		goalRevision?: unknown;
+		cloudOwnerEpoch?: unknown;
 	};
 	const raw = legacy.revokedPermissions;
-	return {
-		...snapshot,
-		// v1 snapshots created before the permission gate did not carry this
-		// field. Treating them as authorized preserves compatibility; only an
-		// observed revocation may close the gate.
-		revokedPermissions:
-			raw === undefined
-				? []
-				: normalizePermissions(raw, "revokedPermissions", true),
-		goalRevision: normalizeGoalRevision(legacy),
+	const cloudOwnerEpoch = normalizeRecoveredCloudOwnerEpoch(
+		legacy.cloudOwnerEpoch,
+	);
+	const recoveredOpenCloudOwnerEpoch = normalizeRecoveredCloudOwnerEpoch(
+		(
+			snapshot.openWindow as
+				| (OpenEventWindowV1 & { cloudOwnerEpoch?: unknown })
+				| null
+		)?.cloudOwnerEpoch,
+	);
+	const normalizedOpenWindow =
+		snapshot.openWindow !== null &&
+		recoveredOpenCloudOwnerEpoch !== null &&
+		cloudOwnerEpoch !== null &&
+		sameCloudOwnerEpoch(recoveredOpenCloudOwnerEpoch, cloudOwnerEpoch)
+			? {
+					...snapshot.openWindow,
+					cloudOwnerEpoch: recoveredOpenCloudOwnerEpoch,
+				}
+			: null;
+	const invalidOpenOwner =
+		snapshot.openWindow !== null && normalizedOpenWindow === null;
+	const migratedCloudOwnerEpoch = cloudOwnerEpoch === null || invalidOpenOwner;
+	const normalizedCloudOwnerEpoch = cloudOwnerEpoch ?? {
+		epoch: 0,
+		accountId: null,
 	};
+	return {
+		snapshot: {
+			...snapshot,
+			// v1 snapshots created before the permission gate did not carry this
+			// field. Treating them as authorized preserves compatibility; only an
+			// observed revocation may close the gate.
+			revokedPermissions:
+				raw === undefined
+					? []
+					: normalizePermissions(raw, "revokedPermissions", true),
+			goalRevision: normalizeGoalRevision(legacy),
+			cloudOwnerEpoch: normalizedCloudOwnerEpoch,
+			// An open window without the exact same durable owner epoch cannot prove
+			// who collected its evidence. Migration drops it and its prior context.
+			state: migratedCloudOwnerEpoch ? "ACTIVE_EMPTY" : snapshot.state,
+			openWindow: migratedCloudOwnerEpoch ? null : normalizedOpenWindow,
+			contextCandidates: migratedCloudOwnerEpoch
+				? []
+				: snapshot.contextCandidates,
+		},
+		migratedCloudOwnerEpoch,
+	};
+}
+
+function normalizeRecoveredCloudOwnerEpoch(
+	value: unknown,
+): ReflectionCollectorSnapshotV1["cloudOwnerEpoch"] | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return null;
+	}
+	const candidate = value as Record<string, unknown>;
+	const epoch = candidate.epoch;
+	if (
+		Object.keys(candidate).length !== 2 ||
+		!("epoch" in candidate) ||
+		!("accountId" in candidate) ||
+		typeof epoch !== "number" ||
+		!Number.isSafeInteger(epoch) ||
+		epoch < 0
+	) {
+		return null;
+	}
+	try {
+		return {
+			epoch,
+			accountId: normalizeCloudOwnerAccountId(candidate.accountId),
+		};
+	} catch {
+		return null;
+	}
+}
+
+function normalizeCloudOwnerAccountId(value: unknown): string | null {
+	if (value === null) return null;
+	if (
+		typeof value !== "string" ||
+		value.length < 1 ||
+		value.length > 256 ||
+		value.trim() !== value ||
+		value.includes("\u0000")
+	) {
+		throw new Error("Reflection cloud owner account id is invalid.");
+	}
+	return value;
+}
+
+function sameCloudOwnerEpoch(
+	left: ReflectionCloudOwnerEpochV1,
+	right: ReflectionCloudOwnerEpochV1,
+): boolean {
+	return left.epoch === right.epoch && left.accountId === right.accountId;
 }
 
 function normalizeGoalRevision(
@@ -789,7 +959,10 @@ function normalizeGoalRevision(
 	return revision;
 }
 
-function mergePermissions(current: readonly string[], added: readonly string[]): string[] {
+function mergePermissions(
+	current: readonly string[],
+	added: readonly string[],
+): string[] {
 	return Array.from(
 		new Set([
 			...normalizePermissions(current, "revokedPermissions", true),
@@ -825,11 +998,12 @@ function normalizePermissions(
 		!value.every(
 			(permission) =>
 				typeof permission === "string" &&
-				(permission === "*" ||
-					/^[a-z][a-z0-9.-]{0,127}$/u.test(permission)),
+				(permission === "*" || /^[a-z][a-z0-9.-]{0,127}$/u.test(permission)),
 		)
 	) {
-		throw new Error(`${field} must contain 1 to 32 canonical permission names.`);
+		throw new Error(
+			`${field} must contain 1 to 32 canonical permission names.`,
+		);
 	}
 	return Array.from(new Set(value as string[])).sort();
 }
@@ -840,7 +1014,9 @@ function isBlockedByRevocation(
 ): boolean {
 	if (revokedPermissions.includes("*")) return true;
 	const requirements = permissionsForEvent(event);
-	return requirements.some((permission) => revokedPermissions.includes(permission));
+	return requirements.some((permission) =>
+		revokedPermissions.includes(permission),
+	);
 }
 
 function permissionsForEvent(event: DesktopEventV1): readonly string[] {

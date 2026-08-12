@@ -69,6 +69,7 @@ describe("AgentRunCoordinator", () => {
 		expect(JSON.stringify(harness.sidecar.calls[0]?.params)).not.toContain(
 			"raw_event",
 		);
+		expect(harness.coordinator.modelPurposeForRun(runId)).toBe("activity");
 
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
@@ -126,6 +127,9 @@ describe("AgentRunCoordinator", () => {
 		});
 		if (started.kind !== "success")
 			throw new Error("active run was not accepted");
+		expect(harness.coordinator.modelPurposeForRun(started.data.runId)).toBe(
+			"agent",
+		);
 
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(
@@ -980,6 +984,80 @@ describe("AgentRunCoordinator", () => {
 			harness.repository.listCalendarEvents("account-a"),
 		).resolves.toEqual([]);
 	});
+
+	test("resumes a persisted planning run with its original durable request identity", async () => {
+		const harness = createHarness();
+		await harness.repository.ensureAccount("account-a");
+		await harness.repository.setGrant("account-a", "agent.calendar.read");
+		await harness.repository.setGrant("account-a", "agent.planning.read");
+		const originatingRequestId = "request-planning-durable-origin";
+		const started = await harness.coordinator.startTaskPlanningRun({
+			requestId: originatingRequestId,
+			input: planningInput(),
+		});
+		if (started.kind !== "success") {
+			throw new Error("planning run was not accepted");
+		}
+		const sidecarStart = harness.sidecar.calls.find(
+			(call) => call.method === "planning.start",
+		);
+		const sessionId = String(sidecarStart?.params.sessionId);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				1,
+				{
+					kind: "run.suspended",
+					suspendPayload: {
+						kind: "planning.clarification",
+						sessionId,
+						status: "clarifying",
+						clarificationRounds: 1,
+						version: 1,
+						questions: [
+							{
+								key: "expected_outcome",
+								text: "需要怎样的验收结果？",
+								required: true,
+							},
+						],
+					},
+				},
+				null,
+			),
+		);
+		await waitFor(
+			async () =>
+				(await harness.repository.getRun("account-a", started.data.runId))
+					?.status === "suspended",
+		);
+
+		const restartedSidecar = new RecordingSidecar();
+		const restarted = restartCoordinator(harness, restartedSidecar);
+		const continued = await restarted.submitPlanningClarification({
+			requestId: "request-clarification-command-random",
+			runId: started.data.runId,
+			expectedRevision: 2,
+			answers: [
+				{ questionKey: "expected_outcome", answerText: "安装并通过核心验收" },
+			],
+		});
+
+		expect(continued.kind).toBe("success");
+		expect(restartedSidecar.calls).toContainEqual(
+			expect.objectContaining({
+				method: "planning.answer",
+				params: expect.objectContaining({
+					runId: started.data.runId,
+					sessionId,
+					originatingRequestId,
+				}),
+				options: expect.objectContaining({
+					requestId: "request-clarification-command-random",
+				}),
+			}),
+		);
+	});
 });
 
 class RecordingSidecar implements AgentSidecar {
@@ -1119,11 +1197,14 @@ function sessionIdentity(account: {
 		: null;
 }
 
-function restartCoordinator(harness: CoordinatorHarness): AgentRunCoordinator {
+function restartCoordinator(
+	harness: CoordinatorHarness,
+	sidecar: RecordingSidecar = new RecordingSidecar(),
+): AgentRunCoordinator {
 	return new AgentRunCoordinator({
 		sessionIdentity: () => sessionIdentity(harness.account),
 		repository: harness.repository,
-		sidecar: new RecordingSidecar(),
+		sidecar,
 		abortModelRelay: (runId) => {
 			harness.relayAborts.push(runId);
 			return true;

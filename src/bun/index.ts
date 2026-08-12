@@ -56,7 +56,6 @@ import {
 	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
-	REFLECTION_RELAY_COMPLETIONS_PATH,
 	WHALEHALL_RELAY_MODEL,
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
@@ -91,7 +90,6 @@ import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { PlanningAuthorityService } from "./planning-authority-service";
 import { PrivateTrainingWindowExportCoordinator } from "./private-training-window-export";
-import { ReflectionModelRelayAuthorization } from "./reflection-model-relay-authorization";
 import {
 	createWhaleHallReflectionRuntime,
 	setRuntimeGoal,
@@ -191,7 +189,7 @@ const agentModelConfiguration = agentModelConfigurationFromConfiguration(
 );
 if (activityReflectionConfiguration === null) {
 	console.warn(
-		"WhaleHall cloud reflection is inactive until the literal reflection relay key is provisioned.",
+		"WhaleHall cloud reflection is inactive until the authenticated personal relay capability is provisioned.",
 	);
 }
 if (agentModelConfiguration === null) {
@@ -205,25 +203,73 @@ const configuredModelId =
 	WHALEHALL_RELAY_MODEL;
 const reflectionModelId =
 	activityReflectionConfiguration?.modelName ?? WHALEHALL_RELAY_MODEL;
+const dataCenterModelApiBaseUrl = `${clientConfiguration.configuration.agent.baseurl}/v1`;
 const agentModelRelayProvider = "whalehall-relay";
 const reflectionModelRelayProvider = "whalehall-activity-reflection";
 let activeGoalStore!: AccountScopedActiveGoalStore;
 let coordinator!: AgentRunCoordinator;
 let hostServices!: LocalAgentHostServices;
 let relayBridge!: SidecarModelRelayBridge;
+let activityAgentRelayBridge!: SidecarModelRelayBridge;
 let activityReflectionRelayBridge: SidecarModelRelayBridge | null = null;
 let activityAnalysisDispatcher: ActivityAnalysisDispatcher | null = null;
 let activityReflectionAnalyzer: MastraActivityReflectionAnalyzer | null = null;
 let dataCenterSync: DataCenterSyncService | null = null;
+let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
+const pendingReflectionOwnerCutovers: Array<{
+	accountId: string | null;
+	resolve: () => void;
+	reject: (error: unknown) => void;
+}> = [];
+
+function cutoverReflectionCloudOwner(accountId: string | null): Promise<void> {
+	const runtime = reflectionRuntime;
+	if (runtime !== null) return runtime.service.cutoverCloudOwner(accountId);
+	return new Promise<void>((resolve, reject) => {
+		pendingReflectionOwnerCutovers.push({ accountId, resolve, reject });
+	});
+}
+
+async function publishReflectionRuntime(
+	runtime: WhaleHallReflectionRuntime,
+): Promise<void> {
+	while (pendingReflectionOwnerCutovers.length > 0) {
+		const request = pendingReflectionOwnerCutovers.shift();
+		if (!request) continue;
+		try {
+			await runtime.service.cutoverCloudOwner(request.accountId);
+			request.resolve();
+		} catch (error) {
+			request.reject(error);
+			for (const pending of pendingReflectionOwnerCutovers.splice(0)) {
+				pending.reject(error);
+			}
+			throw error;
+		}
+	}
+	reflectionRuntime = runtime;
+}
 
 const authSession = new RemoteAuthSessionManager(credentialStore, {
 	baseUrl: clientConfiguration.configuration.agent.baseurl,
 	agentKey: agentModelConfiguration?.apikey,
+	onBeforeSessionActivate: (identity) =>
+		cutoverReflectionCloudOwner(identity.accountId),
 	onSessionExpired: () => {
 		try {
 			relayBridge?.abortAll();
 		} catch {
 			// Logout remains fail-closed even if an already-failing relay cannot abort.
+		}
+		try {
+			activityReflectionRelayBridge?.abortAll();
+		} catch {
+			// Account ownership is revoked even if the activity relay is failing.
+		}
+		try {
+			activityAgentRelayBridge?.abortAll();
+		} catch {
+			// Account ownership is revoked even if the activity Agent relay is failing.
 		}
 		activeGoalStore?.invalidateSynchronously();
 		clientRPC.send.authSessionExpired({});
@@ -234,15 +280,44 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 		} catch {
 			// Session transitions stay fail-closed if an in-flight relay is broken.
 		}
+		try {
+			activityReflectionRelayBridge?.abortAll();
+		} catch {
+			// Account transitions remain fail-closed for background model calls.
+		}
+		try {
+			activityAgentRelayBridge?.abortAll();
+		} catch {
+			// Account transitions remain fail-closed for background Agent calls.
+		}
 		activeGoalStore?.invalidateSynchronously();
+		const cleanupFailures: unknown[] = [];
+		try {
+			// This is the account handoff barrier: revoke the durable Reflection
+			// owner and discard its open evidence before another login can activate.
+			await cutoverReflectionCloudOwner(null);
+		} catch (error) {
+			cleanupFailures.push(error);
+		}
 		const cleanupTasks: Array<() => unknown | Promise<unknown>> = [
 			() => dataCenterSync?.stop(),
+			() => stopActivityWindowDelivery(),
 			() => activeGoalStore.clearForAccountTransition(),
 		];
 		if (accountId && coordinator) {
 			cleanupTasks.push(() => coordinator.cancelAllForAccount(accountId));
 		}
-		await runAccountSessionCleanup(cleanupTasks);
+		try {
+			await runAccountSessionCleanup(cleanupTasks);
+		} catch (error) {
+			cleanupFailures.push(error);
+		}
+		if (cleanupFailures.length > 0) {
+			throw new AggregateError(
+				cleanupFailures,
+				"The local account transition did not complete every fail-closed barrier.",
+			);
+		}
 	},
 });
 activeGoalStore = new AccountScopedActiveGoalStore({
@@ -272,15 +347,12 @@ const planningAuthority = new PlanningAuthorityService({
 		return normalized;
 	},
 });
-const modelRelay = new ModelRelayTransport(authSession);
+const modelRelay = new ModelRelayTransport(authSession, { purpose: "agent" });
+const activityAgentModelRelay = new ModelRelayTransport(authSession, {
+	purpose: "activity",
+});
 const activityReflectionModelRelay = activityReflectionConfiguration
-	? new ModelRelayTransport(
-			new ReflectionModelRelayAuthorization({
-				baseUrl: activityReflectionConfiguration.relayBaseUrl,
-				reflectionKey: activityReflectionConfiguration.reflectionKey,
-			}),
-			{ endpointPath: REFLECTION_RELAY_COMPLETIONS_PATH },
-		)
+	? new ModelRelayTransport(authSession, { purpose: "activity" })
 	: null;
 const sidecar = new MastraSidecarClient({
 	nodePath,
@@ -296,7 +368,7 @@ const sidecar = new MastraSidecarClient({
 		reflectionModel: {
 			provider: reflectionModelRelayProvider,
 			modelId: reflectionModelId,
-			baseUrl: "https://model.sea-ridethewindbreakthewaves.xyz/v1",
+			baseUrl: dataCenterModelApiBaseUrl,
 			supportsStructuredOutputs: true,
 		},
 	},
@@ -323,8 +395,12 @@ const sidecar = new MastraSidecarClient({
 			if (params.provider !== agentModelRelayProvider) {
 				throw new Error("Model relay provider is not approved.");
 			}
+			const bridge =
+				coordinator.modelPurposeForRun(ownerRunId) === "activity"
+					? activityAgentRelayBridge
+					: relayBridge;
 			return coordinator.runBoundHostCall(ownerRunId, () =>
-				relayBridge.open(call.requestId, params),
+				bridge.open(call.requestId, params),
 			);
 		}
 		if (call.method === "model/relay.abort") {
@@ -344,7 +420,10 @@ const sidecar = new MastraSidecarClient({
 				);
 			}
 			return coordinator.runBoundHostCall(ownerRunId, async () =>
-				relayBridge.abort(params),
+				(coordinator.modelPurposeForRun(ownerRunId) === "activity"
+					? activityAgentRelayBridge
+					: relayBridge
+				).abort(params),
 			);
 		}
 		return hostServices.handle(call.method, call.params);
@@ -352,12 +431,18 @@ const sidecar = new MastraSidecarClient({
 	onRunEvent: (event) => coordinator.acceptSidecarEvent(event),
 	onInterrupted: (runIds, reason) => {
 		relayBridge.abortAll();
+		activityAgentRelayBridge.abortAll();
 		activityReflectionRelayBridge?.abortAll();
 		void coordinator.interruptRuns(runIds, reason);
 	},
 });
 relayBridge = new SidecarModelRelayBridge({
 	transport: modelRelay,
+	modelId: configuredModelId,
+	send: (event) => sidecar.sendRelayEvent(event),
+});
+activityAgentRelayBridge = new SidecarModelRelayBridge({
+	transport: activityAgentModelRelay,
 	modelId: configuredModelId,
 	send: (event) => sidecar.sendRelayEvent(event),
 });
@@ -378,7 +463,8 @@ coordinator = new AgentRunCoordinator({
 	sessionIdentity: () => authSession.captureCurrentSession(),
 	repository: agentRepository,
 	sidecar,
-	abortModelRelay: (runId) => relayBridge.abortRun(runId),
+	abortModelRelay: (runId) =>
+		relayBridge.abortRun(runId) || activityAgentRelayBridge.abortRun(runId),
 	toolPolicy: agentToolPolicy,
 	toolExecutor: agentToolExecutor,
 	onEvent: (event) => {
@@ -438,7 +524,6 @@ const LOCAL_TOOL_SHUTDOWN_STEP_TIMEOUT_MS = 13_000;
 const OVERALL_SHUTDOWN_TIMEOUT_MS = 25_000;
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
-let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
 let activityWindowDelivery: ActivityWindowDeliveryService | null = null;
 let activityWindowDeliveryStore: ActivityWindowDeliveryStore | null = null;
 let activityWindowDeliveryStopPromise: Promise<void> | null = null;
@@ -714,6 +799,9 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						);
 					}
 					activityAnalysisDispatcher?.wake();
+					if (reflectionRuntime) {
+						await startActivityWindowDelivery(reflectionRuntime.repository);
+					}
 					dataCenterSync?.start();
 					return session;
 				}),
@@ -757,6 +845,9 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 						);
 					}
 					activityAnalysisDispatcher?.wake();
+					if (reflectionRuntime) {
+						await startActivityWindowDelivery(reflectionRuntime.repository);
+					}
 					dataCenterSync?.start();
 					return session;
 				}),
@@ -1269,6 +1360,11 @@ function abortModelRelays(): void {
 	} catch (error) {
 		failures.push(error);
 	}
+	try {
+		activityAgentRelayBridge.abortAll();
+	} catch (error) {
+		failures.push(error);
+	}
 	if (failures.length > 0) {
 		throw new AggregateError(failures, "Model relay shutdown failed.");
 	}
@@ -1300,6 +1396,8 @@ startupPromise = (async () => {
 			candidate = await createWhaleHallReflectionRuntime({
 				agent,
 				dataDirectory: localDataPath,
+				cloudOwnerAccountId: () =>
+					authSession.captureCurrentSession()?.accountId ?? null,
 				onWindowSealed: (window) => {
 					const delivery = activityWindowDelivery;
 					if (delivery === null || shutdownRequested) return;
@@ -1314,14 +1412,18 @@ startupPromise = (async () => {
 				await candidate.close();
 				return;
 			}
-			await startActivityWindowDelivery(candidate.repository);
 			await candidate.service.start();
 			if (shutdownRequested) {
 				await candidate.close();
 				return;
 			}
+			await publishReflectionRuntime(candidate);
 			reflectionRuntime = candidate;
 			candidate = null;
+			const startupOwner = authSession.captureCurrentSession();
+			if (startupOwner !== null && authSession.isCurrentSession(startupOwner)) {
+				await startActivityWindowDelivery(reflectionRuntime.repository);
+			}
 			if (authSession.accountId) {
 				await planningAuthority.load();
 			}
@@ -1415,16 +1517,21 @@ function waitForStartupRetry(delayMs: number): Promise<void> {
 async function startActivityWindowDelivery(
 	source: WhaleHallReflectionRuntime["repository"],
 ): Promise<void> {
+	const owner = authSession.captureCurrentSession();
 	if (
 		activityReflectionConfiguration === null ||
 		activityReflectionRelayBridge === null ||
 		activityWindowDelivery !== null ||
+		owner === null ||
 		shutdownRequested
 	) {
 		return;
 	}
 	const store = new ActivityWindowDeliveryStore(
-		join(localDataPath, "activity-window-worker.sqlite3"),
+		join(
+			localDataPath,
+			`activity-window-worker-${encodeURIComponent(owner.accountId)}.sqlite3`,
+		),
 	);
 	const dispatcher = new ActivityAnalysisDispatcher({
 		store,
@@ -1452,6 +1559,11 @@ async function startActivityWindowDelivery(
 		store,
 		scoreThreshold: activityReflectionConfiguration.scoreThreshold,
 		onAgentTriggerRequired: () => dispatcher.wake(),
+		currentSession: () => {
+			const current = authSession.captureCurrentSession();
+			return current?.accountId === owner.accountId ? current : null;
+		},
+		isCurrentSession: (identity) => authSession.isCurrentSession(identity),
 		onError: (error) => {
 			const diagnostic = activityWindowWorkerDiagnostic(error);
 			console.warn(
