@@ -142,6 +142,46 @@ describe("MastraSidecarClient initialization recovery", () => {
 });
 
 describe("MastraSidecarClient shutdown", () => {
+	test("permanently rejects restart and external requests after shutdown", async () => {
+		const harness = createHarness(["succeed"]);
+		await harness.client.start();
+		await harness.client.stop();
+
+		await expect(harness.client.start()).rejects.toEqual(
+			expect.objectContaining({ code: "SHUTDOWN_REQUESTED" }),
+		);
+		await expect(
+			harness.client.request("run.resume", { runId: "late-run" }),
+		).rejects.toEqual(expect.objectContaining({ code: "SHUTDOWN_REQUESTED" }));
+		await Bun.sleep(25);
+		expect(harness.children).toHaveLength(1);
+	});
+
+	test("a synchronous shutdown latch rejects work before stop begins", async () => {
+		const harness = createHarness(["succeed"]);
+		await harness.client.start();
+		harness.client.beginShutdown();
+
+		await expect(
+			harness.client.request("run.resume", { runId: "late-run" }),
+		).rejects.toEqual(expect.objectContaining({ code: "SHUTDOWN_REQUESTED" }));
+		await expect(harness.client.stop()).resolves.toBeUndefined();
+		expect(harness.children).toHaveLength(1);
+	});
+
+	test("validates every shutdown budget when the client is constructed", () => {
+		for (const option of [
+			"shutdownProtocolTimeoutMs",
+			"shutdownGraceTimeoutMs",
+			"shutdownTerminateTimeoutMs",
+			"shutdownKillTimeoutMs",
+		] as const) {
+			expect(() => createHarness(["succeed"], { [option]: 0 })).toThrow(
+				expect.objectContaining({ code: "INVALID_SHUTDOWN_TIMEOUT" }),
+			);
+		}
+	});
+
 	test("bounds shutdown when an ordered request blocks runtime.shutdown", async () => {
 		const harness = createHarness(["ordered-hang-request"], {
 			shutdownProtocolTimeoutMs: 10,
@@ -225,7 +265,7 @@ describe("MastraSidecarClient shutdown", () => {
 			shutdownProtocolTimeoutMs: 5,
 			shutdownGraceTimeoutMs: 5,
 			shutdownTerminateTimeoutMs: 5,
-			shutdownKillTimeoutMs: 5,
+			shutdownKillTimeoutMs: 1_000,
 		});
 		await harness.client.start();
 		const firstStop = harness.client.stop();

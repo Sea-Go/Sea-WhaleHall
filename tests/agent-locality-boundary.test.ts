@@ -80,14 +80,32 @@ describe("local Agent production boundary", () => {
 		);
 		const activityStep = bunComposition.indexOf(
 			'name: "activity-window-delivery"',
+			shutdownSteps,
 		);
-		const sidecarStep = bunComposition.indexOf('name: "sensor-sidecar"');
+		const sidecarStep = bunComposition.indexOf(
+			'name: "sensor-sidecar"',
+			shutdownSteps,
+		);
+		const localToolStep = bunComposition.indexOf(
+			'name: "local-tool-host"',
+			shutdownSteps,
+		);
+		const nonCriticalTail = bunComposition.indexOf(
+			'name: "audit-capture"',
+			shutdownSteps,
+		);
 
 		expect(shutdownStart).toBeGreaterThanOrEqual(0);
 		expect(nativeStartupLatch).toBeGreaterThan(shutdownStart);
 		expect(shutdownSteps).toBeGreaterThan(nativeStartupLatch);
 		expect(activityStep).toBeGreaterThanOrEqual(0);
 		expect(sidecarStep).toBeGreaterThan(activityStep);
+		expect(localToolStep).toBeGreaterThan(sidecarStep);
+		expect(nonCriticalTail).toBeGreaterThan(localToolStep);
+		expect(bunComposition).toContain(
+			"overallTimeoutMs: OVERALL_SHUTDOWN_TIMEOUT_MS",
+		);
+		expect(bunComposition).toContain("sidecar.beginShutdown();");
 		expect(bunComposition).toContain(
 			"activityReflectionRelayBridge?.abortAll();",
 		);

@@ -25,6 +25,8 @@ export interface ShutdownStepResult {
 
 export interface BestEffortShutdownOptions {
 	nowMs?: () => number;
+	/** Caps the complete sequence so critical owners can be prioritized. */
+	overallTimeoutMs?: number;
 	onStepSettled?(result: ShutdownStepResult): void;
 }
 
@@ -52,11 +54,35 @@ export async function runBestEffortShutdown(
 ): Promise<void> {
 	const criticalFailures: string[] = [];
 	const nowMs = options.nowMs ?? Date.now;
+	const overallTimeoutMs = options.overallTimeoutMs;
+	if (
+		overallTimeoutMs !== undefined &&
+		(!Number.isSafeInteger(overallTimeoutMs) || overallTimeoutMs <= 0)
+	) {
+		throw new Error("Shutdown overall deadline is invalid.");
+	}
+	const deadlineAtMs =
+		overallTimeoutMs === undefined ? null : nowMs() + overallTimeoutMs;
 	for (const step of steps) {
 		const startedAtMs = nowMs();
 		let outcome: ShutdownStepOutcome = "completed";
 		try {
-			await runShutdownStep(step);
+			const remainingMs =
+				deadlineAtMs === null ? null : Math.max(0, deadlineAtMs - startedAtMs);
+			if (remainingMs === 0) {
+				throw new ShutdownStepTimeoutError(step.name, 0);
+			}
+			await runShutdownStep(
+				remainingMs === null
+					? step
+					: {
+							...step,
+							timeoutMs:
+								step.timeoutMs === undefined
+									? remainingMs
+									: Math.min(step.timeoutMs, remainingMs),
+						},
+			);
 		} catch (error) {
 			outcome =
 				error instanceof ShutdownStepTimeoutError ? "timed_out" : "failed";
@@ -190,16 +216,18 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	}
 
 	quit(): Promise<void> {
-		if (!this.quitRequested) {
+		if (this.quitting !== null) return this.quitting;
+		if (!this.quitRequested || this.quitRequestFailure !== null) {
 			this.quitRequested = true;
 			try {
 				this.options.onQuitRequested?.();
+				this.quitRequestFailure = null;
 			} catch (error) {
-				// A failed process-start latch must preserve the Electrobun quit veto.
+				// A failed process-start latch preserves the veto for this attempt. A
+				// later quit retries the required idempotent synchronous latch.
 				this.quitRequestFailure = { error };
 			}
 		}
-		if (this.quitting !== null) return this.quitting;
 		const quitting = (async () => {
 			try {
 				if (this.quitRequestFailure) throw this.quitRequestFailure.error;
@@ -213,13 +241,17 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 				}
 				// Preserve the veto, but let a later quit retry any process owner that
 				// could not be stopped during this attempt.
-				this.quitting = null;
 				return;
 			}
 			this.exitAuthorized = true;
 			this.options.exit();
 		})();
 		this.quitting = quitting;
+		void quitting.then(() => {
+			if (!this.exitAuthorized && this.quitting === quitting) {
+				this.quitting = null;
+			}
+		});
 		return quitting;
 	}
 }

@@ -14,7 +14,7 @@ export async function stopActivityWindowDeliveryResources(
 	resources: ActivityWindowDeliveryShutdownResources,
 	onError: (resource: string, error: unknown) => void = () => {},
 ): Promise<void> {
-	releaseActivityWindowDeliveryResource(
+	await releaseActivityWindowDeliveryResource(
 		"analyzer",
 		() => resources.analyzer?.close(),
 		onError,

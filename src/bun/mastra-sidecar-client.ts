@@ -78,25 +78,55 @@ export class MastraSidecarClient {
 	// A transport error can make a child unusable before Node confirms that its
 	// stdio and process handle are closed. Keep every spawned child owned until
 	// the close event so a later quit retry cannot mistake an orphan for success.
-	private readonly ownedChildren =
-		new Set<ChildProcessWithoutNullStreams>();
+	private readonly ownedChildren = new Set<ChildProcessWithoutNullStreams>();
 	private readonly closedChildren =
 		new WeakSet<ChildProcessWithoutNullStreams>();
 	private startPromise: Promise<RuntimeInitializeResult> | null = null;
 	private stopPromise: Promise<void> | null = null;
 	private stopping = false;
+	private shutdownRequested = false;
 	private restartTimer: ReturnType<typeof setTimeout> | null = null;
 	private restartAttempt = 0;
 	private writerTail = Promise.resolve();
 	private acceptTail = Promise.resolve();
+	private readonly shutdownProtocolTimeoutMs: number;
+	private readonly shutdownGraceTimeoutMs: number;
+	private readonly shutdownTerminateTimeoutMs: number;
+	private readonly shutdownKillTimeoutMs: number;
 
-	constructor(private readonly options: MastraSidecarClientOptions) {}
+	constructor(private readonly options: MastraSidecarClientOptions) {
+		this.shutdownProtocolTimeoutMs = positiveShutdownTimeout(
+			options.shutdownProtocolTimeoutMs,
+			DEFAULT_SHUTDOWN_PROTOCOL_TIMEOUT_MS,
+		);
+		this.shutdownGraceTimeoutMs = positiveShutdownTimeout(
+			options.shutdownGraceTimeoutMs,
+			DEFAULT_SHUTDOWN_GRACE_TIMEOUT_MS,
+		);
+		this.shutdownTerminateTimeoutMs = positiveShutdownTimeout(
+			options.shutdownTerminateTimeoutMs,
+			DEFAULT_SHUTDOWN_TERMINATE_TIMEOUT_MS,
+		);
+		this.shutdownKillTimeoutMs = positiveShutdownTimeout(
+			options.shutdownKillTimeoutMs,
+			DEFAULT_SHUTDOWN_KILL_TIMEOUT_MS,
+		);
+	}
 
 	get isRunning(): boolean {
 		return this.child !== null;
 	}
 
+	/** Permanently prevents late requests or restart during application quit. */
+	beginShutdown(): void {
+		this.shutdownRequested = true;
+		this.stopping = true;
+		if (this.restartTimer) clearTimeout(this.restartTimer);
+		this.restartTimer = null;
+	}
+
 	start(): Promise<RuntimeInitializeResult> {
+		if (this.shutdownRequested) return Promise.reject(sidecarShutdownError());
 		if (this.startPromise) return this.startPromise;
 		if (this.restartTimer) clearTimeout(this.restartTimer);
 		this.restartTimer = null;
@@ -111,6 +141,9 @@ export class MastraSidecarClient {
 	}
 
 	stop(): Promise<void> {
+		// This is an application-lifetime latch. A later stop attempt may retry
+		// ownership reconciliation, but no request may restart the sidecar.
+		this.beginShutdown();
 		if (this.stopPromise) return this.stopPromise;
 		const operation = this.stopOwnedChild();
 		this.stopPromise = operation;
@@ -137,9 +170,7 @@ export class MastraSidecarClient {
 			return;
 		}
 		const outcomes = await Promise.allSettled(
-			children.map((child) =>
-				this.stopChild(child, child === activeChild),
-			),
+			children.map((child) => this.stopChild(child, child === activeChild)),
 		);
 		if (outcomes.some((outcome) => outcome.status === "rejected")) {
 			throw new MastraSidecarError(
@@ -154,23 +185,20 @@ export class MastraSidecarClient {
 		child: ChildProcessWithoutNullStreams,
 		requestProtocolShutdown: boolean,
 	): Promise<void> {
-		const protocolTimeoutMs = positiveShutdownTimeout(
-			this.options.shutdownProtocolTimeoutMs,
-			DEFAULT_SHUTDOWN_PROTOCOL_TIMEOUT_MS,
-		);
 		if (requestProtocolShutdown) {
 			const controller = new AbortController();
 			try {
 				await this.withShutdownDeadline(
-					this.request(
+					this.requestInternal(
 						"runtime.shutdown",
 						{},
 						{
-							timeoutMs: protocolTimeoutMs,
+							timeoutMs: this.shutdownProtocolTimeoutMs,
 							signal: controller.signal,
 						},
+						true,
 					),
-					protocolTimeoutMs,
+					this.shutdownProtocolTimeoutMs,
 				);
 			} catch {
 				// A stuck ordered request can keep runtime.shutdown behind it. Process
@@ -179,41 +207,19 @@ export class MastraSidecarClient {
 				controller.abort();
 			}
 		}
-		if (
-			await this.waitForConfirmedClose(
-				child,
-				positiveShutdownTimeout(
-					this.options.shutdownGraceTimeoutMs,
-					DEFAULT_SHUTDOWN_GRACE_TIMEOUT_MS,
-				),
-			)
-		) {
+		if (await this.waitForConfirmedClose(child, this.shutdownGraceTimeoutMs)) {
 			return;
 		}
 
 		this.signalChild(child, "SIGTERM");
 		if (
-			await this.waitForConfirmedClose(
-				child,
-				positiveShutdownTimeout(
-					this.options.shutdownTerminateTimeoutMs,
-					DEFAULT_SHUTDOWN_TERMINATE_TIMEOUT_MS,
-				),
-			)
+			await this.waitForConfirmedClose(child, this.shutdownTerminateTimeoutMs)
 		) {
 			return;
 		}
 
 		this.signalChild(child, "SIGKILL");
-		if (
-			await this.waitForConfirmedClose(
-				child,
-				positiveShutdownTimeout(
-					this.options.shutdownKillTimeoutMs,
-					DEFAULT_SHUTDOWN_KILL_TIMEOUT_MS,
-				),
-			)
-		) {
+		if (await this.waitForConfirmedClose(child, this.shutdownKillTimeoutMs)) {
 			return;
 		}
 		throw new Error("sidecar close was not confirmed");
@@ -228,8 +234,30 @@ export class MastraSidecarClient {
 			signal?: AbortSignal;
 		} = {},
 	): Promise<TResult> {
+		return this.requestInternal(method, params, options, false);
+	}
+
+	private async requestInternal<TResult = unknown>(
+		method: AgentHostMethod,
+		params: Record<string, unknown>,
+		options: {
+			requestId?: string;
+			timeoutMs?: number;
+			signal?: AbortSignal;
+		},
+		allowDuringShutdown: boolean,
+	): Promise<TResult> {
+		if (this.shutdownRequested && !allowDuringShutdown) {
+			throw sidecarShutdownError();
+		}
 		if (options.signal?.aborted) throw cancelledRequestError();
-		if (!this.child) await awaitAbortable(this.start(), options.signal);
+		if (!this.child) {
+			if (allowDuringShutdown) throw sidecarShutdownError();
+			await awaitAbortable(this.start(), options.signal);
+		}
+		if (this.shutdownRequested && !allowDuringShutdown) {
+			throw sidecarShutdownError();
+		}
 		if (options.signal?.aborted) throw cancelledRequestError();
 		const requestId = options.requestId ?? `bun:${randomUUID()}`;
 		if (this.pending.has(requestId)) {
@@ -296,6 +324,7 @@ export class MastraSidecarClient {
 	}
 
 	sendRelayEvent(event: ModelRelayEventFrame): Promise<void> {
+		if (this.shutdownRequested) return Promise.reject(sidecarShutdownError());
 		return this.write(event);
 	}
 
@@ -643,7 +672,13 @@ export class MastraSidecarClient {
 	}
 
 	private scheduleRestart(): void {
-		if (this.stopping || this.restartTimer || this.child) return;
+		if (
+			this.shutdownRequested ||
+			this.stopping ||
+			this.restartTimer ||
+			this.child
+		)
+			return;
 		const delay =
 			RESTART_DELAYS_MS[
 				Math.min(this.restartAttempt, RESTART_DELAYS_MS.length - 1)
@@ -765,6 +800,14 @@ function cancelledRequestError(): MastraSidecarError {
 		"CANCELLED",
 		"本地 Agent Sidecar 请求已取消。",
 		true,
+	);
+}
+
+function sidecarShutdownError(): MastraSidecarError {
+	return new MastraSidecarError(
+		"SHUTDOWN_REQUESTED",
+		"本地 Agent Sidecar 已进入永久关闭状态。",
+		false,
 	);
 }
 

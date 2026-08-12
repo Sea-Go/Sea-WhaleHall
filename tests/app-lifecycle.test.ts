@@ -230,6 +230,66 @@ describe("background application lifecycle", () => {
 		expect(exitCount).toBe(1);
 	});
 
+	test("a failed synchronous quit latch is retried before shutdown", async () => {
+		let latchCount = 0;
+		let shutdownCount = 0;
+		let exitCount = 0;
+		const errors: string[] = [];
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			onQuitRequested() {
+				latchCount += 1;
+				if (latchCount === 1) throw new Error("synthetic latch failure");
+			},
+			shutdown: async () => {
+				shutdownCount += 1;
+			},
+			exit: () => {
+				exitCount += 1;
+			},
+			onError(operation) {
+				errors.push(operation);
+			},
+		});
+
+		await lifecycle.quit();
+		expect(latchCount).toBe(1);
+		expect(shutdownCount).toBe(0);
+		expect(exitCount).toBe(0);
+		expect(errors).toEqual(["quit"]);
+
+		await lifecycle.quit();
+		expect(latchCount).toBe(2);
+		expect(shutdownCount).toBe(1);
+		expect(exitCount).toBe(1);
+	});
+
+	test("concurrent quit calls share one failed latch attempt", async () => {
+		let latchCount = 0;
+		let shutdownCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			onQuitRequested() {
+				latchCount += 1;
+				if (latchCount === 1) throw new Error("synthetic latch failure");
+			},
+			shutdown: async () => {
+				shutdownCount += 1;
+			},
+			exit: () => {},
+		});
+
+		const first = lifecycle.quit();
+		expect(lifecycle.quit()).toBe(first);
+		await first;
+		expect(latchCount).toBe(1);
+		expect(shutdownCount).toBe(0);
+
+		await lifecycle.quit();
+		expect(latchCount).toBe(2);
+		expect(shutdownCount).toBe(1);
+	});
+
 	test("best-effort shutdown continues after failures and diagnostic errors", async () => {
 		const order: string[] = [];
 		const errors: string[] = [];
@@ -304,6 +364,40 @@ describe("background application lifecycle", () => {
 		expect(settled).toEqual([
 			{ name: "stuck-tail", outcome: "timed_out" },
 			{ name: "later-owner", outcome: "completed" },
+		]);
+	});
+
+	test("caps the complete sequence with one shared overall deadline", async () => {
+		const started: string[] = [];
+		const settled: Array<{ name: string; outcome: string }> = [];
+		const times = [0, 0, 10, 10, 10];
+		await runBestEffortShutdown(
+			[
+				{
+					name: "consumes-deadline",
+					run: () => new Promise<void>(() => {}),
+				},
+				{
+					name: "not-started-after-deadline",
+					run: () => {
+						started.push("not-started-after-deadline");
+					},
+				},
+			],
+			() => {},
+			{
+				nowMs: () => times.shift() ?? 10,
+				overallTimeoutMs: 10,
+				onStepSettled(result) {
+					settled.push({ name: result.name, outcome: result.outcome });
+				},
+			},
+		);
+
+		expect(started).toEqual([]);
+		expect(settled).toEqual([
+			{ name: "consumes-deadline", outcome: "timed_out" },
+			{ name: "not-started-after-deadline", outcome: "timed_out" },
 		]);
 	});
 

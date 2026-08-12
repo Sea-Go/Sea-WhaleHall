@@ -435,11 +435,13 @@ const completedShutdownSteps = new Set<string>();
 const FAST_SHUTDOWN_STEP_TIMEOUT_MS = 1_000;
 const SIDECAR_SHUTDOWN_STEP_TIMEOUT_MS = 5_000;
 const LOCAL_TOOL_SHUTDOWN_STEP_TIMEOUT_MS = 13_000;
+const OVERALL_SHUTDOWN_TIMEOUT_MS = 25_000;
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
 let activityWindowDelivery: ActivityWindowDeliveryService | null = null;
 let activityWindowDeliveryStore: ActivityWindowDeliveryStore | null = null;
+let activityWindowDeliveryStopPromise: Promise<void> | null = null;
 const STARTUP_RETRY_DELAYS_MS = [
 	1_000, 5_000, 15_000, 45_000, 120_000, 300_000,
 ];
@@ -1071,6 +1073,7 @@ const clientLifecycle = new BackgroundAppLifecycle<BrowserWindow>({
 	onQuitRequested() {
 		shutdownRequested = true;
 		agent.beginShutdown();
+		sidecar.beginShutdown();
 	},
 	shutdown,
 	exit: () => Utils.quit(),
@@ -1124,17 +1127,13 @@ petWindow.webview.on("dom-ready", () => {
 function shutdown(): Promise<void> {
 	shutdownRequested = true;
 	agent.beginShutdown();
+	sidecar.beginShutdown();
 	if (shutdownPromise) return shutdownPromise;
 	const steps = [
 		{
 			name: "startup-retry",
 			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => cancelStartupRetryWait?.(),
-		},
-		{
-			name: "audit-capture",
-			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
-			run: () => auditCaptureCoordinator.dispose(),
 		},
 		{
 			name: "model-relays",
@@ -1147,15 +1146,26 @@ function shutdown(): Promise<void> {
 			run: () => stopActivityWindowDelivery(),
 		},
 		{
-			name: "data-center-sync",
-			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
-			run: () => dataCenterSync?.stop(),
-		},
-		{
 			name: "sensor-sidecar",
 			critical: true,
 			timeoutMs: SIDECAR_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => sidecar.stop(),
+		},
+		{
+			name: "local-tool-host",
+			critical: true,
+			timeoutMs: LOCAL_TOOL_SHUTDOWN_STEP_TIMEOUT_MS,
+			run: () => agent.stop(),
+		},
+		{
+			name: "audit-capture",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
+			run: () => auditCaptureCoordinator.dispose(),
+		},
+		{
+			name: "data-center-sync",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
+			run: () => dataCenterSync?.stop(),
 		},
 		{
 			name: "startup",
@@ -1180,12 +1190,6 @@ function shutdown(): Promise<void> {
 				reflectionRuntime = null;
 				await runtime?.close();
 			},
-		},
-		{
-			name: "local-tool-host",
-			critical: true,
-			timeoutMs: LOCAL_TOOL_SHUTDOWN_STEP_TIMEOUT_MS,
-			run: () => agent.stop(),
 		},
 		{
 			name: "agent-repository",
@@ -1229,6 +1233,7 @@ function shutdown(): Promise<void> {
 			);
 		},
 		{
+			overallTimeoutMs: OVERALL_SHUTDOWN_TIMEOUT_MS,
 			onStepSettled(result) {
 				console.log(
 					"[shutdown]",
@@ -1479,33 +1484,48 @@ async function startActivityWindowDelivery(
 		dispatcher.start();
 		await delivery.start();
 	} catch (error) {
-		activityWindowDelivery = null;
-		activityAnalysisDispatcher = null;
-		activityWindowDeliveryStore = null;
-		if (activityReflectionAnalyzer === analyzer) {
-			activityReflectionAnalyzer = null;
-		}
-		await stopActivityWindowDeliveryResources(
-			{ analyzer, delivery, dispatcher, store },
-			reportActivityWindowDeliveryCleanupFailure,
-		);
+		await stopActivityWindowDelivery();
 		throw error;
 	}
 }
 
-async function stopActivityWindowDelivery(): Promise<void> {
+function stopActivityWindowDelivery(): Promise<void> {
+	if (activityWindowDeliveryStopPromise !== null) {
+		return activityWindowDeliveryStopPromise;
+	}
 	const delivery = activityWindowDelivery;
 	const dispatcher = activityAnalysisDispatcher;
 	const store = activityWindowDeliveryStore;
 	const analyzer = activityReflectionAnalyzer;
-	activityWindowDelivery = null;
-	activityAnalysisDispatcher = null;
-	activityWindowDeliveryStore = null;
-	activityReflectionAnalyzer = null;
-	await stopActivityWindowDeliveryResources(
+	let operation!: Promise<void>;
+	operation = stopActivityWindowDeliveryResources(
 		{ analyzer, delivery, dispatcher, store },
 		reportActivityWindowDeliveryCleanupFailure,
+	).then(
+		() => {
+			if (activityWindowDelivery === delivery) activityWindowDelivery = null;
+			if (activityAnalysisDispatcher === dispatcher) {
+				activityAnalysisDispatcher = null;
+			}
+			if (activityWindowDeliveryStore === store) {
+				activityWindowDeliveryStore = null;
+			}
+			if (activityReflectionAnalyzer === analyzer) {
+				activityReflectionAnalyzer = null;
+			}
+			if (activityWindowDeliveryStopPromise === operation) {
+				activityWindowDeliveryStopPromise = null;
+			}
+		},
+		(error: unknown) => {
+			if (activityWindowDeliveryStopPromise === operation) {
+				activityWindowDeliveryStopPromise = null;
+			}
+			throw error;
+		},
 	);
+	activityWindowDeliveryStopPromise = operation;
+	return operation;
 }
 
 function reportActivityWindowDeliveryCleanupFailure(
