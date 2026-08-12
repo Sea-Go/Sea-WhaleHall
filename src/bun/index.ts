@@ -43,6 +43,7 @@ import type {
 import { AccountScopedActiveGoalStore } from "./account-scoped-active-goal";
 import { runAccountSessionCleanup } from "./account-session-cleanup";
 import { ActivityAnalysisDispatcher } from "./activity-analysis-dispatcher";
+import { stopActivityWindowDeliveryResources } from "./activity-window-delivery-lifecycle";
 import { AgentRunCoordinator } from "./agent-run-coordinator";
 import { AgentToolPolicy } from "./agent-tool-policy";
 import {
@@ -431,11 +432,16 @@ let petVisible = true;
 let shutdownRequested = false;
 let shutdownPromise: Promise<void> | null = null;
 const completedShutdownSteps = new Set<string>();
+const FAST_SHUTDOWN_STEP_TIMEOUT_MS = 1_000;
+const SIDECAR_SHUTDOWN_STEP_TIMEOUT_MS = 5_000;
+const LOCAL_TOOL_SHUTDOWN_STEP_TIMEOUT_MS = 13_000;
+const OVERALL_SHUTDOWN_TIMEOUT_MS = 25_000;
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let reflectionRuntime: WhaleHallReflectionRuntime | null = null;
 let activityWindowDelivery: ActivityWindowDeliveryService | null = null;
 let activityWindowDeliveryStore: ActivityWindowDeliveryStore | null = null;
+let activityWindowDeliveryStopPromise: Promise<void> | null = null;
 const STARTUP_RETRY_DELAYS_MS = [
 	1_000, 5_000, 15_000, 45_000, 120_000, 300_000,
 ];
@@ -1064,6 +1070,11 @@ async function createClientWindow(): Promise<BrowserWindow> {
 
 const clientLifecycle = new BackgroundAppLifecycle<BrowserWindow>({
 	createWindow: createClientWindow,
+	onQuitRequested() {
+		shutdownRequested = true;
+		agent.beginShutdown();
+		sidecar.beginShutdown();
+	},
 	shutdown,
 	exit: () => Utils.quit(),
 	onError(operation, error) {
@@ -1115,34 +1126,50 @@ petWindow.webview.on("dom-ready", () => {
 
 function shutdown(): Promise<void> {
 	shutdownRequested = true;
+	agent.beginShutdown();
+	sidecar.beginShutdown();
 	if (shutdownPromise) return shutdownPromise;
 	const steps = [
 		{
 			name: "startup-retry",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => cancelStartupRetryWait?.(),
 		},
 		{
-			name: "audit-capture",
-			run: () => auditCaptureCoordinator.dispose(),
-		},
-		{
-			name: "model-relay",
-			run: () => relayBridge.abortAll(),
-		},
-		{
-			name: "data-center-sync",
-			run: () => dataCenterSync?.stop(),
-		},
-		{
-			name: "sensor-sidecar",
-			run: () => sidecar.stop(),
+			name: "model-relays",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
+			run: () => abortModelRelays(),
 		},
 		{
 			name: "activity-window-delivery",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => stopActivityWindowDelivery(),
 		},
 		{
+			name: "sensor-sidecar",
+			critical: true,
+			timeoutMs: SIDECAR_SHUTDOWN_STEP_TIMEOUT_MS,
+			run: () => sidecar.stop(),
+		},
+		{
+			name: "local-tool-host",
+			critical: true,
+			timeoutMs: LOCAL_TOOL_SHUTDOWN_STEP_TIMEOUT_MS,
+			run: () => agent.stop(),
+		},
+		{
+			name: "audit-capture",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
+			run: () => auditCaptureCoordinator.dispose(),
+		},
+		{
+			name: "data-center-sync",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
+			run: () => dataCenterSync?.stop(),
+		},
+		{
 			name: "startup",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			// Startup owns both the initial native start and any reflection-service
 			// start. Waiting here prevents a late candidate from restarting the
 			// native sensor process after shutdown has already stopped it.
@@ -1152,10 +1179,12 @@ function shutdown(): Promise<void> {
 		},
 		{
 			name: "timeline",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => timelineLifecycle.close(),
 		},
 		{
 			name: "reflection",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: async () => {
 				const runtime = reflectionRuntime;
 				reflectionRuntime = null;
@@ -1163,24 +1192,23 @@ function shutdown(): Promise<void> {
 			},
 		},
 		{
-			name: "local-tool-host",
-			critical: true,
-			run: () => agent.stop(),
-		},
-		{
 			name: "agent-repository",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => agentRepository.close(),
 		},
 		{
 			name: "pet-state",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => petStateArbiter.dispose(),
 		},
 		{
 			name: "pet-window-controller",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => petWindowController.dispose(),
 		},
 		{
 			name: "pet-window",
+			timeoutMs: FAST_SHUTDOWN_STEP_TIMEOUT_MS,
 			run: () => petWindow.close(),
 		},
 	] as const;
@@ -1204,6 +1232,18 @@ function shutdown(): Promise<void> {
 						: "UNKNOWN",
 			);
 		},
+		{
+			overallTimeoutMs: OVERALL_SHUTDOWN_TIMEOUT_MS,
+			onStepSettled(result) {
+				console.log(
+					"[shutdown]",
+					`step=${result.name}`,
+					`outcome=${result.outcome}`,
+					`critical=${result.critical}`,
+					`duration_ms=${Math.round(result.durationMs)}`,
+				);
+			},
+		},
 	);
 	shutdownPromise = operation;
 	void operation.then(
@@ -1215,6 +1255,23 @@ function shutdown(): Promise<void> {
 		},
 	);
 	return operation;
+}
+
+function abortModelRelays(): void {
+	const failures: unknown[] = [];
+	try {
+		relayBridge.abortAll();
+	} catch (error) {
+		failures.push(error);
+	}
+	try {
+		activityReflectionRelayBridge?.abortAll();
+	} catch (error) {
+		failures.push(error);
+	}
+	if (failures.length > 0) {
+		throw new AggregateError(failures, "Model relay shutdown failed.");
+	}
 }
 
 app.on("reopen", () => {
@@ -1427,58 +1484,59 @@ async function startActivityWindowDelivery(
 		dispatcher.start();
 		await delivery.start();
 	} catch (error) {
-		activityWindowDelivery = null;
-		activityAnalysisDispatcher = null;
-		activityWindowDeliveryStore = null;
-		if (activityReflectionAnalyzer === analyzer) {
-			activityReflectionAnalyzer = null;
-		}
-		analyzer.close();
-		await releaseActivityWindowDeliveryResources(delivery, dispatcher, store);
+		await stopActivityWindowDelivery();
 		throw error;
 	}
 }
 
-async function stopActivityWindowDelivery(): Promise<void> {
+function stopActivityWindowDelivery(): Promise<void> {
+	if (activityWindowDeliveryStopPromise !== null) {
+		return activityWindowDeliveryStopPromise;
+	}
 	const delivery = activityWindowDelivery;
 	const dispatcher = activityAnalysisDispatcher;
 	const store = activityWindowDeliveryStore;
 	const analyzer = activityReflectionAnalyzer;
-	activityWindowDelivery = null;
-	activityAnalysisDispatcher = null;
-	activityWindowDeliveryStore = null;
-	await releaseActivityWindowDeliveryResources(delivery, dispatcher, store);
-	analyzer?.close();
-	activityReflectionAnalyzer = null;
+	let operation!: Promise<void>;
+	operation = stopActivityWindowDeliveryResources(
+		{ analyzer, delivery, dispatcher, store },
+		reportActivityWindowDeliveryCleanupFailure,
+	).then(
+		() => {
+			if (activityWindowDelivery === delivery) activityWindowDelivery = null;
+			if (activityAnalysisDispatcher === dispatcher) {
+				activityAnalysisDispatcher = null;
+			}
+			if (activityWindowDeliveryStore === store) {
+				activityWindowDeliveryStore = null;
+			}
+			if (activityReflectionAnalyzer === analyzer) {
+				activityReflectionAnalyzer = null;
+			}
+			if (activityWindowDeliveryStopPromise === operation) {
+				activityWindowDeliveryStopPromise = null;
+			}
+		},
+		(error: unknown) => {
+			if (activityWindowDeliveryStopPromise === operation) {
+				activityWindowDeliveryStopPromise = null;
+			}
+			throw error;
+		},
+	);
+	activityWindowDeliveryStopPromise = operation;
+	return operation;
 }
 
-async function releaseActivityWindowDeliveryResources(
-	delivery: ActivityWindowDeliveryService | null,
-	dispatcher: ActivityAnalysisDispatcher | null,
-	store: ActivityWindowDeliveryStore | null,
-): Promise<void> {
-	await releaseActivityWindowDeliveryResource("delivery", () =>
-		delivery?.stop(),
+function reportActivityWindowDeliveryCleanupFailure(
+	resource: string,
+	error: unknown,
+): void {
+	console.warn(
+		"WhaleHall activity delivery cleanup failed:",
+		resource,
+		error instanceof Error ? error.name : "UNKNOWN",
 	);
-	await releaseActivityWindowDeliveryResource("dispatcher", () =>
-		dispatcher?.stop(),
-	);
-	await releaseActivityWindowDeliveryResource("store", () => store?.close());
-}
-
-async function releaseActivityWindowDeliveryResource(
-	resource: "delivery" | "dispatcher" | "store",
-	release: () => unknown | Promise<unknown>,
-): Promise<void> {
-	try {
-		await release();
-	} catch (error) {
-		console.warn(
-			"WhaleHall activity delivery cleanup failed:",
-			resource,
-			error instanceof Error ? error.name : "UNKNOWN",
-		);
-	}
 }
 
 function createRawFiveMinuteAuditSource(

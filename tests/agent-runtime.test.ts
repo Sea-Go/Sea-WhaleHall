@@ -42,6 +42,9 @@ class FakeLocalProcess implements LocalToolProcess {
 	startError: Error | null = null;
 	appendGoalError: Error | null = null;
 	startCount = 0;
+	stopCount = 0;
+	startGate: Promise<void> | null = null;
+	prepareGate: Promise<void> | null = null;
 	readonly preparedStartupGoalChanges: Array<LocalEventGoalChange | null> = [];
 	readonly appendedGoalChanges: LocalEventGoalChange[] = [];
 	startupGoalAcknowledgements = 0;
@@ -59,6 +62,7 @@ class FakeLocalProcess implements LocalToolProcess {
 	async prepareStartupGoalChange(
 		change: LocalEventGoalChange | null,
 	): Promise<void> {
+		await this.prepareGate;
 		if (this.isRunning) throw new Error("already running");
 		this.preparedStartupGoalChanges.push(structuredClone(change));
 	}
@@ -69,6 +73,7 @@ class FakeLocalProcess implements LocalToolProcess {
 
 	async start(): Promise<void> {
 		this.startCount += 1;
+		await this.startGate;
 		if (this.startError) throw this.startError;
 		this.pid = 7001;
 		this.isRunning = true;
@@ -250,6 +255,7 @@ class FakeLocalProcess implements LocalToolProcess {
 	}
 
 	async stop(): Promise<void> {
+		this.stopCount += 1;
 		this.pid = null;
 		this.isRunning = false;
 	}
@@ -323,6 +329,94 @@ function monitoringStatus(
 }
 
 describe("AgentRuntime", () => {
+	test("permanently gates startup after application shutdown begins", async () => {
+		const local = new FakeLocalProcess();
+		const runtime = new AgentRuntime(local, {
+			requireStartupGoalPreparation: true,
+		});
+		runtime.beginShutdown();
+		runtime.beginShutdown();
+
+		await expect(runtime.prepareStartupGoalChange(null)).rejects.toThrow(
+			"while WhaleHall is quitting",
+		);
+		await expect(runtime.start()).rejects.toThrow(
+			"while WhaleHall is quitting",
+		);
+		await expect(runtime.listLocalTools()).rejects.toThrow(
+			"while WhaleHall is quitting",
+		);
+		expect(local.startCount).toBe(0);
+	});
+
+	test("rejects a startup preparation that completes after shutdown begins", async () => {
+		const local = new FakeLocalProcess();
+		let releasePreparation!: () => void;
+		local.prepareGate = new Promise<void>((resolve) => {
+			releasePreparation = resolve;
+		});
+		const runtime = new AgentRuntime(local, {
+			requireStartupGoalPreparation: true,
+		});
+		const preparing = runtime.prepareStartupGoalChange(null);
+		await Promise.resolve();
+		runtime.beginShutdown();
+		releasePreparation();
+
+		await expect(preparing).rejects.toThrow("while WhaleHall is quitting");
+		await expect(runtime.start()).rejects.toThrow(
+			"while WhaleHall is quitting",
+		);
+		expect(local.startCount).toBe(0);
+	});
+
+	test("stops a native process whose in-flight startup completes after shutdown", async () => {
+		const local = new FakeLocalProcess();
+		let releaseStart!: () => void;
+		local.startGate = new Promise<void>((resolve) => {
+			releaseStart = resolve;
+		});
+		const runtime = new AgentRuntime(local, {
+			requireStartupGoalPreparation: true,
+		});
+		await runtime.prepareStartupGoalChange(null);
+		const starting = runtime.start();
+		await Promise.resolve();
+		runtime.beginShutdown();
+		await runtime.stop();
+		expect(local.isRunning).toBe(false);
+
+		releaseStart();
+		await starting;
+		expect(local.startCount).toBe(1);
+		expect(local.stopCount).toBe(2);
+		expect(local.isRunning).toBe(false);
+		expect(runtime.getLocalStatus().state).toBe("stopped");
+	});
+
+	test("blocks a late automatic-restart preparation before it can spawn", async () => {
+		const local = new FakeLocalProcess();
+		const runtime = new AgentRuntime(local, {
+			requireStartupGoalPreparation: true,
+		});
+		await runtime.prepareStartupGoalChange(null);
+		await runtime.start();
+		await runtime.acknowledgeStartupGoalChange();
+		local.fail(new LocalClientError("PROCESS_EXITED", "native exited"));
+		let releasePreparation!: () => void;
+		local.prepareGate = new Promise<void>((resolve) => {
+			releasePreparation = resolve;
+		});
+		const restarting = runtime.listLocalTools();
+		await Promise.resolve();
+		runtime.beginShutdown();
+		releasePreparation();
+
+		await expect(restarting).rejects.toThrow("while WhaleHall is quitting");
+		expect(local.startCount).toBe(1);
+		expect(local.isRunning).toBe(false);
+	});
+
 	test("production startup gate rejects lazy RPC starts until goal preparation", async () => {
 		const local = new FakeLocalProcess();
 		const runtime = new AgentRuntime(local, {

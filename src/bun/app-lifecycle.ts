@@ -10,7 +10,34 @@ export interface BeforeQuitEvent {
 export interface ShutdownStep {
 	name: string;
 	critical?: boolean;
+	timeoutMs?: number;
 	run(): void | Promise<void>;
+}
+
+export type ShutdownStepOutcome = "completed" | "failed" | "timed_out";
+
+export interface ShutdownStepResult {
+	name: string;
+	critical: boolean;
+	outcome: ShutdownStepOutcome;
+	durationMs: number;
+}
+
+export interface BestEffortShutdownOptions {
+	nowMs?: () => number;
+	/** Caps the complete sequence so critical owners can be prioritized. */
+	overallTimeoutMs?: number;
+	onStepSettled?(result: ShutdownStepResult): void;
+}
+
+export class ShutdownStepTimeoutError extends Error {
+	constructor(
+		public readonly step: string,
+		public readonly timeoutMs: number,
+	) {
+		super(`Shutdown step '${step}' exceeded its ${timeoutMs} ms deadline.`);
+		this.name = "ShutdownStepTimeoutError";
+	}
 }
 
 export class CriticalShutdownError extends Error {
@@ -23,17 +50,58 @@ export class CriticalShutdownError extends Error {
 export async function runBestEffortShutdown(
 	steps: readonly ShutdownStep[],
 	onError: (step: string, error: unknown) => void = () => {},
+	options: BestEffortShutdownOptions = {},
 ): Promise<void> {
 	const criticalFailures: string[] = [];
+	const nowMs = options.nowMs ?? Date.now;
+	const overallTimeoutMs = options.overallTimeoutMs;
+	if (
+		overallTimeoutMs !== undefined &&
+		(!Number.isSafeInteger(overallTimeoutMs) || overallTimeoutMs <= 0)
+	) {
+		throw new Error("Shutdown overall deadline is invalid.");
+	}
+	const deadlineAtMs =
+		overallTimeoutMs === undefined ? null : nowMs() + overallTimeoutMs;
 	for (const step of steps) {
+		const startedAtMs = nowMs();
+		let outcome: ShutdownStepOutcome = "completed";
 		try {
-			await step.run();
+			const remainingMs =
+				deadlineAtMs === null ? null : Math.max(0, deadlineAtMs - startedAtMs);
+			if (remainingMs === 0) {
+				throw new ShutdownStepTimeoutError(step.name, 0);
+			}
+			await runShutdownStep(
+				remainingMs === null
+					? step
+					: {
+							...step,
+							timeoutMs:
+								step.timeoutMs === undefined
+									? remainingMs
+									: Math.min(step.timeoutMs, remainingMs),
+						},
+			);
 		} catch (error) {
+			outcome =
+				error instanceof ShutdownStepTimeoutError ? "timed_out" : "failed";
 			if (step.critical) criticalFailures.push(step.name);
 			try {
 				onError(step.name, error);
 			} catch {
 				// Diagnostics must not prevent later process owners from shutting down.
+			}
+		} finally {
+			try {
+				options.onStepSettled?.({
+					name: step.name,
+					critical: step.critical === true,
+					outcome,
+					durationMs: Math.max(0, nowMs() - startedAtMs),
+				});
+			} catch {
+				// Observability must not prevent later process owners from shutting down.
 			}
 		}
 	}
@@ -42,10 +110,37 @@ export async function runBestEffortShutdown(
 	}
 }
 
+async function runShutdownStep(step: ShutdownStep): Promise<void> {
+	const timeoutMs = step.timeoutMs;
+	if (timeoutMs === undefined) {
+		const operation = Promise.resolve().then(() => step.run());
+		await operation;
+		return;
+	}
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+		throw new Error(`Shutdown step '${step.name}' has an invalid deadline.`);
+	}
+	const operation = Promise.resolve().then(() => step.run());
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(
+			() => reject(new ShutdownStepTimeoutError(step.name, timeoutMs)),
+			timeoutMs,
+		);
+	});
+	try {
+		await Promise.race([operation, deadline]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
 export interface BackgroundAppLifecycleOptions<
 	WindowType extends BackgroundWindow,
 > {
 	createWindow(): Promise<WindowType>;
+	/** Synchronous, one-way latch invoked before quit waits for any async work. */
+	onQuitRequested?(): void;
 	shutdown(): Promise<void>;
 	exit(): void;
 	onError?(operation: "open" | "quit", error: unknown): void;
@@ -62,6 +157,7 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	private opening: Promise<WindowType> | null = null;
 	private quitting: Promise<void> | null = null;
 	private quitRequested = false;
+	private quitRequestFailure: { error: unknown } | null = null;
 	private exitAuthorized = false;
 
 	constructor(
@@ -120,10 +216,21 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	}
 
 	quit(): Promise<void> {
-		this.quitRequested = true;
 		if (this.quitting !== null) return this.quitting;
+		if (!this.quitRequested || this.quitRequestFailure !== null) {
+			this.quitRequested = true;
+			try {
+				this.options.onQuitRequested?.();
+				this.quitRequestFailure = null;
+			} catch (error) {
+				// A failed process-start latch preserves the veto for this attempt. A
+				// later quit retries the required idempotent synchronous latch.
+				this.quitRequestFailure = { error };
+			}
+		}
 		const quitting = (async () => {
 			try {
+				if (this.quitRequestFailure) throw this.quitRequestFailure.error;
 				await this.opening?.catch(() => undefined);
 				await this.options.shutdown();
 			} catch (error) {
@@ -134,13 +241,17 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 				}
 				// Preserve the veto, but let a later quit retry any process owner that
 				// could not be stopped during this attempt.
-				this.quitting = null;
 				return;
 			}
 			this.exitAuthorized = true;
 			this.options.exit();
 		})();
 		this.quitting = quitting;
+		void quitting.then(() => {
+			if (!this.exitAuthorized && this.quitting === quitting) {
+				this.quitting = null;
+			}
+		});
 		return quitting;
 	}
 }
