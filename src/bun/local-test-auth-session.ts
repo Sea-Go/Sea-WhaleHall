@@ -10,6 +10,7 @@ import type {
 	AuthSessionIdentity,
 	DesktopAuthSessionManager,
 } from "./auth-session";
+import type { ModelRelayPurpose } from "./model-relay-transport";
 
 export const LOCAL_TEST_ACCOUNT_ID = LOCAL_TEST_AUTH_USER.id;
 
@@ -162,6 +163,7 @@ export class LocalTestAuthSessionManager implements DesktopAuthSessionManager {
 	async authorizedFetch(
 		_path: string,
 		_init: RequestInit = {},
+		_purpose: ModelRelayPurpose = "agent",
 	): Promise<Response> {
 		throw new LocalTestAuthError(
 			"service-unavailable",

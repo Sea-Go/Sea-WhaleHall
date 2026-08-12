@@ -13,18 +13,16 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-/** Reflection remains on the model relay. Auth, chat, and Agent APIs use one
- * of the two code-owned DataCenter origins. */
+/** All configurable remote model calls use an authenticated DataCenter origin. */
 export const WHALEHALL_RELAY_BASE_URL =
 	"https://model.sea-ridethewindbreakthewaves.xyz";
 export const WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL =
 	"https://data.sea-ridethewindbreakthewaves.xyz";
 export const WHALEHALL_DATA_CENTER_STAGING_BASE_URL =
 	"https://data-staging.sea-ridethewindbreakthewaves.xyz";
-export const REFLECTION_RELAY_COMPLETIONS_PATH = "/v1/activity/completions";
 export const WHALEHALL_RELAY_MODEL = "qwen3:1.7b";
 export const UNPROVISIONED_REFLECTION_RELAY_KEY =
-	"REPLACE_WITH_REFLECTION_RELAY_KEY";
+	"IGNORED_USE_AUTHENTICATED_SESSION";
 export const UNPROVISIONED_AGENT_RELAY_KEY = "REPLACE_WITH_PERSONAL_RELAY_KEY";
 
 const LEGACY_CONFIGURATION_SCHEMA_VERSION = "whalehall-client-config.v1";
@@ -68,7 +66,7 @@ export type ClientConfiguration = {
 export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 	reflection: {
 		name: WHALEHALL_RELAY_MODEL,
-		baseurl: WHALEHALL_RELAY_BASE_URL,
+		baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 		apikey: UNPROVISIONED_REFLECTION_RELAY_KEY,
 	},
 	agent: {
@@ -113,8 +111,6 @@ export type ModelRuntimeConfiguration = {
 
 export type ActivityReflectionRuntimeConfiguration = {
 	modelName: typeof WHALEHALL_RELAY_MODEL;
-	relayBaseUrl: string;
-	reflectionKey: string;
 	scoreThreshold: number;
 };
 
@@ -168,12 +164,9 @@ export function writeProvisionedClientConfiguration(
 	options: WriteProvisionedClientConfigurationOptions,
 ): void {
 	const normalized = normalizeClientConfiguration(options.configuration);
-	if (
-		isUnprovisionedKey(normalized.reflection.apikey) ||
-		isUnprovisionedKey(normalized.agent.apikey)
-	) {
+	if (isUnprovisionedKey(normalized.agent.apikey)) {
 		throw new Error(
-			"Provisioned client configuration requires literal API keys.",
+			"Provisioned client configuration requires a literal personal relay key.",
 		);
 	}
 	const destination = options.path;
@@ -206,13 +199,6 @@ export function writeProvisionedClientConfiguration(
 	}
 }
 
-/** Returns null until the reflection relay key is provisioned literally. */
-export function reflectionModelConfigurationFromConfiguration(
-	configuration: ClientConfiguration,
-): ModelRuntimeConfiguration | null {
-	return runtimeConfiguration(configuration.reflection);
-}
-
 /** Returns null until the personal relay key is provisioned literally. */
 export function agentModelConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
@@ -229,13 +215,9 @@ export function agentModelConfigurationFromConfiguration(
 export function activityReflectionConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
 ): ActivityReflectionRuntimeConfiguration | null {
-	const reflection =
-		reflectionModelConfigurationFromConfiguration(configuration);
-	if (!reflection) return null;
+	if (!agentModelConfigurationFromConfiguration(configuration)) return null;
 	return {
-		modelName: reflection.name,
-		relayBaseUrl: reflection.baseurl,
-		reflectionKey: reflection.apikey,
+		modelName: configuration.reflection.name,
 		scoreThreshold: 1,
 	};
 }
@@ -359,16 +341,24 @@ function normalizeRelayBaseUrl(
 		throw new Error(`${role} model baseurl must be the relay origin.`);
 	}
 	if (role === "reflection") {
-		if (endpoint.origin !== WHALEHALL_RELAY_BASE_URL) {
+		if (
+			endpoint.origin !== WHALEHALL_RELAY_BASE_URL &&
+			endpoint.origin !== WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL &&
+			endpoint.origin !== WHALEHALL_DATA_CENTER_STAGING_BASE_URL
+		) {
 			throw new Error(
-				"reflection model baseurl is not the approved relay origin.",
+				"reflection model baseurl is not an approved legacy or DataCenter origin.",
 			);
 		}
-		return WHALEHALL_RELAY_BASE_URL;
+		// Old owner files remain parseable, but runtime reflection is always bound
+		// to the authenticated DataCenter origin selected by the agent role.
+		return endpoint.origin === WHALEHALL_RELAY_BASE_URL
+			? WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL
+			: endpoint.origin;
 	}
 	if (endpoint.origin === WHALEHALL_RELAY_BASE_URL) {
 		// Existing owner files used the model origin for both roles. Preserve the
-		// literal key while moving Auth/Chat/Agent to the production DataCenter.
+		// literal personal key while moving every authenticated model call to DataCenter.
 		return WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL;
 	}
 	if (

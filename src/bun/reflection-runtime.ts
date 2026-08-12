@@ -41,6 +41,7 @@ export type CreateWhaleHallReflectionRuntimeOptions = {
 	teacherAuthorizationToken?: string;
 	environment?: Readonly<Record<string, string | undefined>>;
 	onError?: (error: unknown) => void;
+	cloudOwnerAccountId?: () => string | null;
 	onWindowSealed?: (window: EventWindowV1) => void | Promise<void>;
 	onFeedback?: (code: ActiveReflectionFeedbackCode) => void | Promise<void>;
 	canPresentFeedback?: () => boolean;
@@ -114,6 +115,7 @@ export async function createWhaleHallReflectionRuntime(
 			// early events cannot be attributed to a stale account; an authenticated
 			// account's authoritative goal is restored afterwards by Bun.
 			startupGoal: null,
+			cloudOwnerAccountId: options.cloudOwnerAccountId,
 			onWindowSealed: options.onWindowSealed,
 			sinks: options.onFeedback
 				? [

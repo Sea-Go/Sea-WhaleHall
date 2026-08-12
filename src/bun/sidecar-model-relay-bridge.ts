@@ -87,7 +87,7 @@ export class SidecarModelRelayBridge {
 				body,
 				idempotencyKey: relayIdempotencyKey(
 					input.originatingRequestId,
-					input.relayId,
+					body,
 				),
 			},
 			{
@@ -228,11 +228,14 @@ function relayFailure(error: unknown): AgentHostErrorPayload {
 	};
 }
 
-function relayIdempotencyKey(originatingRequestId: string | null, relayId: string): string {
+function relayIdempotencyKey(
+	originatingRequestId: string | null,
+	body: Record<string, unknown>,
+): string {
 	return `relay-${createHash("sha256")
 		.update(originatingRequestId ?? "")
 		.update("\0")
-		.update(relayId)
+		.update(JSON.stringify(body))
 		.digest("hex")}`;
 }
 

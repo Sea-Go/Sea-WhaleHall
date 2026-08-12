@@ -11,8 +11,8 @@ SDK 或直接发起模型请求；Bun 也不得绕过 Sidecar 为 `config.yaml` 
 
 | 角色 | Mastra 入口 | 远端数据边界 |
 | --- | --- | --- |
-| `reflection` | `reflection.analyze` → `activity-reflection` Workflow → 仅含 Mastra 原生本地 Skill 元工具的 Agent | Bun 在客户端生成完整中文 prompt；Sidecar 仅在本地内存中把它变成 OpenAI-compatible body。分析与评分 Skill 从随 Sidecar 打包的本地 `SKILL.md` 按需读取；Bun 使用 reflection key 请求固定 relay 路径，relay 只鉴权、限流、allowlist 并转发到 CPU 模型；Bun 再本地校验时间片、中文 action 和分数。 |
-| `agent` | conversation、planning、activity Mastra Agents | Sidecar 构造 OpenAI-compatible 请求，Bun 通过身份验证的 model relay 发送；Renderer 永远拿不到 bearer、relay key 或上游凭据。 |
+| `reflection` | `reflection.analyze` → `activity-reflection` Workflow → 仅含 Mastra 原生本地 Skill 元工具的 Agent | Bun 在客户端生成完整中文 prompt；Sidecar 仅在本地内存中把它变成 OpenAI-compatible body。Bun 使用当前账号的 bearer + personal relay key 请求 DataCenter 固定 `/v1/chat/completions`，并以代码常量添加 `X-WhaleHall-Model-Purpose: activity`；DataCenter 从 session 归属 user 并在内测环境保存请求/响应供开发者查看。 |
+| `agent` | conversation、planning、activity Mastra Agents | Sidecar 构造 OpenAI-compatible 请求，Bun 通过同一认证网关发送；普通对话/计划标记 `agent`，后台 activity Agent 标记 `activity`。Renderer 和 Sidecar 永远拿不到 bearer、relay key 或上游凭据。 |
 
 `activity-reflection` 不注册产品 Tool 或 Memory；它只允许 Mastra 对两个本地 Skill 提供的
 只读 `skill`、`skill_read`、`skill_search` 元工具。外层 Workflow 禁止 snapshot 持久化，内部
@@ -25,12 +25,17 @@ reflection Agent 也不注册到 durable Mastra 实例。原始窗口 prompt 与
   Agent 或 Workflow，再通过已有私有 stdio 协议实现受限 host adapter。
 - 不得新增直接调用旧 `/v1/activity/analyze` Worker 的客户端。`reflection` 只能经
   `MastraActivityReflectionAnalyzer`、Mastra Workflow、`ModelRelayTransport` 和固定
-  `/v1/activity/completions` 路径到达模型。
+  DataCenter `/v1/chat/completions` 路径到达模型。
 - 完整 `raw_event` 与目标快照可以作为本地 Sidecar 的 `userPrompt`，因为模型必须看到它们；
   但它们不得进入 Renderer、配置、日志、durable snapshot、普通 Agent run 或 Tool。relay
   key、agent key、bearer 和上游凭据始终留在 Bun/relay，不能进入 Sidecar。
-- relay 不添加 system prompt、不聚合事件、不格式化 action、不计算分数、不保存反思请求或
-  响应；这些职责只能在客户端代码中实现。
+- DataCenter 不添加 system prompt、不聚合事件、不格式化 action、不计算分数；这些职责只能
+  在客户端代码中实现。内测版会按认证 user 保存 exact request/response，属于明确的
+  internal-only 明文审计能力，不是产品云同步或长期隐私策略。
+- `X-WhaleHall-Model-Purpose` 只能由 Bun 的 code-owned transport/bridge 设置；Sidecar、body、
+  Renderer 都不能提供或覆盖。请求 body 中的 `userId`、token 或 key 一律拒绝。
+- raw activity outbox、receipt、score 和后台 Agent job 使用账号专属 ledger。未登录窗口不进入
+  云 outbox；A 的 pending 只能由 A 重登恢复，B 不能接管，且不会从无 owner 的全局窗口回扫。
 - 新模型调用必须有覆盖其输入脱敏、取消/超时、错误恢复和输出合同的测试；不能以“测试
   用直接 fetch”作为生产路径的例外。
 

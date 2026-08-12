@@ -15,7 +15,7 @@ flowchart TB
     Pet["Transparent Canvas pet window"] -->|"Typed RPC"| Bun
     Bun <-->|"private Content-Length stdio"| Mastra["Bundled Node 22.18 Mastra Sidecar\nconversation, planning, Tool loop"]
     Mastra -->|"complete OpenAI-compatible request"| Bun
-    Bun -.->|"HTTPS · auth/bearer · chat relay key · Agent v2 signature"| DataCenter["DataCenter data origin\nauth, chat, Agent, cloud sync"]
+    Bun -.->|"HTTPS · bearer · personal relay key · purpose · Agent v2 signature"| DataCenter["DataCenter data origin\nauth, model audit, Agent, cloud sync"]
     DataCenter -->|"chat model forwarding"| LLM["OpenAI-compatible model"]
     Bun --> AgentDB["Encrypted Agent SQLite"]
     Bun --> CredentialHelper["Credential helper\nCredential Manager / Keychain"]
@@ -25,10 +25,7 @@ flowchart TB
     Reflection --> SealedWindow["sealed-window outbox"]
     SealedWindow -->|"complete client-owned prompt / Mastra Workflow"| Mastra
     Mastra -->|"complete OpenAI-compatible request"| Bun
-    Bun -->|"reflection relay key + HTTPS"| ModelOrigin["Model origin\nreflection completion relay only"]
-    ModelOrigin -->|"CPU-only forward"| LLM
-    LLM -->|"model JSON"| ModelOrigin
-    ModelOrigin -->|"model JSON"| Bun
+    Bun -->|"same authenticated /v1/chat/completions\npurpose=activity"| DataCenter
     LocalClient -->|"stdin/stdout · JSONL"| Server["whalehall-local server"]
     Observer["Signed macOS Observer"] --> Server
     Server --> EventJournal["EventJournal · SQLite WAL"]
@@ -61,25 +58,25 @@ prompt from a sealed window, and normalizes the model JSON into reviewable
 time/action events plus a local score receipt. Mastra does not absorb the
 sensor catalogue or the deterministic Reflection pipeline.
 
-Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. DataCenter authenticates a short-lived bearer plus the same account's personal relay key for chat and owns Agent/cloud APIs; the separate model origin accepts only the reflection completion route. Browser contexts never communicate directly, never receive bearer tokens or relay keys, and never supply account identity.
+Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. Every configurable remote model call, including sealed-window reflection, uses DataCenter's single `/v1/chat/completions` gateway with a short-lived bearer and the same account's personal relay key. Bun adds the code-owned `agent` or `activity` purpose; the request body cannot declare a user. Internal-test DataCenter deployments retain the exact request and response for developer review under the authenticated user. Browser contexts never communicate directly, never receive bearer tokens or relay keys, and never supply account identity.
 
 Production login uses the configured remote email/password service. The submitted password is immediately cleared from React state; access and refresh credentials remain in Bun's secure credential storage, while the personal relay key remains only in owner-provisioned local `config.yaml`. WhaleHall does not fabricate credentials or fall back to a remote Agent.
 
 ## Development areas / 开发区域
 
-| Area | Location | Responsibility |
-| --- | --- | --- |
-| Client frontend | [`src/views/client`](src/views/client) | Authentication gate, planning, calendar, reports, settings, and client-side service adapters |
-| Pet frontend | [`src/views/pet`](src/views/pet) | Transparent Canvas companion, interaction, and replaceable `PetRenderer` interface |
-| Local Mastra Agent | [`src/agent/mastra-host`](src/agent/mastra-host) | Bundled Node ESM Sidecar, conversation/activity Agents, planning/reflection Workflows, and private stdio protocol |
-| TypeScript local runtimes | [`src/agent`](src/agent) | Mastra boundary, Local Tool client, Reflection/Timeline v2, and handwritten protocol mirrors |
-| Electrobun main process | [`src/bun`](src/bun) | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition |
-| Shared frontend contracts | [`src/shared`](src/shared) | Electrobun Typed RPC schemas shared with both WebViews |
-| Credential helper | [`whalehall-credential-helper`](whalehall-credential-helper) | One-shot OS vault access without secrets in argv, environment, stderr, or Renderer RPC |
-| Remote model relay | [`services/model-relay`](services/model-relay) | Model-origin reflection forwarding only in production Caddy; never an Agent |
-| Rust Local protocol | [`whalehall-local/protocol`](whalehall-local/protocol) | JSONL requests, responses, tool descriptors, events, and errors |
-| Rust Local core | [`whalehall-local/core`](whalehall-local/core) | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence |
-| Rust Local server | [`whalehall-local/server`](whalehall-local/server) | Concurrent stdin/stdout JSONL server and packaged executable |
+| Area                      | Location                                                     | Responsibility                                                                                                    |
+| ------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Client frontend           | [`src/views/client`](src/views/client)                       | Authentication gate, planning, calendar, reports, settings, and client-side service adapters                      |
+| Pet frontend              | [`src/views/pet`](src/views/pet)                             | Transparent Canvas companion, interaction, and replaceable `PetRenderer` interface                                |
+| Local Mastra Agent        | [`src/agent/mastra-host`](src/agent/mastra-host)             | Bundled Node ESM Sidecar, conversation/activity Agents, planning/reflection Workflows, and private stdio protocol |
+| TypeScript local runtimes | [`src/agent`](src/agent)                                     | Mastra boundary, Local Tool client, Reflection/Timeline v2, and handwritten protocol mirrors                      |
+| Electrobun main process   | [`src/bun`](src/bun)                                         | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition           |
+| Shared frontend contracts | [`src/shared`](src/shared)                                   | Electrobun Typed RPC schemas shared with both WebViews                                                            |
+| Credential helper         | [`whalehall-credential-helper`](whalehall-credential-helper) | One-shot OS vault access without secrets in argv, environment, stderr, or Renderer RPC                            |
+| Remote model relay        | [`services/model-relay`](services/model-relay)               | Model-origin reflection forwarding only in production Caddy; never an Agent                                       |
+| Rust Local protocol       | [`whalehall-local/protocol`](whalehall-local/protocol)       | JSONL requests, responses, tool descriptors, events, and errors                                                   |
+| Rust Local core           | [`whalehall-local/core`](whalehall-local/core)               | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence                      |
+| Rust Local server         | [`whalehall-local/server`](whalehall-local/server)           | Concurrent stdin/stdout JSONL server and packaged executable                                                      |
 
 Project contribution and frontend implementation rules:
 
@@ -89,7 +86,7 @@ Project contribution and frontend implementation rules:
 - [`docs/frontend/FRONTEND_STANDARD.md`](docs/frontend/FRONTEND_STANDARD.md) — feature-first React architecture and Definition of Done;
 - [`docs/frontend/CALENDAR_STANDARD.md`](docs/frontend/CALENDAR_STANDARD.md) — calendar domain, adapter, interaction, timezone, and QA rules.
 - [`docs/REFLECTION_SYSTEM.md`](docs/REFLECTION_SYSTEM.md) — behavior events, 64/5-minute windows, persistence, model locks, privacy, and training/runtime operations.
-- [`config.example.yaml`](config.example.yaml) and [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) — the two-role home-cloud model configuration and API-key guide.
+- [`config.example.yaml`](config.example.yaml) and [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) — the authenticated internal-test model gateway and configuration guide.
 - [`docs/MODEL_CALL_BOUNDARY.md`](docs/MODEL_CALL_BOUNDARY.md) — Mastra-only configurable model-call policy and audited local-inference exceptions.
 
 Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. The first Agent release exposes only three read Tools and five approval-bound planning/calendar writes; it does not register the sensor, accessibility, browser, activity, or cleanup catalogue.
@@ -205,11 +202,10 @@ the credential helper, verifies and stages the pinned Node runtime, and bundles
 the local Mastra Sidecar. On macOS it also builds and signs the Observer and
 versioned Vault Broker before the existing post-wrap and post-package security
 checks run. Desktop authentication and model requests use the owner-provisioned
-`config.yaml` fixed-role configuration. Reflection uses the model origin;
-authentication, chat, Agent registration, and opt-in encrypted cloud sync use the
-DataCenter origin. The reflection relay key and personal
-relay key are literal owner-only values; upstream model credentials remain in
-the separately deployed relay process. See
+`config.yaml` fixed-role configuration. Reflection, chat, Agent registration,
+and opt-in cloud sync all use the selected code-owned DataCenter origin. Only
+the personal relay key is a live model credential; the legacy reflection key
+field is ignored. Upstream model credentials remain in DataCenter. See
 [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) for
 the configuration and deployment boundary, and
 [`docs/CONVERSATION_AGENT_INTEGRATION.md`](docs/CONVERSATION_AGENT_INTEGRATION.md)
@@ -322,7 +318,7 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 - `browser.history`, `browser.searches`, and `browser.downloads` query the local `browser.sqlite3` import. All browser Tools require the high-impact `browser.read` permission.
 - `editor.status` reports explicit VS Code bridge enablement, spool health, quarantine state, open edit bursts, and durable outbox backlog without returning document content. It requires `editor.metadata`.
 
-Timeline v2 classifies with the explicit `deterministic-cold-start.v2` implementation by default. Its ModernBERT episode adapter is a separate opt-in runtime boundary: it sends facts only after a caller-pinned v2 artifact manifest matches field-for-field. The editable two-role `config.yaml` is reserved for the home-cloud reflection and Agent relay; it does not turn an arbitrary endpoint into a Timeline model. The reviewed local `qwen3:4b` Teacher remains an internal fallback and never receives or supplies ModernBERT class probabilities. Serving code or an endpoint address alone is never treated as proof that a trained, calibrated artifact is ready. WhaleHall still does not control a browser.
+Timeline v2 classifies with the explicit `deterministic-cold-start.v2` implementation by default. Its ModernBERT episode adapter is a separate opt-in runtime boundary: it sends facts only after a caller-pinned v2 artifact manifest matches field-for-field, and P0 production composition accepts loopback endpoints only. Remote ModernBERT HTTPS is rejected because it would bypass the authenticated DataCenter model-audit path. The editable two-role `config.yaml` selects DataCenter-backed model names but cannot turn an arbitrary endpoint into a Timeline model. The reviewed local `qwen3:4b` Teacher remains an internal fallback and never receives or supplies ModernBERT class probabilities. Serving code or an endpoint address alone is never treated as proof that a trained, calibrated artifact is ready. WhaleHall still does not control a browser.
 
 ## Foreground application usage and SQLite
 

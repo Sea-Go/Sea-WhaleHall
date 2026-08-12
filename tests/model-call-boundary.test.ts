@@ -23,12 +23,12 @@ describe("desktop model-call boundary", () => {
 		expect(protocol).toContain("interface ActivityReflectionAnalyzeParams");
 		expect(protocol).toContain("userPrompt: string");
 		expect(protocol).not.toContain("ActivityEventWorkerRequest");
-		const relayAuthorization =
-			sources.get("src/bun/reflection-model-relay-authorization.ts") ?? "";
-		expect(relayAuthorization).toContain('"/v1/activity/completions"');
-		expect(relayAuthorization).not.toContain(
-			"ACTIVITY_REFLECTION_SYSTEM_PROMPT",
-		);
+		const relayTransport =
+			sources.get("src/bun/model-relay-transport.ts") ?? "";
+		expect(relayTransport).toContain('"/v1/chat/completions"');
+		expect(relayTransport).toContain('"agent" | "activity"');
+		expect(relayTransport).not.toContain('"/v1/activity/completions"');
+		expect(relayTransport).not.toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
 	});
 
 	test("requires explicit local annotations for audited legacy inference", async () => {
@@ -51,20 +51,18 @@ describe("desktop model-call boundary", () => {
 		);
 	});
 
-	test("routes only reflection completions through the production model origin", async () => {
+	test("keeps the legacy model origin isolated from the authenticated desktop path", async () => {
 		const fragment = await readFile(
 			join(repositoryRoot, "deploy/home-cloud/model-relay/Caddyfile.fragment"),
 			"utf8",
 		);
 		expect(fragment).toMatch(
-			/@whalehall_model_relay \{\s+method POST\s+path \/v1\/activity\/completions\s+\}/,
-		);
-		expect(fragment).toMatch(
-			/@whalehall_model_relay_invalid_method \{\s+not method POST\s+path \/v1\/activity\/completions\s+\}/,
+			/@whalehall_retired_activity_completion \{\s+path \/v1\/activity\/completions\s+\}/,
 		);
 		expect(fragment).toContain(
-			"respond @whalehall_model_relay_invalid_method 405",
+			"respond @whalehall_retired_activity_completion 410",
 		);
+		expect(fragment).not.toContain("reverse_proxy 127.0.0.1:8787");
 		const dataCenterDenyMatcher = fragment.match(
 			/@whalehall_datacenter_paths \{([\s\S]*?)\n\}/,
 		)?.[1];
@@ -79,6 +77,19 @@ describe("desktop model-call boundary", () => {
 			expect(dataCenterDenyMatcher).toContain(path);
 		}
 		expect(fragment).toContain("respond @whalehall_datacenter_paths 404");
+	});
+
+	test("keeps the retired activity path out of desktop release inputs", async () => {
+		const sources = await sourceFiles();
+		for (const path of [
+			"config.template.yaml",
+			"electrobun.config.ts",
+			"scripts/pre-build.ts",
+			"scripts/build-agent-host.ts",
+		]) {
+			sources.set(path, await readFile(join(repositoryRoot, path), "utf8"));
+		}
+		expect(findContaining(sources, "/v1/activity/completions")).toEqual([]);
 	});
 });
 

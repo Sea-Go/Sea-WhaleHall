@@ -20,8 +20,24 @@ import type {
 import { ActivityAnalysisDispatcher } from "../src/bun/activity-analysis-dispatcher";
 import type { StartActivityAnalysisRun } from "../src/bun/agent-run-coordinator";
 import type { DesktopAuthSessionManager } from "../src/bun/auth-session";
+import type { AuthSessionIdentity } from "../src/shared/session-identity";
 
 const directories: string[] = [];
+const activityOwner: AuthSessionIdentity = {
+	accountId: "account-a",
+	sessionId: "session-account-a",
+	generation: 1,
+};
+
+function ownerBoundary(identity = activityOwner) {
+	return {
+		currentSession: () => ({ ...identity }),
+		isCurrentSession: (candidate: AuthSessionIdentity) =>
+			candidate.accountId === identity.accountId &&
+			candidate.sessionId === identity.sessionId &&
+			candidate.generation === identity.generation,
+	};
+}
 
 afterEach(() => {
 	for (const directory of directories.splice(0)) {
@@ -144,10 +160,17 @@ function stateOnlyWorkerResponse(
 }
 
 class MutableWindowSource implements ActivityWindowSource {
-	constructor(readonly windows: EventWindowV1[]) {}
+	constructor(
+		readonly windows: EventWindowV1[],
+		readonly ownerAccountId: string | null = null,
+	) {}
 
-	async listWindows(): Promise<readonly EventWindowV1[]> {
-		return structuredClone(this.windows);
+	async listWindowsForAccount(
+		accountId: string,
+	): Promise<readonly EventWindowV1[]> {
+		return accountId === this.ownerAccountId
+			? structuredClone(this.windows)
+			: [];
 	}
 }
 
@@ -222,6 +245,290 @@ async function eventually(
 }
 
 describe("ActivityWindowDeliveryService", () => {
+	test("fails closed before creating an outbox without an authenticated owner", async () => {
+		const directory = temporaryDirectory();
+		const store = new ActivityWindowDeliveryStore(
+			join(directory, "activity-window-worker.sqlite3"),
+		);
+		const service = new ActivityWindowDeliveryService({
+			source: new MutableWindowSource([]),
+			analyzer: new RecordingAnalyzer([1]),
+			store,
+			currentSession: () => null,
+			isCurrentSession: () => false,
+		});
+		try {
+			await expect(service.start()).rejects.toThrow(
+				"requires an authenticated account",
+			);
+			expect(service.getStatus().pendingWindowCount).toBe(0);
+		} finally {
+			await service.stop();
+			store.close();
+		}
+	});
+
+	test("serializes a seal notification behind the activation baseline", async () => {
+		const directory = temporaryDirectory();
+		const concurrent = sealedWindow("window-sealed-during-cutover", 2);
+		let releaseList!: () => void;
+		const listBlocked = new Promise<void>((resolve) => {
+			releaseList = resolve;
+		});
+		const source: ActivityWindowSource = {
+			async listWindowsForAccount() {
+				await listBlocked;
+				return [];
+			},
+		};
+		const analyzer = new RecordingAnalyzer([0.5]);
+		const store = new ActivityWindowDeliveryStore(
+			join(directory, "activity-window-worker.sqlite3"),
+		);
+		const service = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
+			source,
+			analyzer,
+			store,
+		});
+		try {
+			const starting = service.start();
+			const enqueueing = service.enqueueWindow(concurrent);
+			releaseList();
+			await starting;
+			await enqueueing;
+			await service.whenIdle();
+			expect(analyzer.requests).toHaveLength(1);
+			expect((analyzer.requests[0]?.raw_event as EventWindowV1).windowId).toBe(
+				concurrent.windowId,
+			);
+			expect(service.getStatus().acceptedAnalysisCount).toBe(1);
+		} finally {
+			await service.stop();
+			store.close();
+		}
+	});
+
+	test("rejects activation when the exact session changes for the same account", async () => {
+		const directory = temporaryDirectory();
+		let releaseList!: () => void;
+		const listBlocked = new Promise<void>((resolve) => {
+			releaseList = resolve;
+		});
+		const source: ActivityWindowSource = {
+			async listWindowsForAccount() {
+				await listBlocked;
+				return [sealedWindow("window-owned-by-old-session", 2)];
+			},
+		};
+		let identity = { ...activityOwner };
+		const analyzer = new RecordingAnalyzer([0.5]);
+		const store = new ActivityWindowDeliveryStore(
+			join(directory, "activity-window-worker.sqlite3"),
+		);
+		const service = new ActivityWindowDeliveryService({
+			source,
+			analyzer,
+			store,
+			currentSession: () => ({ ...identity }),
+			isCurrentSession: (candidate) =>
+				candidate.accountId === identity.accountId &&
+				candidate.sessionId === identity.sessionId &&
+				candidate.generation === identity.generation,
+		});
+		try {
+			const starting = service.start();
+			identity = {
+				...identity,
+				sessionId: "session-account-a-replacement",
+				generation: identity.generation + 1,
+			};
+			releaseList();
+			await expect(starting).rejects.toThrow(
+				"session changed during activation",
+			);
+			expect(analyzer.requests).toHaveLength(0);
+			expect(service.getStatus().pendingWindowCount).toBe(0);
+		} finally {
+			await service.stop();
+			store.close();
+		}
+	});
+
+	test("recovers an account-owned seal lost before the live outbox handoff", async () => {
+		const directory = temporaryDirectory();
+		const lostNotification = sealedWindow("window-owned-seal-before-crash", 2);
+		const source = new MutableWindowSource(
+			[lostNotification],
+			activityOwner.accountId,
+		);
+		const analyzer = new RecordingAnalyzer([0.5]);
+		const store = new ActivityWindowDeliveryStore(
+			join(directory, "activity-window-worker.sqlite3"),
+		);
+		const service = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
+			source,
+			analyzer,
+			store,
+		});
+		try {
+			await service.start();
+			await service.whenIdle();
+			expect(analyzer.requests).toHaveLength(1);
+			expect(
+				(analyzer.requests[0]?.raw_event as EventWindowV1).windowId,
+			).toBe(lostNotification.windowId);
+			expect(service.getStatus()).toMatchObject({
+				acceptedAnalysisCount: 1,
+				pendingWindowCount: 0,
+			});
+		} finally {
+			await service.stop();
+			store.close();
+		}
+	});
+
+	test("waits for an in-flight activation before account cleanup closes its ledger", async () => {
+		const directory = temporaryDirectory();
+		let releaseList!: () => void;
+		const listBlocked = new Promise<void>((resolve) => {
+			releaseList = resolve;
+		});
+		const source: ActivityWindowSource = {
+			async listWindowsForAccount() {
+				await listBlocked;
+				return [];
+			},
+		};
+		const analyzer = new RecordingAnalyzer([1]);
+		const store = new ActivityWindowDeliveryStore(
+			join(directory, "activity-window-worker.sqlite3"),
+		);
+		const service = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
+			source,
+			analyzer,
+			store,
+		});
+		const starting = service.start();
+		let stopped = false;
+		const stopping = service.stop().then(() => {
+			stopped = true;
+		});
+		await Promise.resolve();
+		expect(stopped).toBeFalse();
+		releaseList();
+		await Promise.all([starting, stopping]);
+		store.close();
+		expect(analyzer.requests).toHaveLength(0);
+	});
+
+	test("keeps raw outbox, receipts, score, and Agent jobs bound to account A", () => {
+		const directory = temporaryDirectory();
+		const store = new ActivityWindowDeliveryStore(
+			join(directory, "activity-window-worker.sqlite3"),
+		);
+		const window = sealedWindow("window-owned-by-a", 2);
+		const requestId = "request-owned-by-a";
+		const accountB: AuthSessionIdentity = {
+			accountId: "account-b",
+			sessionId: "session-account-b",
+			generation: 1,
+		};
+		try {
+			store.initializeBaseline([], activityOwner);
+			store.enqueue(window, requestId, 1, activityOwner);
+			expect(() => store.nextWindow(1, accountB)).toThrow(
+				"belongs to another account",
+			);
+			store.apply(
+				window.windowId,
+				workerResponse(requestId, window.windowId, 1),
+				1,
+				2,
+			);
+			expect(store.nextActivityAnalysisJob(1, "account-b", 3)).toEqual({
+				kind: "account_mismatch",
+			});
+			const owned = store.nextActivityAnalysisJob(1, "account-a", 3);
+			expect(owned.kind).toBe("ready");
+			if (owned.kind !== "ready") throw new Error("Expected account A job.");
+			expect(() =>
+				store.claimActivityAnalysisJob(
+					owned.job.jobId,
+					"account-b",
+					"run-b",
+					3,
+				),
+			).toThrow("belongs to another account");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("recovers account A exact wire after restart without assigning it to B", async () => {
+		const directory = temporaryDirectory();
+		const databasePath = join(directory, "activity-window-worker.sqlite3");
+		const window = sealedWindow("window-response-lost-a", 2);
+		const requestId = "request-response-lost-a";
+		const first = new ActivityWindowDeliveryStore(databasePath);
+		first.initializeBaseline([], activityOwner);
+		first.enqueue(window, requestId, 1, activityOwner);
+		first.defer(window.windowId, 1, "transport_error");
+		first.close();
+
+		const accountBOwner: AuthSessionIdentity = {
+			accountId: "account-b",
+			sessionId: "session-account-b",
+			generation: 1,
+		};
+		const accountBAnalyzer = new RecordingAnalyzer([1]);
+		const accountBStore = new ActivityWindowDeliveryStore(
+			join(directory, "activity-window-worker-account-b.sqlite3"),
+		);
+		const accountBService = new ActivityWindowDeliveryService({
+			...ownerBoundary(accountBOwner),
+			source: new MutableWindowSource([]),
+			analyzer: accountBAnalyzer,
+			store: accountBStore,
+			nowMs: () => 2,
+		});
+		await accountBService.start();
+		await accountBService.whenIdle();
+		expect(accountBAnalyzer.requests).toHaveLength(0);
+		await accountBService.stop();
+		accountBStore.close();
+
+		const resumedOwner: AuthSessionIdentity = {
+			...activityOwner,
+			sessionId: "session-account-a-after-restart",
+			generation: 2,
+		};
+		const resumedStore = new ActivityWindowDeliveryStore(databasePath);
+		const analyzer = new RecordingAnalyzer([0.5]);
+		const service = new ActivityWindowDeliveryService({
+			...ownerBoundary(resumedOwner),
+			source: new MutableWindowSource([]),
+			analyzer,
+			store: resumedStore,
+			nowMs: () => 2,
+		});
+		try {
+			await service.start();
+			await service.whenIdle();
+			expect(analyzer.requests).toHaveLength(1);
+			expect(analyzer.requests[0]?.request_id).toBe(requestId);
+			expect(service.getStatus()).toMatchObject({
+				acceptedAnalysisCount: 1,
+				pendingWindowCount: 0,
+			});
+		} finally {
+			await service.stop();
+			resumedStore.close();
+		}
+	});
+
 	test("persists a deterministic zero-score state receipt without scheduling an Agent job", () => {
 		const directory = temporaryDirectory();
 		const store = new ActivityWindowDeliveryStore(
@@ -230,8 +537,8 @@ describe("ActivityWindowDeliveryService", () => {
 		const window = sealedWindow("window-state-only", 2);
 		const requestId = "request-state-only";
 		try {
-			store.initializeBaseline([]);
-			store.enqueue(window, requestId, 1);
+			store.initializeBaseline([], activityOwner);
+			store.enqueue(window, requestId, 1, activityOwner);
 			const result = store.apply(
 				window.windowId,
 				stateOnlyWorkerResponse(requestId, window.windowId),
@@ -243,7 +550,7 @@ describe("ActivityWindowDeliveryService", () => {
 				triggerBecamePending: false,
 				status: { accumulatedScore: 0, agentTriggerPending: false },
 			});
-			expect(store.nextActivityAnalysisJob(1, "account-state", 3)).toEqual({
+			expect(store.nextActivityAnalysisJob(1, "account-a", 3)).toEqual({
 				kind: "none",
 			});
 		} finally {
@@ -260,6 +567,7 @@ describe("ActivityWindowDeliveryService", () => {
 		);
 		const triggerScores: number[] = [];
 		const service = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
 			source,
 			analyzer,
 			store,
@@ -325,6 +633,7 @@ describe("ActivityWindowDeliveryService", () => {
 			join(directory, "activity-window-worker.sqlite3"),
 		);
 		const service = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
 			source,
 			analyzer,
 			store,
@@ -436,6 +745,7 @@ describe("ActivityWindowDeliveryService", () => {
 				),
 		});
 		const service = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
 			source,
 			analyzer: new RecordingAnalyzer([0.6, 0.6]),
 			store,
@@ -519,7 +829,7 @@ describe("ActivityWindowDeliveryService", () => {
 		}
 	});
 
-	test("does not backfill windows sealed before cutover and repairs a missed new-window notification", async () => {
+	test("never assigns globally discovered windows to a later login", async () => {
 		const directory = temporaryDirectory();
 		const legacy = sealedWindow("window-before-cutover", 2);
 		const newWindow = sealedWindow("window-after-cutover", 2);
@@ -529,6 +839,7 @@ describe("ActivityWindowDeliveryService", () => {
 			join(directory, "activity-window-worker.sqlite3"),
 		);
 		const firstService = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
 			source,
 			analyzer: new RecordingAnalyzer([0.8]),
 			store: firstStore,
@@ -539,14 +850,14 @@ describe("ActivityWindowDeliveryService", () => {
 		await firstService.stop();
 		firstStore.close();
 
-		// Simulate a process stop just after Reflection sealed a new window but
-		// before its asynchronous notification reached the activity outbox.
+		// This window has no durable account owner. A later login must not claim it.
 		source.windows.push(newWindow);
 		const analyzer = new RecordingAnalyzer([0.8]);
 		const recoveredStore = new ActivityWindowDeliveryStore(
 			join(directory, "activity-window-worker.sqlite3"),
 		);
 		const recovered = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
 			source,
 			analyzer,
 			store: recoveredStore,
@@ -554,16 +865,9 @@ describe("ActivityWindowDeliveryService", () => {
 		try {
 			await recovered.start();
 			await recovered.whenIdle();
-			expect(analyzer.requests).toHaveLength(1);
-			const deliveredRequest = analyzer.requests[0];
-			if (!deliveredRequest) {
-				throw new Error("Expected the recovered activity window request.");
-			}
-			expect((deliveredRequest.raw_event as EventWindowV1).windowId).toBe(
-				"window-after-cutover",
-			);
+			expect(analyzer.requests).toHaveLength(0);
 			expect(recovered.getStatus()).toMatchObject({
-				acceptedAnalysisCount: 1,
+				acceptedAnalysisCount: 0,
 				pendingWindowCount: 0,
 			});
 		} finally {
@@ -582,6 +886,7 @@ describe("ActivityWindowDeliveryService", () => {
 		const accepted: ActivityEventWorkerResponse[] = [];
 		const errors: unknown[] = [];
 		const service = new ActivityWindowDeliveryService({
+			...ownerBoundary(),
 			source,
 			analyzer: new HallucinatedSourceAnalyzer(),
 			store,
@@ -625,11 +930,11 @@ describe("ActivityWindowDeliveryService", () => {
 		const threshold = 1;
 		const receiptCount = 514;
 		try {
-			store.initializeBaseline([]);
+			store.initializeBaseline([], activityOwner);
 			for (let index = 0; index < receiptCount; index += 1) {
 				const window = sealedWindow(`window-backlog-${index}`, 1);
 				const requestId = `request-backlog-${index}`;
-				store.enqueue(window, requestId, index);
+				store.enqueue(window, requestId, index, activityOwner);
 				store.apply(
 					window.windowId,
 					workerResponse(requestId, window.windowId, 1),
@@ -643,7 +948,7 @@ describe("ActivityWindowDeliveryService", () => {
 			while (true) {
 				const next = store.nextActivityAnalysisJob(
 					threshold,
-					"account-backlog",
+					"account-a",
 					receiptCount * 2 + completedJobs,
 				);
 				if (next.kind === "none") break;
@@ -660,13 +965,13 @@ describe("ActivityWindowDeliveryService", () => {
 				const runId = `backlog-run-${completedJobs}`;
 				store.claimActivityAnalysisJob(
 					next.job.jobId,
-					"account-backlog",
+					"account-a",
 					runId,
 					receiptCount * 3 + completedJobs,
 				);
 				store.completeActivityAnalysisJob(
 					next.job.jobId,
-					"account-backlog",
+					"account-a",
 					runId,
 					threshold,
 					receiptCount * 4 + completedJobs,
@@ -687,12 +992,12 @@ describe("ActivityWindowDeliveryService", () => {
 		const threshold = 1;
 		const zeroScoreReceiptCount = 200;
 		try {
-			store.initializeBaseline([]);
+			store.initializeBaseline([], activityOwner);
 			for (let index = 0; index < zeroScoreReceiptCount + 1; index += 1) {
 				const window = sealedWindow(`window-zero-score-${index}`, 1);
 				const requestId = `request-zero-score-${index}`;
 				const score = index === zeroScoreReceiptCount ? 1 : 0;
-				store.enqueue(window, requestId, index);
+				store.enqueue(window, requestId, index, activityOwner);
 				store.apply(
 					window.windowId,
 					workerResponse(requestId, window.windowId, score),
@@ -708,7 +1013,7 @@ describe("ActivityWindowDeliveryService", () => {
 			while (true) {
 				const next = store.nextActivityAnalysisJob(
 					threshold,
-					"account-zero-score",
+					"account-a",
 					zeroScoreReceiptCount * 2 + completedJobs,
 				);
 				if (next.kind === "none") break;
@@ -721,13 +1026,13 @@ describe("ActivityWindowDeliveryService", () => {
 				const runId = `zero-score-run-${completedJobs}`;
 				store.claimActivityAnalysisJob(
 					next.job.jobId,
-					"account-zero-score",
+					"account-a",
 					runId,
 					zeroScoreReceiptCount * 3 + completedJobs,
 				);
 				store.completeActivityAnalysisJob(
 					next.job.jobId,
-					"account-zero-score",
+					"account-a",
 					runId,
 					threshold,
 					zeroScoreReceiptCount * 4 + completedJobs,

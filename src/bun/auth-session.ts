@@ -1,12 +1,10 @@
 import type { AuthCredentials, AuthSession } from "../shared/auth";
+import type { AuthSessionIdentity } from "../shared/session-identity";
+import type { ModelRelayPurpose } from "./model-relay-transport";
+
+export type { AuthSessionIdentity } from "../shared/session-identity";
 
 /** A session generation binds local encrypted work to one exact account login. */
-export interface AuthSessionIdentity {
-	accountId: string;
-	sessionId: string;
-	generation: number;
-}
-
 /**
  * The Bun composition depends only on this narrow desktop authentication
  * contract. Implementations keep access, refresh, and personal relay keys out
@@ -18,7 +16,11 @@ export interface DesktopAuthSessionManager {
 	restoreSession(): Promise<AuthSession | null>;
 	signIn(credentials: AuthCredentials): Promise<AuthSession>;
 	signOut(): Promise<void>;
-	authorizedFetch(path: string, init?: RequestInit): Promise<Response>;
+	authorizedFetch(
+		path: string,
+		init?: RequestInit,
+		purpose?: ModelRelayPurpose,
+	): Promise<Response>;
 	captureCurrentSession(): AuthSessionIdentity | null;
 	isCurrentSession(identity: AuthSessionIdentity): boolean;
 	clearSessionIfCurrent(identity: AuthSessionIdentity): Promise<boolean>;

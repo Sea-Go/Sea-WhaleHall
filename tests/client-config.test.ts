@@ -15,8 +15,6 @@ import {
 	type ClientConfiguration,
 	DEFAULT_CLIENT_CONFIGURATION,
 	loadOrCreateClientConfiguration,
-	REFLECTION_RELAY_COMPLETIONS_PATH,
-	reflectionModelConfigurationFromConfiguration,
 	UNPROVISIONED_AGENT_RELAY_KEY,
 	UNPROVISIONED_REFLECTION_RELAY_KEY,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
@@ -49,7 +47,7 @@ function templateConfiguration(): string {
 	return [
 		"reflection:",
 		`  name: "${WHALEHALL_RELAY_MODEL}"`,
-		`  baseurl: "${WHALEHALL_RELAY_BASE_URL}"`,
+		`  baseurl: "${WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL}"`,
 		`  apikey: "${UNPROVISIONED_REFLECTION_RELAY_KEY}"`,
 		"",
 		"agent:",
@@ -72,7 +70,7 @@ function provisionedConfiguration(): ClientConfiguration {
 	return {
 		reflection: {
 			name: WHALEHALL_RELAY_MODEL,
-			baseurl: WHALEHALL_RELAY_BASE_URL,
+			baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 			apikey: fixtureReflectionRelayKey,
 		},
 		agent: {
@@ -117,9 +115,6 @@ describe("WhaleHall client config.yaml", () => {
 		);
 		expectOwnerOnlyMode(result.path);
 		expect(
-			reflectionModelConfigurationFromConfiguration(result.configuration),
-		).toBeNull();
-		expect(
 			agentModelConfigurationFromConfiguration(result.configuration),
 		).toBeNull();
 	});
@@ -131,7 +126,7 @@ describe("WhaleHall client config.yaml", () => {
 		mkdirSync(userDataDirectory, { mode: 0o700 });
 		writeFileSync(
 			path,
-			templateConfiguration().replace(
+			templateConfiguration().replaceAll(
 				WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 				WHALEHALL_DATA_CENTER_STAGING_BASE_URL,
 			),
@@ -194,17 +189,12 @@ describe("WhaleHall client config.yaml", () => {
 		expect(result.status).toBe("loaded");
 		expect(result.configuration).toEqual(provisionedConfiguration());
 		expect(
-			reflectionModelConfigurationFromConfiguration(result.configuration),
-		).toEqual(provisionedConfiguration().reflection);
-		expect(
 			agentModelConfigurationFromConfiguration(result.configuration),
 		).toEqual(provisionedConfiguration().agent);
 		expect(
 			activityReflectionConfigurationFromConfiguration(result.configuration),
 		).toEqual({
 			modelName: WHALEHALL_RELAY_MODEL,
-			relayBaseUrl: WHALEHALL_RELAY_BASE_URL,
-			reflectionKey: fixtureReflectionRelayKey,
 			scoreThreshold: 1,
 		});
 		expectOwnerOnlyMode(path);
@@ -217,8 +207,8 @@ describe("WhaleHall client config.yaml", () => {
 				"$" + "{WHALEHALL_REFLECTION_RELAY_KEY}",
 			),
 			templateConfiguration().replace(
-				WHALEHALL_RELAY_BASE_URL,
-				`${WHALEHALL_RELAY_BASE_URL}${REFLECTION_RELAY_COMPLETIONS_PATH}`,
+				WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+				`${WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL}/v1/chat/completions`,
 			),
 			templateConfiguration().replace(WHALEHALL_RELAY_MODEL, "qwen3:other"),
 			templateConfiguration().replace(

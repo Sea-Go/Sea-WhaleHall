@@ -69,6 +69,7 @@ describe("AgentRunCoordinator", () => {
 		expect(JSON.stringify(harness.sidecar.calls[0]?.params)).not.toContain(
 			"raw_event",
 		);
+		expect(harness.coordinator.modelPurposeForRun(runId)).toBe("activity");
 
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
@@ -126,6 +127,9 @@ describe("AgentRunCoordinator", () => {
 		});
 		if (started.kind !== "success")
 			throw new Error("active run was not accepted");
+		expect(harness.coordinator.modelPurposeForRun(started.data.runId)).toBe(
+			"agent",
+		);
 
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(

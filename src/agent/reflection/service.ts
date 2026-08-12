@@ -1,5 +1,5 @@
-import type { AgentRuntime } from "../agent-runtime";
 import { MAX_ACTIVE_GOAL_TEXT_LENGTH } from "../../shared/goal-context";
+import type { AgentRuntime } from "../agent-runtime";
 import type {
 	LocalEventCommitResult,
 	LocalEventGoalChange,
@@ -10,27 +10,25 @@ import type {
 import {
 	DEFAULT_MAX_WAIT_MS,
 	DEFAULT_SEMANTIC_EVENT_THRESHOLD,
-	ReflectionCollector,
 	type ReflectionClock,
+	ReflectionCollector,
 } from "./collector";
+import { WebCryptoReflectionHasher } from "./hash";
 import {
-	ReflectionJobRunner,
 	type ReflectionCommitter,
 	type ReflectionInferenceProvider,
+	ReflectionJobRunner,
 	type ReflectionJobRunResult,
 } from "./job-runner";
 import type { ReflectionRepository } from "./repository";
-import {
-	type ActiveGoalContextV1,
-	type DesktopEventV1,
-	type EventWindowV1,
-	type ReflectionQueueMode,
-	type ReflectionV1,
+import type {
+	ActiveGoalContextV1,
+	DesktopEventV1,
+	EventWindowV1,
+	ReflectionQueueMode,
+	ReflectionV1,
 } from "./types";
-import {
-	DeterministicWindowBuilder,
-} from "./window-builder";
-import { WebCryptoReflectionHasher } from "./hash";
+import { DeterministicWindowBuilder } from "./window-builder";
 
 export const REFLECTION_EVENT_CONSUMER_ID = "whalehall.reflection.v1";
 export const DEFAULT_EVENT_PULL_LIMIT = 256;
@@ -89,6 +87,8 @@ export type DesktopReflectionServiceOptions = {
 	eventPollMs?: number;
 	semanticEventThreshold?: number;
 	maxWaitMs?: number;
+	/** Authenticated account desired when startup reconciliation completes. */
+	cloudOwnerAccountId?: () => string | null;
 	/**
 	 * An authoritative goal known during startup. The service injects its
 	 * durable boundary into the native process before any resident sensor
@@ -128,6 +128,7 @@ export class DesktopReflectionService {
 		| Omit<ActiveGoalContextV1, "version">
 		| null
 		| undefined;
+	private readonly cloudOwnerAccountId: () => string | null;
 	private readonly onError: (error: unknown) => void;
 	private readonly collector: ReflectionCollector;
 	private readonly jobs: ReflectionJobRunner;
@@ -164,8 +165,14 @@ export class DesktopReflectionService {
 			options.startupGoal === undefined || options.startupGoal === null
 				? options.startupGoal
 				: validateRequestedGoal(options.startupGoal);
-		this.onError = options.onError ?? ((error) => console.error("[reflection]", error));
-		if (!Number.isInteger(this.pullLimit) || this.pullLimit < 1 || this.pullLimit > 1_000) {
+		this.cloudOwnerAccountId = options.cloudOwnerAccountId ?? (() => null);
+		this.onError =
+			options.onError ?? ((error) => console.error("[reflection]", error));
+		if (
+			!Number.isInteger(this.pullLimit) ||
+			this.pullLimit < 1 ||
+			this.pullLimit > 1_000
+		) {
 			throw new Error("pullLimit must be between 1 and 1000.");
 		}
 		if (!Number.isFinite(this.jobPollMs) || this.jobPollMs <= 0) {
@@ -227,6 +234,16 @@ export class DesktopReflectionService {
 
 		try {
 			await this.collector.recover({ deferDeadline: true });
+			const startupCloudOwnerAccountId = this.cloudOwnerAccountId();
+			const recoveredCloudOwnerAccountId =
+				this.collector.getSnapshot().cloudOwnerEpoch.accountId;
+			const changesCloudOwner =
+				recoveredCloudOwnerAccountId !== startupCloudOwnerAccountId;
+			if (changesCloudOwner && recoveredCloudOwnerAccountId !== null) {
+				// Never let native backlog accumulated across an account transition be
+				// adopted by the incoming account. First enter a durable anonymous epoch.
+				await this.collector.cutoverCloudOwner(null);
+			}
 			let startupPlan: ActiveGoalChangePlan | null = null;
 			if (this.startupGoal !== undefined) {
 				startupPlan = await this.planActiveGoalChange(this.startupGoal);
@@ -256,7 +273,14 @@ export class DesktopReflectionService {
 				);
 			}
 			await this.transport.acknowledgeStartupGoalChange();
-			const resumeDeadlines = this.enqueue(() => this.collector.resumeDeadlines());
+			if (changesCloudOwner && startupCloudOwnerAccountId !== null) {
+				// Backlog and recovered evidence were handled under the anonymous epoch.
+				// Only events materialized after this durable cutover may belong to login.
+				await this.collector.cutoverCloudOwner(startupCloudOwnerAccountId);
+			}
+			const resumeDeadlines = this.enqueue(() =>
+				this.collector.resumeDeadlines(),
+			);
 			this.acceptingLiveEvents = true;
 			await resumeDeadlines;
 			this.armJobPump(0);
@@ -299,11 +323,27 @@ export class DesktopReflectionService {
 			requestedGoal === null ? null : validateRequestedGoal(requestedGoal);
 		let normalized: ActiveGoalContextV1 | null = null;
 		await this.enqueue(async () => {
-			if (!this.started) throw new Error("DesktopReflectionService is not started.");
+			if (!this.started)
+				throw new Error("DesktopReflectionService is not started.");
 			await this.pullBacklog();
 			normalized = await this.appendActiveGoalToJournal(validatedGoal);
 		});
 		return normalized;
+	}
+
+	/**
+	 * Serial account cutover used by Bun's authentication transition barrier.
+	 * Durable events already visible to the named consumer are materialized
+	 * before the collector atomically discards the prior epoch's open evidence.
+	 */
+	async cutoverCloudOwner(accountId: string | null): Promise<void> {
+		await this.enqueue(async () => {
+			if (!this.started) {
+				throw new Error("DesktopReflectionService is not started.");
+			}
+			await this.pullBacklog();
+			await this.collector.cutoverCloudOwner(accountId);
+		});
 	}
 
 	async pullNow(): Promise<void> {
@@ -373,7 +413,9 @@ export class DesktopReflectionService {
 		await this.pullBacklog();
 		const activeGoal = this.collector.getSnapshot().activeGoal;
 		if (!sameGoalContext(activeGoal, plan.expectedGoal)) {
-			throw new Error("Durable goal boundary did not materialize as requested.");
+			throw new Error(
+				"Durable goal boundary did not materialize as requested.",
+			);
 		}
 		return structuredClone(activeGoal);
 	}
@@ -413,10 +455,7 @@ export class DesktopReflectionService {
 			shouldAppend = true;
 		}
 		const occurredAtMs = this.clock.nowMs();
-		if (
-			expectedGoal !== null &&
-			expectedGoal.activatedAtMs > occurredAtMs
-		) {
+		if (expectedGoal !== null && expectedGoal.activatedAtMs > occurredAtMs) {
 			throw new Error("Active goal activatedAtMs cannot be in the future.");
 		}
 		const change = shouldAppend
@@ -435,22 +474,20 @@ export class DesktopReflectionService {
 					)}`,
 				}
 			: null;
-		const startupChange =
-			change ??
-			{
-				previous: structuredClone(previous),
-				next: structuredClone(expectedGoal),
-				occurredAtMs,
-				deduplicationKey: `whalehall-startup-goal-v1:${await this.hasher.sha256(
-					JSON.stringify({
-						collectorId: this.identity.collectorId,
-						deviceId: this.identity.deviceId,
-						revision: collectorSnapshot.goalRevision,
-						previous,
-						desired: expectedGoal,
-					}),
-				)}`,
-			};
+		const startupChange = change ?? {
+			previous: structuredClone(previous),
+			next: structuredClone(expectedGoal),
+			occurredAtMs,
+			deduplicationKey: `whalehall-startup-goal-v1:${await this.hasher.sha256(
+				JSON.stringify({
+					collectorId: this.identity.collectorId,
+					deviceId: this.identity.deviceId,
+					revision: collectorSnapshot.goalRevision,
+					previous,
+					desired: expectedGoal,
+				}),
+			)}`,
+		};
 		return {
 			change,
 			startupChange,
@@ -466,7 +503,8 @@ export class DesktopReflectionService {
 		) {
 			return;
 		}
-		const activeGoalVersion = this.collector.getSnapshot().activeGoal?.version ?? null;
+		const activeGoalVersion =
+			this.collector.getSnapshot().activeGoal?.version ?? null;
 		const event = structuredClone(rawEvent);
 		event.deviceId = this.identity.deviceId;
 		event.sessionId = this.identity.sessionId;
@@ -662,7 +700,9 @@ function validateRequestedGoal(
 		throw new Error("goalId must contain 1 to 200 non-control UTF-8 bytes.");
 	}
 	if (goal.planId !== null && !isBoundedGoalString(goal.planId, 200)) {
-		throw new Error("planId must be null or contain 1 to 200 non-control UTF-8 bytes.");
+		throw new Error(
+			"planId must be null or contain 1 to 200 non-control UTF-8 bytes.",
+		);
 	}
 	if (
 		text.length === 0 ||
@@ -757,7 +797,11 @@ function compareEventCursors(left: string, right: string): number {
 	const leftSequence = eventCursorSequence(left);
 	const rightSequence = eventCursorSequence(right);
 	if (leftSequence !== null && rightSequence !== null) {
-		return leftSequence === rightSequence ? 0 : leftSequence > rightSequence ? 1 : -1;
+		return leftSequence === rightSequence
+			? 0
+			: leftSequence > rightSequence
+				? 1
+				: -1;
 	}
 	return left.localeCompare(right);
 }
@@ -767,6 +811,8 @@ function eventCursorSequence(cursor: string): bigint | null {
 	return BigInt(`0x${cursor.slice(4)}`);
 }
 
-export function asDesktopEventTransport(runtime: AgentRuntime): DesktopEventTransport {
+export function asDesktopEventTransport(
+	runtime: AgentRuntime,
+): DesktopEventTransport {
 	return runtime;
 }

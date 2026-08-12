@@ -4,6 +4,7 @@ import type {
 	AuthSessionIdentity,
 	DesktopAuthSessionManager,
 } from "./auth-session";
+import type { ModelRelayPurpose } from "./model-relay-transport";
 
 const REFRESH_TOKEN_KEY = "auth.refresh-token.current";
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
@@ -58,6 +59,8 @@ export interface RemoteAuthSessionManagerOptions {
 	fetch?: typeof fetch;
 	requestTimeoutMs?: number;
 	onBeforeSessionClear?: (accountId: string | null) => Promise<void>;
+	/** Must durably prepare account-owned local state before current is exposed. */
+	onBeforeSessionActivate?: (identity: AuthSessionIdentity) => Promise<void>;
 	onSessionExpired?: () => void;
 }
 
@@ -72,6 +75,9 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	private readonly requestTimeoutMs: number;
 	private readonly onBeforeSessionClear: (
 		accountId: string | null,
+	) => Promise<void>;
+	private readonly onBeforeSessionActivate: (
+		identity: AuthSessionIdentity,
 	) => Promise<void>;
 	private readonly onSessionExpired: () => void;
 	private current: { session: RemoteAuthSession; accessToken: string } | null =
@@ -95,6 +101,8 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 		this.onBeforeSessionClear =
 			options.onBeforeSessionClear ?? (async () => {});
+		this.onBeforeSessionActivate =
+			options.onBeforeSessionActivate ?? (async () => {});
 		this.onSessionExpired = options.onSessionExpired ?? (() => {});
 	}
 
@@ -216,6 +224,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	async authorizedFetch(
 		path: string,
 		init: RequestInit = {},
+		purpose: ModelRelayPurpose = "agent",
 	): Promise<Response> {
 		if (path !== "/v1/chat/completions") {
 			throw new RemoteAuthError(
@@ -223,7 +232,25 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				"个人 Agent relay key 只能发送到固定聊天入口。",
 			);
 		}
-		return this.authorizedRequest(path, init, this.requireAgentKey());
+		if (purpose !== "agent" && purpose !== "activity") {
+			throw new RemoteAuthError(
+				"unexpected",
+				"模型请求用途不是 WhaleHall 允许的固定用途。",
+			);
+		}
+		const headers = new Headers(init.headers);
+		if (headers.has("x-whalehall-model-purpose")) {
+			throw new RemoteAuthError(
+				"unexpected",
+				"模型请求用途只能由 WhaleHall 主进程设置。",
+			);
+		}
+		headers.set("x-whalehall-model-purpose", purpose);
+		return this.authorizedRequest(
+			path,
+			{ ...init, headers },
+			this.requireAgentKey(),
+		);
 	}
 
 	/** Sends a bearer-only request to a code-owned DataCenter path. */
@@ -388,13 +415,56 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				}
 			}
 			if (generation !== this.generation) return false;
+			const nextIdentity: AuthSessionIdentity = {
+				accountId: payload.user.id,
+				sessionId: payload.id,
+				generation,
+			};
+			const preparedNewOwner = previousAccountId !== payload.user.id;
+			try {
+				// This hook is inside the same transition lock as logout cleanup. It
+				// must finish before current can expose the incoming account to any
+				// model, activity, renderer, or background worker.
+				await this.onBeforeSessionActivate(nextIdentity);
+			} catch (error) {
+				if (preparedNewOwner) {
+					try {
+						await this.onBeforeSessionClear(payload.user.id);
+					} catch (rollbackError) {
+						throw new AggregateError(
+							[error, rollbackError],
+							"Session activation and its local owner rollback both failed.",
+						);
+					}
+				}
+				throw error;
+			}
+			if (generation !== this.generation) {
+				if (preparedNewOwner) {
+					await this.onBeforeSessionClear(payload.user.id);
+				}
+				return false;
+			}
 			try {
 				await this.credentials.write(REFRESH_TOKEN_KEY, payload.refreshToken);
 			} catch (error) {
+				if (preparedNewOwner) {
+					try {
+						await this.onBeforeSessionClear(payload.user.id);
+					} catch (rollbackError) {
+						throw new AggregateError(
+							[credentialFailure(error), rollbackError],
+							"Credential persistence and local owner rollback both failed.",
+						);
+					}
+				}
 				throw credentialFailure(error);
 			}
 			if (generation !== this.generation) {
 				await this.credentials.delete(REFRESH_TOKEN_KEY).catch(() => {});
+				if (preparedNewOwner) {
+					await this.onBeforeSessionClear(payload.user.id);
+				}
 				return false;
 			}
 			this.current = {

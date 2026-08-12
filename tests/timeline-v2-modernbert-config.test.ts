@@ -163,14 +163,13 @@ describe("Timeline v2 ModernBERT Bun configuration", () => {
 		).toMatchObject({ code: "invalid_config" });
 	});
 
-	test("propagates YAML-owned remote origins while keeping the token environment-only", () => {
+	test("keeps a loopback deployment opt-in and its token environment-only", () => {
 		const directory = temporaryDirectory();
 		writeFileSync(join(directory, "manifest.json"), JSON.stringify(manifest()));
 		const result = loadConfiguration(
 			{
 				...completeEnvironment("manifest.json"),
 				WHALEHALL_TIMELINE_MODERNBERT_TOKEN: "local-token",
-				WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS: "https://model.example",
 				WHALEHALL_TIMELINE_MODERNBERT_ALLOW_INSECURE_REMOTE: "1",
 			},
 			directory,
@@ -182,12 +181,12 @@ describe("Timeline v2 ModernBERT Bun configuration", () => {
 			manifestEndpoint: "http://127.0.0.1:8766/v2/manifest",
 			expectedArtifact: manifest(),
 			authorizationToken: "local-token",
-			allowedRemoteOrigins: ["https://model.example"],
+			allowedRemoteOrigins: [],
 		});
 		expect(result.modernBert).not.toHaveProperty("allowInsecureRemote");
 	});
 
-	test("enables a complete remote configuration only with its exact HTTPS origin", () => {
+	test("rejects every remote deployment even when its HTTPS origin is allowlisted", () => {
 		const directory = temporaryDirectory();
 		writeFileSync(join(directory, "manifest.json"), JSON.stringify(manifest()));
 		const remoteEnvironment = {
@@ -211,14 +210,9 @@ describe("Timeline v2 ModernBERT Bun configuration", () => {
 				},
 				directory,
 			),
-		).toMatchObject({
-			code: "enabled",
-			modernBert: {
-				enabled: true,
-				endpoint: "https://models.example.test/v2/episodes:classify",
-				manifestEndpoint: "https://models.example.test/v2/manifest",
-				allowedRemoteOrigins: ["https://models.example.test"],
-			},
+		).toEqual({
+			modernBert: { enabled: false },
+			code: "invalid_config",
 		});
 	});
 });

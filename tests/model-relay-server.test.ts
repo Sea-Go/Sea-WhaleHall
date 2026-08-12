@@ -22,11 +22,8 @@ import {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const personalRelayKey = ["whk", "fixture", "relay"].join("_");
-const reflectionKeyId = "whref_0123456789abcdef0123456789abcdef";
-const reflectionRelayKey = `${reflectionKeyId}.fixture_reflection_secret_0123456789`;
 let passwordHash = "";
 let agentKeyHash = "";
-let reflectionKeyHash = "";
 
 beforeAll(async () => {
 	passwordHash = await createScryptPasswordHash(
@@ -37,9 +34,6 @@ beforeAll(async () => {
 	);
 	agentKeyHash = await createScryptPasswordHash(personalRelayKey, {
 		salt: new Uint8Array(16).fill(9),
-	});
-	reflectionKeyHash = await createScryptPasswordHash(reflectionRelayKey, {
-		salt: new Uint8Array(16).fill(10),
 	});
 });
 
@@ -66,12 +60,7 @@ function createFixture(
 	options: {
 		fetch?: typeof fetch;
 		config?: Partial<ModelRelayServerConfig>;
-		dependencies?: Partial<
-			Pick<
-				ModelRelayDependencies,
-				"passwordVerifier" | "reflectionAuthenticationRateLimiter"
-			>
-		>;
+		dependencies?: Partial<Pick<ModelRelayDependencies, "passwordVerifier">>;
 	} = {},
 ) {
 	const users = new InMemoryUserStore([
@@ -82,8 +71,6 @@ function createFixture(
 			initials: "测试",
 			passwordHash,
 			agentKeyHash,
-			reflectionKeyId,
-			reflectionKeyHash,
 		},
 	]);
 	const sessions = new InMemorySessionStore();
@@ -146,7 +133,7 @@ function reflectionRequest(
 	return new Request("https://relay.example.test/v1/activity/completions", {
 		method: "POST",
 		headers: {
-			"x-whalehall-reflection-key": reflectionRelayKey,
+			"x-whalehall-reflection-key": "retired-fixture-only",
 			"content-type": "application/json",
 			"idempotency-key": idempotencyKey,
 			...extraHeaders,
@@ -274,8 +261,6 @@ describe("model relay forwarding", () => {
 				initials: "测试",
 				passwordHash,
 				agentKeyHash,
-				reflectionKeyId,
-				reflectionKeyHash,
 			},
 			{
 				id: "account-2",
@@ -284,8 +269,6 @@ describe("model relay forwarding", () => {
 				initials: "二",
 				passwordHash,
 				agentKeyHash: secondAgentKeyHash,
-				reflectionKeyId: "whref_11111111111111111111111111111111",
-				reflectionKeyHash,
 			},
 		]);
 		const handler = createModelRelayHandler(baseConfig(), {
@@ -381,7 +364,7 @@ describe("model relay forwarding", () => {
 		expect(records[0]?.state).toBe("completed");
 	});
 
-	test("forwards a reflection model request transiently without storing or interpreting activity data", async () => {
+	test("retires a reflection model request without forwarding or storing it", async () => {
 		let upstreamCalls = 0;
 		const seen: { body?: string; headers?: Headers } = {};
 		const fixture = createFixture({
@@ -407,21 +390,16 @@ describe("model relay forwarding", () => {
 			reflectionRequest(raw, "reflection-same-key"),
 		);
 
-		expect(first.status).toBe(200);
-		expect(second.status).toBe(200);
-		expect(seen.body).toBe(raw);
-		expect(seen.headers?.get("authorization")).toBe(
-			"Bearer provider-secret-key-for-tests",
-		);
-		expect(seen.headers?.has("x-whalehall-reflection-key")).toBeFalse();
-		expect(seen.headers?.has("x-whalehall-agent-key")).toBeFalse();
-		expect(seen.headers?.get("idempotency-key")).toBe("reflection-same-key");
-		expect(upstreamCalls).toBe(2);
+		expect(first.status).toBe(404);
+		expect(second.status).toBe(404);
+		expect(seen.body).toBeUndefined();
+		expect(seen.headers).toBeUndefined();
+		expect(upstreamCalls).toBe(0);
 		expect(fixture.records.snapshot()).toEqual([]);
 		expect(first.headers.get("cache-control")).toBe("no-store");
 	});
 
-	test("requires only the provisioned reflection key and rejects streaming or chat credentials", async () => {
+	test("rejects every credential shape on the retired reflection route", async () => {
 		let upstreamCalls = 0;
 		const fixture = createFixture({
 			fetch: (async () => {
@@ -457,17 +435,16 @@ describe("model relay forwarding", () => {
 			),
 		);
 
-		expect(missing.status).toBe(401);
-		expect(bearer.status).toBe(401);
-		expect(agentKey.status).toBe(401);
-		expect(streaming.status).toBe(400);
+		expect(missing.status).toBe(404);
+		expect(bearer.status).toBe(404);
+		expect(agentKey.status).toBe(404);
+		expect(streaming.status).toBe(404);
 		expect(upstreamCalls).toBe(0);
 	});
 
-	test("limits invalid reflection-key verification before scrypt authentication", async () => {
+	test("does not verify keys on the retired reflection route", async () => {
 		let verificationCalls = 0;
 		const fixture = createFixture({
-			config: { reflectionAuthenticationAttemptsPerMinute: 1 },
 			dependencies: {
 				passwordVerifier: async () => {
 					verificationCalls += 1;
@@ -493,21 +470,20 @@ describe("model relay forwarding", () => {
 					clientAddress: "198.51.100.9",
 				})
 			).status,
-		).toBe(401);
+		).toBe(404);
 		expect(
 			(
 				await fixture.handler(invalidRequest(), {
 					clientAddress: "198.51.100.9",
 				})
 			).status,
-		).toBe(429);
-		expect(verificationCalls).toBe(1);
+		).toBe(404);
+		expect(verificationCalls).toBe(0);
 	});
 
-	test("bounds a non-settling reflection provider request and aborts it", async () => {
+	test("does not start a non-settling provider on the retired reflection route", async () => {
 		let upstreamSignal: AbortSignal | undefined;
 		const fixture = createFixture({
-			config: { reflectionUpstreamTimeoutMs: 25 },
 			fetch: ((
 				_input: Parameters<typeof fetch>[0],
 				init?: Parameters<typeof fetch>[1],
@@ -526,20 +502,14 @@ describe("model relay forwarding", () => {
 				"reflection-provider-timeout",
 			),
 		);
-		expect(response.status).toBe(504);
-		expect(await response.json()).toEqual(
-			expect.objectContaining({
-				error: expect.objectContaining({ code: "upstream-timeout" }),
-			}),
-		);
-		expect(upstreamSignal?.aborted).toBeTrue();
+		expect(response.status).toBe(404);
+		expect(upstreamSignal).toBeUndefined();
 	});
 
-	test("bounds a reflection response body that never produces a chunk", async () => {
+	test("does not read a provider body on the retired reflection route", async () => {
 		let upstreamSignal: AbortSignal | undefined;
 		let bodyCancelled = false;
 		const fixture = createFixture({
-			config: { reflectionUpstreamTimeoutMs: 25 },
 			fetch: ((
 				_input: Parameters<typeof fetch>[0],
 				init?: Parameters<typeof fetch>[1],
@@ -566,9 +536,9 @@ describe("model relay forwarding", () => {
 				"reflection-body-timeout",
 			),
 		);
-		expect(response.status).toBe(504);
-		expect(upstreamSignal?.aborted).toBeTrue();
-		expect(bodyCancelled).toBeTrue();
+		expect(response.status).toBe(404);
+		expect(upstreamSignal).toBeUndefined();
+		expect(bodyCancelled).toBeFalse();
 	});
 
 	test("replays a completed non-stream response by subject and key without a second provider request", async () => {

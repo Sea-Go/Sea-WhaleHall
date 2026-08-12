@@ -272,18 +272,54 @@ describe("SidecarModelRelayBridge", () => {
 			send: async () => {},
 		});
 
-		await expect(
-			bridge.open(
-				"host-request-identity",
-				relayOpenParams("relay-identity", "run-identity", {
-					...validBody(),
-					userId: "forged-account",
-					accessToken: "renderer-token",
-					apiKey: "provider-key",
-				}),
-			),
-		).rejects.toThrow("不得携带自报身份或供应商凭据");
+		for (const [index, key] of ["userId", "user", "user_id", "accessToken", "apiKey"].entries()) {
+			await expect(
+				bridge.open(
+					`host-request-identity-${index}`,
+					relayOpenParams(`relay-identity-${index}`, `run-identity-${index}`, {
+						...validBody(),
+						[key]: "forged-value",
+					}),
+				),
+			).rejects.toThrow("不得携带自报身份或供应商凭据");
+		}
 		expect(remoteCalls).toBe(0);
+	});
+
+	test("keeps the idempotency key stable across relay retries", async () => {
+		const keys: string[] = [];
+		const auth = authWithResponse((_path, init) => {
+			keys.push(new Headers(init.headers).get("idempotency-key") ?? "");
+			return Response.json({ ok: true });
+		});
+		const bridge = new SidecarModelRelayBridge({
+			transport: new ModelRelayTransport(auth),
+			modelId: "approved-model",
+			send: async () => {},
+		});
+		const body = validBody();
+		await bridge.open(
+			"host-request-stable-1",
+			relayOpenParams("relay-stable-1", "run-stable-1", body, "origin-stable"),
+		);
+		await bridge.open(
+			"host-request-stable-2",
+			relayOpenParams("relay-stable-2", "run-stable-2", body, "origin-stable"),
+		);
+		await bridge.open(
+			"host-request-stable-3",
+			relayOpenParams(
+				"relay-stable-3",
+				"run-stable-3",
+				{ ...body, temperature: 0.2 },
+				"origin-stable",
+			),
+		);
+
+		expect(keys).toHaveLength(3);
+		expect(keys[0]).toMatch(/^relay-[0-9a-f]{64}$/);
+		expect(keys[1]).toBe(keys[0]);
+		expect(keys[2]).not.toBe(keys[0]);
 	});
 });
 
@@ -299,11 +335,12 @@ function relayOpenParams(
 	relayId: string,
 	runId: string,
 	body: Record<string, unknown>,
+	originatingRequestId = `origin-${relayId}`,
 ): Record<string, unknown> {
 	return {
 		relayId,
 		runId,
-		originatingRequestId: `origin-${relayId}`,
+		originatingRequestId,
 		provider: "whalehall-relay",
 		modelId: "approved-model",
 		request: {

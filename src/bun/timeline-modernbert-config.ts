@@ -45,9 +45,8 @@ export function loadTimelineModernBertConfiguration(
 		environment.WHALEHALL_TIMELINE_MODERNBERT_MANIFEST_ENDPOINT?.trim();
 	const pinnedManifestPath =
 		environment.WHALEHALL_TIMELINE_MODERNBERT_PINNED_MANIFEST?.trim();
-	const allowedRemoteOrigins = parseAllowedRemoteOrigins(
-		environment.WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS,
-	);
+	const configuredRemoteOrigins =
+		environment.WHALEHALL_TIMELINE_MODERNBERT_ALLOWED_ORIGINS?.trim();
 	const configured = [endpoint, manifestEndpoint, pinnedManifestPath].filter(
 		(value) => value !== undefined && value.length > 0,
 	).length;
@@ -66,6 +65,17 @@ export function loadTimelineModernBertConfiguration(
 		return invalidConfiguration();
 	}
 	try {
+		// P0 production composition is local-only. A separately deployed HTTPS
+		// classifier would bypass the authenticated DataCenter model-audit
+		// boundary, so even an explicitly allowlisted remote origin fails closed.
+		if (
+			(configuredRemoteOrigins !== undefined &&
+				configuredRemoteOrigins.length > 0) ||
+			!isLoopbackHttpEndpoint(endpoint) ||
+			!isLoopbackHttpEndpoint(manifestEndpoint)
+		) {
+			return invalidConfiguration();
+		}
 		if (!PINNED_MANIFEST_FILE_NAME.test(pinnedManifestPath)) {
 			return invalidConfiguration();
 		}
@@ -116,11 +126,10 @@ export function loadTimelineModernBertConfiguration(
 			endpoint,
 			manifestEndpoint,
 			expectedArtifact,
-			allowedRemoteOrigins,
+			allowedRemoteOrigins: [],
 			...(authorizationToken === undefined ? {} : { authorizationToken }),
 		};
-		// Constructor validation is metadata-only and requires an exact HTTPS
-		// allowlist entry before a remote deployment can report "enabled".
+		// Constructor validation remains the second line of URL/schema defense.
 		new ModernBertEpisodeClassifier(modernBert);
 		return {
 			modernBert,
@@ -131,12 +140,22 @@ export function loadTimelineModernBertConfiguration(
 	}
 }
 
-function parseAllowedRemoteOrigins(value: string | undefined): string[] {
-	if (value === undefined || value.trim().length === 0) return [];
-	return value
-		.split(",")
-		.map((origin) => origin.trim())
-		.filter((origin) => origin.length > 0);
+function isLoopbackHttpEndpoint(value: string): boolean {
+	try {
+		const url = new URL(value);
+		const hostname = url.hostname
+			.toLowerCase()
+			.replace(/^\[/u, "")
+			.replace(/\]$/u, "");
+		return (
+			(url.protocol === "http:" || url.protocol === "https:") &&
+			(hostname === "127.0.0.1" ||
+				hostname === "localhost" ||
+				hostname === "::1")
+		);
+	} catch {
+		return false;
+	}
 }
 
 function invalidConfiguration(): TimelineModernBertConfiguration {
