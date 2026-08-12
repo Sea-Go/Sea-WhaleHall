@@ -64,4 +64,33 @@ describe("local Agent production boundary", () => {
 			"activityReflectionOutputToWorkerResponse",
 		);
 	});
+
+	test("quiesces activity reflection before stopping its Sidecar process owner", () => {
+		const bunComposition = source("src/bun/index.ts");
+		const shutdownStart = bunComposition.indexOf(
+			"function shutdown(): Promise<void>",
+		);
+		const nativeStartupLatch = bunComposition.indexOf(
+			"agent.beginShutdown();",
+			shutdownStart,
+		);
+		const shutdownSteps = bunComposition.indexOf(
+			"const steps = [",
+			shutdownStart,
+		);
+		const activityStep = bunComposition.indexOf(
+			'name: "activity-window-delivery"',
+		);
+		const sidecarStep = bunComposition.indexOf('name: "sensor-sidecar"');
+
+		expect(shutdownStart).toBeGreaterThanOrEqual(0);
+		expect(nativeStartupLatch).toBeGreaterThan(shutdownStart);
+		expect(shutdownSteps).toBeGreaterThan(nativeStartupLatch);
+		expect(activityStep).toBeGreaterThanOrEqual(0);
+		expect(sidecarStep).toBeGreaterThan(activityStep);
+		expect(bunComposition).toContain(
+			"activityReflectionRelayBridge?.abortAll();",
+		);
+		expect(bunComposition).toContain("stopActivityWindowDeliveryResources(");
+	});
 });

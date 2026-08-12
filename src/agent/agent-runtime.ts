@@ -58,6 +58,7 @@ export class AgentRuntime {
 		(event: SemanticEventV2) => void
 	>();
 	private startPromise: Promise<void> | null = null;
+	private shutdownRequested = false;
 	private startupGoalPrepared = false;
 	private automaticRestartPrepared = false;
 	private hasGoalReconciliationIntent = false;
@@ -104,12 +105,14 @@ export class AgentRuntime {
 	async prepareStartupGoalChange(
 		change: LocalEventGoalChange | null,
 	): Promise<void> {
+		this.assertStartupAllowed();
 		if (this.startPromise || this.local.isRunning) {
 			throw new Error(
 				"whalehall-local already started before its startup goal boundary was prepared.",
 			);
 		}
 		await this.local.prepareStartupGoalChange(change);
+		this.assertStartupAllowed();
 		this.goalReconciliationIntent = structuredClone(change);
 		this.hasGoalReconciliationIntent = true;
 		this.startupGoalPrepared = true;
@@ -117,11 +120,14 @@ export class AgentRuntime {
 	}
 
 	async acknowledgeStartupGoalChange(): Promise<void> {
+		this.assertStartupAllowed();
 		await this.local.acknowledgeStartupGoalChange();
+		this.assertStartupAllowed();
 		this.automaticRestartPrepared = true;
 	}
 
 	async start(): Promise<void> {
+		this.assertStartupAllowed();
 		if (this.local.isRunning) {
 			this.setStatus("ready", null);
 			return;
@@ -136,17 +142,24 @@ export class AgentRuntime {
 		}
 		if (this.startPromise) return this.startPromise;
 		this.setStatus("starting", null);
-		this.startPromise = this.local
-			.start()
-			.then(() => this.local.health())
-			.then(() => this.setStatus("ready", null))
-			.catch((error: unknown) =>
-				this.setStatus("degraded", errorMessage(error)),
-			)
-			.finally(() => {
-				this.startPromise = null;
-			});
-		return this.startPromise;
+		const operation = this.startLocalProcess();
+		this.startPromise = operation;
+		void operation.then(
+			() => {
+				if (this.startPromise === operation) this.startPromise = null;
+			},
+			() => {
+				if (this.startPromise === operation) this.startPromise = null;
+			},
+		);
+		return operation;
+	}
+
+	/** Permanently prevents this application instance from spawning native work. */
+	beginShutdown(): void {
+		this.shutdownRequested = true;
+		this.startupGoalPrepared = false;
+		this.automaticRestartPrepared = false;
 	}
 
 	async listLocalTools(): Promise<LocalToolDescriptor[]> {
@@ -293,6 +306,7 @@ export class AgentRuntime {
 	}
 
 	private async ensureStarted(): Promise<void> {
+		this.assertStartupAllowed();
 		let preparedAutomaticRestart = false;
 		if (
 			!this.local.isRunning &&
@@ -302,10 +316,12 @@ export class AgentRuntime {
 			this.hasGoalReconciliationIntent
 		) {
 			await this.local.prepareStartupGoalChange(this.goalReconciliationIntent);
+			this.assertStartupAllowed();
 			this.startupGoalPrepared = true;
 			preparedAutomaticRestart = true;
 		}
 		if (!this.local.isRunning) await this.start();
+		this.assertStartupAllowed();
 		if (!this.local.isRunning) {
 			throw new Error(
 				this.status.lastError ?? "whalehall-local is unavailable.",
@@ -313,6 +329,40 @@ export class AgentRuntime {
 		}
 		if (preparedAutomaticRestart) {
 			await this.local.acknowledgeStartupGoalChange();
+			this.assertStartupAllowed();
+		}
+	}
+
+	private async startLocalProcess(): Promise<void> {
+		try {
+			await this.local.start();
+			if (this.shutdownRequested) {
+				await this.local.stop();
+				this.setStatus("stopped", null);
+				return;
+			}
+			await this.local.health();
+			if (this.shutdownRequested) {
+				await this.local.stop();
+				this.setStatus("stopped", null);
+				return;
+			}
+			this.setStatus("ready", null);
+		} catch (error) {
+			if (this.shutdownRequested) {
+				if (this.local.isRunning) await this.local.stop();
+				this.setStatus("stopped", null);
+				return;
+			}
+			this.setStatus("degraded", errorMessage(error));
+		}
+	}
+
+	private assertStartupAllowed(): void {
+		if (this.shutdownRequested) {
+			throw new Error(
+				"whalehall-local cannot start while WhaleHall is quitting.",
+			);
 		}
 	}
 

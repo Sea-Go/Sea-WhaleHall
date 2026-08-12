@@ -10,7 +10,32 @@ export interface BeforeQuitEvent {
 export interface ShutdownStep {
 	name: string;
 	critical?: boolean;
+	timeoutMs?: number;
 	run(): void | Promise<void>;
+}
+
+export type ShutdownStepOutcome = "completed" | "failed" | "timed_out";
+
+export interface ShutdownStepResult {
+	name: string;
+	critical: boolean;
+	outcome: ShutdownStepOutcome;
+	durationMs: number;
+}
+
+export interface BestEffortShutdownOptions {
+	nowMs?: () => number;
+	onStepSettled?(result: ShutdownStepResult): void;
+}
+
+export class ShutdownStepTimeoutError extends Error {
+	constructor(
+		public readonly step: string,
+		public readonly timeoutMs: number,
+	) {
+		super(`Shutdown step '${step}' exceeded its ${timeoutMs} ms deadline.`);
+		this.name = "ShutdownStepTimeoutError";
+	}
 }
 
 export class CriticalShutdownError extends Error {
@@ -23,17 +48,34 @@ export class CriticalShutdownError extends Error {
 export async function runBestEffortShutdown(
 	steps: readonly ShutdownStep[],
 	onError: (step: string, error: unknown) => void = () => {},
+	options: BestEffortShutdownOptions = {},
 ): Promise<void> {
 	const criticalFailures: string[] = [];
+	const nowMs = options.nowMs ?? Date.now;
 	for (const step of steps) {
+		const startedAtMs = nowMs();
+		let outcome: ShutdownStepOutcome = "completed";
 		try {
-			await step.run();
+			await runShutdownStep(step);
 		} catch (error) {
+			outcome =
+				error instanceof ShutdownStepTimeoutError ? "timed_out" : "failed";
 			if (step.critical) criticalFailures.push(step.name);
 			try {
 				onError(step.name, error);
 			} catch {
 				// Diagnostics must not prevent later process owners from shutting down.
+			}
+		} finally {
+			try {
+				options.onStepSettled?.({
+					name: step.name,
+					critical: step.critical === true,
+					outcome,
+					durationMs: Math.max(0, nowMs() - startedAtMs),
+				});
+			} catch {
+				// Observability must not prevent later process owners from shutting down.
 			}
 		}
 	}
@@ -42,10 +84,37 @@ export async function runBestEffortShutdown(
 	}
 }
 
+async function runShutdownStep(step: ShutdownStep): Promise<void> {
+	const timeoutMs = step.timeoutMs;
+	if (timeoutMs === undefined) {
+		const operation = Promise.resolve().then(() => step.run());
+		await operation;
+		return;
+	}
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+		throw new Error(`Shutdown step '${step.name}' has an invalid deadline.`);
+	}
+	const operation = Promise.resolve().then(() => step.run());
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(
+			() => reject(new ShutdownStepTimeoutError(step.name, timeoutMs)),
+			timeoutMs,
+		);
+	});
+	try {
+		await Promise.race([operation, deadline]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
 export interface BackgroundAppLifecycleOptions<
 	WindowType extends BackgroundWindow,
 > {
 	createWindow(): Promise<WindowType>;
+	/** Synchronous, one-way latch invoked before quit waits for any async work. */
+	onQuitRequested?(): void;
 	shutdown(): Promise<void>;
 	exit(): void;
 	onError?(operation: "open" | "quit", error: unknown): void;
@@ -62,6 +131,7 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	private opening: Promise<WindowType> | null = null;
 	private quitting: Promise<void> | null = null;
 	private quitRequested = false;
+	private quitRequestFailure: { error: unknown } | null = null;
 	private exitAuthorized = false;
 
 	constructor(
@@ -120,10 +190,19 @@ export class BackgroundAppLifecycle<WindowType extends BackgroundWindow> {
 	}
 
 	quit(): Promise<void> {
-		this.quitRequested = true;
+		if (!this.quitRequested) {
+			this.quitRequested = true;
+			try {
+				this.options.onQuitRequested?.();
+			} catch (error) {
+				// A failed process-start latch must preserve the Electrobun quit veto.
+				this.quitRequestFailure = { error };
+			}
+		}
 		if (this.quitting !== null) return this.quitting;
 		const quitting = (async () => {
 			try {
+				if (this.quitRequestFailure) throw this.quitRequestFailure.error;
 				await this.opening?.catch(() => undefined);
 				await this.options.shutdown();
 			} catch (error) {

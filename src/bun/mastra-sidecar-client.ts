@@ -22,6 +22,10 @@ import { ModelRelayError } from "./model-relay-transport";
 
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 35_000;
+const DEFAULT_SHUTDOWN_PROTOCOL_TIMEOUT_MS = 1_000;
+const DEFAULT_SHUTDOWN_GRACE_TIMEOUT_MS = 500;
+const DEFAULT_SHUTDOWN_TERMINATE_TIMEOUT_MS = 1_000;
+const DEFAULT_SHUTDOWN_KILL_TIMEOUT_MS = 1_000;
 const RESTART_DELAYS_MS = [1_000, 5_000, 15_000] as const;
 
 interface PendingRequest {
@@ -43,6 +47,10 @@ export interface MastraSidecarClientOptions {
 	initialize: RuntimeInitializeParams;
 	requestTimeoutMs?: number;
 	initializeTimeoutMs?: number;
+	shutdownProtocolTimeoutMs?: number;
+	shutdownGraceTimeoutMs?: number;
+	shutdownTerminateTimeoutMs?: number;
+	shutdownKillTimeoutMs?: number;
 	onHostCall(call: SidecarHostCall): Promise<unknown>;
 	onRunEvent(event: AgentRunEventFrame): void;
 	onInterrupted?(runIds: readonly string[], reason: string): void;
@@ -67,7 +75,15 @@ export class MastraSidecarClient {
 	private parser = new ContentLengthFrameParser(MAX_FRAME_BYTES);
 	private readonly pending = new Map<string, PendingRequest>();
 	private readonly activeRunIds = new Set<string>();
+	// A transport error can make a child unusable before Node confirms that its
+	// stdio and process handle are closed. Keep every spawned child owned until
+	// the close event so a later quit retry cannot mistake an orphan for success.
+	private readonly ownedChildren =
+		new Set<ChildProcessWithoutNullStreams>();
+	private readonly closedChildren =
+		new WeakSet<ChildProcessWithoutNullStreams>();
 	private startPromise: Promise<RuntimeInitializeResult> | null = null;
+	private stopPromise: Promise<void> | null = null;
 	private stopping = false;
 	private restartTimer: ReturnType<typeof setTimeout> | null = null;
 	private restartAttempt = 0;
@@ -75,6 +91,10 @@ export class MastraSidecarClient {
 	private acceptTail = Promise.resolve();
 
 	constructor(private readonly options: MastraSidecarClientOptions) {}
+
+	get isRunning(): boolean {
+		return this.child !== null;
+	}
 
 	start(): Promise<RuntimeInitializeResult> {
 		if (this.startPromise) return this.startPromise;
@@ -90,38 +110,113 @@ export class MastraSidecarClient {
 		return operation;
 	}
 
-	async stop(): Promise<void> {
+	stop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise;
+		const operation = this.stopOwnedChild();
+		this.stopPromise = operation;
+		void operation.then(
+			() => {
+				if (this.stopPromise === operation) this.stopPromise = null;
+			},
+			() => {
+				if (this.stopPromise === operation) this.stopPromise = null;
+			},
+		);
+		return operation;
+	}
+
+	private async stopOwnedChild(): Promise<void> {
 		this.stopping = true;
 		if (this.restartTimer) clearTimeout(this.restartTimer);
 		this.restartTimer = null;
-		const child = this.child;
-		if (!child) {
+		const activeChild = this.child;
+		const children = [...this.ownedChildren];
+		if (children.length === 0) {
 			this.startPromise = null;
 			this.resetTransportState();
 			return;
 		}
-		try {
-			await this.request("runtime.shutdown", {});
-		} catch {}
+		const outcomes = await Promise.allSettled(
+			children.map((child) =>
+				this.stopChild(child, child === activeChild),
+			),
+		);
+		if (outcomes.some((outcome) => outcome.status === "rejected")) {
+			throw new MastraSidecarError(
+				"STOP_FAILED",
+				"本地 Agent Sidecar 在强制终止后仍未确认退出。",
+				false,
+			);
+		}
+	}
+
+	private async stopChild(
+		child: ChildProcessWithoutNullStreams,
+		requestProtocolShutdown: boolean,
+	): Promise<void> {
+		const protocolTimeoutMs = positiveShutdownTimeout(
+			this.options.shutdownProtocolTimeoutMs,
+			DEFAULT_SHUTDOWN_PROTOCOL_TIMEOUT_MS,
+		);
+		if (requestProtocolShutdown) {
+			const controller = new AbortController();
+			try {
+				await this.withShutdownDeadline(
+					this.request(
+						"runtime.shutdown",
+						{},
+						{
+							timeoutMs: protocolTimeoutMs,
+							signal: controller.signal,
+						},
+					),
+					protocolTimeoutMs,
+				);
+			} catch {
+				// A stuck ordered request can keep runtime.shutdown behind it. Process
+				// termination below is the bounded recovery path.
+			} finally {
+				controller.abort();
+			}
+		}
 		if (
-			this.child !== child ||
-			child.exitCode !== null ||
-			child.signalCode !== null
+			await this.waitForConfirmedClose(
+				child,
+				positiveShutdownTimeout(
+					this.options.shutdownGraceTimeoutMs,
+					DEFAULT_SHUTDOWN_GRACE_TIMEOUT_MS,
+				),
+			)
 		) {
-			this.startPromise = null;
 			return;
 		}
-		await new Promise<void>((resolve) => {
-			const timer = setTimeout(() => {
-				child.kill();
-				resolve();
-			}, 2_000);
-			child.once("close", () => {
-				clearTimeout(timer);
-				resolve();
-			});
-		});
-		if (this.child === child) this.handleExit(child, "Agent Sidecar stopped.");
+
+		this.signalChild(child, "SIGTERM");
+		if (
+			await this.waitForConfirmedClose(
+				child,
+				positiveShutdownTimeout(
+					this.options.shutdownTerminateTimeoutMs,
+					DEFAULT_SHUTDOWN_TERMINATE_TIMEOUT_MS,
+				),
+			)
+		) {
+			return;
+		}
+
+		this.signalChild(child, "SIGKILL");
+		if (
+			await this.waitForConfirmedClose(
+				child,
+				positiveShutdownTimeout(
+					this.options.shutdownKillTimeoutMs,
+					DEFAULT_SHUTDOWN_KILL_TIMEOUT_MS,
+				),
+			)
+		) {
+			return;
+		}
+		throw new Error("sidecar close was not confirmed");
 	}
 
 	async request<TResult = unknown>(
@@ -219,6 +314,7 @@ export class MastraSidecarClient {
 				env: safeSidecarEnvironment(),
 			},
 		);
+		this.ownedChildren.add(child);
 		this.child = child;
 		child.stdout.on("data", (chunk: Buffer) => this.acceptBytes(child, chunk));
 		// Consume stderr to avoid a blocked pipe, but never copy potentially
@@ -226,6 +322,8 @@ export class MastraSidecarClient {
 		child.stderr.on("data", () => {});
 		child.once("error", (error) => this.handleExit(child, error.message));
 		child.once("close", (code, signal) => {
+			this.closedChildren.add(child);
+			this.ownedChildren.delete(child);
 			this.handleExit(
 				child,
 				`Agent Sidecar exited (${signal ?? code ?? "unknown"}).`,
@@ -471,6 +569,73 @@ export class MastraSidecarClient {
 		this.scheduleRestart();
 	}
 
+	private signalChild(
+		child: ChildProcessWithoutNullStreams,
+		signal: NodeJS.Signals,
+	): void {
+		try {
+			child.kill(signal);
+		} catch {
+			// A failed signal is followed by the same confirmed-close deadline. The
+			// caller reports STOP_FAILED if ownership cannot be safely released.
+		}
+	}
+
+	private async waitForConfirmedClose(
+		child: ChildProcessWithoutNullStreams,
+		timeoutMs: number,
+	): Promise<boolean> {
+		if (this.closedChildren.has(child)) return true;
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const finish = (closed: boolean) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				child.removeListener("close", onClose);
+				resolve(closed);
+			};
+			const onClose = () => finish(true);
+			const timer = setTimeout(() => finish(false), timeoutMs);
+			child.once("close", onClose);
+			if (this.closedChildren.has(child)) finish(true);
+		});
+	}
+
+	private async withShutdownDeadline<TResult>(
+		operation: Promise<TResult>,
+		timeoutMs: number,
+	): Promise<TResult> {
+		return new Promise<TResult>((resolve, reject) => {
+			let settled = false;
+			const finish = (
+				outcome:
+					| { kind: "completed"; value: TResult }
+					| { kind: "failed"; error: unknown }
+					| { kind: "timed_out" },
+			) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (outcome.kind === "completed") resolve(outcome.value);
+				else if (outcome.kind === "failed") reject(outcome.error);
+				else
+					reject(
+						new MastraSidecarError(
+							"SHUTDOWN_TIMEOUT",
+							"本地 Agent Sidecar 关闭请求超时。",
+							true,
+						),
+					);
+			};
+			const timer = setTimeout(() => finish({ kind: "timed_out" }), timeoutMs);
+			void operation.then(
+				(value) => finish({ kind: "completed", value }),
+				(error: unknown) => finish({ kind: "failed", error }),
+			);
+		});
+	}
+
 	private resetTransportState(): void {
 		this.parser = new ContentLengthFrameParser(MAX_FRAME_BYTES);
 		this.writerTail = Promise.resolve();
@@ -482,7 +647,8 @@ export class MastraSidecarClient {
 		const delay =
 			RESTART_DELAYS_MS[
 				Math.min(this.restartAttempt, RESTART_DELAYS_MS.length - 1)
-			]!;
+			] ?? RESTART_DELAYS_MS[RESTART_DELAYS_MS.length - 1];
+		if (delay === undefined) return;
 		this.restartAttempt += 1;
 		this.restartTimer = setTimeout(() => {
 			this.restartTimer = null;
@@ -577,6 +743,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
+}
+
+function positiveShutdownTimeout(
+	configured: number | undefined,
+	fallback: number,
+): number {
+	const value = configured ?? fallback;
+	if (!Number.isSafeInteger(value) || value <= 0) {
+		throw new MastraSidecarError(
+			"INVALID_SHUTDOWN_TIMEOUT",
+			"本地 Agent Sidecar 关闭预算无效。",
+			false,
+		);
+	}
+	return value;
 }
 
 function cancelledRequestError(): MastraSidecarError {

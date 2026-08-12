@@ -18,6 +18,8 @@ import {
 type FakeBehavior =
 	| "hang-initialize"
 	| "hang-request"
+	| "ignore-shutdown"
+	| "ordered-hang-request"
 	| "reject-initialize"
 	| "succeed";
 
@@ -102,6 +104,9 @@ describe("MastraSidecarClient initialization recovery", () => {
 		await Bun.sleep(50);
 		expect(harness.restarts.count).toBe(1);
 		expect(harness.children).toHaveLength(2);
+		// The terminated initializer remains process-owned until Node confirms
+		// close, even though its successor is already the active transport.
+		harness.children[0]?.emitClose(1, null);
 		await expect(
 			harness.client.request("run.resume", { runId: "automatic-restart" }),
 		).resolves.toEqual({ accepted: true });
@@ -136,7 +141,126 @@ describe("MastraSidecarClient initialization recovery", () => {
 	});
 });
 
-function createHarness(behaviors: readonly FakeBehavior[]): {
+describe("MastraSidecarClient shutdown", () => {
+	test("bounds shutdown when an ordered request blocks runtime.shutdown", async () => {
+		const harness = createHarness(["ordered-hang-request"], {
+			shutdownProtocolTimeoutMs: 10,
+			shutdownGraceTimeoutMs: 5,
+			shutdownTerminateTimeoutMs: 5,
+			shutdownKillTimeoutMs: 50,
+		});
+		await harness.client.start();
+		const request = harness.client.request(
+			"reflection.analyze",
+			{ invocationId: "blocked-reflection" },
+			{ timeoutMs: 5_000 },
+		);
+		const requestOutcome = request.then(
+			() => null,
+			(error: unknown) => error,
+		);
+		await waitFor(
+			() =>
+				harness.children[0]?.receivedMethods.includes("reflection.analyze") ===
+				true,
+		);
+
+		const startedAt = Date.now();
+		await expect(harness.client.stop()).resolves.toBeUndefined();
+		expect(Date.now() - startedAt).toBeLessThan(500);
+		expect(harness.children[0]?.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+		expect(await requestOutcome).toEqual(
+			expect.objectContaining({ code: "INTERRUPTED" }),
+		);
+		expect(harness.client.isRunning).toBe(false);
+	});
+
+	test("returns one stop promise and waits for a confirmed close", async () => {
+		const harness = createHarness(["ignore-shutdown"], {
+			shutdownProtocolTimeoutMs: 10,
+			shutdownGraceTimeoutMs: 5,
+			shutdownTerminateTimeoutMs: 1_000,
+			shutdownKillTimeoutMs: 10,
+		});
+		await harness.client.start();
+		let settled = false;
+		const stopping = harness.client.stop();
+		expect(harness.client.stop()).toBe(stopping);
+		void stopping.finally(() => {
+			settled = true;
+		});
+		await waitFor(
+			() => harness.children[0]?.killSignals.includes("SIGTERM") === true,
+		);
+		expect(settled).toBe(false);
+
+		harness.children[0]?.emitClose(null, "SIGTERM");
+		await expect(stopping).resolves.toBeUndefined();
+		expect(settled).toBe(true);
+		expect(harness.children[0]?.killSignals).toEqual(["SIGTERM"]);
+	});
+
+	test("retains ownership when SIGKILL never produces a close", async () => {
+		const harness = createHarness(["ignore-shutdown"], {
+			shutdownProtocolTimeoutMs: 5,
+			shutdownGraceTimeoutMs: 5,
+			shutdownTerminateTimeoutMs: 5,
+			shutdownKillTimeoutMs: 5,
+		});
+		await harness.client.start();
+
+		await expect(harness.client.stop()).rejects.toEqual(
+			expect.objectContaining({ code: "STOP_FAILED" }),
+		);
+		expect(harness.children[0]?.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+		expect(harness.client.isRunning).toBe(true);
+
+		harness.children[0]?.emitClose(null, "SIGKILL");
+		await Promise.resolve();
+		expect(harness.client.isRunning).toBe(false);
+	});
+
+	test("a child error without close remains owned by later stop retries", async () => {
+		const harness = createHarness(["ignore-shutdown"], {
+			shutdownProtocolTimeoutMs: 5,
+			shutdownGraceTimeoutMs: 5,
+			shutdownTerminateTimeoutMs: 5,
+			shutdownKillTimeoutMs: 5,
+		});
+		await harness.client.start();
+		const firstStop = harness.client.stop();
+		await waitFor(
+			() => harness.children[0]?.killSignals.includes("SIGTERM") === true,
+		);
+		harness.children[0]?.emitError(new Error("synthetic transport error"));
+		await expect(firstStop).rejects.toEqual(
+			expect.objectContaining({ code: "STOP_FAILED" }),
+		);
+
+		let retrySettled = false;
+		const retry = harness.client.stop();
+		void retry.finally(() => {
+			retrySettled = true;
+		});
+		await Bun.sleep(1);
+		expect(retrySettled).toBe(false);
+		harness.children[0]?.emitClose(null, "SIGKILL");
+		await expect(retry).resolves.toBeUndefined();
+	});
+});
+
+function createHarness(
+	behaviors: readonly FakeBehavior[],
+	shutdownOptions: Partial<
+		Pick<
+			MastraSidecarClientOptions,
+			| "shutdownProtocolTimeoutMs"
+			| "shutdownGraceTimeoutMs"
+			| "shutdownTerminateTimeoutMs"
+			| "shutdownKillTimeoutMs"
+		>
+	> = {},
+): {
 	client: MastraSidecarClient;
 	children: FakeSidecarChild[];
 	interruptions: string[][];
@@ -170,6 +294,7 @@ function createHarness(behaviors: readonly FakeBehavior[]): {
 			restarts.count += 1;
 		},
 		spawnProcess,
+		...shutdownOptions,
 	};
 	return {
 		client: new MastraSidecarClient(options),
@@ -186,18 +311,32 @@ class FakeSidecarChild extends EventEmitter {
 	exitCode: number | null = null;
 	signalCode: NodeJS.Signals | null = null;
 	killed = false;
+	readonly killSignals: NodeJS.Signals[] = [];
+	readonly receivedMethods: string[] = [];
 	private readonly parser = new ContentLengthFrameParser();
 	private hungRequest = false;
+	private requestTail = Promise.resolve();
 
 	constructor(private readonly behavior: FakeBehavior) {
 		super();
 		this.stdin.on("data", (chunk: Buffer) => {
-			for (const message of this.parser.push(chunk)) this.accept(message);
+			for (const message of this.parser.push(chunk)) {
+				if (this.behavior === "ordered-hang-request") {
+					this.requestTail = this.requestTail.then(() => this.accept(message));
+					void this.requestTail.catch(() => undefined);
+				} else {
+					void this.accept(message);
+				}
+			}
 		});
 	}
 
-	kill(): boolean {
+	kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
 		this.killed = true;
+		this.killSignals.push(signal);
+		if (this.behavior === "ordered-hang-request" && signal === "SIGKILL") {
+			queueMicrotask(() => this.emitClose(null, signal));
+		}
 		return true;
 	}
 
@@ -211,7 +350,7 @@ class FakeSidecarChild extends EventEmitter {
 		this.emit("error", error);
 	}
 
-	private accept(value: unknown): void {
+	private async accept(value: unknown): Promise<void> {
 		if (
 			!isRecord(value) ||
 			value.type !== "request" ||
@@ -220,6 +359,9 @@ class FakeSidecarChild extends EventEmitter {
 			return;
 		}
 		if (this.behavior === "hang-initialize") return;
+		this.receivedMethods.push(
+			typeof value.method === "string" ? value.method : "unknown",
+		);
 		if (value.method === "runtime.initialize") {
 			if (this.behavior === "reject-initialize") {
 				this.respond({
@@ -253,6 +395,19 @@ class FakeSidecarChild extends EventEmitter {
 					},
 				},
 			});
+			return;
+		}
+		if (
+			this.behavior === "ordered-hang-request" &&
+			value.method === "reflection.analyze"
+		) {
+			await new Promise<void>(() => {});
+			return;
+		}
+		if (
+			this.behavior === "ignore-shutdown" &&
+			value.method === "runtime.shutdown"
+		) {
 			return;
 		}
 		if (this.behavior === "hang-request" && !this.hungRequest) {

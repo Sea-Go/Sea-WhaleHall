@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { AgentRuntime } from "../src/agent/agent-runtime";
+import type { LocalToolProcess } from "../src/agent/local-tool-client";
 import {
 	BackgroundAppLifecycle,
 	type BackgroundWindow,
@@ -94,6 +96,64 @@ describe("background application lifecycle", () => {
 
 		await Promise.all([lifecycle.quit(), lifecycle.quit()]);
 		expect(order).toEqual(["shutdown", "persisted", "exit"]);
+	});
+
+	test("latches native startup synchronously before waiting for a hanging window open", async () => {
+		let localRunning = false;
+		let nativeStartCount = 0;
+		const local = {
+			pid: null,
+			get isRunning() {
+				return localRunning;
+			},
+			onEvent: () => () => {},
+			onDesktopEvent: () => () => {},
+			onSemanticEvent: () => () => {},
+			onFailure: () => () => {},
+			async start() {
+				nativeStartCount += 1;
+				localRunning = true;
+			},
+			async stop() {
+				localRunning = false;
+			},
+		} as unknown as LocalToolProcess;
+		const runtime = new AgentRuntime(local);
+		let releaseOpen!: (window: TestWindow) => void;
+		const pendingWindow = new Promise<TestWindow>((resolve) => {
+			releaseOpen = resolve;
+		});
+		let quitLatchCount = 0;
+		let shutdownCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: () => pendingWindow,
+			onQuitRequested() {
+				quitLatchCount += 1;
+				runtime.beginShutdown();
+			},
+			shutdown: async () => {
+				shutdownCount += 1;
+			},
+			exit: () => {},
+		});
+		const opening = lifecycle.open().catch((error: unknown) => error);
+
+		const quitting = lifecycle.quit();
+		expect(lifecycle.quit()).toBe(quitting);
+		expect(quitLatchCount).toBe(1);
+		expect(shutdownCount).toBe(0);
+		await expect(runtime.start()).rejects.toThrow(
+			"while WhaleHall is quitting",
+		);
+		await expect(runtime.listLocalTools()).rejects.toThrow(
+			"while WhaleHall is quitting",
+		);
+		expect(nativeStartCount).toBe(0);
+
+		releaseOpen(new TestWindow());
+		await opening;
+		await quitting;
+		expect(shutdownCount).toBe(1);
 	});
 
 	test("vetoes Electrobun quit until shutdown authorizes the final exit", async () => {
@@ -210,5 +270,77 @@ describe("background application lifecycle", () => {
 
 		expect(order).toEqual(["first", "second", "third"]);
 		expect(errors).toEqual(["first"]);
+	});
+
+	test("bounds a stuck step and continues to later process owners", async () => {
+		const order: string[] = [];
+		const errors: string[] = [];
+		const settled: Array<{ name: string; outcome: string }> = [];
+		await runBestEffortShutdown(
+			[
+				{
+					name: "stuck-tail",
+					timeoutMs: 10,
+					run: () => new Promise<void>(() => {}),
+				},
+				{
+					name: "later-owner",
+					timeoutMs: 100,
+					run: () => {
+						order.push("later-owner");
+					},
+				},
+			],
+			(step) => errors.push(step),
+			{
+				onStepSettled(result) {
+					settled.push({ name: result.name, outcome: result.outcome });
+				},
+			},
+		);
+
+		expect(order).toEqual(["later-owner"]);
+		expect(errors).toEqual(["stuck-tail"]);
+		expect(settled).toEqual([
+			{ name: "stuck-tail", outcome: "timed_out" },
+			{ name: "later-owner", outcome: "completed" },
+		]);
+	});
+
+	test("reports sanitized duration for every outcome without trusting diagnostics", async () => {
+		const times = [100, 107, 107, 119];
+		const settled: Array<{
+			name: string;
+			outcome: string;
+			durationMs: number;
+		}> = [];
+		await runBestEffortShutdown(
+			[
+				{ name: "successful", run: () => {} },
+				{
+					name: "failed",
+					run: () => {
+						throw new Error("private failure detail");
+					},
+				},
+			],
+			() => {},
+			{
+				nowMs: () => times.shift() ?? 119,
+				onStepSettled(result) {
+					settled.push({
+						name: result.name,
+						outcome: result.outcome,
+						durationMs: result.durationMs,
+					});
+					throw new Error("diagnostic failed");
+				},
+			},
+		);
+
+		expect(settled).toEqual([
+			{ name: "successful", outcome: "completed", durationMs: 7 },
+			{ name: "failed", outcome: "failed", durationMs: 12 },
+		]);
 	});
 });
