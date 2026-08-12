@@ -55,6 +55,11 @@ export class SidecarModelRelayBridge {
 		const body = decodeBody(input.request.bodyBase64);
 		if (!isRecord(body))
 			throw new Error("Model relay body must be a JSON object.");
+		if (body.model !== this.options.modelId) {
+			throw new Error(
+				"Model relay body requested a model outside the configured allowlist.",
+			);
+		}
 		const transportRunId = input.runId ?? input.relayId;
 		const relay: ActiveRelay = {
 			requestId,

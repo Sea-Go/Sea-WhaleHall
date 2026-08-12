@@ -309,6 +309,32 @@ describe("SidecarModelRelayBridge", () => {
 		);
 	});
 
+	test("rejects a wire body model that differs from the host allowlist", async () => {
+		let remoteCalls = 0;
+		const bridge = new SidecarModelRelayBridge({
+			transport: new ModelRelayTransport(
+				authWithResponse(() => {
+					remoteCalls += 1;
+					return Response.json({ ok: true });
+				}),
+			),
+			modelId: "approved-model",
+			send: async () => {},
+		});
+		await expect(
+			bridge.open(
+				"host-request-wrong-wire-model",
+				relayOpenParams("relay-wrong-wire-model", "run-wrong-wire-model", {
+					...validBody(),
+					model: "unapproved-model",
+				}),
+			),
+		).rejects.toThrow(
+			"body requested a model outside the configured allowlist",
+		);
+		expect(remoteCalls).toBe(0);
+	});
+
 	test("rejects sidecar-supplied identity and credentials before any remote request", async () => {
 		let remoteCalls = 0;
 		const auth = authWithResponse(() => {
