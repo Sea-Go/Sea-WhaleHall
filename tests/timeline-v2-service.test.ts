@@ -247,6 +247,35 @@ describe("TimelineV2Service", () => {
 		expect(transport.commits).toHaveLength(0);
 	});
 
+	test("retries startup after a transient transport failure", async () => {
+		const transport = new FakeSemanticTransport([]);
+		let startCalls = 0;
+		transport.start = async () => {
+			startCalls += 1;
+			if (startCalls === 1) throw new Error("transient transport startup failure");
+		};
+		const service = new TimelineV2Service({
+			transport,
+			repository: new InMemoryTimelineV2Repository(),
+			identity: {
+				collectorId: "collector.timeline-v2.start-retry",
+				deviceId: "device-1",
+				sessionId: "session-1",
+			},
+			hypotheses: new DeterministicTimelineHypothesisGenerator(),
+			clock: new FakeClock(),
+			eventPollMs: 60_000,
+			jobPollMs: 60_000,
+		});
+
+		await expect(service.start()).rejects.toThrow(
+			"transient transport startup failure",
+		);
+		await expect(service.start()).resolves.toBeUndefined();
+		expect(startCalls).toBe(2);
+		await service.stop();
+	});
+
 	test("revocation outranks a due count window and restored authorization starts fresh", async () => {
 		const clock = new FakeClock();
 		const transport = new FakeSemanticTransport([

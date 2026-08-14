@@ -434,12 +434,16 @@ export async function createTimelineV2Runtime(
 			beginShutdown,
 			close() {
 				if (closePromise !== null) return closePromise;
-				beginShutdown();
 				closePromise = (async () => {
-					await service.stop();
-					if (repositoryClosed) return;
-					repositoryClosed = true;
-					repository.close();
+					try {
+						beginShutdown();
+						await service.stop();
+					} finally {
+						if (!repositoryClosed) {
+							repositoryClosed = true;
+							repository.close();
+						}
+					}
 				})();
 				return closePromise;
 			},
