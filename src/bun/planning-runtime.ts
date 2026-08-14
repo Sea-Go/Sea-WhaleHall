@@ -611,6 +611,9 @@ class VerifiedQwenPlanningModel implements PlanningModelPort {
 		if (!this.verification) {
 			this.verification = (async () => {
 				await verifyOllamaModelLock(WHALEHALL_TEACHER_MODEL_LOCK);
+				// @whalehall-model-boundary-exception planning-local-model-lock
+				// Dynamic planning is deliberately local, fixed to the verified teacher
+				// lock, and exposes only the structured PlanningModelPort contract.
 				const client = new OllamaJsonClient({
 					baseUrl: WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
 					model: WHALEHALL_TEACHER_MODEL_LOCK.model,
