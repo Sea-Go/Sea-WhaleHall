@@ -19,7 +19,10 @@ import {
 	verifyWindowsFileSignature,
 } from "./app-update-sign-windows";
 import { assertElectrobunSignalForwarding } from "./electrobun-signal-forwarding";
-import { verifyMacWrapperFromEnvironment } from "./macos-build-security";
+import {
+	prepareDevelopmentMacWrapperFromEnvironment,
+	verifyMacWrapperFromEnvironment,
+} from "./macos-build-security";
 
 export function finalizeStableWindowsInstaller(
 	environment: NodeJS.ProcessEnv = process.env,
@@ -261,6 +264,7 @@ function requiredEnvironment(
 
 if (import.meta.main) {
 	verifyEmbeddedUpdatePublicKey();
+	prepareDevelopmentMacWrapperFromEnvironment();
 	verifyMacWrapperFromEnvironment();
 	verifyPackagedElectrobunSignalForwarding();
 	verifyStableMacNotarization();
@@ -285,6 +289,7 @@ export function verifyPackagedElectrobunSignalForwarding(
 			`Unsupported Electrobun signal-verification target: ${os}-${architecture}.`,
 		);
 	}
+	if (buildEnvironment === "dev") return;
 	const artifactDirectory = requiredEnvironment(
 		environment,
 		"ELECTROBUN_ARTIFACT_DIR",
