@@ -131,11 +131,10 @@ export async function createWhaleHallReflectionRuntime(
 			repository,
 			inference,
 			identity,
-			// The local test session is not restored across application launches.
-			// Clear any recovered collector goal before native sensors start so
-			// early events cannot be attributed to a stale account; an authenticated
-			// account's authoritative goal is restored afterwards by Bun.
-			startupGoal: null,
+			// Preserve the durable executing-task goal across launches. The local
+			// PlanningRuntime reconciles it against the current calendar after the
+			// native planning store becomes available. Cloud ownership remains scoped
+			// to the authenticated account independently of that local execution goal.
 			cloudOwnerAccountId: options.cloudOwnerAccountId,
 			onWindowSealed: options.onWindowSealed,
 			sinks: options.onFeedback
