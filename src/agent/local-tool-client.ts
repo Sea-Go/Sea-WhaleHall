@@ -3,6 +3,9 @@ import {
 	isLocalAuditFiveMinutesResult,
 	isLocalMonitoringConfigure,
 	isLocalMonitoringStatus,
+	isLocalPlanningCalendarEvent,
+	isLocalPlanningOutboxEntry,
+	isLocalPlanningPlanSnapshot,
 	isLocalToolDescriptor,
 	isLocalVaultDeleteResultRecord,
 	isLocalVaultKeyStatus,
@@ -27,6 +30,23 @@ import {
 	type LocalMethod,
 	type LocalMonitoringConfigure,
 	type LocalMonitoringStatus,
+	type LocalPlanningCalendarEvent,
+	type LocalPlanningCalendarList,
+	type LocalPlanningCalendarListResult,
+	type LocalPlanningCalendarMutate,
+	type LocalPlanningCalendarMutationResult,
+	type LocalPlanningList,
+	type LocalPlanningListResult,
+	type LocalPlanningMutationParams,
+	type LocalPlanningMutationResult,
+	type LocalPlanningOperationGetResult,
+	type LocalPlanningOutboxAck,
+	type LocalPlanningOutboxAckResult,
+	type LocalPlanningOutboxList,
+	type LocalPlanningOutboxListResult,
+	type LocalPlanningPlanSnapshot,
+	type LocalPlanningVaultReferences,
+	type LocalPlanningVaultReferencesResult,
 	type LocalRequest,
 	type LocalRuntimeHealth,
 	type LocalSemanticCommitResult,
@@ -43,6 +63,8 @@ import {
 	type LocalVaultDeleteBatchResult,
 	type LocalVaultKeyStatus,
 	type LocalVaultLegacyMigrationResult,
+	type LocalVaultListRecords,
+	type LocalVaultListRecordsResult,
 	type LocalVaultOpenBatch,
 	type LocalVaultOpenBatchResult,
 	type LocalVaultSealBatch,
@@ -65,6 +87,7 @@ export class LocalClientError extends Error {
 	constructor(
 		public readonly code: LocalClientFailureCode | string,
 		message: string,
+		public readonly details: Record<string, unknown> | null = null,
 	) {
 		super(message);
 		this.name = "LocalClientError";
@@ -279,8 +302,42 @@ export interface LocalToolProcess {
 	deleteVaultBatch(
 		batch: LocalVaultDeleteBatch,
 	): Promise<LocalVaultDeleteBatchResult>;
+	listVaultRecords?(
+		query: LocalVaultListRecords,
+	): Promise<LocalVaultListRecordsResult>;
 	getVaultKeyStatus(): Promise<LocalVaultKeyStatus>;
 	migrateLegacyVaultKey(): Promise<LocalVaultLegacyMigrationResult>;
+	listPlanningPlans?(
+		query?: LocalPlanningList,
+	): Promise<LocalPlanningListResult>;
+	getPlanningPlan?(planId: string): Promise<LocalPlanningPlanSnapshot | null>;
+	getPlanningOperationResult?(
+		operationId: string,
+	): Promise<LocalPlanningPlanSnapshot | null>;
+	upsertPlanningPlan?(
+		mutation: LocalPlanningMutationParams,
+	): Promise<LocalPlanningMutationResult>;
+	mutatePlanningPlan?(
+		mutation: LocalPlanningMutationParams & { expectedVersion: number },
+	): Promise<LocalPlanningMutationResult>;
+	listPlanningVaultReferences?(
+		query?: LocalPlanningVaultReferences,
+	): Promise<LocalPlanningVaultReferencesResult>;
+	listPlanningCalendar?(
+		query?: LocalPlanningCalendarList,
+	): Promise<LocalPlanningCalendarListResult>;
+	getPlanningCalendarEvent?(
+		eventId: string,
+	): Promise<LocalPlanningCalendarEvent | null>;
+	mutatePlanningCalendar?(
+		mutation: LocalPlanningCalendarMutate,
+	): Promise<LocalPlanningCalendarMutationResult>;
+	listPlanningOutbox?(
+		query?: LocalPlanningOutboxList,
+	): Promise<LocalPlanningOutboxListResult>;
+	ackPlanningOutbox?(
+		acknowledgement: LocalPlanningOutboxAck,
+	): Promise<LocalPlanningOutboxAckResult>;
 	stop(): Promise<void>;
 	onEvent(listener: (event: LocalToolEvent) => void): () => void;
 	onDesktopEvent(
@@ -770,6 +827,20 @@ export class LocalToolClient implements LocalToolProcess {
 		return result as LocalVaultDeleteBatchResult;
 	}
 
+	async listVaultRecords(
+		query: LocalVaultListRecords,
+	): Promise<LocalVaultListRecordsResult> {
+		const result = await this.request<unknown>("vault.listRecords", {
+			...query,
+		});
+		if (!isLocalVaultListRecordsResult(result, query.limit ?? 100)) {
+			throw this.protocolFailure(
+				"vault.listRecords returned an invalid result.",
+			);
+		}
+		return result;
+	}
+
 	async getVaultKeyStatus(): Promise<LocalVaultKeyStatus> {
 		const result = await this.request<unknown>("vault.status", {});
 		if (!isLocalVaultKeyStatus(result)) {
@@ -791,6 +862,194 @@ export class LocalToolClient implements LocalToolProcess {
 			);
 		}
 		return result as LocalVaultLegacyMigrationResult;
+	}
+
+	async listPlanningPlans(
+		query: LocalPlanningList = {},
+	): Promise<LocalPlanningListResult> {
+		const result = await this.request<unknown>("planning.list", { ...query });
+		if (
+			!isExactLocalRecord(result, ["plans"]) ||
+			!Array.isArray(result.plans) ||
+			result.plans.length > (query.limit ?? 100) ||
+			!result.plans.every(isLocalPlanningPlanSnapshot)
+		) {
+			throw this.protocolFailure("planning.list returned an invalid result.");
+		}
+		return result as LocalPlanningListResult;
+	}
+
+	async getPlanningPlan(
+		planId: string,
+	): Promise<LocalPlanningPlanSnapshot | null> {
+		const result = await this.request<unknown>("planning.get", { planId });
+		if (
+			!isExactLocalRecord(result, ["plan"]) ||
+			!(result.plan === null || isLocalPlanningPlanSnapshot(result.plan))
+		) {
+			throw this.protocolFailure("planning.get returned an invalid result.");
+		}
+		return result.plan as LocalPlanningPlanSnapshot | null;
+	}
+
+	async getPlanningOperationResult(
+		operationId: string,
+	): Promise<LocalPlanningPlanSnapshot | null> {
+		const result = await this.request<unknown>("planning.operation.get", {
+			operationId,
+		});
+		if (!isValidLocalPlanningOperationGetResult(result, operationId)) {
+			throw this.protocolFailure(
+				"planning.operation.get returned an invalid result.",
+			);
+		}
+		return result.plan;
+	}
+
+	async upsertPlanningPlan(
+		mutation: LocalPlanningMutationParams,
+	): Promise<LocalPlanningMutationResult> {
+		const result = await this.request<unknown>("planning.upsert", {
+			...mutation,
+		});
+		return this.parsePlanningMutationResult(
+			result,
+			"planning.upsert",
+			mutation.plan,
+		);
+	}
+
+	async mutatePlanningPlan(
+		mutation: LocalPlanningMutationParams & { expectedVersion: number },
+	): Promise<LocalPlanningMutationResult> {
+		const result = await this.request<unknown>("planning.mutate", {
+			...mutation,
+		});
+		return this.parsePlanningMutationResult(
+			result,
+			"planning.mutate",
+			mutation.plan,
+		);
+	}
+
+	async listPlanningVaultReferences(
+		query: LocalPlanningVaultReferences = {},
+	): Promise<LocalPlanningVaultReferencesResult> {
+		const result = await this.request<unknown>("planning.vaultReferences", {
+			...query,
+		});
+		if (!isLocalPlanningVaultReferencesResult(result, query.limit ?? 100)) {
+			throw this.protocolFailure(
+				"planning.vaultReferences returned an invalid result.",
+			);
+		}
+		return result;
+	}
+
+	async listPlanningCalendar(
+		query: LocalPlanningCalendarList = {},
+	): Promise<LocalPlanningCalendarListResult> {
+		const result = await this.request<unknown>("calendar.list", { ...query });
+		if (
+			!isExactLocalRecord(result, ["events"]) ||
+			!Array.isArray(result.events) ||
+			!result.events.every(isLocalPlanningCalendarEvent)
+		) {
+			throw this.protocolFailure("calendar.list returned an invalid result.");
+		}
+		return result as LocalPlanningCalendarListResult;
+	}
+
+	async getPlanningCalendarEvent(
+		eventId: string,
+	): Promise<LocalPlanningCalendarEvent | null> {
+		const result = await this.request<unknown>("calendar.get", { eventId });
+		if (
+			!isExactLocalRecord(result, ["event"]) ||
+			!(result.event === null || isLocalPlanningCalendarEvent(result.event))
+		) {
+			throw this.protocolFailure("calendar.get returned an invalid result.");
+		}
+		return result.event as LocalPlanningCalendarEvent | null;
+	}
+
+	async mutatePlanningCalendar(
+		mutation: LocalPlanningCalendarMutate,
+	): Promise<LocalPlanningCalendarMutationResult> {
+		const result = await this.request<unknown>("calendar.mutate", {
+			...mutation,
+		});
+		if (
+			!isExactLocalRecord(result, ["outcomes", "outbox"]) ||
+			!Array.isArray(result.outcomes) ||
+			result.outcomes.length !== mutation.mutations.length ||
+			!result.outcomes.every((outcome, index) => {
+				const requested = mutation.mutations[index];
+				if (!requested || !isExactLocalRecord(outcome, ["eventId", "event"])) {
+					return false;
+				}
+				const expectedId =
+					requested.action === "delete"
+						? requested.eventId
+						: requested.event.eventId;
+				return (
+					outcome.eventId === expectedId &&
+					(requested.action === "delete"
+						? outcome.event === null
+						: isLocalPlanningCalendarEvent(outcome.event) &&
+							outcome.event.eventId === expectedId)
+				);
+			}) ||
+			!Array.isArray(result.outbox) ||
+			!result.outbox.every(isLocalPlanningOutboxEntry)
+		) {
+			throw this.protocolFailure("calendar.mutate returned an invalid result.");
+		}
+		return result as LocalPlanningCalendarMutationResult;
+	}
+
+	async listPlanningOutbox(
+		query: LocalPlanningOutboxList = {},
+	): Promise<LocalPlanningOutboxListResult> {
+		const result = await this.request<unknown>("planning.outbox.list", {
+			...query,
+		});
+		if (
+			!isExactLocalRecord(result, ["entries"]) ||
+			!Array.isArray(result.entries) ||
+			result.entries.length > (query.limit ?? 100) ||
+			!result.entries.every(isLocalPlanningOutboxEntry)
+		) {
+			throw this.protocolFailure(
+				"planning.outbox.list returned an invalid result.",
+			);
+		}
+		return result as LocalPlanningOutboxListResult;
+	}
+
+	async ackPlanningOutbox(
+		acknowledgement: LocalPlanningOutboxAck,
+	): Promise<LocalPlanningOutboxAckResult> {
+		const result = await this.request<unknown>("planning.outbox.ack", {
+			...acknowledgement,
+		});
+		if (
+			!isExactLocalRecord(result, ["entries"]) ||
+			!Array.isArray(result.entries) ||
+			result.entries.length !== acknowledgement.entryIds.length ||
+			!result.entries.every(
+				(entry, index) =>
+					isLocalPlanningOutboxEntry(entry) &&
+					entry.entryId === acknowledgement.entryIds[index] &&
+					entry.status === "delivered" &&
+					entry.deliveredAtMs === acknowledgement.deliveredAtMs,
+			)
+		) {
+			throw this.protocolFailure(
+				"planning.outbox.ack returned an invalid result.",
+			);
+		}
+		return result as LocalPlanningOutboxAckResult;
 	}
 
 	stop(): Promise<void> {
@@ -920,6 +1179,26 @@ export class LocalToolClient implements LocalToolProcess {
 		});
 	}
 
+	private parsePlanningMutationResult(
+		result: unknown,
+		method: "planning.upsert" | "planning.mutate",
+		expectedPlan: LocalPlanningPlanSnapshot,
+	): LocalPlanningMutationResult {
+		if (
+			!isExactLocalRecord(result, ["plan", "calendarEvents", "outbox"]) ||
+			!isLocalPlanningPlanSnapshot(result.plan) ||
+			result.plan.planId !== expectedPlan.planId ||
+			result.plan.version !== expectedPlan.version ||
+			!Array.isArray(result.calendarEvents) ||
+			!result.calendarEvents.every(isLocalPlanningCalendarEvent) ||
+			!Array.isArray(result.outbox) ||
+			!result.outbox.every(isLocalPlanningOutboxEntry)
+		) {
+			throw this.protocolFailure(`${method} returned an invalid result.`);
+		}
+		return result as LocalPlanningMutationResult;
+	}
+
 	private async requestMonitoringStatus(
 		method:
 			| "monitoring.status"
@@ -1015,10 +1294,15 @@ export class LocalToolClient implements LocalToolProcess {
 		clearTimeout(pending.timeout);
 		this.pending.delete(message.id);
 		if (message.ok) pending.resolve(message.result);
-		else
+		else {
 			pending.reject(
-				new LocalClientError(message.error.code, message.error.message),
+				new LocalClientError(
+					message.error.code,
+					message.error.message,
+					message.error.details ?? null,
+				),
 			);
+		}
 	}
 
 	private handleExit(child: ChildTransport, exitCode: number): void {
@@ -1156,6 +1440,134 @@ function sameGoalContext(
 		left.text === right.text &&
 		left.activatedAtMs === right.activatedAtMs
 	);
+}
+
+function isValidLocalPlanningOperationGetResult(
+	value: unknown,
+	operationId: string,
+): value is LocalPlanningOperationGetResult {
+	if (
+		!isExactLocalRecord(value, ["operationId", "method", "plan", "result"]) ||
+		value.operationId !== operationId ||
+		!(
+			value.method === null ||
+			value.method === "planning.upsert" ||
+			value.method === "planning.mutate" ||
+			value.method === "calendar.mutate" ||
+			value.method === "planning.outbox.ack"
+		) ||
+		!(value.plan === null || isLocalPlanningPlanSnapshot(value.plan)) ||
+		!(value.result === null || isRecord(value.result))
+	) {
+		return false;
+	}
+	if (value.method === null) {
+		return value.plan === null && value.result === null;
+	}
+	if (value.result === null) return false;
+	if (
+		value.method === "planning.upsert" ||
+		value.method === "planning.mutate"
+	) {
+		return (
+			value.plan !== null &&
+			isLocalPlanningPlanSnapshot(value.result.plan) &&
+			value.result.plan.planId === value.plan.planId &&
+			value.result.plan.version === value.plan.version
+		);
+	}
+	return value.plan === null;
+}
+
+function isLocalVaultListRecordsResult(
+	value: unknown,
+	pageLimit: number,
+): value is LocalVaultListRecordsResult {
+	return (
+		isExactLocalRecord(value, ["records", "nextCursor"]) &&
+		Array.isArray(value.records) &&
+		value.records.length <= pageLimit &&
+		value.records.every(
+			(record) =>
+				isExactLocalRecord(record, [
+					"recordId",
+					"schemaVersion",
+					"contentRef",
+					"createdAtMs",
+					"expiresAtMs",
+				]) &&
+				localProtocolIdentifier(record.recordId, 256) &&
+				localProtocolIdentifier(record.schemaVersion, 160) &&
+				localProtocolIdentifier(record.contentRef, 512) &&
+				nonNegativeLocalInteger(record.createdAtMs) &&
+				(record.expiresAtMs === null ||
+					(nonNegativeLocalInteger(record.expiresAtMs) &&
+						record.expiresAtMs >= record.createdAtMs)),
+		) &&
+		(value.nextCursor === null || boundedLocalString(value.nextCursor, 1_024))
+	);
+}
+
+function isLocalPlanningVaultReferencesResult(
+	value: unknown,
+	pageLimit: number,
+): value is LocalPlanningVaultReferencesResult {
+	return (
+		isExactLocalRecord(value, ["references", "nextCursor"]) &&
+		Array.isArray(value.references) &&
+		value.references.length <= pageLimit &&
+		value.references.every(
+			(reference) =>
+				isExactLocalRecord(reference, [
+					"source",
+					"planId",
+					"version",
+					"sealedContentRef",
+					"manifestRecordId",
+				]) &&
+				(reference.source === "current" ||
+					reference.source === "history" ||
+					reference.source === "operation") &&
+				localProtocolIdentifier(reference.planId, 256) &&
+				Number.isSafeInteger(reference.version) &&
+				Number(reference.version) > 0 &&
+				localProtocolIdentifier(reference.sealedContentRef, 512) &&
+				(reference.manifestRecordId === null ||
+					localProtocolIdentifier(reference.manifestRecordId, 256)),
+		) &&
+		(value.nextCursor === null || boundedLocalString(value.nextCursor, 1_024))
+	);
+}
+
+function isExactLocalRecord(
+	value: unknown,
+	keys: readonly string[],
+): value is Record<string, unknown> {
+	if (!isRecord(value)) return false;
+	const actual = Object.keys(value);
+	return actual.length === keys.length && keys.every((key) => key in value);
+}
+
+function boundedLocalString(value: unknown, maximum: number): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= maximum &&
+		!value.includes("\u0000")
+	);
+}
+
+function localProtocolIdentifier(
+	value: unknown,
+	maximum: number,
+): value is string {
+	return (
+		boundedLocalString(value, maximum) && /^[A-Za-z0-9._:@/-]+$/u.test(value)
+	);
+}
+
+function nonNegativeLocalInteger(value: unknown): value is number {
+	return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
 async function closeGracefully(

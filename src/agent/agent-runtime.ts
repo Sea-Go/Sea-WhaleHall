@@ -9,6 +9,21 @@ import type {
 	LocalEventTailCursorResult,
 	LocalMonitoringConfigure,
 	LocalMonitoringStatus,
+	LocalPlanningCalendarList,
+	LocalPlanningCalendarListResult,
+	LocalPlanningCalendarMutate,
+	LocalPlanningCalendarMutationResult,
+	LocalPlanningList,
+	LocalPlanningListResult,
+	LocalPlanningMutationParams,
+	LocalPlanningMutationResult,
+	LocalPlanningOutboxAck,
+	LocalPlanningOutboxAckResult,
+	LocalPlanningOutboxList,
+	LocalPlanningOutboxListResult,
+	LocalPlanningPlanSnapshot,
+	LocalPlanningVaultReferences,
+	LocalPlanningVaultReferencesResult,
 	LocalRuntimeStatus,
 	LocalSemanticCommitResult,
 	LocalSemanticQuery,
@@ -22,6 +37,8 @@ import type {
 	LocalVaultDeleteBatchResult,
 	LocalVaultKeyStatus,
 	LocalVaultLegacyMigrationResult,
+	LocalVaultListRecords,
+	LocalVaultListRecordsResult,
 	LocalVaultOpenBatch,
 	LocalVaultOpenBatchResult,
 	LocalVaultSealBatch,
@@ -287,6 +304,15 @@ export class AgentRuntime {
 		return this.local.deleteVaultBatch(batch);
 	}
 
+	async listVaultRecords(
+		query: LocalVaultListRecords,
+	): Promise<LocalVaultListRecordsResult> {
+		await this.ensureStarted();
+		const method = this.local.listVaultRecords;
+		if (!method) throw new Error("Native Vault inventory is unavailable.");
+		return method.call(this.local, query);
+	}
+
 	async getVaultKeyStatus(): Promise<LocalVaultKeyStatus> {
 		await this.ensureStarted();
 		return this.local.getVaultKeyStatus();
@@ -295,6 +321,97 @@ export class AgentRuntime {
 	async migrateLegacyVaultKey(): Promise<LocalVaultLegacyMigrationResult> {
 		await this.ensureStarted();
 		return this.local.migrateLegacyVaultKey();
+	}
+
+	async listPlanningPlans(
+		query: LocalPlanningList = {},
+	): Promise<LocalPlanningListResult> {
+		await this.ensureStarted();
+		const method = this.local.listPlanningPlans;
+		if (!method) throw new Error("Native planning store is unavailable.");
+		return method.call(this.local, query);
+	}
+
+	async getPlanningPlan(
+		planId: string,
+	): Promise<LocalPlanningPlanSnapshot | null> {
+		await this.ensureStarted();
+		const method = this.local.getPlanningPlan;
+		if (!method) throw new Error("Native planning store is unavailable.");
+		return method.call(this.local, planId);
+	}
+
+	async getPlanningOperationResult(
+		operationId: string,
+	): Promise<LocalPlanningPlanSnapshot | null> {
+		await this.ensureStarted();
+		const method = this.local.getPlanningOperationResult;
+		if (!method) throw new Error("Native planning store is unavailable.");
+		return method.call(this.local, operationId);
+	}
+
+	async upsertPlanningPlan(
+		mutation: LocalPlanningMutationParams,
+	): Promise<LocalPlanningMutationResult> {
+		await this.ensureStarted();
+		const method = this.local.upsertPlanningPlan;
+		if (!method) throw new Error("Native planning store is unavailable.");
+		return method.call(this.local, mutation);
+	}
+
+	async mutatePlanningPlan(
+		mutation: LocalPlanningMutationParams & { expectedVersion: number },
+	): Promise<LocalPlanningMutationResult> {
+		await this.ensureStarted();
+		const method = this.local.mutatePlanningPlan;
+		if (!method) throw new Error("Native planning store is unavailable.");
+		return method.call(this.local, mutation);
+	}
+
+	async listPlanningVaultReferences(
+		query: LocalPlanningVaultReferences = {},
+	): Promise<LocalPlanningVaultReferencesResult> {
+		await this.ensureStarted();
+		const method = this.local.listPlanningVaultReferences;
+		if (!method)
+			throw new Error("Native planning Vault inventory is unavailable.");
+		return method.call(this.local, query);
+	}
+
+	async listPlanningCalendar(
+		query: LocalPlanningCalendarList = {},
+	): Promise<LocalPlanningCalendarListResult> {
+		await this.ensureStarted();
+		const method = this.local.listPlanningCalendar;
+		if (!method) throw new Error("Native planning calendar is unavailable.");
+		return method.call(this.local, query);
+	}
+
+	async mutatePlanningCalendar(
+		mutation: LocalPlanningCalendarMutate,
+	): Promise<LocalPlanningCalendarMutationResult> {
+		await this.ensureStarted();
+		const method = this.local.mutatePlanningCalendar;
+		if (!method) throw new Error("Native planning calendar is unavailable.");
+		return method.call(this.local, mutation);
+	}
+
+	async listPlanningOutbox(
+		query: LocalPlanningOutboxList = {},
+	): Promise<LocalPlanningOutboxListResult> {
+		await this.ensureStarted();
+		const method = this.local.listPlanningOutbox;
+		if (!method) throw new Error("Native planning outbox is unavailable.");
+		return method.call(this.local, query);
+	}
+
+	async ackPlanningOutbox(
+		acknowledgement: LocalPlanningOutboxAck,
+	): Promise<LocalPlanningOutboxAckResult> {
+		await this.ensureStarted();
+		const method = this.local.ackPlanningOutbox;
+		if (!method) throw new Error("Native planning outbox is unavailable.");
+		return method.call(this.local, acknowledgement);
 	}
 
 	async stop(): Promise<void> {

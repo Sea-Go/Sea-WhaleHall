@@ -34,8 +34,20 @@ export type LocalMethod =
 	| "vault.sealBatch"
 	| "vault.openBatch"
 	| "vault.deleteBatch"
+	| "vault.listRecords"
 	| "vault.status"
-	| "vault.migrateLegacyKey";
+	| "vault.migrateLegacyKey"
+	| "planning.list"
+	| "planning.get"
+	| "planning.operation.get"
+	| "planning.upsert"
+	| "planning.mutate"
+	| "planning.vaultReferences"
+	| "calendar.list"
+	| "calendar.get"
+	| "calendar.mutate"
+	| "planning.outbox.list"
+	| "planning.outbox.ack";
 
 export type LocalRequest = {
 	id: string;
@@ -59,6 +71,7 @@ export type LocalProtocolErrorCode =
 export type LocalErrorPayload = {
 	code: LocalProtocolErrorCode;
 	message: string;
+	details?: Record<string, unknown>;
 };
 
 export type LocalSuccessResponse = {
@@ -306,6 +319,26 @@ export type LocalVaultDeleteBatchResult = {
 	records: LocalVaultDeleteResultRecord[];
 };
 
+export type LocalVaultListRecords = {
+	namespace: string;
+	createdBeforeMs: number;
+	cursor?: string | null;
+	limit?: number;
+};
+
+export type LocalVaultInventoryRecord = {
+	recordId: string;
+	schemaVersion: string;
+	contentRef: string;
+	createdAtMs: number;
+	expiresAtMs: number | null;
+};
+
+export type LocalVaultListRecordsResult = {
+	records: LocalVaultInventoryRecord[];
+	nextCursor: string | null;
+};
+
 export type LocalVaultKeyAvailability =
 	| "available"
 	| "migration_required"
@@ -327,6 +360,177 @@ export type LocalVaultKeyStatus = {
 export type LocalVaultLegacyMigrationResult = {
 	migrated: boolean;
 	status: LocalVaultKeyStatus;
+};
+
+/**
+ * Versioned aggregate stored by whalehall-local. The native protocol validates
+ * every product field; Bun keeps this boundary open to forward-compatible
+ * aggregate additions while still validating identity and version metadata.
+ */
+export type LocalPlanningPlanSnapshot = Record<string, unknown> & {
+	schemaVersion: "planning.v1";
+	planId: string;
+	version: number;
+};
+
+export type LocalPlanningList = {
+	statuses?: Array<
+		| "draft"
+		| "awaiting-confirmation"
+		| "active"
+		| "paused"
+		| "completed"
+		| "archived"
+	>;
+	limit?: number;
+};
+
+export type LocalPlanningListResult = {
+	plans: LocalPlanningPlanSnapshot[];
+};
+
+export type LocalPlanningVaultReferences = {
+	cursor?: string | null;
+	limit?: number;
+};
+
+export type LocalPlanningVaultReference = {
+	source: "current" | "history" | "operation";
+	planId: string;
+	version: number;
+	sealedContentRef: string;
+	manifestRecordId: string | null;
+};
+
+export type LocalPlanningVaultReferencesResult = {
+	references: LocalPlanningVaultReference[];
+	nextCursor: string | null;
+};
+
+export type LocalPlanningGetResult = {
+	plan: LocalPlanningPlanSnapshot | null;
+};
+
+export type LocalPlanningOperationGetResult = {
+	operationId: string;
+	method:
+		| "planning.upsert"
+		| "planning.mutate"
+		| "calendar.mutate"
+		| "planning.outbox.ack"
+		| null;
+	plan: LocalPlanningPlanSnapshot | null;
+	result: Record<string, unknown> | null;
+};
+
+export type LocalPlanningOutboxDraft = {
+	entryId: string;
+	kind: "plan-changed" | "calendar-changed" | "notification";
+	aggregateId: string;
+	payload: Record<string, unknown>;
+	createdAtMs: number;
+};
+
+export type LocalPlanningCalendarSchedule =
+	| { allDay: false; start: string; end: string; timeZone: string }
+	| { allDay: true; startDate: string; endDateExclusive: string };
+
+export const LOCAL_REDACTED_PLAN_CALENDAR_TITLE = "计划任务";
+
+export type LocalPlanningCalendarEvent = {
+	schemaVersion: "calendar.v1";
+	eventId: string;
+	title: string;
+	sealedContentRef: string | null;
+	redactedContent: boolean;
+	kind: "plan" | "manual-block" | "external" | "break";
+	state: "proposed" | "committed";
+	schedule: LocalPlanningCalendarSchedule;
+	recurrence: {
+		seriesId: string;
+		rrule: string;
+		timeZone: string;
+		exceptionDates: string[];
+	} | null;
+	occurrenceId: string | null;
+	sourcePlanId: string | null;
+	sourceTaskId: string | null;
+	scheduleOrigin: "model" | "user" | null;
+	userLocked: boolean;
+	editable: boolean;
+	version: number;
+};
+
+export type LocalPlanningOutboxEntry = LocalPlanningOutboxDraft & {
+	status: "pending" | "delivered";
+	deliveredAtMs: number | null;
+};
+
+export type LocalPlanningMutationParams = {
+	operationId: string;
+	expectedVersion?: number | null;
+	plan: LocalPlanningPlanSnapshot;
+	calendarEvents?: LocalPlanningCalendarEvent[] | null;
+	outbox?: LocalPlanningOutboxDraft[];
+};
+
+export type LocalPlanningMutationResult = {
+	plan: LocalPlanningPlanSnapshot;
+	calendarEvents: LocalPlanningCalendarEvent[];
+	outbox: LocalPlanningOutboxEntry[];
+};
+
+export type LocalPlanningCalendarList = {
+	sourcePlanId?: string;
+	sourceTaskId?: string;
+	fromDate?: string;
+	toDateExclusive?: string;
+};
+
+export type LocalPlanningCalendarListResult = {
+	events: LocalPlanningCalendarEvent[];
+};
+
+export type LocalPlanningCalendarMutation =
+	| {
+			action: "upsert";
+			expectedVersion?: number | null;
+			event: LocalPlanningCalendarEvent;
+	  }
+	| { action: "delete"; eventId: string; expectedVersion: number };
+
+export type LocalPlanningCalendarMutate = {
+	operationId: string;
+	actor?: "user" | "planning-runtime";
+	mutations: LocalPlanningCalendarMutation[];
+	outbox?: LocalPlanningOutboxDraft[];
+};
+
+export type LocalPlanningCalendarMutationResult = {
+	outcomes: Array<{
+		eventId: string;
+		event: LocalPlanningCalendarEvent | null;
+	}>;
+	outbox: LocalPlanningOutboxEntry[];
+};
+
+export type LocalPlanningOutboxList = {
+	status?: "pending" | "delivered";
+	limit?: number;
+};
+
+export type LocalPlanningOutboxListResult = {
+	entries: LocalPlanningOutboxEntry[];
+};
+
+export type LocalPlanningOutboxAck = {
+	operationId: string;
+	entryIds: string[];
+	deliveredAtMs: number;
+};
+
+export type LocalPlanningOutboxAckResult = {
+	entries: LocalPlanningOutboxEntry[];
 };
 
 export type LocalEventGoalChange = {
@@ -426,7 +630,8 @@ export function parseLocalMessage(line: string): LocalMessage {
 		!isRecord(value.error) ||
 		typeof value.error.code !== "string" ||
 		!ERROR_CODES.has(value.error.code as LocalProtocolErrorCode) ||
-		typeof value.error.message !== "string"
+		typeof value.error.message !== "string" ||
+		("details" in value.error && !isRecord(value.error.details))
 	) {
 		throw new Error("Failed local response has an invalid error payload.");
 	}
@@ -548,6 +753,260 @@ export function isLocalVaultLegacyMigrationResult(
 		typeof value.migrated === "boolean" &&
 		isLocalVaultKeyStatus(value.status)
 	);
+}
+
+export function isLocalPlanningPlanSnapshot(
+	value: unknown,
+): value is LocalPlanningPlanSnapshot {
+	return (
+		isRecord(value) &&
+		value.schemaVersion === "planning.v1" &&
+		isProtocolIdentifier(value.planId, 256) &&
+		isPositiveSafeInteger(value.version)
+	);
+}
+
+export function isLocalPlanningCalendarEvent(
+	value: unknown,
+): value is LocalPlanningCalendarEvent {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, [
+			"schemaVersion",
+			"eventId",
+			"title",
+			"sealedContentRef",
+			"redactedContent",
+			"kind",
+			"state",
+			"schedule",
+			"recurrence",
+			"occurrenceId",
+			"sourcePlanId",
+			"sourceTaskId",
+			"scheduleOrigin",
+			"userLocked",
+			"editable",
+			"version",
+		]) ||
+		value.schemaVersion !== "calendar.v1" ||
+		!isProtocolIdentifier(value.eventId, 256) ||
+		!isBoundedString(value.title, 100_000) ||
+		!isNullableProtocolIdentifier(value.sealedContentRef, 256) ||
+		typeof value.redactedContent !== "boolean" ||
+		!(
+			value.kind === "plan" ||
+			value.kind === "manual-block" ||
+			value.kind === "external" ||
+			value.kind === "break"
+		) ||
+		!(value.state === "proposed" || value.state === "committed") ||
+		!isRecord(value.schedule) ||
+		typeof value.schedule.allDay !== "boolean" ||
+		!isLocalPlanningCalendarRecurrence(value.recurrence) ||
+		!isNullableProtocolIdentifier(value.occurrenceId, 256) ||
+		!isNullableProtocolIdentifier(value.sourcePlanId, 256) ||
+		!isNullableProtocolIdentifier(value.sourceTaskId, 256) ||
+		!(
+			value.scheduleOrigin === null ||
+			value.scheduleOrigin === "model" ||
+			value.scheduleOrigin === "user"
+		) ||
+		typeof value.userLocked !== "boolean" ||
+		typeof value.editable !== "boolean" ||
+		!isPositiveSafeInteger(value.version)
+	) {
+		return false;
+	}
+	const contentIsProtected =
+		value.sealedContentRef !== null || value.redactedContent;
+	if (
+		(contentIsProtected &&
+			value.title !== LOCAL_REDACTED_PLAN_CALENDAR_TITLE) ||
+		(value.scheduleOrigin === "model" && !contentIsProtected) ||
+		(value.sourceTaskId !== null && value.sourcePlanId === null) ||
+		(value.occurrenceId !== null && value.recurrence === null) ||
+		(value.kind === "external" && value.editable) ||
+		(value.kind === "plan"
+			? value.sourcePlanId === null ||
+				value.sourceTaskId === null ||
+				value.scheduleOrigin === null
+			: value.sourcePlanId !== null ||
+				value.sourceTaskId !== null ||
+				value.scheduleOrigin !== null ||
+				value.userLocked)
+	) {
+		return false;
+	}
+	if (value.schedule.allDay) {
+		return (
+			hasExactKeys(value.schedule, [
+				"allDay",
+				"startDate",
+				"endDateExclusive",
+			]) &&
+			isCanonicalProtocolDate(value.schedule.startDate) &&
+			isCanonicalProtocolDate(value.schedule.endDateExclusive) &&
+			value.schedule.startDate < value.schedule.endDateExclusive
+		);
+	}
+	return (
+		hasExactKeys(value.schedule, ["allDay", "start", "end", "timeZone"]) &&
+		isBoundedString(value.schedule.start, 80) &&
+		isBoundedString(value.schedule.end, 80) &&
+		isBoundedString(value.schedule.timeZone, 128) &&
+		validOrderedProtocolInstants(value.schedule.start, value.schedule.end)
+	);
+}
+
+export function isLocalPlanningOutboxEntry(
+	value: unknown,
+): value is LocalPlanningOutboxEntry {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, [
+			"entryId",
+			"kind",
+			"aggregateId",
+			"payload",
+			"status",
+			"createdAtMs",
+			"deliveredAtMs",
+		]) ||
+		!isProtocolIdentifier(value.entryId, 256) ||
+		!(
+			value.kind === "plan-changed" ||
+			value.kind === "calendar-changed" ||
+			value.kind === "notification"
+		) ||
+		!isProtocolIdentifier(value.aggregateId, 256) ||
+		!isRecord(value.payload) ||
+		!isLocalPlanningOutboxPayload(
+			value.kind,
+			value.aggregateId,
+			value.payload,
+		) ||
+		!(value.status === "pending" || value.status === "delivered") ||
+		!isNonNegativeSafeInteger(value.createdAtMs) ||
+		!(
+			value.deliveredAtMs === null ||
+			isNonNegativeSafeInteger(value.deliveredAtMs)
+		) ||
+		(value.status === "pending"
+			? value.deliveredAtMs !== null
+			: value.deliveredAtMs === null)
+	) {
+		return false;
+	}
+	return true;
+}
+
+function isLocalPlanningCalendarRecurrence(value: unknown): boolean {
+	return (
+		value === null ||
+		(isRecord(value) &&
+			hasExactKeys(value, [
+				"seriesId",
+				"rrule",
+				"timeZone",
+				"exceptionDates",
+			]) &&
+			isProtocolIdentifier(value.seriesId, 256) &&
+			isBoundedString(value.rrule, 8_192) &&
+			isBoundedString(value.timeZone, 128) &&
+			Array.isArray(value.exceptionDates) &&
+			value.exceptionDates.length <= 10_000 &&
+			value.exceptionDates.every(isCanonicalProtocolDate))
+	);
+}
+
+function isLocalPlanningOutboxPayload(
+	kind: LocalPlanningOutboxEntry["kind"],
+	aggregateId: string,
+	payload: Record<string, unknown>,
+): boolean {
+	if (kind === "plan-changed") {
+		return (
+			hasExactKeys(payload, ["planId", "version"]) &&
+			payload.planId === aggregateId &&
+			isPositiveSafeInteger(payload.version)
+		);
+	}
+	if (kind === "calendar-changed") {
+		if (hasExactKeys(payload, ["changeSetId", "planId"])) {
+			return (
+				isProtocolIdentifier(payload.changeSetId, 256) &&
+				payload.planId === aggregateId
+			);
+		}
+		return (
+			hasExactKeys(payload, [
+				"batchId",
+				"mutationCount",
+				"planIds",
+				"requiresPlanningReestimate",
+			]) &&
+			isProtocolIdentifier(payload.batchId, 256) &&
+			isPositiveSafeInteger(payload.mutationCount) &&
+			Array.isArray(payload.planIds) &&
+			payload.planIds.length <= 10_000 &&
+			payload.planIds.every((planId) => isProtocolIdentifier(planId, 256)) &&
+			typeof payload.requiresPlanningReestimate === "boolean"
+		);
+	}
+	const allowed = new Set([
+		"code",
+		"planId",
+		"version",
+		"adjustmentId",
+		"added",
+		"moved",
+		"cancelled",
+		"unscheduled",
+		"etaChanged",
+	]);
+	return (
+		Object.keys(payload).length > 0 &&
+		Object.keys(payload).every((key) => allowed.has(key)) &&
+		isProtocolIdentifier(payload.code, 256) &&
+		(payload.planId === undefined ||
+			isProtocolIdentifier(payload.planId, 256)) &&
+		(payload.adjustmentId === undefined ||
+			isProtocolIdentifier(payload.adjustmentId, 256)) &&
+		["version", "added", "moved", "cancelled", "unscheduled"].every(
+			(key) =>
+				payload[key] === undefined || isNonNegativeSafeInteger(payload[key]),
+		) &&
+		(payload.etaChanged === undefined ||
+			typeof payload.etaChanged === "boolean")
+	);
+}
+
+function validOrderedProtocolInstants(start: string, end: string): boolean {
+	const rfc3339 =
+		/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
+	if (!rfc3339.test(start) || !rfc3339.test(end)) return false;
+	const startMs = Date.parse(start);
+	const endMs = Date.parse(end);
+	return Number.isFinite(startMs) && Number.isFinite(endMs) && startMs < endMs;
+}
+
+function isCanonicalProtocolDate(value: unknown): value is string {
+	if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+		return false;
+	}
+	const parsed = new Date(`${value}T00:00:00Z`);
+	return (
+		Number.isFinite(parsed.getTime()) &&
+		parsed.toISOString().slice(0, 10) === value
+	);
+}
+
+function isNullableProtocolIdentifier(
+	value: unknown,
+	maximumLength: number,
+): boolean {
+	return value === null || isProtocolIdentifier(value, maximumLength);
 }
 
 export function isLocalMonitoringStatus(
@@ -1181,6 +1640,10 @@ function isSafeRelativePath(value: unknown): boolean {
 
 function isNonNegativeSafeInteger(value: unknown): boolean {
 	return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): boolean {
+	return Number.isSafeInteger(value) && (value as number) > 0;
 }
 
 function isNullableNonNegativeSafeInteger(value: unknown): boolean {

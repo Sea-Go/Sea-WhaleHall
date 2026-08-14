@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type {
 	LocalEventGoalChange,
 	LocalMonitoringStatus,
+	LocalPlanningPlanSnapshot,
 	LocalToolDescriptor,
 } from "../src/agent/local-protocol";
 import { parseLocalMessage } from "../src/agent/local-protocol";
@@ -1213,6 +1214,67 @@ describe("LocalToolClient", () => {
 				recordIds: [],
 			}),
 		).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
+		await client.stop();
+	});
+
+	test("validates planning operation recovery and preserves stale details", async () => {
+		const snapshot: LocalPlanningPlanSnapshot = {
+			schemaVersion: "planning.v1",
+			planId: "plan-1",
+			version: 2,
+		};
+		const child = new FakeChild((line, process) => {
+			const request = JSON.parse(line) as {
+				id: string;
+				method: string;
+				params: Record<string, unknown>;
+			};
+			if (request.method === "planning.operation.get") {
+				process.respond({
+					id: request.id,
+					ok: true,
+					result: {
+						operationId: request.params.operationId,
+						method: "planning.mutate",
+						plan: snapshot,
+						result: {
+							plan: snapshot,
+							calendarEvents: [],
+							outbox: [],
+						},
+					},
+				});
+				return;
+			}
+			process.respond({
+				id: request.id,
+				ok: false,
+				error: {
+					code: "INVALID_ARGUMENTS",
+					message: "stale plan version",
+					details: {
+						reason: "stale-version",
+						actualVersion: 3,
+					},
+				},
+			});
+		});
+		const client = new LocalToolClient("fake", { spawn: () => child });
+		await client.start();
+
+		await expect(
+			client.getPlanningOperationResult("operation-1"),
+		).resolves.toEqual(snapshot);
+		await expect(
+			client.mutatePlanningPlan({
+				operationId: "operation-2",
+				expectedVersion: 2,
+				plan: { ...snapshot, version: 3 },
+			}),
+		).rejects.toMatchObject({
+			code: "INVALID_ARGUMENTS",
+			details: { reason: "stale-version", actualVersion: 3 },
+		});
 		await client.stop();
 	});
 
