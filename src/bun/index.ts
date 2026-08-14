@@ -140,6 +140,11 @@ import {
 	developmentQaWindowSize,
 	isDevelopmentQaMode,
 } from "./development-qa-auth";
+import {
+	calendarEventsAfterDurableCommit,
+	runDurableCalendarMutation,
+	type DurableCalendarPostCommitStage,
+} from "./durable-calendar-mutation";
 import { WhaleHallPlanningRuntime } from "./planning-runtime";
 
 const HMR_ORIGIN = "http://127.0.0.1:5173";
@@ -2842,58 +2847,72 @@ async function mutateRendererCalendar(
 ): Promise<
 	import("../shared/planning").PlanningCalendarBatchResultProjection
 > {
-	try {
-		const affectedPlanIds = [
-			...new Set(
-				mutations
-					.flatMap((mutation) => [
-						mutation.before?.sourcePlanId ?? "",
-						mutation.after?.sourcePlanId ?? "",
-					])
-					.filter(Boolean),
-			),
-		];
-		const result = await agent.mutatePlanningCalendar({
-			operationId: batchId,
-			mutations: mutations.map((mutation) =>
-				mutation.kind === "delete"
-					? {
-							action: "delete" as const,
-							eventId: mutation.eventId,
-							expectedVersion: mutation.expectedVersion ?? 0,
-						}
-					: {
-							action: "upsert" as const,
-							expectedVersion: mutation.expectedVersion,
-							event: nativeCalendarEvent(
-								mutation.after!,
-								shouldForceRendererPlanLock(mutation),
-							),
+	const affectedPlanIds = [
+		...new Set(
+			mutations
+				.flatMap((mutation) => [
+					mutation.before?.sourcePlanId ?? "",
+					mutation.after?.sourcePlanId ?? "",
+				])
+				.filter(Boolean),
+		),
+	];
+	const mutation = await runDurableCalendarMutation({
+		commit: () =>
+			agent.mutatePlanningCalendar({
+				operationId: batchId,
+				mutations: mutations.map((mutation) =>
+					mutation.kind === "delete"
+						? {
+								action: "delete" as const,
+								eventId: mutation.eventId,
+								expectedVersion: mutation.expectedVersion ?? 0,
+							}
+						: {
+								action: "upsert" as const,
+								expectedVersion: mutation.expectedVersion,
+								event: nativeCalendarEvent(
+									mutation.after!,
+									shouldForceRendererPlanLock(mutation),
+								),
+							},
+				),
+				outbox: [
+					{
+						entryId: `renderer-calendar:${batchId}`,
+						kind: "calendar-changed",
+						aggregateId: "calendar",
+						payload: {
+							batchId,
+							mutationCount: mutations.length,
+							planIds: affectedPlanIds,
+							requiresPlanningReestimate: true,
 						},
-			),
-			outbox: [
-				{
-					entryId: `renderer-calendar:${batchId}`,
-					kind: "calendar-changed",
-					aggregateId: "calendar",
-					payload: {
-						batchId,
-						mutationCount: mutations.length,
-						planIds: affectedPlanIds,
-						requiresPlanningReestimate: true,
+						createdAtMs: Date.now(),
 					},
-					createdAtMs: Date.now(),
+				],
+			}),
+		project: (result) =>
+			result.outcomes.flatMap((outcome) =>
+				outcome.event ? [projectNativeCalendarEvent(outcome.event)] : [],
+			),
+		followUps: [
+			{
+				stage: "outbox-flush",
+				run: async () => {
+					const planning = await requirePlanningRuntime();
+					await planning.flushOutbox();
 				},
-			],
-		});
-		const events = result.outcomes.flatMap((outcome) =>
-			outcome.event ? [projectNativeCalendarEvent(outcome.event)] : [],
-		);
-		const planning = await requirePlanningRuntime();
-		await planning.flushOutbox();
-		await reconcileExecutingPlanningGoal();
-		return { ok: true, batchId, events, warnings: [] };
-	} catch (error) {
+			},
+			{
+				stage: "execution-reconciliation",
+				run: reconcileExecutingPlanningGoal,
+			},
+		],
+		onDeferredFailure: reportCommittedCalendarFailure,
+	});
+	if (!mutation.committed) {
+		const error = mutation.error;
 		const stale =
 			error !== null &&
 			typeof error === "object" &&
@@ -2919,6 +2938,26 @@ async function mutateRendererCalendar(
 			],
 		};
 	}
+
+	// A projection failure must retain the renderer's optimistic post-commit
+	// state until the durable outbox invalidation reloads the authoritative
+	// snapshot. Deletes intentionally have no projected event.
+	const events = calendarEventsAfterDurableCommit(
+		mutations,
+		mutation.projection,
+	);
+	return { ok: true, batchId, events, warnings: [] };
+}
+
+function reportCommittedCalendarFailure(
+	stage: DurableCalendarPostCommitStage,
+	error: unknown,
+): void {
+	console.warn(
+		"[planning] committed calendar follow-up deferred",
+		stage,
+		error instanceof Error ? error.name : "UNKNOWN",
+	);
 }
 
 let planningMaintenanceRunning = false;
