@@ -286,7 +286,7 @@ async function removeTree(path: string): Promise<void> {
 async function launchInstaller(
 	plan: WindowsUpdateInstallerPlan,
 ): Promise<ChildProcess> {
-	const launch = windowsUpdateInstallerLaunch(plan, requiredSystemRoot());
+	const launch = windowsUpdateInstallerLaunch(plan);
 	const child = spawn(launch.command, launch.arguments, launch.options);
 	await waitForSpawn(child);
 	return child;

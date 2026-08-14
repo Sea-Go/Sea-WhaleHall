@@ -54,6 +54,8 @@ const UPDATE_STAGING_TIMEOUT_MS = 5 * 60 * 1000;
 const WINDOWS_INSTALLER_SPAWN_TIMEOUT_MS = 10_000;
 const WINDOWS_INSTALLER_READY_TIMEOUT_MS = 10_000;
 const WINDOWS_INSTALLER_CLOSE_TIMEOUT_MS = 5_000;
+const WINDOWS_POWERSHELL_PATH =
+	"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 
 export type AppUpdaterLocalInfo = {
 	version: string;
@@ -1125,10 +1127,7 @@ async function extractWindowsTarArchive(
 async function spawnWindowsUpdateInstaller(
 	plan: WindowsUpdateInstallerPlan,
 ): Promise<WindowsUpdateInstallerHandle> {
-	const launch = windowsUpdateInstallerLaunch(
-		plan,
-		process.env.SystemRoot?.trim() ?? "",
-	);
+	const launch = windowsUpdateInstallerLaunch(plan);
 	await access(launch.command, fsConstants.X_OK);
 	return new Promise<WindowsUpdateInstallerHandle>((resolve, reject) => {
 		const child = spawn(launch.command, launch.arguments, launch.options);
@@ -1200,20 +1199,15 @@ async function spawnWindowsUpdateInstaller(
 
 export function windowsUpdateInstallerLaunch(
 	plan: WindowsUpdateInstallerPlan,
-	systemRoot: string,
 ): WindowsUpdateInstallerLaunch {
-	if (!isAbsolute(systemRoot)) {
-		throw new Error("The trusted Windows system directory is unavailable.");
-	}
 	const paths = windowsUpdateInstallerPaths(plan);
 	return {
-		command: join(
-			systemRoot,
-			"System32",
-			"WindowsPowerShell",
-			"v1.0",
-			"powershell.exe",
-		),
+		// The executable path is deliberately code-owned. Environment-derived
+		// SystemRoot/WINDIR values would let an injected launch environment choose
+		// which program receives the verified installer plan. A non-standard
+		// Windows directory therefore fails closed instead of widening this trust
+		// boundary.
+		command: WINDOWS_POWERSHELL_PATH,
 		arguments: [
 			"-NoLogo",
 			"-NoProfile",

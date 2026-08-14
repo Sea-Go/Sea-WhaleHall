@@ -336,19 +336,9 @@ describe("Electrobun app updater adapter", () => {
 		expect(capturedScript).not.toContain("Remove-Item -LiteralPath $current");
 		expect(capturedScript).not.toContain("tasklist");
 		expect(capturedScript).not.toContain("goto waitloop");
-		const launch = windowsUpdateInstallerLaunch(
-			capturedPlan,
-			join(root, "Windows"),
-		);
+		const launch = windowsUpdateInstallerLaunch(capturedPlan);
 		expect(launch.command).toBe(
-			join(
-				root,
-				"Windows",
-				"System32",
-				"WindowsPowerShell",
-				"v1.0",
-				"powershell.exe",
-			),
+			"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
 		);
 		expect(launch.arguments).not.toContain("-Command");
 		expect(launch.options).toMatchObject({
