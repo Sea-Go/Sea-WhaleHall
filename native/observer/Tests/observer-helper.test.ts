@@ -472,7 +472,7 @@ macOSTest(
 		// Rust owns the helper's stdin pipe. A forced whalehall-local exit closes
 		// that pipe even when Rust destructors cannot run; the packaged helper must
 		// treat the resulting EOF as parent disconnect and terminate itself.
-		const eofChild = Bun.spawn([executable], {
+		const eofChild = Bun.spawn([observerExecutable as string], {
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
