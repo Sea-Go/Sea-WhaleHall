@@ -894,6 +894,12 @@ export class AgentHostRuntime {
 					}
 					const finalText = await stream.text;
 					if (!text && finalText) text = finalText;
+					if (text.length > maxConversationCharacters) {
+						throw runtimeError(
+							"ACTIVITY_OUTPUT_INVALID",
+							"Activity analysis response is too large.",
+						);
+					}
 					if (!text.trim()) {
 						throw runtimeError(
 							"ACTIVITY_OUTPUT_INVALID",
