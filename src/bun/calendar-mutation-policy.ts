@@ -2,9 +2,10 @@ import type { PlanningCalendarMutationProjection } from "../shared/planning";
 
 /**
  * Renderer edits to model events are locked by default. The sole exception is
- * an unlock-only write: every event field and expected version must be
- * unchanged except userLocked true -> false. This keeps renderer writes in the
- * user actor path and prevents them from impersonating model auto-adjustment.
+ * an unlock-only write: every event field must be unchanged except
+ * userLocked true -> false and the required optimistic version increment.
+ * This keeps renderer writes in the user actor path and prevents them from
+ * impersonating model auto-adjustment.
  */
 export function isExplicitRendererPlanUnlock(
 	mutation: PlanningCalendarMutationProjection,
@@ -18,7 +19,8 @@ export function isExplicitRendererPlanUnlock(
 		before.scheduleOrigin !== "model" ||
 		!before.userLocked ||
 		after.userLocked ||
-		mutation.expectedVersion !== before.version
+		mutation.expectedVersion !== before.version ||
+		after.version !== before.version + 1
 	) {
 		return false;
 	}
@@ -73,6 +75,5 @@ function canonicalUnlockEvent(
 		scheduleOrigin: event.scheduleOrigin,
 		userLocked: false,
 		editable: event.editable,
-		version: event.version,
 	};
 }

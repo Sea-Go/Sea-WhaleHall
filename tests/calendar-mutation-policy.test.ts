@@ -45,14 +45,18 @@ function updateMutation(
 
 describe("renderer planning-calendar actor policy", () => {
 	test("accepts only the exact user unlock without forcing the lock back on", () => {
-		const unlock = updateMutation({ ...lockedModelEvent, userLocked: false });
+		const unlock = updateMutation({
+			...lockedModelEvent,
+			userLocked: false,
+			version: 5,
+		});
 		expect(isExplicitRendererPlanUnlock(unlock)).toBe(true);
 		expect(shouldForceRendererPlanLock(unlock)).toBe(false);
 	});
 
 	test("compares unlock payloads semantically instead of trusting key order", () => {
 		const reordered: PlanningCalendarEventProjection = {
-			version: 4,
+			version: 5,
 			editable: true,
 			userLocked: false,
 			scheduleOrigin: "model",
@@ -72,6 +76,15 @@ describe("renderer planning-calendar actor policy", () => {
 			id: "event-1",
 		};
 		expect(isExplicitRendererPlanUnlock(updateMutation(reordered))).toBe(true);
+	});
+
+	test("rejects unlock writes that do not increment the optimistic version", () => {
+		const staleUnlock = updateMutation({
+			...lockedModelEvent,
+			userLocked: false,
+		});
+		expect(isExplicitRendererPlanUnlock(staleUnlock)).toBe(false);
+		expect(shouldForceRendererPlanLock(staleUnlock)).toBe(true);
 	});
 
 	test("forces every model-event edit other than the exact unlock to stay locked", () => {
