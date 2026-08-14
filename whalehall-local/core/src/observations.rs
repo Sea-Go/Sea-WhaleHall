@@ -15,15 +15,15 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use whalehall_local_protocol::{
     AuditQueryFiveMinutesParams, CoverageLevelV2, EventGoalChangeParams, EvidenceReliabilityV2,
-    MAX_SEMANTIC_QUERY_LIMIT, MonitoringPermissionState, MonitoringPermissions,
-    ObservationIntervalV2, ObservationSensorV2, ObservationSourceV2, ObservationSubjectV2,
-    RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2, RawObservationV2,
+    MAX_SEMANTIC_QUERY_LIMIT, MAX_VAULT_LIST_LIMIT, MonitoringPermissionState,
+    MonitoringPermissions, ObservationIntervalV2, ObservationSensorV2, ObservationSourceV2,
+    ObservationSubjectV2, RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2, RawObservationV2,
     SEMANTIC_EVENT_SCHEMA_VERSION, SEMANTIC_PROJECTOR_VERSION, SEMANTIC_TAXONOMY_VERSION,
     SemanticCommitParams, SemanticCommitResult, SemanticContentStateV2, SemanticCountClassV2,
     SemanticEventV2, SemanticQueryParams, SemanticQueryResult, VaultDeleteBatchParams,
-    VaultDeleteBatchResult, VaultDeleteResult, VaultOpenBatchParams, VaultOpenBatchResult,
-    VaultOpenResult, VaultSealBatchParams, VaultSealBatchResult, VaultSealResult,
-    semantic_event_kinds,
+    VaultDeleteBatchResult, VaultDeleteResult, VaultListRecordsParams, VaultListRecordsResult,
+    VaultOpenBatchParams, VaultOpenBatchResult, VaultOpenResult, VaultRecordMetadata,
+    VaultSealBatchParams, VaultSealBatchResult, VaultSealResult, semantic_event_kinds,
 };
 use zeroize::Zeroizing;
 
@@ -46,6 +46,7 @@ const MAX_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_VAULT_RECORD_BYTES: usize = 512 * 1024;
 const MAX_VAULT_BATCH_BYTES: usize = 768 * 1024;
 const MAX_VAULT_BATCH_RECORDS: usize = 64;
+const VAULT_LIST_CURSOR_PREFIX: &str = "vl1";
 #[cfg(any(target_os = "macos", test))]
 pub(crate) const KEY_VERSION: &str = "keychain-v1";
 #[cfg(any(target_os = "macos", test))]
@@ -1654,6 +1655,74 @@ impl ObservationJournal {
             });
         }
         Ok(VaultOpenBatchResult { records: results })
+    }
+
+    /// Lists metadata from exactly one namespace and one exclusive creation
+    /// cutoff. Each page is read from one SQLite snapshot; the cursor is bound
+    /// to both namespace and cutoff so it cannot silently widen or change a GC
+    /// inventory between calls. Content, hashes, and key metadata never cross
+    /// this boundary.
+    pub fn list_vault_records(
+        &self,
+        params: &VaultListRecordsParams,
+    ) -> Result<VaultListRecordsResult, ObservationJournalError> {
+        let after = validate_vault_list(params)?;
+        let mut connection = connect(&self.inner.database_path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let fetch_limit = i64::try_from(params.limit.saturating_add(1)).map_err(|_| {
+            ObservationJournalError::Configuration(
+                "vault.listRecords limit is too large".to_owned(),
+            )
+        })?;
+        let (after_created_at_ms, after_record_id) =
+            after.as_ref().map_or((-1_i64, ""), |cursor| {
+                (cursor.created_at_ms, cursor.record_id.as_str())
+            });
+        let mut statement = transaction.prepare(
+            "SELECT record_id, schema_version, content_ref, created_at_ms, expires_at_ms
+             FROM vault_records
+             WHERE namespace = ?1
+               AND created_at_ms < ?2
+               AND (
+                    created_at_ms > ?3
+                    OR (created_at_ms = ?3 AND record_id > ?4)
+               )
+             ORDER BY created_at_ms ASC, record_id ASC
+             LIMIT ?5",
+        )?;
+        let rows = statement.query_map(
+            params![
+                params.namespace,
+                params.created_before_ms,
+                after_created_at_ms,
+                after_record_id,
+                fetch_limit,
+            ],
+            |row| {
+                Ok(VaultRecordMetadata {
+                    record_id: row.get(0)?,
+                    schema_version: row.get(1)?,
+                    content_ref: row.get(2)?,
+                    created_at_ms: row.get(3)?,
+                    expires_at_ms: row.get(4)?,
+                })
+            },
+        )?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let has_more = records.len() > params.limit;
+        if has_more {
+            records.pop();
+        }
+        let next_cursor = has_more
+            .then(|| records.last())
+            .flatten()
+            .map(|record| format_vault_list_cursor(params, record));
+        transaction.commit()?;
+        Ok(VaultListRecordsResult {
+            records,
+            next_cursor,
+        })
     }
 
     pub fn delete_vault_batch(
@@ -3839,6 +3908,80 @@ fn validate_vault_open(params: &VaultOpenBatchParams) -> Result<(), ObservationJ
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VaultListCursor {
+    created_at_ms: i64,
+    record_id: String,
+}
+
+fn validate_vault_list(
+    params: &VaultListRecordsParams,
+) -> Result<Option<VaultListCursor>, ObservationJournalError> {
+    validate_ascii_identifier("vault namespace", &params.namespace, 128)?;
+    if !(0..=MAX_SAFE_INTEGER).contains(&params.created_before_ms) {
+        return Err(ObservationJournalError::Configuration(
+            "vault.listRecords createdBeforeMs must be a non-negative safe integer".to_owned(),
+        ));
+    }
+    if !(1..=MAX_VAULT_LIST_LIMIT).contains(&params.limit) {
+        return Err(ObservationJournalError::Configuration(format!(
+            "vault.listRecords limit must be between 1 and {MAX_VAULT_LIST_LIMIT}"
+        )));
+    }
+    params
+        .cursor
+        .as_deref()
+        .map(|cursor| parse_vault_list_cursor(params, cursor))
+        .transpose()
+}
+
+fn format_vault_list_cursor(
+    params: &VaultListRecordsParams,
+    record: &VaultRecordMetadata,
+) -> String {
+    format!(
+        "{VAULT_LIST_CURSOR_PREFIX}_{}_{:016x}_{}",
+        vault_list_scope(params),
+        record.created_at_ms,
+        record.record_id
+    )
+}
+
+fn parse_vault_list_cursor(
+    params: &VaultListRecordsParams,
+    cursor: &str,
+) -> Result<VaultListCursor, ObservationJournalError> {
+    let mut parts = cursor.splitn(4, '_');
+    let prefix = parts.next();
+    let scope = parts.next();
+    let created_at = parts.next();
+    let record_id = parts.next();
+    let invalid = || {
+        ObservationJournalError::InvalidCursor(
+            "vault.listRecords cursor is malformed or belongs to another inventory".to_owned(),
+        )
+    };
+    if prefix != Some(VAULT_LIST_CURSOR_PREFIX) || scope != Some(vault_list_scope(params).as_str())
+    {
+        return Err(invalid());
+    }
+    let created_at_ms =
+        i64::from_str_radix(created_at.ok_or_else(&invalid)?, 16).map_err(|_| invalid())?;
+    if !(0..params.created_before_ms).contains(&created_at_ms) {
+        return Err(invalid());
+    }
+    let record_id = record_id.ok_or_else(&invalid)?;
+    validate_ascii_identifier("vault cursor recordId", record_id, 256).map_err(|_| invalid())?;
+    Ok(VaultListCursor {
+        created_at_ms,
+        record_id: record_id.to_owned(),
+    })
+}
+
+fn vault_list_scope(params: &VaultListRecordsParams) -> String {
+    digest_hex(format!("{}\0{}", params.namespace, params.created_before_ms).as_bytes())
+}
+
 fn validate_vault_delete(params: &VaultDeleteBatchParams) -> Result<(), ObservationJournalError> {
     validate_ascii_identifier("vault namespace", &params.namespace, 128)?;
     if params.record_ids.is_empty() || params.record_ids.len() > MAX_VAULT_BATCH_RECORDS {
@@ -4354,6 +4497,13 @@ fn initialize(connection: &mut Connection) -> Result<(), ObservationJournalError
                 ON projector_state(content_ref);",
         )?;
     }
+    // This covering order supports metadata-only namespace inventories. It is
+    // safe to add independently of the content schema and remains compatible
+    // with existing v2 databases.
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS vault_records_namespace_created
+            ON vault_records(namespace, created_at_ms, record_id);",
+    )?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
