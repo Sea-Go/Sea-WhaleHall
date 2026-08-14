@@ -325,6 +325,7 @@ describe("Electrobun app updater adapter", () => {
 			bundleName: "WhaleHall",
 		});
 		if (capturedPlan === undefined) throw new Error("Missing Windows plan.");
+		const verifiedPlan = capturedPlan;
 		expect(capturedScript).toContain("Get-Process -Id $parentProcessId");
 		expect(capturedScript).toContain("$totalDeadlineSeconds = 120");
 		expect(capturedScript).toContain(
@@ -336,10 +337,28 @@ describe("Electrobun app updater adapter", () => {
 		expect(capturedScript).not.toContain("Remove-Item -LiteralPath $current");
 		expect(capturedScript).not.toContain("tasklist");
 		expect(capturedScript).not.toContain("goto waitloop");
-		const launch = windowsUpdateInstallerLaunch(capturedPlan);
-		expect(launch.command).toBe(
-			"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+		const launch = windowsUpdateInstallerLaunch(
+			verifiedPlan,
+			"D:\\CustomWindows\\System32",
 		);
+		expect(launch.command).toBe(
+			"D:\\CustomWindows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+		);
+		expect(() =>
+			windowsUpdateInstallerLaunch(verifiedPlan, "relative\\System32"),
+		).toThrow("system directory is invalid");
+		expect(() =>
+			windowsUpdateInstallerLaunch(verifiedPlan, "\\Windows\\System32"),
+		).toThrow("system directory is invalid");
+		expect(() =>
+			windowsUpdateInstallerLaunch(verifiedPlan, "C:\\Windows\\SysWOW64"),
+		).toThrow("system directory is invalid");
+		expect(() =>
+			windowsUpdateInstallerLaunch(
+				verifiedPlan,
+				"C:\\Windows\\System32\0attacker",
+			),
+		).toThrow("system directory is invalid");
 		expect(launch.arguments).not.toContain("-Command");
 		expect(launch.options).toMatchObject({
 			cwd: join(

@@ -1908,9 +1908,11 @@ function shutdown(): Promise<void> {
 	const drainAgentRuns = () =>
 		runShutdownFlight("agentRuns", async () => {
 			// A renderer request accepted before the synchronous ingress latch may
-			// still be entering the coordinator. Establish the stable consumer set
-			// only after that exact request set has drained.
+			// still be entering the coordinator, while a Sidecar event may already be
+			// parsed behind an accepted host call. Establish the stable consumer set
+			// only after both exact ingress sets have drained.
 			await drainClientRpc();
+			await sidecar.drainAcceptedFrames();
 			if (capturedShutdownAccountId) {
 				await coordinator.cancelAllForAccount(capturedShutdownAccountId);
 			}

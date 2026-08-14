@@ -115,6 +115,29 @@ describe("ProactiveFeedbackRuntime", () => {
 		fixture.runtime.dispose();
 	});
 
+	test("rejects a policy write when logout wins an in-flight policy read", async () => {
+		const policyReadStarted = deferred();
+		const releasePolicyRead = deferred();
+		const fixture = createFixture({
+			beforePolicyRead: async () => {
+				policyReadStarted.resolve();
+				await releasePolicyRead.promise;
+			},
+		});
+
+		const request = fixture.runtime.setPolicy(identity, {
+			policy: { enabled: true, retention: 7 },
+			expectedRevision: 0,
+		});
+		await policyReadStarted.promise;
+		fixture.current = null;
+		releasePolicyRead.resolve();
+
+		await expect(request).rejects.toThrow("session changed");
+		expect(fixture.calls.some((call) => call.startsWith("save:"))).toBeFalse();
+		fixture.runtime.dispose();
+	});
+
 	test("repairs a crash after a disabled policy committed before pending cleanup", async () => {
 		const fixture = createFixture({ enabled: false, revision: 1 });
 		await fixture.runtime.prepareSessionActivation(identity);
@@ -1081,6 +1104,7 @@ function createFixture(initial?: {
 	ensureAccountFailures?: number;
 	afterEnsureAccount?: () => Promise<void>;
 	isCurrentSessionFailure?: boolean;
+	beforePolicyRead?: () => Promise<void>;
 	afterPolicySave?: () => Promise<void>;
 	failClearPendingOnce?: boolean;
 	stopDelivery?: () => Promise<void>;
@@ -1156,7 +1180,10 @@ function createFixture(initial?: {
 					throw new Error("account storage unavailable");
 				}
 			},
-			getProactiveFeedbackPolicy: async () => snapshot(),
+			getProactiveFeedbackPolicy: async () => {
+				await initial?.beforePolicyRead?.();
+				return snapshot();
+			},
 			setProactiveFeedbackPolicy: async (_accountId, next, expected) => {
 				if (expected !== revision) throw new Error("revision conflict");
 				policy = { ...next };

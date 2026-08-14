@@ -208,7 +208,7 @@ function PolicyStatus({
 				role="alert"
 			>
 				<span>{state.message}</span>
-				{state.stage === "load" ? (
+				{state.stage === "load" || state.stage === "save" ? (
 					<Button size="small" variant="ghost" onClick={onRetry}>
 						重新读取
 					</Button>

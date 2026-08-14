@@ -50,6 +50,59 @@ describe("Electrobun lifecycle signal forwarding", () => {
 		});
 	});
 
+	test("preserves the exact Windows CRLF runtime while applying the patch", () => {
+		const windowsVendor = `before\r\n${ELECTROBUN_VENDOR_SIGNAL_SENTINEL.replaceAll("\n", "\r\n")}\r\nafter`;
+		const rewritten = rewriteElectrobunSignalForwarding(windowsVendor);
+
+		expect(rewritten.changed).toBeTrue();
+		expect(rewritten.source).not.toContain(
+			ELECTROBUN_VENDOR_SIGNAL_SENTINEL.replaceAll("\n", "\r\n"),
+		);
+		expect(rewritten.source.replaceAll("\r\n", "")).not.toContain("\n");
+		assertElectrobunSignalForwarding(rewritten.source);
+		expect(rewriteElectrobunSignalForwarding(rewritten.source)).toEqual({
+			source: rewritten.source,
+			changed: false,
+		});
+	});
+
+	test("accepts Windows patchedDependencies hunk line endings only after exact canonical proof", () => {
+		const mixedForwarder = ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING.replace(
+			"\n",
+			"\r\n",
+		);
+		const windowsPatched = `before\r\n${mixedForwarder}\nafter`;
+		expect(rewriteElectrobunSignalForwarding(windowsPatched)).toEqual({
+			source: windowsPatched,
+			changed: false,
+		});
+		assertElectrobunSignalForwarding(windowsPatched);
+
+		expect(() =>
+			rewriteElectrobunSignalForwarding(
+				`before\r\n${ELECTROBUN_VENDOR_SIGNAL_SENTINEL}\nafter`,
+			),
+		).toThrow("mixed line endings");
+		expect(() =>
+			rewriteElectrobunSignalForwarding(
+				`before\r\n${mixedForwarder.replace("SIGTERM", "SIGQUIT")}\nafter`,
+			),
+		).toThrow("mixed line endings");
+	});
+
+	test("rejects mixed or unsupported runtime line endings", () => {
+		expect(() =>
+			rewriteElectrobunSignalForwarding(
+				ELECTROBUN_VENDOR_SIGNAL_SENTINEL.replace("\n", "\r\n"),
+			),
+		).toThrow("mixed line endings");
+		expect(() =>
+			rewriteElectrobunSignalForwarding(
+				ELECTROBUN_VENDOR_SIGNAL_SENTINEL.replace("\n", "\r"),
+			),
+		).toThrow("unsupported line ending");
+	});
+
 	test("upgrades the previous forwarder without leaving a startup signal gap", () => {
 		const upgraded = rewriteElectrobunSignalForwarding(
 			ELECTROBUN_WHALEHALL_LEGACY_SIGNAL_FORWARDING,

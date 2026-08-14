@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+	getWindowsSystemDirectory,
 	type WindowsUpdateInstallerPlan,
 	windowsUpdateInstallerLaunch,
 	windowsUpdateInstallerScript,
@@ -111,9 +112,9 @@ writeFileSync(outputPath, marker, "utf8");
 					"launcher.exe",
 				);
 				await mkdir(dirname(unrelatedLauncherPath), { recursive: true });
-				const systemRoot = requiredSystemRoot();
+				const systemDirectory = getWindowsSystemDirectory();
 				await copyFile(
-					join(systemRoot, "System32", "PING.EXE"),
+					join(systemDirectory, "PING.EXE"),
 					unrelatedLauncherPath,
 				);
 				const unrelatedLauncher = await spawnStarted(unrelatedLauncherPath, [
@@ -286,18 +287,13 @@ async function removeTree(path: string): Promise<void> {
 async function launchInstaller(
 	plan: WindowsUpdateInstallerPlan,
 ): Promise<ChildProcess> {
-	const launch = windowsUpdateInstallerLaunch(plan);
+	const launch = windowsUpdateInstallerLaunch(
+		plan,
+		getWindowsSystemDirectory(),
+	);
 	const child = spawn(launch.command, launch.arguments, launch.options);
 	await waitForSpawn(child);
 	return child;
-}
-
-function requiredSystemRoot(): string {
-	const systemRoot = process.env.SystemRoot?.trim();
-	if (systemRoot === undefined || systemRoot.length === 0) {
-		throw new Error("The Windows system root is unavailable.");
-	}
-	return systemRoot;
 }
 
 async function windowsProcessName(
@@ -305,8 +301,7 @@ async function windowsProcessName(
 ): Promise<string> {
 	if (processId === undefined) throw new Error("The test process has no PID.");
 	const powerShell = join(
-		requiredSystemRoot(),
-		"System32",
+		getWindowsSystemDirectory(),
 		"WindowsPowerShell",
 		"v1.0",
 		"powershell.exe",

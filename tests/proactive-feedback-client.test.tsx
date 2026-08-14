@@ -34,6 +34,7 @@ class TestProactiveFeedbackService implements ProactiveFeedbackService {
 	}> = [];
 	listFailure: unknown = null;
 	nextListPromise: Promise<ProactiveFeedbackPage> | null = null;
+	nextSavePromise: Promise<ProactiveFeedbackPolicySnapshot> | null = null;
 	saveFailure: unknown = null;
 	clearFailure: unknown = null;
 	clearCount = 0;
@@ -46,6 +47,11 @@ class TestProactiveFeedbackService implements ProactiveFeedbackService {
 	}
 
 	async setPolicy(policy: ProactiveFeedbackPolicy, expectedRevision: number) {
+		if (this.nextSavePromise) {
+			const request = this.nextSavePromise;
+			this.nextSavePromise = null;
+			return clonePolicy(await request);
+		}
 		if (this.saveFailure) throw this.saveFailure;
 		if (expectedRevision !== this.policy.revision) {
 			throw new ProactiveFeedbackServiceError("version-conflict", "conflict");
@@ -290,6 +296,65 @@ describe("proactive feedback policy", () => {
 			stage: "save",
 			snapshot: { policy: { enabled: true, retention: 30 } },
 		});
+	});
+
+	test("offers an authoritative reload after a save revision conflict", async () => {
+		const service = new TestProactiveFeedbackService();
+		const controller = new ProactiveFeedbackPolicyController(service);
+		await controller.load();
+		service.policy = {
+			policy: { enabled: true, retention: 7 },
+			revision: 1,
+			updatedAtMs: 1_800_000_000_000,
+		};
+
+		expect(await controller.setEnabled(false)).toBeNull();
+		expect(controller.getSnapshot()).toMatchObject({
+			status: "error",
+			stage: "save",
+			snapshot: { policy: { enabled: true, retention: 30 }, revision: 0 },
+		});
+		const markup = renderToStaticMarkup(
+			<ProactiveFeedbackPolicyControl controller={controller} />,
+		);
+		expect(markup).toContain("重新读取");
+
+		await controller.load();
+		expect(controller.getSnapshot()).toMatchObject({
+			status: "ready",
+			snapshot: { policy: { enabled: true, retention: 7 }, revision: 1 },
+		});
+		controller.dispose();
+	});
+
+	test("dispose invalidates an in-flight save and rejects future operations", async () => {
+		const service = new TestProactiveFeedbackService();
+		const controller = new ProactiveFeedbackPolicyController(service);
+		await controller.load();
+		let resolveSave!: (snapshot: ProactiveFeedbackPolicySnapshot) => void;
+		service.nextSavePromise = new Promise((resolve) => {
+			resolveSave = resolve;
+		});
+		let notifications = 0;
+		controller.subscribe(() => {
+			notifications += 1;
+		});
+
+		const request = controller.setEnabled(false);
+		expect(controller.getSnapshot().status).toBe("saving");
+		controller.dispose();
+		resolveSave({
+			policy: { enabled: false, retention: 30 },
+			revision: 1,
+			updatedAtMs: 1_800_000_000_000,
+		});
+
+		expect(await request).toBeNull();
+		expect(controller.getSnapshot().status).toBe("saving");
+		expect(notifications).toBe(1);
+		expect(await controller.load()).toBeNull();
+		expect(await controller.setRetention(7)).toBeNull();
+		expect(await controller.clear()).toBeFalse();
 	});
 
 	test("clears through the authoritative service and renders explicit remote disclosure", async () => {

@@ -37,17 +37,20 @@ export class ProactiveFeedbackPolicyController {
 	private readonly listeners = new Set<Listener>();
 	private operation: Promise<unknown> | null = null;
 	private operationVersion = 0;
+	private disposed = false;
 
 	constructor(private readonly service: ProactiveFeedbackService) {}
 
 	readonly getSnapshot = (): ProactiveFeedbackPolicyState => this.state;
 	readonly getServerSnapshot = (): ProactiveFeedbackPolicyState => this.state;
 	readonly subscribe = (listener: Listener): (() => void) => {
+		if (this.disposed) return () => {};
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
 	};
 
 	load(): Promise<ProactiveFeedbackPolicySnapshot | null> {
+		if (this.disposed) return Promise.resolve(null);
 		if (this.operation)
 			return this.operation as Promise<ProactiveFeedbackPolicySnapshot | null>;
 		const version = ++this.operationVersion;
@@ -60,6 +63,7 @@ export class ProactiveFeedbackPolicyController {
 	setEnabled(
 		enabled: boolean,
 	): Promise<ProactiveFeedbackPolicySnapshot | null> {
+		if (this.disposed) return Promise.resolve(null);
 		const snapshot = snapshotFromState(this.state);
 		if (!snapshot || this.operation) return Promise.resolve(null);
 		return this.save({ ...snapshot.policy, enabled }, snapshot);
@@ -68,12 +72,14 @@ export class ProactiveFeedbackPolicyController {
 	setRetention(
 		retention: ProactiveFeedbackRetention,
 	): Promise<ProactiveFeedbackPolicySnapshot | null> {
+		if (this.disposed) return Promise.resolve(null);
 		const snapshot = snapshotFromState(this.state);
 		if (!snapshot || this.operation) return Promise.resolve(null);
 		return this.save({ ...snapshot.policy, retention }, snapshot);
 	}
 
 	clear(): Promise<boolean> {
+		if (this.disposed) return Promise.resolve(false);
 		const snapshot = snapshotFromState(this.state);
 		if (!snapshot || this.operation) return Promise.resolve(false);
 		const version = ++this.operationVersion;
@@ -81,6 +87,13 @@ export class ProactiveFeedbackPolicyController {
 		const request = this.performClear(snapshot, version);
 		this.track(request);
 		return request;
+	}
+
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.operationVersion += 1;
+		this.listeners.clear();
 	}
 
 	private async performLoad(

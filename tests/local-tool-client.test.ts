@@ -513,10 +513,7 @@ describe("LocalToolClient", () => {
 			try {
 				await client.start();
 				const { leaderPid, observerPid } = await waitForFixtureTree(directory);
-				await waitForClientStopped(client);
-				// isRunning reports request availability, while stop() also joins the
-				// already-started failed process-tree cleanup before OS-level assertions.
-				await client.stop();
+				await waitForFixtureTreeStopped(client, leaderPid, observerPid);
 
 				expect(
 					failures.some((error) => error.code === "PROTOCOL_ERROR"),
@@ -545,10 +542,7 @@ describe("LocalToolClient", () => {
 				await client.start();
 				const { leaderPid, observerPid } = await waitForFixtureTree(directory);
 				expect(isProcessAlive(observerPid)).toBeTrue();
-				await waitForClientStopped(client);
-				// isRunning reports request availability, while stop() also joins the
-				// already-started failed process-tree cleanup before OS-level assertions.
-				await client.stop();
+				await waitForFixtureTreeStopped(client, leaderPid, observerPid);
 
 				expect(
 					failures.some((error) => error.code === "PROCESS_EXITED"),
@@ -1296,12 +1290,32 @@ async function waitForClientStopped(client: LocalToolClient): Promise<void> {
 	}
 }
 
+async function waitForFixtureTreeStopped(
+	client: LocalToolClient,
+	leaderPid: number,
+	observerPid: number,
+): Promise<void> {
+	for (let attempt = 0; attempt < 300; attempt += 1) {
+		if (
+			!client.isRunning &&
+			!isProcessAlive(leaderPid) &&
+			!isProcessAlive(observerPid) &&
+			!isProcessGroupAlive(leaderPid)
+		) {
+			return;
+		}
+		await Bun.sleep(10);
+	}
+	throw new Error("LocalToolClient retained its process tree too long");
+}
+
 function isProcessAlive(processId: number): boolean {
 	try {
 		process.kill(processId, 0);
 		return true;
 	} catch (error) {
 		if (isNoSuchProcess(error)) return false;
+		if (isPermissionDenied(error)) return true;
 		throw error;
 	}
 }
@@ -1312,6 +1326,9 @@ function isProcessGroupAlive(processGroupId: number): boolean {
 		return true;
 	} catch (error) {
 		if (isNoSuchProcess(error)) return false;
+		// Darwin may report EPERM while a killed group is still being reaped.
+		// It proves neither absence nor completion, so keep the waiter polling.
+		if (isPermissionDenied(error)) return true;
 		throw error;
 	}
 }
@@ -1322,6 +1339,15 @@ function isNoSuchProcess(error: unknown): boolean {
 		error !== null &&
 		"code" in error &&
 		error.code === "ESRCH"
+	);
+}
+
+function isPermissionDenied(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		error.code === "EPERM"
 	);
 }
 

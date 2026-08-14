@@ -1,7 +1,9 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { StrictMode, useEffect } from "react";
 import type { AuthCredentials } from "../src/views/client/features/auth/domain";
 import type { ConversationRun } from "../src/views/client/features/conversation/domain";
+import type { ProactiveFeedbackService } from "../src/views/client/features/proactive-feedback/proactive-feedback-service";
 
 GlobalRegistrator.register({
 	url: "http://whalehall.test/",
@@ -14,15 +16,21 @@ const reactActEnvironment = globalThis as typeof globalThis & {
 reactActEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
 
 const [
-	{ cleanup, render },
+	{ cleanup, render, waitFor },
 	{ default: userEvent },
 	{ AuthPage },
 	{ ConversationPage },
+	{ ProactiveFeedbackPolicyController },
+	{ useStrictModeSafeDispose },
 ] = await Promise.all([
 	import("@testing-library/react"),
 	import("@testing-library/user-event"),
 	import("../src/views/client/features/auth/AuthPage"),
 	import("../src/views/client/features/conversation/ConversationPage"),
+	import(
+		"../src/views/client/features/proactive-feedback/ProactiveFeedbackPolicyController"
+	),
+	import("../src/views/client/use-strict-mode-safe-dispose"),
 ]);
 
 afterEach(() => cleanup());
@@ -78,6 +86,55 @@ const streamingThread = {
 		},
 	],
 };
+
+describe("StrictMode-owned account controllers", () => {
+	test("keeps the policy controller alive through rehearsal and disposes it on real unmount", async () => {
+		let revision = 0;
+		const service: ProactiveFeedbackService = {
+			loadPolicy: async () => ({
+				policy: { enabled: true, retention: 30 },
+				revision,
+				updatedAtMs: 1_800_000_000_000,
+			}),
+			setPolicy: async (policy, expectedRevision) => {
+				expect(expectedRevision).toBe(revision);
+				revision += 1;
+				return {
+					policy: { ...policy },
+					revision,
+					updatedAtMs: 1_800_000_000_001,
+				};
+			},
+			listHistory: async () => ({ items: [], nextCursor: null }),
+			clear: async () => ({ clearedAtMs: 1_800_000_000_002 }),
+			onAvailable: () => () => {},
+		};
+		const controller = new ProactiveFeedbackPolicyController(service);
+
+		function PolicyOwner() {
+			useStrictModeSafeDispose(controller, (owned) => owned.dispose());
+			useEffect(() => {
+				void controller.load();
+			}, []);
+			return null;
+		}
+
+		const view = render(
+			<StrictMode>
+				<PolicyOwner />
+			</StrictMode>,
+		);
+		await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
+		expect(await controller.setEnabled(false)).toMatchObject({
+			policy: { enabled: false, retention: 30 },
+			revision: 1,
+		});
+
+		view.unmount();
+		await Promise.resolve();
+		expect(await controller.load()).toBeNull();
+	});
+});
 
 describe("critical ConversationPage DOM behavior", () => {
 	test("renders a streaming bubble, wires Stop, and never announces token deltas", async () => {
