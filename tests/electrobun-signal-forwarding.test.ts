@@ -66,6 +66,21 @@ describe("Electrobun lifecycle signal forwarding", () => {
 		});
 	});
 
+	test("accepts only the exact Windows patchedDependencies mixed runtime", () => {
+		const windowsPatched = `before\r\n${ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING}\r\nafter`;
+		expect(rewriteElectrobunSignalForwarding(windowsPatched)).toEqual({
+			source: windowsPatched,
+			changed: false,
+		});
+		assertElectrobunSignalForwarding(windowsPatched);
+
+		expect(() =>
+			rewriteElectrobunSignalForwarding(
+				`before\r\n${ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING}\nafter`,
+			),
+		).toThrow("mixed line endings");
+	});
+
 	test("rejects mixed or unsupported runtime line endings", () => {
 		expect(() =>
 			rewriteElectrobunSignalForwarding(

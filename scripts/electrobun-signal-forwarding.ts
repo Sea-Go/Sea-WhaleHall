@@ -230,7 +230,33 @@ function canonicalSignalSource(source: string): {
 	}
 	const hasCrLf = source.includes("\r\n");
 	if (hasCrLf && withoutCrLf.includes("\n")) {
-		throw new Error("Electrobun runtime main contains mixed line endings.");
+		const patchedCount = countExact(
+			source,
+			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
+		);
+		const outsidePatchedBlock = source.replace(
+			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
+			"",
+		);
+		const outsideWithoutCrLf = outsidePatchedBlock.replaceAll("\r\n", "");
+		if (
+			patchedCount !== 1 ||
+			outsideWithoutCrLf.includes("\n") ||
+			outsideWithoutCrLf.includes("\r")
+		) {
+			throw new Error("Electrobun runtime main contains mixed line endings.");
+		}
+		// Bun's Windows patchedDependencies implementation preserves CRLF in the
+		// vendor file while writing the one tracked patch hunk with LF. Accept only
+		// that byte-exact mixed form; arbitrary mixed input remains fail-closed.
+		const uniformCrLf = source.replace(
+			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
+			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING.replaceAll("\n", "\r\n"),
+		);
+		return {
+			canonical: uniformCrLf.replaceAll("\r\n", "\n"),
+			lineEnding: "\r\n",
+		};
 	}
 	return {
 		canonical: hasCrLf ? source.replaceAll("\r\n", "\n") : source,
