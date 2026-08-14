@@ -2924,9 +2924,11 @@ fn encrypt_value(
     getrandom::fill(&mut nonce).map_err(|_| ObservationJournalError::Encryption)?;
     let cipher =
         Aes256Gcm::new_from_slice(key.bytes()).map_err(|_| ObservationJournalError::Encryption)?;
+    let nonce_ref =
+        <&Nonce<_>>::try_from(nonce.as_slice()).map_err(|_| ObservationJournalError::Encryption)?;
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            nonce_ref,
             Payload {
                 msg: &plaintext,
                 aad: &aad,
@@ -2960,9 +2962,11 @@ fn decrypt_value(
     })?;
     let cipher = Aes256Gcm::new_from_slice(key.bytes())
         .map_err(|_| ObservationJournalError::Authentication)?;
+    let nonce_ref = <&Nonce<_>>::try_from(encrypted.nonce.as_slice())
+        .map_err(|_| ObservationJournalError::Authentication)?;
     let plaintext = cipher
         .decrypt(
-            Nonce::from_slice(&encrypted.nonce),
+            nonce_ref,
             Payload {
                 msg: &encrypted.ciphertext,
                 aad: &aad,
