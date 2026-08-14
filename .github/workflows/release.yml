@@ -183,7 +183,7 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: whalehall-local -> target
           cache-on-failure: true
@@ -260,7 +260,7 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: whalehall-local -> target
           cache-on-failure: true
@@ -410,7 +410,7 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: whalehall-local -> target
           cache-on-failure: true
