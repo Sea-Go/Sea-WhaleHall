@@ -514,6 +514,9 @@ describe("LocalToolClient", () => {
 				await client.start();
 				const { leaderPid, observerPid } = await waitForFixtureTree(directory);
 				await waitForClientStopped(client);
+				// isRunning reports request availability, while stop() also joins the
+				// already-started failed process-tree cleanup before OS-level assertions.
+				await client.stop();
 
 				expect(
 					failures.some((error) => error.code === "PROTOCOL_ERROR"),
@@ -543,6 +546,9 @@ describe("LocalToolClient", () => {
 				const { leaderPid, observerPid } = await waitForFixtureTree(directory);
 				expect(isProcessAlive(observerPid)).toBeTrue();
 				await waitForClientStopped(client);
+				// isRunning reports request availability, while stop() also joins the
+				// already-started failed process-tree cleanup before OS-level assertions.
+				await client.stop();
 
 				expect(
 					failures.some((error) => error.code === "PROCESS_EXITED"),
