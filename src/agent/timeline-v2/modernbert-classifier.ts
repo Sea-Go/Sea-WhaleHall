@@ -376,7 +376,7 @@ export class ModernBertEpisodeClassifier
 
 	private async runVerification(signal?: AbortSignal): Promise<void> {
 		if (!this.verification) {
-			this.verification = this.verifyArtifactOnce(signal).finally(() => {
+			this.verification = this.verifyArtifactOnce().finally(() => {
 				this.verification = null;
 			});
 		}
