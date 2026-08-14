@@ -1,17 +1,18 @@
 import type { CalendarService } from "./calendar-service";
-import type { CalendarScenarioId } from "./fixtures";
 import {
 	assertValidCalendarEvent,
-	cloneCalendarEvent,
-	createOccurrenceOverride,
 	type CalendarBatchMutationResult,
 	type CalendarConflict,
 	type CalendarEvent,
 	type CalendarMutation,
 	type CalendarMutationKind,
 	type CalendarMutationResult,
+	canUserUnlockPlanEvent,
+	cloneCalendarEvent,
+	createOccurrenceOverride,
 	type RecurrenceScope,
 } from "./domain";
+import type { CalendarScenarioId } from "./fixtures";
 
 export interface DeletedCalendarEvent {
 	event: CalendarEvent;
@@ -98,7 +99,8 @@ export class CalendarController {
 		} catch (error) {
 			if (sequence !== this.loadSequence) return;
 			const offline =
-				error instanceof Error && error.message.toLowerCase().includes("offline");
+				error instanceof Error &&
+				error.message.toLowerCase().includes("offline");
 			this.patch({
 				loadState: offline ? "offline" : "error",
 				message: offline
@@ -133,8 +135,8 @@ export class CalendarController {
 		event: CalendarEvent,
 		recurrenceScope: RecurrenceScope | null = null,
 	): Promise<CalendarMutationResult> {
-		assertValidCalendarEvent(event);
-		const before = this.state.events.find((item) => item.id === event.id) ?? null;
+		const before =
+			this.state.events.find((item) => item.id === event.id) ?? null;
 		if (!before?.editable) {
 			return this.rejectLocally(
 				event.id,
@@ -149,14 +151,50 @@ export class CalendarController {
 				"请先选择修改本次、后续或整个系列。",
 			);
 		}
-		return this.runMutation("update", before, event, recurrenceScope);
+		if (
+			before.kind !== event.kind ||
+			before.sourcePlanId !== event.sourcePlanId ||
+			before.sourceTaskId !== event.sourceTaskId ||
+			before.scheduleOrigin !== event.scheduleOrigin
+		) {
+			return this.rejectLocally(
+				event.id,
+				"read-only-event",
+				"日程类型和计划归属不能在编辑器中更改。",
+			);
+		}
+		const userEdited =
+			before.kind === "plan" && before.scheduleOrigin === "model"
+				? { ...event, userLocked: true }
+				: event;
+		assertValidCalendarEvent(userEdited);
+		return this.runMutation("update", before, userEdited, recurrenceScope);
+	}
+
+	async setPlanEventLocked(
+		eventId: string,
+		userLocked: boolean,
+	): Promise<CalendarMutationResult> {
+		const before =
+			this.state.events.find((event) => event.id === eventId) ?? null;
+		if (userLocked || !before || !canUserUnlockPlanEvent(before)) {
+			return this.rejectLocally(
+				eventId,
+				"read-only-event",
+				"只有已锁定的模型计划日程可以重新交给自动排程。",
+			);
+		}
+		const after = { ...before, userLocked };
+		assertValidCalendarEvent(after);
+		return this.runMutation("update", before, after, null);
 	}
 
 	async delete(
 		eventId: string,
 		recurrenceScope: RecurrenceScope | null = null,
 	): Promise<CalendarMutationResult> {
-		const before = this.state.events.find((event) => event.id === eventId) ?? null;
+		const before =
+			this.state.events.find((event) => event.id === eventId) ?? null;
 		if (!before) {
 			return this.rejectLocally(
 				eventId,
@@ -225,7 +263,9 @@ export class CalendarController {
 			const result = await this.service.mutateBatch(batchId, mutations);
 			if (accountGeneration !== this.accountGeneration) return result;
 			if (result.ok) {
-				const authoritative = new Map(result.events.map((event) => [event.id, event]));
+				const authoritative = new Map(
+					result.events.map((event) => [event.id, event]),
+				);
 				this.patch({
 					events: this.state.events.map(
 						(event) => authoritative.get(event.id) ?? event,
@@ -248,7 +288,9 @@ export class CalendarController {
 			}
 			return result;
 		} catch {
-			const conflict = unavailableConflict("同步失败，所有待确认计划均已恢复。");
+			const conflict = unavailableConflict(
+				"同步失败，所有待确认计划均已恢复。",
+			);
 			if (accountGeneration !== this.accountGeneration) {
 				return { ok: false, batchId, conflicts: [conflict] };
 			}

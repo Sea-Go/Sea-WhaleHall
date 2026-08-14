@@ -20,13 +20,12 @@ import {
 import type { PetPresentationBridge } from "../src/views/client/features/pet-bridge/public";
 import { PlanningController } from "../src/views/client/features/planning/PlanningController";
 import { PlanningPage } from "../src/views/client/features/planning/PlanningPage";
+import type { PlanningService } from "../src/views/client/features/planning/planning-service";
 import { ProactiveFeedbackHistoryController } from "../src/views/client/features/proactive-feedback/public";
 import { ReportController } from "../src/views/client/features/reports/ReportController";
 import { ReportsPage } from "../src/views/client/features/reports/ReportsPage";
 import { PreferencesController } from "../src/views/client/features/settings/PreferencesController";
 import { MockCalendarService } from "../src/views/client/infrastructure/calendar/MockCalendarService";
-import { CalendarPlanningGateway } from "../src/views/client/infrastructure/planning/CalendarPlanningGateway";
-import { MockPlanningGenerationService } from "../src/views/client/infrastructure/planning/MockPlanningGenerationService";
 import { InMemoryProactiveFeedbackService } from "../src/views/client/infrastructure/proactive-feedback/InMemoryProactiveFeedbackService";
 import { MockReportService } from "../src/views/client/infrastructure/reports/MockReportService";
 import { MockPreferencesService } from "../src/views/client/infrastructure/settings/MockPreferencesService";
@@ -39,12 +38,25 @@ const shellUser = {
 	initials: "鸣",
 };
 const calendarService = new MockCalendarService({ latencyMs: 0 });
-const planningController = new PlanningController(
-	new MockPlanningGenerationService({ latencyMs: 0 }),
-	new CalendarPlanningGateway(calendarService),
-	() => "2026-07-29",
-	() => "Asia/Shanghai",
-);
+const emptyPlanningService: PlanningService = {
+	subscribe: () => () => {},
+	listPlans: async () => [],
+	getPlan: async () => {
+		throw new Error("not used");
+	},
+	createPlanDraft: async () => ({ planId: "not-used" }),
+	sendPlanMessage: async () => {},
+	confirmPlanRevision: async () => {},
+	setTaskStatus: async () => {},
+	confirmObservationAttribution: async () => {},
+	pausePlan: async () => {},
+	resumePlan: async () => {},
+	completePlan: async () => {},
+	archivePlan: async () => {},
+	undoPlanAdjustment: async () => {},
+	retryPendingAnalysis: async () => {},
+};
+const planningController = new PlanningController(emptyPlanningService);
 const planningPageProps = {
 	controller: planningController,
 	onNotify: notify,
@@ -158,6 +170,7 @@ const monitoringService: MonitoringService = {
 };
 const monitoringController = new MonitoringController(monitoringService);
 await monitoringController.load();
+await planningController.initialize();
 const auditExportService: AuditExportService = {
 	async exportFiveMinutes() {
 		return { status: "cancelled", basename: null };
@@ -268,14 +281,13 @@ describe("client app shell", () => {
 
 describe("client page shells", () => {
 	test("planning offers a clear first action and an honest empty state", () => {
-		planningController.reset();
 		const markup = renderToStaticMarkup(
 			<PlanningPage {...planningPageProps} />,
 		);
 
-		expect(markup).toContain("制定计划");
-		expect(markup).toContain("制定第一个计划");
-		expect(markup).toContain("确认后才进入日历");
+		expect(markup).toContain("动态计划");
+		expect(markup).toContain("你想推进什么");
+		expect(markup).toContain("默认关闭；确认计划后，从明天开始安排");
 	});
 
 	test("calendar contains its toolbar, mini month, source controls, and production grid adapter", () => {

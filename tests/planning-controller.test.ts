@@ -1,783 +1,658 @@
 import { describe, expect, test } from "bun:test";
 import type {
-	GeneratedPlanDraft,
-	GenerationStatus,
-	Plan,
-	PlanInput,
-	PlanningBusyWindow,
-	ProposedScheduleItem,
+	PlanningTaskView,
+	PlanSummaryView,
+	PlanView,
 } from "../src/views/client/features/planning/domain";
 import { PlanningController } from "../src/views/client/features/planning/PlanningController";
-import type {
-	PlanApplyResult,
-	PlanningAuthorityGateway,
-	PlanningAvailabilityRequest,
-	PlanningCalendarGateway,
-	PlanningGenerationContext,
-	PlanningGenerationService,
+import {
+	type ChangePlanStatusRequest,
+	type ConfirmObservationAttributionRequest,
+	type ConfirmPlanRevisionRequest,
+	type CreatePlanDraftRequest,
+	type PlanningService,
+	PlanningServiceError,
+	type PlanningServiceEvent,
+	type SendPlanMessageRequest,
+	type SetPlanTaskStatusRequest,
+	type UndoPlanAdjustmentRequest,
 } from "../src/views/client/features/planning/planning-service";
-import type {
-	PlanningAuthoritySnapshot,
-	PlanningCommitResult,
-} from "../src/shared/planning-authority";
-import { MockPlanningGenerationService } from "../src/views/client/infrastructure/planning/MockPlanningGenerationService";
 
-class FakePlanningCalendarGateway implements PlanningCalendarGateway {
-	availability: readonly PlanningBusyWindow[] = [];
-	applyCalls = 0;
-	lastApplied: readonly ProposedScheduleItem[] = [];
-	result: PlanApplyResult | null = null;
+function schedule(eventId: string, start: string, userLocked = false) {
+	return {
+		eventId,
+		date: start.slice(0, 10),
+		start,
+		end: start.replace("01:00:00", "02:00:00"),
+		timeZone: "Asia/Shanghai",
+		scheduleOrigin: "model" as const,
+		userLocked,
+		version: 2,
+	};
+}
 
-	async loadAvailability(
-		_request: PlanningAvailabilityRequest,
-	): Promise<readonly PlanningBusyWindow[]> {
-		return this.availability;
+function planningTask(
+	id: string,
+	overrides: Partial<PlanningTaskView> = {},
+): PlanningTaskView {
+	return {
+		id,
+		title: `任务 ${id}`,
+		description: null,
+		purpose: "execution",
+		status: "pending",
+		estimatedMinutes: 90,
+		dependencyIds: [],
+		schedules: [schedule(`${id}-session-1`, "2026-08-14T01:00:00Z")],
+		unplanned: null,
+		...overrides,
+	};
+}
+
+function basePlan(
+	status: PlanView["status"] = "awaiting-confirmation",
+): PlanView {
+	const tasks = [
+		planningTask("task-1", {
+			schedules: [
+				schedule("session-1", "2026-08-14T01:00:00Z"),
+				schedule("session-2", "2026-08-16T01:00:00Z", true),
+			],
+		}),
+		planningTask("task-2", {
+			schedules: [],
+			unplanned: { kind: "capacity", message: "本周剩余容量不足" },
+		}),
+	];
+	const estimate = {
+		estimatedCompletionDate: "2026-10-30",
+		confidence: "low" as const,
+		assessedAt: "2026-08-13T02:00:00Z",
+		evidenceThrough: "2026-08-12T23:59:59Z",
+		basis: "先验证一周的稳定投入，再缩小日期范围。",
+		modelVersion: "qwen3:4b",
+	};
+	return {
+		id: "plan-1",
+		title: "建立个人作品集",
+		goal: "完成一套可以用于求职的作品集",
+		status,
+		type: status === "awaiting-confirmation" ? null : "fuzzy",
+		version: 7,
+		timeZone: "Asia/Shanghai",
+		startToday: false,
+		effectiveDate: status === "awaiting-confirmation" ? null : "2026-08-14",
+		estimate,
+		revision: {
+			revisionId: "revision-7",
+			version: 7,
+			status: status === "awaiting-confirmation" ? "proposed" : "confirmed",
+			createdAt: "2026-08-13T02:00:00Z",
+			goal: "完成一套可以用于求职的作品集",
+			summary: "先验证作品生产节奏，再动态收敛长期日期。",
+			reasoningSummary: "当前目标路径仍有不确定性，建议作为模糊计划推进。",
+			planType: "fuzzy",
+			estimate,
+			schedulingPreferences: {
+				weeklyCapacityMinutes: 240,
+				sessionMinutes: 60,
+				availableWindows: [
+					{ dayOfWeek: 6, startTime: "09:00", endTime: "12:00" },
+				],
+			},
+			scheduleWindow: {
+				startDate: "2026-08-14",
+				endDateInclusive: "2026-08-20",
+				timeZone: "Asia/Shanghai",
+			},
+			assumptions: ["每周至少投入 3 小时"],
+			questions: [],
+			tasks,
+		},
+		messages: [
+			{
+				id: "message-1",
+				role: "user",
+				content: "我想完成作品集",
+				createdAt: "2026-08-13T01:58:00Z",
+				status: "complete",
+				revisionId: null,
+			},
+			{
+				id: "message-2",
+				role: "assistant",
+				content: "建议先作为模糊计划，用一周验证稳定产出速度。",
+				createdAt: "2026-08-13T02:00:00Z",
+				status: "complete",
+				revisionId: "revision-7",
+			},
+		],
+		tasks,
+		monitoring: {
+			authorized: false,
+			enabled: false,
+			mode: "manual-only",
+			coverage: "unavailable",
+			message: "未授权活动监测。",
+		},
+		pendingObservations: [
+			{
+				id: "observation-1",
+				occurredAt: "2026-08-14T02:00:00Z",
+				durationMinutes: 45,
+				summary: "检测到一段可能与计划相关的投入",
+				confidence: "medium",
+				candidateTaskIds: ["task-1", "task-2"],
+				version: 3,
+			},
+		],
+		adjustments: [
+			{
+				id: "adjustment-1",
+				createdAt: "2026-08-14T03:00:00Z",
+				trigger: "task-status",
+				summary: "根据任务进度后移一次安排",
+				previousEstimatedCompletionDate: "2026-10-28",
+				nextEstimatedCompletionDate: "2026-10-30",
+				movedCount: 1,
+				addedCount: 0,
+				cancelledCount: 0,
+				canUndo: true,
+				undoUnavailableReason: null,
+				undoneAt: null,
+				version: 2,
+			},
+		],
+		notifications: [],
+		updatedAt: "2026-08-13T02:00:00Z",
+	};
+}
+
+function summary(plan: PlanView): PlanSummaryView {
+	return {
+		id: plan.id,
+		title: plan.title,
+		goal: plan.goal,
+		status: plan.status,
+		type: plan.type,
+		version: plan.version,
+		estimatedCompletionDate: plan.estimate?.estimatedCompletionDate ?? null,
+		confidence: plan.estimate?.confidence ?? null,
+		updatedAt: plan.updatedAt,
+	};
+}
+
+class FakePlanningService implements PlanningService {
+	plan: PlanView | null;
+	readonly listeners = new Set<(event: PlanningServiceEvent) => void>();
+	readonly createRequests: CreatePlanDraftRequest[] = [];
+	readonly messageRequests: SendPlanMessageRequest[] = [];
+	readonly confirmationRequests: ConfirmPlanRevisionRequest[] = [];
+	readonly taskRequests: SetPlanTaskStatusRequest[] = [];
+	readonly observationRequests: ConfirmObservationAttributionRequest[] = [];
+	readonly undoRequests: UndoPlanAdjustmentRequest[] = [];
+	readonly statusRequests: Array<{
+		action: string;
+		request: ChangePlanStatusRequest;
+	}> = [];
+	sendErrorAfterPersist: PlanningServiceError | null = null;
+	pauseError: PlanningServiceError | null = null;
+	listError: PlanningServiceError | null = null;
+	createErrorOnce: PlanningServiceError | null = null;
+
+	constructor(plan: PlanView | null = basePlan()) {
+		this.plan = plan;
 	}
 
-	async applyPlan(
-		_plan: Plan,
-		proposals: readonly ProposedScheduleItem[],
-		applyId: string,
-	): Promise<PlanApplyResult> {
-		this.applyCalls += 1;
-		this.lastApplied = proposals;
-		return (
-			this.result ?? {
-				ok: true,
-				kind: "success",
-				applyId,
-				committedCount: proposals.length,
-				warnings: [],
-			}
-		);
+	subscribe(listener: (event: PlanningServiceEvent) => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	async listPlans(): Promise<readonly PlanSummaryView[]> {
+		if (this.listError) throw this.listError;
+		return this.plan ? [summary(this.plan)] : [];
+	}
+
+	async getPlan(planId: string): Promise<PlanView> {
+		if (!this.plan || this.plan.id !== planId) {
+			throw new PlanningServiceError("not-found", "not found", {
+				retryable: false,
+			});
+		}
+		return this.plan;
+	}
+
+	async createPlanDraft(request: CreatePlanDraftRequest) {
+		this.createRequests.push(request);
+		if (this.createErrorOnce) {
+			const error = this.createErrorOnce;
+			this.createErrorOnce = null;
+			throw error;
+		}
+		this.plan = {
+			...basePlan("draft"),
+			id: "created-plan",
+			title: request.input.goal,
+			goal: request.input.goal,
+			startToday: request.input.startToday,
+			type: null,
+			effectiveDate: null,
+			revision: null,
+			estimate: null,
+			tasks: [],
+			messages: [
+				{
+					id: "created-message",
+					role: "user",
+					content: request.input.goal,
+					createdAt: "2026-08-13T04:00:00Z",
+					status: "pending-analysis",
+					revisionId: null,
+				},
+			],
+		};
+		return { planId: "created-plan" };
+	}
+
+	async sendPlanMessage(request: SendPlanMessageRequest): Promise<void> {
+		this.messageRequests.push(request);
+		const plan = this.requirePlan();
+		this.plan = {
+			...plan,
+			version: plan.version + 1,
+			messages: [
+				...plan.messages,
+				{
+					id: `message-${plan.messages.length + 1}`,
+					role: "user",
+					content: request.content,
+					createdAt: "2026-08-13T05:00:00Z",
+					status: this.sendErrorAfterPersist ? "pending-analysis" : "complete",
+					revisionId: null,
+				},
+			],
+		};
+		if (this.sendErrorAfterPersist) throw this.sendErrorAfterPersist;
+	}
+
+	async confirmPlanRevision(
+		request: ConfirmPlanRevisionRequest,
+	): Promise<void> {
+		this.confirmationRequests.push(request);
+		const plan = this.requirePlan();
+		this.plan = {
+			...plan,
+			status: plan.status === "paused" ? "paused" : "active",
+			type: plan.revision?.planType ?? null,
+			version: plan.version + 1,
+			effectiveDate: plan.startToday ? "2026-08-13" : "2026-08-14",
+			revision: plan.revision
+				? { ...plan.revision, status: "confirmed" }
+				: null,
+		};
+	}
+
+	async setTaskStatus(request: SetPlanTaskStatusRequest): Promise<void> {
+		this.taskRequests.push(request);
+		const plan = this.requirePlan();
+		this.plan = {
+			...plan,
+			version: plan.version + 1,
+			tasks: plan.tasks.map((task) =>
+				task.id === request.taskId ? { ...task, status: request.status } : task,
+			),
+		};
+	}
+
+	async confirmObservationAttribution(
+		request: ConfirmObservationAttributionRequest,
+	): Promise<void> {
+		this.observationRequests.push(request);
+		const plan = this.requirePlan();
+		this.plan = {
+			...plan,
+			version: plan.version + 1,
+			pendingObservations: plan.pendingObservations.filter(
+				(item) => item.id !== request.observationId,
+			),
+		};
+	}
+
+	async pausePlan(request: ChangePlanStatusRequest): Promise<void> {
+		this.statusRequests.push({ action: "pause", request });
+		if (this.pauseError) throw this.pauseError;
+		this.changeStatus("paused");
+	}
+
+	async resumePlan(request: ChangePlanStatusRequest): Promise<void> {
+		this.statusRequests.push({ action: "resume", request });
+		this.changeStatus("active");
+	}
+
+	async completePlan(request: ChangePlanStatusRequest): Promise<void> {
+		this.statusRequests.push({ action: "complete", request });
+		this.changeStatus("completed");
+	}
+
+	async archivePlan(request: ChangePlanStatusRequest): Promise<void> {
+		this.statusRequests.push({ action: "archive", request });
+		this.changeStatus("archived");
+	}
+
+	async undoPlanAdjustment(request: UndoPlanAdjustmentRequest): Promise<void> {
+		this.undoRequests.push(request);
+		const plan = this.requirePlan();
+		this.plan = {
+			...plan,
+			version: plan.version + 1,
+			adjustments: plan.adjustments.map((item) =>
+				item.id === request.adjustmentId
+					? {
+							...item,
+							canUndo: false,
+							undoneAt: "2026-08-14T04:00:00Z",
+						}
+					: item,
+			),
+		};
+	}
+
+	async retryPendingAnalysis(request: ChangePlanStatusRequest): Promise<void> {
+		this.statusRequests.push({ action: "retry-analysis", request });
+		const plan = this.requirePlan();
+		this.sendErrorAfterPersist = null;
+		this.plan = {
+			...plan,
+			status: "awaiting-confirmation",
+			version: plan.version + 1,
+			messages: plan.messages.map((message) =>
+				message.status === "pending-analysis"
+					? { ...message, status: "complete" }
+					: message,
+			),
+		};
+	}
+
+	emit(event: PlanningServiceEvent): void {
+		for (const listener of this.listeners) listener(event);
+	}
+
+	private requirePlan(): PlanView {
+		if (!this.plan) throw new Error("Expected a plan");
+		return this.plan;
+	}
+
+	private changeStatus(status: PlanView["status"]): void {
+		const plan = this.requirePlan();
+		this.plan = { ...plan, status, version: plan.version + 1 };
 	}
 }
 
 function ids() {
 	let value = 0;
-	return () => `id-${++value}`;
+	return () => `operation-${++value}`;
 }
 
-function createController(
-	generator: PlanningGenerationService = new MockPlanningGenerationService({
-		latencyMs: 0,
-	}),
-	gateway = new FakePlanningCalendarGateway(),
-) {
-	return {
-		controller: new PlanningController(
-			generator,
-			gateway,
-			() => "2026-07-29",
-			() => "Asia/Shanghai",
-			ids(),
-		),
-		gateway,
-	};
-}
-
-function fillInput(
-	controller: PlanningController,
-	type: "long-term" | "short-term",
-) {
-	controller.start();
-	controller.updateInput({ goal: "完成个人作品集与求职材料" });
-	controller.next();
-	controller.updateInput({ type });
-	controller.next();
-	controller.updateInput({
-		deadline: type === "long-term" ? "2026-10-01" : "2026-08-05",
-		weeklyCapacityHours: 6,
-		preferredDayPart: "evening",
-	});
-}
-
-async function generateReview(
-	controller: PlanningController,
-	type: "long-term" | "short-term",
-) {
-	fillInput(controller, type);
-	await controller.generate();
+function currentPlan(controller: PlanningController): PlanView {
 	const state = controller.getSnapshot();
-	expect(state.status).toBe("review");
-	if (state.status !== "review") throw new Error("Expected review");
-	return state;
+	if (!("content" in state) || !state.content) {
+		throw new Error(`Expected loaded content, got ${state.status}`);
+	}
+	return state.content.plan;
 }
 
-describe("PlanningController generation flow", () => {
-	test("long plans prioritize phases and only precision-schedule the near window", async () => {
-		const { controller } = createController();
-		const state = await generateReview(controller, "long-term");
-		expect(state.draft.plan.phases).toHaveLength(3);
-		expect(state.draft.plan.milestones).toHaveLength(3);
-		expect(state.draft.plan.scheduleWindow).toEqual({
-			startDate: "2026-07-29",
-			endDateExclusive: "2026-08-08",
-		});
-		expect(state.draft.proposals.length).toBeLessThanOrEqual(6);
-		expect(state.draft.plan.deadline).toBe("2026-10-01");
-	});
-
-	test("short plans produce tasks and a near-term schedule", async () => {
-		const { controller } = createController();
-		const state = await generateReview(controller, "short-term");
-		expect(state.draft.plan.phases).toHaveLength(1);
-		expect(state.draft.plan.tasks).toHaveLength(3);
-		expect(state.draft.proposals).toHaveLength(3);
-	});
-
-	test("shows incomplete input at the relevant progressive step", () => {
-		const { controller } = createController();
-		controller.start();
-		controller.updateInput({ goal: "短" });
-		controller.next();
-		const state = controller.getSnapshot();
-		expect(state.status).toBe("drafting");
-		if (state.status !== "drafting") return;
-		expect(state.step).toBe("describe");
-		expect(state.issues[0]?.field).toBe("goal");
-	});
-
-	test("suggests an editable deadline after choosing long or short type", () => {
-		const { controller } = createController();
-		controller.start();
-		controller.updateInput({ goal: "完成一个可以交付的作品集" });
-		controller.next();
-		controller.updateInput({ type: "short-term" });
-		controller.next();
-		const state = controller.getSnapshot();
-		expect(state.status).toBe("drafting");
-		if (state.status !== "drafting") return;
-		expect(state.input.deadline).toBe("2026-08-12");
-	});
-
-	test("understands an explicit month in the natural-language goal", () => {
-		const { controller } = createController();
-		controller.start();
-		controller.updateInput({ goal: "在 9 月前完成个人作品集" });
-		controller.next();
-		controller.updateInput({ type: "long-term" });
-		controller.next();
-		const state = controller.getSnapshot();
-		expect(state.status).toBe("drafting");
-		if (state.status !== "drafting") return;
-		expect(state.input.deadline).toBe("2026-08-31");
-	});
-
-	test("exposes generation failure and supports retry", async () => {
-		const generator = new MockPlanningGenerationService({ latencyMs: 0 });
-		generator.failNextGeneration();
-		const { controller } = createController(generator);
-		fillInput(controller, "short-term");
-		await controller.generate();
-		expect(controller.getSnapshot().status).toBe("generation-error");
-		await controller.retryGeneration();
-		expect(controller.getSnapshot().status).toBe("review");
-	});
-
-	test("exposes an empty draft with deadline, scope, and capacity suggestions", async () => {
-		const generator = new MockPlanningGenerationService({ latencyMs: 0 });
-		generator.returnEmptyNextGeneration();
-		const { controller } = createController(generator);
-		fillInput(controller, "short-term");
-		await controller.generate();
-		const state = controller.getSnapshot();
-		expect(state.status).toBe("empty-draft");
-		if (state.status !== "empty-draft") return;
-		expect(state.suggestions.join(" ")).toContain("截止");
-		expect(state.suggestions.join(" ")).toContain("范围");
-		expect(state.suggestions.join(" ")).toContain("投入");
-	});
-
-	test("keeps Agent follow-up questions inside the planning flow before reviewing the draft", async () => {
-		let receivedAnswers: readonly import("../src/shared/task-planning").TaskPlanningAnswer[] = [];
-		const generator: PlanningGenerationService = {
-			async generate() {
-				return {
-					kind: "clarification",
-					sessionId: "agent-session",
-					questions: [{ key: "current_progress", text: "目前进展如何？", required: true }],
-				};
-			},
-			async continueAfterClarification(_input, sessionId, answers) {
-				expect(sessionId).toBe("agent-session");
-				receivedAnswers = answers;
-				return { kind: "draft", draft: sampleDraft() };
-			},
-		};
-		const { controller } = createController(generator);
-		fillInput(controller, "short-term");
-		await controller.generate();
-		expect(controller.getSnapshot()).toMatchObject({ status: "clarifying", step: "clarify" });
-		await controller.submitClarificationAnswers([
-			{ questionKey: "current_progress", answerText: "还没有开始。" },
-		]);
-		expect(receivedAnswers).toHaveLength(1);
-		expect(controller.getSnapshot().status).toBe("review");
-	});
-
-	test("restores a persisted planning clarification after the WebView reloads", async () => {
-		const recoveredInput: PlanInput = {
-			goal: "完成个人作品集与求职材料",
-			type: "short-term",
-			deadline: "2026-08-05",
-			priority: "high",
-			weeklyCapacityHours: 6,
-			unavailableDays: [],
-			preferredSessionMinutes: 60,
-			preferredDayPart: "evening",
-		};
-		const generator: PlanningGenerationService = {
-			async findRestorable() {
-				return { runId: "run-restored", input: recoveredInput };
-			},
-			async restore(run, _availability, context) {
-				expect(run.runId).toBe("run-restored");
-				context.onStatus("checking-calendar");
-				return {
-					kind: "clarification",
-					sessionId: "session-restored",
-					questions: [{ key: "scope", text: "首版范围是什么？", required: true }],
-				};
-			},
-			async generate() {
-				throw new Error("restore must not restart generation");
-			},
-			async continueAfterClarification(_input, sessionId) {
-				expect(sessionId).toBe("session-restored");
-				return { kind: "draft", draft: sampleDraft() };
-			},
-		};
-		const { controller } = createController(generator);
-		await controller.restore();
+describe("PlanningController creation and conversation", () => {
+	test("loads an honest empty state and creates with tomorrow as the default", async () => {
+		const service = new FakePlanningService(null);
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
 		expect(controller.getSnapshot()).toMatchObject({
-			status: "clarifying",
-			input: recoveredInput,
-			sessionId: "session-restored",
+			status: "empty",
+			input: { goal: "", startToday: false },
 		});
-		await controller.submitClarificationAnswers([
-			{ questionKey: "scope", answerText: "先完成核心页面。" },
-		]);
-		expect(controller.getSnapshot().status).toBe("review");
-	});
-});
 
-describe("PlanningController draft isolation and confirmation", () => {
-	test("cancel during generation never writes to committed calendar", async () => {
-		let resolveGeneration: (
-			result: import("../src/views/client/features/planning/planning-service").PlanningGenerationResult,
-		) => void = () => {};
-		const generator: PlanningGenerationService = {
-			generate(
-				_input: PlanInput,
-				_availability: readonly PlanningBusyWindow[],
-				context: PlanningGenerationContext,
-			) {
-				context.onStatus("checking-calendar" as GenerationStatus);
-				return new Promise((resolve) => {
-					resolveGeneration = resolve;
-				});
-			},
-			async continueAfterClarification() {
-				throw new Error("not used by this test");
-			},
-		};
-		const { controller, gateway } = createController(generator);
-		fillInput(controller, "short-term");
-		const request = controller.generate();
-		controller.cancel();
-		resolveGeneration({ kind: "draft", draft: sampleDraft() });
-		await request;
-		expect(controller.getSnapshot().status).toBe("cancelled");
-		expect(gateway.applyCalls).toBe(0);
-	});
-
-	test("blocks confirmation on unavailable-time conflicts", async () => {
-		const { controller, gateway } = createController();
-		gateway.availability = [
+		controller.updateCreateInput({ goal: "完成一套个人作品集" });
+		await controller.createPlanDraft();
+		expect(service.createRequests).toEqual([
 			{
-				id: "manual",
-				title: "不可用时间",
-				kind: "manual-block",
-				start: "2026-07-29T11:00:00Z",
-				end: "2026-07-29T12:00:00Z",
-				timeZone: "Asia/Shanghai",
+				input: { goal: "完成一套个人作品集", startToday: false },
+				operationId: "operation-1",
 			},
-		];
-		const state = await generateReview(controller, "short-term");
-		expect(state.draft.conflicts[0]?.severity).toBe("error");
-		controller.openSchedule();
-		controller.openConfirm();
-		expect(controller.getSnapshot()).toMatchObject({
-			status: "review",
-			step: "schedule",
-		});
-		expect(await controller.apply()).toBeNull();
-		expect(gateway.applyCalls).toBe(0);
-	});
-
-	test("confirm writes once and guards repeated confirmation", async () => {
-		const { controller, gateway } = createController();
-		expect(controller.getActiveGoalContext()).toBeNull();
-		await generateReview(controller, "short-term");
-		controller.openSchedule();
-		controller.openConfirm();
-		const first = await controller.apply();
-		const second = await controller.apply();
-		expect(first?.ok).toBe(true);
-		expect(second).toBeNull();
-		expect(gateway.applyCalls).toBe(1);
-		expect(gateway.lastApplied.every((item) => item.state === "proposed")).toBe(
-			true,
+		]);
+		expect(controller.getSnapshot().status).toBe("draft");
+		expect(currentPlan(controller).effectiveDate).toBeNull();
+		expect(currentPlan(controller).messages[0]?.status).toBe(
+			"pending-analysis",
 		);
-		expect(controller.getSnapshot().status).toBe("success");
-		expect(controller.getActiveGoalContext()).toMatchObject({
-			schemaVersion: "active-goal.v1",
-			version: 1,
-			text: "完成个人作品集与求职材料",
-		});
 	});
 
-	test("explicitly clears an active goal and notifies subscribers once", async () => {
-		const { controller } = createController();
-		let notifications = 0;
-		controller.subscribe(() => {
-			notifications += 1;
+	test("passes today-start only when the user explicitly checks it", async () => {
+		const service = new FakePlanningService(null);
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
+		controller.updateCreateInput({
+			goal: "建立长期写作与发布节奏",
+			startToday: true,
 		});
-		await generateReview(controller, "short-term");
-		controller.openSchedule();
-		controller.openConfirm();
-		await controller.apply();
-		const beforeClear = notifications;
-
-		expect(controller.clearActiveGoalContext()).toBe(true);
-		expect(controller.getActiveGoalContext()).toBeNull();
-		expect(notifications).toBe(beforeClear + 1);
-		expect(controller.clearActiveGoalContext()).toBe(false);
-		expect(notifications).toBe(beforeClear + 1);
+		await controller.createPlanDraft();
+		expect(service.createRequests[0]?.input.startToday).toBe(true);
 	});
 
-	test("preserves an explicit partial-apply failure and allows retry", async () => {
-		const { controller, gateway } = createController();
-		await generateReview(controller, "short-term");
-		controller.openSchedule();
-		controller.openConfirm();
-		gateway.result = {
-			ok: false,
-			kind: "partial",
-			applyId: "partial",
-			committedCount: 1,
-			failedProposalIds: ["plan-1-proposal-2"],
-			message: "1 项已写入，1 项冲突。",
-		};
-		await controller.apply();
-		expect(controller.getSnapshot().status).toBe("partial-failure");
-		const partial = controller.getSnapshot();
-		if (partial.status !== "partial-failure") {
-			throw new Error("Expected partial failure");
+	test("reuses the stable creation operation id after a lost local acknowledgement", async () => {
+		const service = new FakePlanningService(null);
+		service.createErrorOnce = new PlanningServiceError("offline", "offline");
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
+		controller.updateCreateInput({ goal: "完成一套个人作品集" });
+		await controller.createPlanDraft();
+		expect(controller.getSnapshot().status).toBe("offline");
+
+		await controller.retry();
+		expect(
+			service.createRequests.map((request) => request.operationId),
+		).toEqual(["operation-1", "operation-1"]);
+		expect(controller.getSnapshot().status).toBe("draft");
+	});
+
+	test("sends repeated messages through the port and confirms only the latest revision", async () => {
+		const service = new FakePlanningService();
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
+
+		await controller.sendMessage(" 我每周可投入三小时 ");
+		expect(service.messageRequests[0]).toMatchObject({
+			planId: "plan-1",
+			content: "我每周可投入三小时",
+			expectedVersion: 7,
+			operationId: "operation-1",
+		});
+		expect(currentPlan(controller).messages.at(-1)?.content).toBe(
+			"我每周可投入三小时",
+		);
+
+		await controller.confirmLatestRevision();
+		expect(service.confirmationRequests[0]).toMatchObject({
+			planId: "plan-1",
+			revisionId: "revision-7",
+			expectedVersion: 8,
+			operationId: "operation-2",
+		});
+		expect(controller.getSnapshot().status).toBe("active");
+		expect(currentPlan(controller).effectiveDate).toBe("2026-08-14");
+	});
+
+	test("applies a proposal without stopping an active or paused execution baseline", async () => {
+		for (const status of ["active", "paused"] as const) {
+			const plan = basePlan(status);
+			if (!plan.revision) throw new Error("Expected revision fixture");
+			const liveTaskIds = plan.tasks.map((task) => task.id);
+			const service = new FakePlanningService({
+				...plan,
+				revision: { ...plan.revision, status: "proposed" },
+			});
+			const controller = new PlanningController(service, ids());
+			await controller.initialize();
+
+			await controller.confirmLatestRevision();
+
+			expect(service.confirmationRequests).toHaveLength(1);
+			expect(currentPlan(controller).status).toBe(status);
+			expect(currentPlan(controller).tasks.map((task) => task.id)).toEqual(
+				liveTaskIds,
+			);
+			expect(currentPlan(controller).revision?.status).toBe("confirmed");
 		}
-		expect(partial.draft.proposals.map((item) => item.id)).toEqual([
-			"plan-1-proposal-2",
-		]);
-		gateway.result = null;
-		await controller.retryApply();
-		expect(controller.getSnapshot().status).toBe("success");
-		expect(gateway.applyCalls).toBe(2);
-		expect(gateway.lastApplied.map((item) => item.id)).toEqual([
-			"plan-1-proposal-2",
-		]);
-		const success = controller.getSnapshot();
-		if (success.status === "success") {
-			expect(success.committedCount).toBe(2);
-		}
+	});
+
+	test("keeps a persisted pending message when the model is unavailable", async () => {
+		const service = new FakePlanningService(basePlan("draft"));
+		service.sendErrorAfterPersist = new PlanningServiceError(
+			"model-unavailable",
+			"model down",
+		);
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
+		await controller.sendMessage("请按每周三个晚上重新分析");
+
+		expect(controller.getSnapshot().status).toBe("model-unavailable");
+		expect(currentPlan(controller).messages.at(-1)).toMatchObject({
+			content: "请按每周三个晚上重新分析",
+			status: "pending-analysis",
+		});
+
+		await controller.retry();
+		expect(service.statusRequests.at(-1)).toMatchObject({
+			action: "retry-analysis",
+			request: {
+				planId: "plan-1",
+				operationId: "operation-2",
+				expectedVersion: 8,
+			},
+		});
+		expect(controller.getSnapshot().status).toBe("awaiting-confirmation");
+		expect(currentPlan(controller).messages.at(-1)?.status).toBe("complete");
 	});
 });
 
-describe("PlanningController local planning authority", () => {
-	test("persists generation, edits, and deletion, then restores the completed draft", async () => {
-		const authority = new FakePlanningAuthorityGateway();
-		const controller = authorityController(authority);
-		fillInputWithGoal(controller, "第一份本地草案");
-		await controller.generate();
-		expect(controller.getSnapshot().status).toBe("review");
-		expect(authority.saveCalls).toHaveLength(1);
+describe("PlanningController execution and recovery", () => {
+	test("carries stable operation and current plan versions through every lifecycle write", async () => {
+		const service = new FakePlanningService(basePlan("active"));
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
 
-		controller.openSchedule();
-		controller.updateProposal("proposal-a", {
-			title: "已编辑的安排",
-			start: "2026-07-30T03:00:00Z",
-			end: "2026-07-30T04:00:00Z",
-		});
-		await eventually(() => authority.saveCalls.length === 2);
-		expect(authority.snapshot?.draft.proposals[0]?.title).toBe("已编辑的安排");
-		controller.deleteProposal("proposal-b");
-		await eventually(() => authority.saveCalls.length === 3);
-		expect(authority.snapshot?.draft.proposals.map((item) => item.id)).toEqual([
-			"proposal-a",
-		]);
+		await controller.pausePlan();
+		await controller.resumePlan();
+		await controller.completePlan();
+		await controller.archivePlan();
 
-		const restored = authorityController(authority);
-		await restored.restore();
-		expect(restored.getSnapshot()).toMatchObject({
-			status: "review",
-			input: { goal: "第一份本地草案" },
-			draft: { proposals: [{ id: "proposal-a", title: "已编辑的安排" }] },
-		});
-	});
-
-	test("serializes a cancelled save behind a newer flow without reviving stale UI", async () => {
-		const authority = new FakePlanningAuthorityGateway();
-		const gate = authority.blockNextSave();
-		const controller = authorityController(authority);
-		fillInputWithGoal(controller, "即将取消的旧计划");
-		const oldGeneration = controller.generate();
-		await gate.started;
-
-		controller.cancel();
-		fillInputWithGoal(controller, "必须保留的新计划");
-		const newGeneration = controller.generate();
-		gate.release();
-		await Promise.all([oldGeneration, newGeneration]);
-
-		expect(controller.getSnapshot()).toMatchObject({
-			status: "review",
-			input: { goal: "必须保留的新计划" },
-		});
-		expect(authority.snapshot?.input.goal).toBe("必须保留的新计划");
-		expect(authority.saveCalls.map((call) => call.input.goal)).toEqual([
-			"即将取消的旧计划",
-			"必须保留的新计划",
-		]);
-	});
-
-	test("reuses the exact commit id after an ACK loss and never duplicates calendar writes", async () => {
-		const authority = new FakePlanningAuthorityGateway();
-		authority.throwAfterCommitOnce = true;
-		const controller = authorityController(authority);
-		fillInputWithGoal(controller, "提交 ACK 恢复计划");
-		await controller.generate();
-		controller.openSchedule();
-		controller.openConfirm();
-
-		const first = await controller.apply();
-		expect(first).toEqual(expect.objectContaining({ ok: false, calendarState: "unknown" }));
-		expect(controller.getSnapshot().status).toBe("partial-failure");
-		const retried = await controller.retryApply();
-		expect(retried?.ok).toBe(true);
-		expect(controller.getSnapshot().status).toBe("success");
-		expect(authority.commitIds).toEqual(["id-1", "id-1"]);
-		expect(authority.calendarWrites).toBe(1);
-	});
-
-	test("shows a recoverable warning when calendar commit succeeds but the local goal effect is pending", async () => {
-		const authority = new FakePlanningAuthorityGateway();
-		authority.effectsApplied = false;
-		const controller = authorityController(authority);
-		fillInputWithGoal(controller, "等待本地目标同步");
-		await controller.generate();
-		controller.openSchedule();
-		controller.openConfirm();
-		const result = await controller.apply();
-		expect(result?.ok).toBe(true);
-		expect(controller.getSnapshot()).toMatchObject({
-			status: "success",
-			effectWarning: "目标事件暂未同步",
-		});
-		expect(authority.calendarWrites).toBe(1);
-	});
-});
-
-class FakePlanningAuthorityGateway implements PlanningAuthorityGateway {
-	snapshot: PlanningAuthoritySnapshot | null = null;
-	saveCalls: Array<{ input: PlanInput; draft: GeneratedPlanDraft }> = [];
-	commitIds: string[] = [];
-	calendarWrites = 0;
-	throwAfterCommitOnce = false;
-	effectsApplied = true;
-	private saveGate: {
-		started: () => void;
-		wait: Promise<void>;
-	} | null = null;
-
-	blockNextSave(): { started: Promise<void>; release: () => void } {
-		let release!: () => void;
-		let markStarted!: () => void;
-		const wait = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		const started = new Promise<void>((resolve) => {
-			markStarted = resolve;
-		});
-		this.saveGate = { started: markStarted, wait };
-		return { started, release };
-	}
-
-	async load(): Promise<PlanningAuthoritySnapshot | null> {
-		return structuredClone(this.snapshot);
-	}
-
-	async saveDraft(
-		input: PlanInput,
-		draft: GeneratedPlanDraft,
-		expectedRevision: number | null,
-	): Promise<PlanningAuthoritySnapshot> {
-		this.saveCalls.push({ input: structuredClone(input), draft: structuredClone(draft) });
-		const gate = this.saveGate;
-		if (gate) {
-			this.saveGate = null;
-			gate.started();
-			await gate.wait;
-		}
-		if (!input.type) throw new Error("missing plan type");
-		if ((this.snapshot?.revision ?? null) !== expectedRevision) {
-			throw new Error("计划草案版本已变化");
-		}
-		this.snapshot = {
-			schemaVersion: "planning-authority.v1",
-			revision: (expectedRevision ?? 0) + 1,
-			status: "draft",
-			input: { ...structuredClone(input), type: input.type },
-			draft: structuredClone(draft),
-			confirmedPlan: structuredClone(this.snapshot?.confirmedPlan ?? null),
-			activeGoal: structuredClone(this.snapshot?.activeGoal ?? null),
-			commit: structuredClone(this.snapshot?.commit ?? null),
-			updatedAtMs: 100,
-		};
-		return structuredClone(this.snapshot);
-	}
-
-	async commitDraft(
-		commitId: string,
-		expectedRevision: number,
-		expectedCalendarRevision: number,
-	): Promise<PlanningCommitResult> {
-		this.commitIds.push(commitId);
-		if (!this.snapshot) throw new Error("missing draft");
-		if (this.snapshot.status === "committed") {
-			if (this.snapshot.commit?.commitId !== commitId) throw new Error("commit conflict");
-			return this.commitResult(true);
-		}
-		if (this.snapshot.revision !== expectedRevision) throw new Error("revision conflict");
-		this.calendarWrites += 1;
-		const draft = structuredClone(this.snapshot);
-		const activeGoal = {
-			schemaVersion: "active-goal.v1" as const,
-			goalId: draft.draft.plan.id,
-			planId: draft.draft.plan.id,
-			version: (draft.activeGoal?.version ?? 0) + 1,
-			text: draft.input.goal,
-			activatedAtMs: 100,
-		};
-		this.snapshot = {
-			...draft,
-			revision: draft.revision + 1,
-			status: "committed",
-			confirmedPlan: structuredClone(draft.draft.plan),
-			activeGoal,
-			commit: {
-				commitId,
-				draftRevision: draft.revision,
-				draftDigest: "a".repeat(64),
-				calendarRevision: expectedCalendarRevision + 1,
-				committedAtMs: 100,
-				committedCount: draft.draft.proposals.length,
-				warnings: [],
-				effect: {
-					status: this.effectsApplied ? "applied" : "pending",
-					attempts: 1,
-					lastAttemptAtMs: 100,
-					lastError: this.effectsApplied ? null : "目标事件暂未同步",
+		expect(service.statusRequests).toEqual([
+			{
+				action: "pause",
+				request: {
+					planId: "plan-1",
+					operationId: "operation-1",
+					expectedVersion: 7,
 				},
 			},
-			updatedAtMs: 100,
-		};
-		if (this.throwAfterCommitOnce) {
-			this.throwAfterCommitOnce = false;
-			throw new Error("提交响应丢失");
-		}
-		return this.commitResult(false);
-	}
-
-	private commitResult(idempotent: boolean): PlanningCommitResult {
-		if (!this.snapshot?.commit) throw new Error("missing commit");
-		return {
-			snapshot: structuredClone(this.snapshot),
-			calendarCommitted: true,
-			idempotent,
-			effectsApplied: this.snapshot.commit.effect.status === "applied",
-		};
-	}
-}
-
-function authorityController(authority: PlanningAuthorityGateway): PlanningController {
-	return new PlanningController(
-		new ImmediatePlanningGenerationService(),
-		new FakePlanningCalendarGateway(),
-		() => "2026-07-29",
-		() => "Asia/Shanghai",
-		ids(),
-		() => 100,
-		authority,
-	);
-}
-
-class ImmediatePlanningGenerationService implements PlanningGenerationService {
-	async generate(
-		input: PlanInput,
-		_availability: readonly PlanningBusyWindow[],
-		context: PlanningGenerationContext,
-	): Promise<import("../src/views/client/features/planning/planning-service").PlanningGenerationResult> {
-		context.onStatus("ready");
-		return { kind: "draft", draft: authorityDraft(input, context.revision) };
-	}
-
-	async continueAfterClarification(): Promise<never> {
-		throw new Error("not used");
-	}
-}
-
-function fillInputWithGoal(controller: PlanningController, goal: string): void {
-	controller.start();
-	controller.updateInput({ goal });
-	controller.next();
-	controller.updateInput({ type: "short-term" });
-	controller.next();
-	controller.updateInput({
-		deadline: "2026-08-05",
-		weeklyCapacityHours: 6,
-		preferredDayPart: "evening",
+			{
+				action: "resume",
+				request: {
+					planId: "plan-1",
+					operationId: "operation-2",
+					expectedVersion: 8,
+				},
+			},
+			{
+				action: "complete",
+				request: {
+					planId: "plan-1",
+					operationId: "operation-3",
+					expectedVersion: 9,
+				},
+			},
+			{
+				action: "archive",
+				request: {
+					planId: "plan-1",
+					operationId: "operation-4",
+					expectedVersion: 10,
+				},
+			},
+		]);
+		expect(controller.getSnapshot().status).toBe("archived");
 	});
-}
 
-function authorityDraft(input: PlanInput, revision: number): GeneratedPlanDraft {
-	if (!input.type) throw new Error("missing plan type");
-	const planId = `authority-plan-${revision}`;
-	const phaseId = `${planId}-phase`;
-	const taskA = `${planId}-task-a`;
-	const taskB = `${planId}-task-b`;
-	return {
-		plan: {
-			id: planId,
-			type: input.type,
-			title: input.goal,
-			goal: input.goal,
-			deadline: input.deadline,
-			priority: input.priority,
-			weeklyCapacityHours: input.weeklyCapacityHours,
-			calendarRevision: 0,
-			totalEstimatedMinutes: 120,
-			phases: [{ id: phaseId, title: "阶段", objective: input.goal, order: 1 }],
-			milestones: [],
-			tasks: [
-				{ id: taskA, phaseId, milestoneId: null, title: "任务 A", estimatedMinutes: 60 },
-				{ id: taskB, phaseId, milestoneId: null, title: "任务 B", estimatedMinutes: 60 },
-			],
-			scheduleWindow: { startDate: "2026-07-29", endDateExclusive: "2026-08-06" },
-			generationRun: {
-				id: `authority-run-${revision}`,
-				startedAt: "2026-07-29T00:00:00Z",
-				completedAt: "2026-07-29T00:00:01Z",
-				statuses: ["ready"],
-				revision,
-			},
-		},
-		proposals: [
-			{
-				id: "proposal-a",
-				sourcePlanId: planId,
-				taskId: taskA,
-				title: "任务 A",
-				state: "proposed",
-				start: "2026-07-30T01:00:00Z",
-				end: "2026-07-30T02:00:00Z",
-				timeZone: "Asia/Shanghai",
-				version: 0,
-			},
-			{
-				id: "proposal-b",
-				sourcePlanId: planId,
-				taskId: taskB,
-				title: "任务 B",
-				state: "proposed",
-				start: "2026-07-30T03:00:00Z",
-				end: "2026-07-30T04:00:00Z",
-				timeZone: "Asia/Shanghai",
-				version: 0,
-			},
-		],
-		busyWindows: [],
-		conflicts: [],
-		suggestions: [],
-	};
-}
+	test("only explicit user task actions change completed/skipped state", async () => {
+		const service = new FakePlanningService(basePlan("active"));
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
 
-async function eventually(predicate: () => boolean): Promise<void> {
-	for (let attempt = 0; attempt < 20; attempt += 1) {
-		if (predicate()) return;
-		await Promise.resolve();
-	}
-	throw new Error("condition was not reached");
-}
+		await controller.setTaskStatus("task-1", "completed");
+		expect(service.taskRequests[0]).toMatchObject({
+			taskId: "task-1",
+			status: "completed",
+			expectedVersion: 7,
+		});
+		expect(currentPlan(controller).tasks[0]?.status).toBe("completed");
 
-function sampleDraft(): GeneratedPlanDraft {
-	const plan: Plan = {
-		id: "sample-plan",
-		type: "short-term",
-		title: "示例",
-		goal: "示例目标",
-		deadline: "2026-08-05",
-		priority: "medium",
-		weeklyCapacityHours: 5,
-		totalEstimatedMinutes: 60,
-		phases: [
-			{ id: "phase", title: "推进", objective: "完成", order: 1 },
-		],
-		milestones: [
-			{
-				id: "milestone",
-				phaseId: "phase",
-				title: "完成",
-				targetDate: "2026-08-05",
-			},
-		],
-		tasks: [
-			{
-				id: "task",
-				phaseId: "phase",
-				milestoneId: "milestone",
-				title: "核心任务",
-				estimatedMinutes: 60,
-			},
-		],
-		scheduleWindow: {
-			startDate: "2026-07-29",
-			endDateExclusive: "2026-08-05",
-		},
-		generationRun: {
-			id: "run",
-			startedAt: "2026-07-29T00:00:00Z",
-			completedAt: "2026-07-29T00:00:01Z",
-			statuses: ["ready"],
-			revision: 1,
-		},
-	};
-	return {
-		plan,
-		proposals: [
-			{
-				id: "proposal",
-				sourcePlanId: plan.id,
-				taskId: "task",
-				title: "核心任务",
-				state: "proposed",
-				start: "2026-07-30T01:00:00Z",
-				end: "2026-07-30T02:00:00Z",
-				timeZone: "Asia/Shanghai",
-				version: 0,
-			},
-		],
-		busyWindows: [],
-		conflicts: [],
-		suggestions: [],
-	};
-}
+		await controller.setTaskStatus("task-1", "pending");
+		expect(currentPlan(controller).tasks[0]?.status).toBe("pending");
+	});
+
+	test("confirms ambiguous observation attribution without completing a task", async () => {
+		const service = new FakePlanningService(basePlan("active"));
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
+		await controller.confirmObservationAttribution("observation-1", "task-1");
+
+		expect(service.observationRequests[0]).toMatchObject({
+			observationId: "observation-1",
+			taskId: "task-1",
+			expectedVersion: 7,
+		});
+		expect(currentPlan(controller).pendingObservations).toHaveLength(0);
+		expect(currentPlan(controller).tasks[0]?.status).toBe("pending");
+	});
+
+	test("undo uses both plan and adjustment versions", async () => {
+		const service = new FakePlanningService(basePlan("active"));
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
+		await controller.undoAdjustment("adjustment-1");
+		expect(service.undoRequests[0]).toMatchObject({
+			planId: "plan-1",
+			adjustmentId: "adjustment-1",
+			adjustmentVersion: 2,
+			expectedVersion: 7,
+		});
+		expect(currentPlan(controller).adjustments[0]?.canUndo).toBe(false);
+	});
+
+	test("surfaces stale writes and reloads the authoritative version", async () => {
+		const service = new FakePlanningService(basePlan("active"));
+		service.pauseError = new PlanningServiceError("stale-version", "stale");
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
+		await controller.pausePlan();
+		expect(controller.getSnapshot().status).toBe("stale");
+
+		service.pauseError = null;
+		service.plan = { ...basePlan("active"), version: 12 };
+		await controller.retry();
+		expect(controller.getSnapshot().status).toBe("active");
+		expect(currentPlan(controller).version).toBe(12);
+	});
+
+	test("keeps cached content visible when the local service goes offline", async () => {
+		const service = new FakePlanningService(basePlan("active"));
+		const controller = new PlanningController(service, ids());
+		await controller.initialize();
+		service.listError = new PlanningServiceError("offline", "offline");
+		await controller.load();
+		const state = controller.getSnapshot();
+		expect(state.status).toBe("offline");
+		if (state.status !== "offline") throw new Error("Expected offline state");
+		expect(state.cached?.plan.id).toBe("plan-1");
+	});
+});

@@ -1,9 +1,9 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useRef, useState } from "react";
 import {
-	WhaleCalendar,
 	type CalendarEvent,
 	type CalendarMutationResult,
+	WhaleCalendar,
 	type WhaleCalendarHandle,
 } from "../features/calendar/public";
 import type { PlanningSchedulePreviewProps } from "../features/planning/public";
@@ -25,6 +25,9 @@ function proposalEvent(
 		recurrence: null,
 		occurrenceId: null,
 		sourcePlanId: item.sourcePlanId,
+		sourceTaskId: item.taskId,
+		scheduleOrigin: "model",
+		userLocked: false,
 		editable: true,
 		version: item.version,
 	};
@@ -36,12 +39,7 @@ function busyEvent(
 	return {
 		id: `busy:${item.id}`,
 		title: item.title,
-		kind:
-			item.kind === "manual-block"
-				? "manual-block"
-				: item.kind === "external"
-					? "external"
-					: "plan",
+		kind: item.kind === "manual-block" ? "manual-block" : "external",
 		state: "committed",
 		schedule: {
 			allDay: false,
@@ -51,7 +49,10 @@ function busyEvent(
 		},
 		recurrence: null,
 		occurrenceId: null,
-		sourcePlanId: item.kind === "committed-plan" ? item.id : null,
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+		userLocked: false,
 		editable: false,
 		version: 1,
 	};
@@ -84,7 +85,7 @@ export function PlanningSchedulePreview({
 	];
 
 	async function handleChange(
-		before: CalendarEvent,
+		_before: CalendarEvent,
 		after: CalendarEvent,
 	): Promise<CalendarMutationResult> {
 		if (after.schedule.allDay) {
@@ -109,13 +110,13 @@ export function PlanningSchedulePreview({
 	}
 
 	return (
-		<div className="planning-calendar-preview" aria-label="计划草案周视图">
+		<section className="planning-calendar-preview" aria-label="计划草案周视图">
 			<div className="planning-calendar-preview__toolbar">
 				<div>
 					<strong>{rangeLabel}</strong>
 					<span>虚线为待确认安排</span>
 				</div>
-				<div role="group" aria-label="草案周导航">
+				<nav aria-label="草案周导航">
 					<button
 						type="button"
 						className="ui-icon-button"
@@ -132,7 +133,7 @@ export function PlanningSchedulePreview({
 					>
 						<ChevronRight size={15} />
 					</button>
-				</div>
+				</nav>
 			</div>
 			<div className="planning-calendar-preview__grid">
 				<WhaleCalendar
@@ -151,6 +152,6 @@ export function PlanningSchedulePreview({
 					onResize={handleChange}
 				/>
 			</div>
-		</div>
+		</section>
 	);
 }

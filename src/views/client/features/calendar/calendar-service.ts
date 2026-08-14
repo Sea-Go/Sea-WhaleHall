@@ -1,12 +1,17 @@
 import type {
-	CalendarEvent,
 	CalendarBatchMutationResult,
+	CalendarEvent,
 	CalendarMutation,
 	CalendarMutationResult,
 } from "./domain";
 import type { CalendarScenarioId } from "./fixtures";
 
-export type CalendarLoadState = "idle" | "loading" | "ready" | "error" | "offline";
+export type CalendarLoadState =
+	| "idle"
+	| "loading"
+	| "ready"
+	| "error"
+	| "offline";
 
 export interface CalendarLoadResult {
 	events: readonly CalendarEvent[];
@@ -16,6 +21,8 @@ export interface CalendarLoadResult {
 }
 
 export interface CalendarService {
+	/** Optional authoritative invalidation stream (for local/native persistence). */
+	subscribe?(listener: () => void): () => void;
 	load(scenario?: CalendarScenarioId): Promise<CalendarLoadResult>;
 	mutate(mutation: CalendarMutation): Promise<CalendarMutationResult>;
 	mutateBatch(

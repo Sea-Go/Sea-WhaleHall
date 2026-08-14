@@ -15,13 +15,13 @@ import {
 	X,
 } from "lucide-react";
 import {
+	type FormEvent,
+	type KeyboardEvent,
 	useEffect,
 	useMemo,
 	useRef,
 	useState,
 	useSyncExternalStore,
-	type FormEvent,
-	type KeyboardEvent,
 } from "react";
 import { Button } from "../../shared/ui/Button";
 import { IconButton } from "../../shared/ui/IconButton";
@@ -33,7 +33,6 @@ import {
 	calendarRangeLabel,
 	durationMinutes,
 	instantToLocalParts,
-	localDateTimeToInstant,
 	miniCalendarDays,
 	monthLabel,
 	moveMonth,
@@ -41,10 +40,11 @@ import {
 	timeZoneOffsetLabel,
 } from "./date-time";
 import {
-	cloneCalendarEvent,
 	type CalendarEvent,
 	type CalendarEventKind,
 	type CalendarEventState,
+	canUserUnlockPlanEvent,
+	cloneCalendarEvent,
 	type RecurrenceScope,
 	withOccurrenceException,
 } from "./domain";
@@ -54,11 +54,11 @@ import {
 	type CalendarScenarioId,
 } from "./fixtures";
 import {
-	WhaleCalendar,
 	type CalendarOccurrenceSelection,
 	type CalendarRange,
 	type CalendarSelectionDraft,
 	type CalendarView,
+	WhaleCalendar,
 	type WhaleCalendarHandle,
 } from "./fullcalendar-adapter";
 
@@ -103,10 +103,7 @@ interface EditorForm {
 	disambiguation: "earlier" | "later";
 }
 
-function initialEditorForm(
-	editor: EditorState,
-	timeZone: string,
-): EditorForm {
+function initialEditorForm(editor: EditorState, timeZone: string): EditorForm {
 	const event = editor.event;
 	const schedule = event?.schedule ?? editor.selection?.schedule;
 	let startDate = CALENDAR_REFERENCE_DATE;
@@ -123,10 +120,7 @@ function initialEditorForm(
 		const occurrenceStart = editor.occurrenceStart ?? schedule.start;
 		const start = instantToLocalParts(occurrenceStart, timeZone);
 		const duration = durationMinutes(schedule.start, schedule.end);
-		const occurrenceEnd = addMinutes(
-			occurrenceStart,
-			Math.max(15, duration),
-		);
+		const occurrenceEnd = addMinutes(occurrenceStart, Math.max(15, duration));
 		const end = instantToLocalParts(occurrenceEnd, timeZone);
 		startDate = start.date;
 		startTime = start.time;
@@ -138,9 +132,9 @@ function initialEditorForm(
 		title: event?.title ?? "",
 		kind:
 			event?.kind === "external"
-				? "plan"
+				? "manual-block"
 				: (event?.kind ?? editor.presetKind) === "external"
-					? "plan"
+					? "manual-block"
 					: ((event?.kind ?? editor.presetKind) as EditorForm["kind"]),
 		state: event?.state ?? "committed",
 		allDay,
@@ -175,6 +169,7 @@ interface EventEditorProps {
 		scope: RecurrenceScope,
 		setError: (message: string) => void,
 	) => Promise<void>;
+	onUnlock?: (setError: (message: string) => void) => Promise<void>;
 }
 
 export function EventEditor({
@@ -184,6 +179,7 @@ export function EventEditor({
 	onClose,
 	onSave,
 	onDelete,
+	onUnlock,
 }: EventEditorProps) {
 	const [form, setForm] = useState(() => initialEditorForm(editor, timeZone));
 	const [error, setError] = useState<string | null>(null);
@@ -305,7 +301,7 @@ export function EventEditor({
 							<span>类型</span>
 							<select
 								value={form.kind}
-								disabled={readOnly}
+								disabled={readOnly || editor.event !== null}
 								onChange={(event) =>
 									setForm((current) => ({
 										...current,
@@ -313,7 +309,9 @@ export function EventEditor({
 									}))
 								}
 							>
-								<option value="plan">计划日程</option>
+								{editor.event?.kind === "plan" ? (
+									<option value="plan">计划日程</option>
+								) : null}
 								<option value="manual-block">手动占用</option>
 								<option value="break">休息与恢复</option>
 							</select>
@@ -421,7 +419,11 @@ export function EventEditor({
 					</div>
 
 					{!form.allDay && !readOnly ? (
-						<div className="calendar-nudge" aria-label="键盘替代操作">
+						<div
+							className="calendar-nudge"
+							role="toolbar"
+							aria-label="键盘替代操作"
+						>
 							<span>15 分钟微调</span>
 							<Button
 								type="button"
@@ -529,20 +531,35 @@ export function EventEditor({
 					) : null}
 
 					<footer className="calendar-dialog__footer">
-						{editor.event?.editable ? (
-							<Button
-								type="button"
-								variant="danger"
-								size="small"
-								icon={<Trash2 size={15} aria-hidden="true" />}
-								disabled={pending}
-								onClick={() => void onDelete(form.scope, setError)}
-							>
-								删除
-							</Button>
-						) : (
-							<span />
-						)}
+						<div className="calendar-dialog__footer-actions">
+							{editor.event?.editable ? (
+								<Button
+									type="button"
+									variant="danger"
+									size="small"
+									icon={<Trash2 size={15} aria-hidden="true" />}
+									disabled={pending}
+									onClick={() => void onDelete(form.scope, setError)}
+								>
+									删除
+								</Button>
+							) : (
+								<span />
+							)}
+							{editor.event &&
+							canUserUnlockPlanEvent(editor.event) &&
+							onUnlock ? (
+								<Button
+									type="button"
+									variant="secondary"
+									size="small"
+									disabled={pending}
+									onClick={() => void onUnlock(setError)}
+								>
+									允许计划重新安排
+								</Button>
+							) : null}
+						</div>
 						<div>
 							<Button
 								type="button"
@@ -616,6 +633,13 @@ export function CalendarPage({
 	useEffect(() => {
 		void controller.load(initialScenario ?? undefined);
 	}, [controller, initialScenario]);
+
+	useEffect(() => {
+		if (!service.subscribe) return;
+		return service.subscribe(() => {
+			void controller.load();
+		});
+	}, [controller, service]);
 
 	useEffect(() => {
 		if (range.currentDate) setMiniAnchor(range.currentDate.slice(0, 10));
@@ -718,7 +742,9 @@ export function CalendarPage({
 			);
 			if (typeof start !== "string" || typeof end !== "string") {
 				setError(
-					typeof start !== "string" ? start.error : (end as { error: string }).error,
+					typeof start !== "string"
+						? start.error
+						: (end as { error: string }).error,
 				);
 				return;
 			}
@@ -731,12 +757,13 @@ export function CalendarPage({
 		}
 
 		const base = editor.event;
+		const kind = base && base.kind !== "external" ? base.kind : form.kind;
 		const eventId = base?.id ?? createLocalId("event");
 		const next: CalendarEvent = {
 			id: eventId,
 			title,
-			kind: form.kind,
-			state: form.kind === "manual-block" ? "committed" : form.state,
+			kind,
+			state: kind === "manual-block" ? "committed" : form.state,
 			schedule,
 			recurrence: form.recurring
 				? (base?.recurrence ?? {
@@ -747,7 +774,15 @@ export function CalendarPage({
 					})
 				: null,
 			occurrenceId: base?.occurrenceId ?? null,
-			sourcePlanId: form.kind === "plan" ? (base?.sourcePlanId ?? null) : null,
+			sourcePlanId: kind === "plan" ? (base?.sourcePlanId ?? null) : null,
+			sourceTaskId: kind === "plan" ? (base?.sourceTaskId ?? null) : null,
+			scheduleOrigin: kind === "plan" ? (base?.scheduleOrigin ?? "user") : null,
+			userLocked:
+				kind === "plan"
+					? base?.scheduleOrigin === "model"
+						? true
+						: (base?.userLocked ?? false)
+					: false,
 			editable: true,
 			version: base?.version ?? 0,
 		};
@@ -755,23 +790,21 @@ export function CalendarPage({
 		setEditorPending(true);
 		try {
 			const result =
-				base && editor.occurrenceStart && base.recurrence && form.scope === "occurrence"
+				base &&
+				editor.occurrenceStart &&
+				base.recurrence &&
+				form.scope === "occurrence"
 					? await controller.updateOccurrence(
 							base.id,
 							editor.occurrenceStart,
 							next,
 						)
 					: base
-						? await controller.update(
-								next,
-								base.recurrence ? form.scope : null,
-							)
+						? await controller.update(next, base.recurrence ? form.scope : null)
 						: await controller.create(next);
 			if (!result.ok) {
 				const conflict =
-					"conflict" in result
-						? result.conflict
-						: result.conflicts[0];
+					"conflict" in result ? result.conflict : result.conflicts[0];
 				setError(conflict?.message ?? "日程未保存，请重试。");
 				return;
 			}
@@ -799,10 +832,7 @@ export function CalendarPage({
 							withOccurrenceException(base, editor.occurrenceStart),
 							"occurrence",
 						)
-					: await controller.delete(
-							base.id,
-							base.recurrence ? scope : null,
-						);
+					: await controller.delete(base.id, base.recurrence ? scope : null);
 			if (!result.ok) {
 				setError(result.conflict.message);
 				return;
@@ -813,6 +843,23 @@ export function CalendarPage({
 					? "已仅删除这一次。"
 					: "日程已删除，可撤销。",
 			);
+		} finally {
+			setEditorPending(false);
+		}
+	}
+
+	async function unlockEditor(setError: (message: string) => void) {
+		const event = editor?.event;
+		if (!event) return;
+		setEditorPending(true);
+		try {
+			const result = await controller.setPlanEventLocked(event.id, false);
+			if (!result.ok) {
+				setError(result.conflict.message || "暂时无法解除锁定，请重试。");
+				return;
+			}
+			closeEditor();
+			onNotify("已允许计划重新安排该时段。");
 		} finally {
 			setEditorPending(false);
 		}
@@ -875,7 +922,7 @@ export function CalendarPage({
 					<p>时间安排</p>
 					<h1>日程</h1>
 				</div>
-				<div className="calendar-toolbar__navigation" aria-label="日期导航">
+				<nav className="calendar-toolbar__navigation" aria-label="日期导航">
 					<Button
 						variant="secondary"
 						size="small"
@@ -894,9 +941,13 @@ export function CalendarPage({
 						onClick={() => calendarRef.current?.next()}
 					/>
 					<strong aria-live="polite">{range.title}</strong>
-				</div>
+				</nav>
 				<div className="calendar-toolbar__actions">
-					<div className="segmented-control" role="group" aria-label="日历视图">
+					<div
+						className="segmented-control"
+						role="toolbar"
+						aria-label="日历视图"
+					>
 						{calendarViews.map((item) => (
 							<button
 								type="button"
@@ -913,7 +964,7 @@ export function CalendarPage({
 						variant="primary"
 						size="small"
 						icon={<Plus size={16} aria-hidden="true" />}
-						onClick={() => openEditor({ presetKind: "plan" })}
+						onClick={() => openEditor({ presetKind: "manual-block" })}
 					>
 						创建日程
 					</Button>
@@ -922,16 +973,17 @@ export function CalendarPage({
 
 			<div className="calendar-workspace">
 				<aside className="calendar-sidebar" aria-label="日历工具栏">
-					<section className="mini-calendar" aria-labelledby="mini-calendar-title">
+					<section
+						className="mini-calendar"
+						aria-labelledby="mini-calendar-title"
+					>
 						<div className="mini-calendar__heading">
 							<h2 id="mini-calendar-title">{monthLabel(miniAnchor)}</h2>
 							<div>
 								<IconButton
 									label="上个月"
 									icon={<ChevronLeft size={15} />}
-									onClick={() =>
-										setMiniAnchor((date) => moveMonth(date, -1))
-									}
+									onClick={() => setMiniAnchor((date) => moveMonth(date, -1))}
 								/>
 								<IconButton
 									label="下个月"
@@ -945,11 +997,10 @@ export function CalendarPage({
 								<span key={day}>{day}</span>
 							))}
 						</div>
-						<div className="mini-calendar__days" role="grid">
+						<div className="mini-calendar__days">
 							{miniDays.map((day) => (
 								<button
 									type="button"
-									role="gridcell"
 									key={day.date}
 									className={[
 										!day.inMonth ? "mini-calendar__adjacent" : "",
@@ -988,7 +1039,10 @@ export function CalendarPage({
 						/>
 					</div>
 
-					<section className="calendar-sources" aria-labelledby="calendar-sources-title">
+					<section
+						className="calendar-sources"
+						aria-labelledby="calendar-sources-title"
+					>
 						<div className="calendar-sources__heading">
 							<h2 id="calendar-sources-title">我的日历</h2>
 							<IconButton
@@ -1039,9 +1093,7 @@ export function CalendarPage({
 								value={calendar.scenario}
 								disabled={calendar.loadState === "loading"}
 								onChange={(event) =>
-									void controller.load(
-										event.target.value as CalendarScenarioId,
-									)
+									void controller.load(event.target.value as CalendarScenarioId)
 								}
 							>
 								{CALENDAR_SCENARIOS.map((scenario) => (
@@ -1055,7 +1107,9 @@ export function CalendarPage({
 
 					<div className="calendar-sidebar__note">
 						<CalendarDays size={15} aria-hidden="true" />
-						<p>拖选创建；拖动和缩放按 15 分钟吸附。所有操作也可在表单中完成。</p>
+						<p>
+							拖选创建；拖动和缩放按 15 分钟吸附。所有操作也可在表单中完成。
+						</p>
 					</div>
 				</aside>
 
@@ -1063,10 +1117,7 @@ export function CalendarPage({
 					className="calendar-board"
 					aria-label={`${calendarViewLabels[view]}视图日历`}
 				>
-					<div
-						className="calendar-board__timezone"
-						title={calendar.timeZone}
-					>
+					<div className="calendar-board__timezone" title={calendar.timeZone}>
 						{timeZoneOffsetLabel(calendar.timeZone, range.currentDate)}
 					</div>
 					<WhaleCalendar
@@ -1078,7 +1129,7 @@ export function CalendarPage({
 						pendingEventIds={calendar.pendingEventIds}
 						onRangeChange={handleRangeChange}
 						onSelect={(selection) =>
-							openEditor({ presetKind: "plan", selection })
+							openEditor({ presetKind: "manual-block", selection })
 						}
 						onEventClick={selectEvent}
 						onMove={(_before, after) => controller.update(after)}
@@ -1114,7 +1165,7 @@ export function CalendarPage({
 								<Button
 									variant="secondary"
 									size="small"
-									onClick={() => openEditor({ presetKind: "plan" })}
+									onClick={() => openEditor({ presetKind: "manual-block" })}
 								>
 									创建第一项日程
 								</Button>
@@ -1169,6 +1220,7 @@ export function CalendarPage({
 					onClose={closeEditor}
 					onSave={saveEditor}
 					onDelete={deleteEditor}
+					onUnlock={unlockEditor}
 				/>
 			) : null}
 		</div>

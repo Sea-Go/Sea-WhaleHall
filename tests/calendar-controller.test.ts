@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { CalendarController } from "../src/views/client/features/calendar/CalendarController";
 import type {
 	CalendarLoadResult,
 	CalendarService,
 } from "../src/views/client/features/calendar/calendar-service";
-import { CalendarController } from "../src/views/client/features/calendar/CalendarController";
 import { addMinutes } from "../src/views/client/features/calendar/date-time";
 import type {
 	CalendarBatchMutationResult,
@@ -13,8 +13,8 @@ import type {
 	CalendarMutationResult,
 } from "../src/views/client/features/calendar/domain";
 import {
-	calendarScenarioEvents,
 	type CalendarScenarioId,
+	calendarScenarioEvents,
 } from "../src/views/client/features/calendar/fixtures";
 import { MockCalendarService } from "../src/views/client/infrastructure/calendar/MockCalendarService";
 
@@ -47,7 +47,9 @@ class DeferredCalendarService implements CalendarService {
 		deferred: ReturnType<typeof controlledPromise<CalendarMutationResult>>;
 	}> = [];
 
-	async load(scenario: CalendarScenarioId = "normal"): Promise<CalendarLoadResult> {
+	async load(
+		scenario: CalendarScenarioId = "normal",
+	): Promise<CalendarLoadResult> {
 		return {
 			events: calendarScenarioEvents(scenario),
 			timeZone: "Asia/Shanghai",
@@ -105,7 +107,7 @@ describe("CalendarController CRUD and rollback", () => {
 		const created: CalendarEvent = {
 			id: "created",
 			title: "创建测试",
-			kind: "plan",
+			kind: "manual-block",
 			state: "committed",
 			schedule: {
 				allDay: false,
@@ -116,14 +118,18 @@ describe("CalendarController CRUD and rollback", () => {
 			recurrence: null,
 			occurrenceId: null,
 			sourcePlanId: null,
+			sourceTaskId: null,
+			scheduleOrigin: null,
+			userLocked: false,
 			editable: true,
 			version: 0,
 		};
 		expect((await controller.create(created)).ok).toBe(true);
 		const authoritative = controller.getSnapshot().events[0];
 		expect(authoritative?.version).toBe(1);
+		if (!authoritative) throw new Error("Missing created event");
 
-		const updated = { ...authoritative!, title: "更新测试" };
+		const updated = { ...authoritative, title: "更新测试" };
 		expect((await controller.update(updated)).ok).toBe(true);
 		expect(controller.getSnapshot().events[0]?.title).toBe("更新测试");
 		expect(controller.getSnapshot().events[0]?.version).toBe(2);
@@ -135,6 +141,63 @@ describe("CalendarController CRUD and rollback", () => {
 		expect((await controller.undoDelete())?.ok).toBe(true);
 		expect(controller.getSnapshot().events[0]?.title).toBe("更新测试");
 		expect(controller.getSnapshot().undo).toBeNull();
+	});
+
+	test("locks a model-created task after a user calendar edit", async () => {
+		const service = new MockCalendarService({ latencyMs: 0 });
+		const controller = new CalendarController(service, idSequence());
+		await controller.load("normal");
+		const before = controller
+			.getSnapshot()
+			.events.find((event) => event.scheduleOrigin === "model");
+		if (!before) throw new Error("Missing model-created event");
+
+		const result = await controller.update({
+			...before,
+			title: "用户固定的安排",
+		});
+		expect(result.ok).toBe(true);
+		expect(
+			controller.getSnapshot().events.find((event) => event.id === before.id)
+				?.userLocked,
+		).toBe(true);
+	});
+
+	test("explicitly unlocks only editable model plan events for future rescheduling", async () => {
+		const service = new MockCalendarService({ latencyMs: 0 });
+		const controller = new CalendarController(service, idSequence());
+		await controller.load("normal");
+		const before = controller
+			.getSnapshot()
+			.events.find((event) => event.scheduleOrigin === "model");
+		if (!before) throw new Error("Missing model-created event");
+
+		expect(
+			(await controller.update({ ...before, title: "用户固定的安排" })).ok,
+		).toBe(true);
+		const locked = controller
+			.getSnapshot()
+			.events.find((event) => event.id === before.id);
+		expect(locked?.userLocked).toBe(true);
+		const lockedVersion = locked?.version;
+
+		expect((await controller.setPlanEventLocked(before.id, false)).ok).toBe(
+			true,
+		);
+		const unlocked = controller
+			.getSnapshot()
+			.events.find((event) => event.id === before.id);
+		expect(unlocked?.userLocked).toBe(false);
+		expect(unlocked?.version).toBe((lockedVersion ?? 0) + 1);
+
+		const manual = controller
+			.getSnapshot()
+			.events.find((event) => event.scheduleOrigin === "user");
+		if (manual) {
+			expect((await controller.setPlanEventLocked(manual.id, false)).ok).toBe(
+				false,
+			);
+		}
 	});
 
 	test("rolls back a rejected drag and exposes a structured reason", async () => {
@@ -179,7 +242,10 @@ describe("CalendarController CRUD and rollback", () => {
 		service.failNextMutation(unavailableConflict("缩放同步失败"));
 		const resized = {
 			...before,
-			schedule: { ...before.schedule, end: addMinutes(before.schedule.end, 30) },
+			schedule: {
+				...before.schedule,
+				end: addMinutes(before.schedule.end, 30),
+			},
 		};
 		await controller.update(resized);
 		expect(controller.getSnapshot().events[0]?.schedule).toEqual(
@@ -240,6 +306,8 @@ describe("CalendarController CRUD and rollback", () => {
 			title: "冲突计划",
 			kind: "plan",
 			sourcePlanId: "plan-conflict",
+			sourceTaskId: "task-conflict",
+			scheduleOrigin: "model",
 			version: 0,
 		};
 		const result = await controller.create(candidate);
@@ -249,7 +317,9 @@ describe("CalendarController CRUD and rollback", () => {
 			expect(result.conflict.affectedEventIds).toContain(manual.id);
 		}
 		expect(
-			controller.getSnapshot().events.some((event) => event.id === candidate.id),
+			controller
+				.getSnapshot()
+				.events.some((event) => event.id === candidate.id),
 		).toBe(false);
 	});
 
@@ -263,6 +333,27 @@ describe("CalendarController CRUD and rollback", () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.conflict.reason).toBe("read-only-event");
 		expect(controller.getSnapshot().events[0]?.title).toBe(external.title);
+	});
+
+	test("rejects changes to an existing event kind or planning ownership", async () => {
+		const service = new MockCalendarService({ latencyMs: 0 });
+		const controller = new CalendarController(service, idSequence());
+		await controller.load("normal");
+		const before = controller.getSnapshot().events[0];
+		if (!before) throw new Error("Missing calendar event");
+
+		const result = await controller.update({
+			...before,
+			kind: "manual-block",
+			sourcePlanId: null,
+			sourceTaskId: null,
+			scheduleOrigin: null,
+			userLocked: false,
+		});
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.conflict.reason).toBe("read-only-event");
+		expect(controller.getSnapshot().events[0]).toEqual(before);
 	});
 });
 
@@ -306,7 +397,9 @@ describe("CalendarController recurrence, batch, and load states", () => {
 		const events = controller.getSnapshot().events;
 		const updatedSeries = events.find((event) => event.id === series.id);
 		const occurrence = events.find((event) => event.occurrenceId);
-		expect(updatedSeries?.recurrence?.exceptionDates).toContain(occurrenceStart);
+		expect(updatedSeries?.recurrence?.exceptionDates).toContain(
+			occurrenceStart,
+		);
 		expect(updatedSeries?.schedule).toEqual(series.schedule);
 		expect(occurrence?.title).toBe("仅本次改期");
 		expect(occurrence?.id).not.toBe(series.id);
@@ -337,7 +430,9 @@ describe("CalendarController recurrence, batch, and load states", () => {
 		const service = new DeferredLoadCalendarService();
 		const controller = new CalendarController(service, idSequence());
 		const firstLoad = controller.load("normal");
-		service.pendingLoads[0]!.deferred.resolve({
+		const initialRequest = service.pendingLoads[0];
+		if (!initialRequest) throw new Error("Missing initial calendar load");
+		initialRequest.deferred.resolve({
 			events: calendarScenarioEvents("normal"),
 			timeZone: "Asia/Shanghai",
 			scenario: "normal",
@@ -352,7 +447,9 @@ describe("CalendarController recurrence, batch, and load states", () => {
 		});
 
 		controller.clearAccountData();
-		service.pendingLoads[1]!.deferred.resolve({
+		const staleRequest = service.pendingLoads[1];
+		if (!staleRequest) throw new Error("Missing stale calendar load");
+		staleRequest.deferred.resolve({
 			events: calendarScenarioEvents("dense"),
 			timeZone: "Asia/Shanghai",
 			scenario: "dense",

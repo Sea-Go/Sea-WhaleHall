@@ -1,13 +1,252 @@
 import { Temporal } from "temporal-polyfill";
-import { MAX_ACTIVE_GOAL_TEXT_LENGTH } from "../../../../shared/goal-context";
 
-export type PlanType = "short-term" | "long-term";
+/** Stable product vocabulary shared by the planning page and its service port. */
+export type PlanType = "short-term" | "long-term" | "fuzzy";
+export type PlanStatus =
+	| "draft"
+	| "awaiting-confirmation"
+	| "active"
+	| "paused"
+	| "completed"
+	| "archived";
+export type PlanTaskStatus = "pending" | "completed" | "skipped";
+export type PlanTaskPurpose = "execution" | "validation" | "review";
+export type PlanEstimateConfidence = "high" | "medium" | "low";
+
+export interface PlanCreateInput {
+	goal: string;
+	startToday: boolean;
+}
+
+export interface PlanEstimate {
+	estimatedCompletionDate: string | null;
+	confidence: PlanEstimateConfidence;
+	assessedAt: string;
+	evidenceThrough: string | null;
+	basis: string;
+	modelVersion: string;
+}
+
+export interface PlanningTaskSchedule {
+	eventId: string;
+	date: string;
+	start: string;
+	end: string;
+	timeZone: string;
+	scheduleOrigin: "model" | "user";
+	userLocked: boolean;
+	version: number;
+}
+
+export interface PlanningUnplannedReason {
+	kind: "capacity" | "conflict" | "dependency" | "model-pending" | "other";
+	message: string;
+}
+
+export interface PlanningTaskView {
+	id: string;
+	title: string;
+	description: string | null;
+	purpose: PlanTaskPurpose;
+	status: PlanTaskStatus;
+	estimatedMinutes: number;
+	dependencyIds: readonly string[];
+	schedules: readonly PlanningTaskSchedule[];
+	unplanned: PlanningUnplannedReason | null;
+}
+
+export interface PlanScheduleWindow {
+	startDate: string;
+	endDateInclusive: string;
+	timeZone: string;
+}
+
+export interface PlanningSchedulingPreferencesView {
+	weeklyCapacityMinutes: number;
+	sessionMinutes: number;
+	availableWindows: readonly {
+		dayOfWeek: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+		startTime: string;
+		endTime: string;
+	}[];
+}
+
+export interface PlanRevisionView {
+	revisionId: string;
+	version: number;
+	status: "proposed" | "confirmed" | "superseded";
+	createdAt: string;
+	goal: string;
+	summary: string;
+	reasoningSummary: string;
+	planType: PlanType;
+	estimate: PlanEstimate;
+	schedulingPreferences: PlanningSchedulingPreferencesView;
+	scheduleWindow: PlanScheduleWindow;
+	assumptions: readonly string[];
+	questions: readonly string[];
+	tasks: readonly PlanningTaskView[];
+}
+
+export interface PlanningMessageView {
+	id: string;
+	role: "user" | "assistant" | "system";
+	content: string;
+	createdAt: string;
+	status: "complete" | "pending-analysis" | "failed";
+	revisionId: string | null;
+}
+
+export interface PlanningMonitoringView {
+	authorized: boolean;
+	enabled: boolean;
+	mode: "observed" | "manual-only";
+	coverage: "complete" | "partial" | "unavailable";
+	message: string;
+}
+
+export interface PlanningObservationView {
+	id: string;
+	occurredAt: string;
+	durationMinutes: number;
+	summary: string;
+	confidence: PlanEstimateConfidence;
+	candidateTaskIds: readonly string[];
+	version: number;
+}
+
+export interface PlanAdjustmentView {
+	id: string;
+	createdAt: string;
+	trigger:
+		| "task-status"
+		| "observation"
+		| "calendar"
+		| "daily-rollover"
+		| "user-request";
+	summary: string;
+	previousEstimatedCompletionDate: string | null;
+	nextEstimatedCompletionDate: string | null;
+	movedCount: number;
+	addedCount: number;
+	cancelledCount: number;
+	canUndo: boolean;
+	undoUnavailableReason: string | null;
+	undoneAt: string | null;
+	version: number;
+}
+
+export interface PlanningNotificationView {
+	id: string;
+	kind: "analysis-ready" | "schedule-adjusted" | "attention-required";
+	message: string;
+	createdAt: string;
+}
+
+export interface PlanSummaryView {
+	id: string;
+	title: string;
+	goal: string;
+	status: PlanStatus;
+	type: PlanType | null;
+	version: number;
+	estimatedCompletionDate: string | null;
+	confidence: PlanEstimateConfidence | null;
+	updatedAt: string;
+}
+
+export interface PlanView {
+	id: string;
+	title: string;
+	goal: string;
+	status: PlanStatus;
+	type: PlanType | null;
+	version: number;
+	timeZone: string;
+	startToday: boolean;
+	effectiveDate: string | null;
+	estimate: PlanEstimate | null;
+	revision: PlanRevisionView | null;
+	messages: readonly PlanningMessageView[];
+	tasks: readonly PlanningTaskView[];
+	monitoring: PlanningMonitoringView;
+	pendingObservations: readonly PlanningObservationView[];
+	adjustments: readonly PlanAdjustmentView[];
+	notifications: readonly PlanningNotificationView[];
+	updatedAt: string;
+}
+
+export interface PlanCreateIssue {
+	field: "goal";
+	message: string;
+}
+
+export const MAX_PLAN_GOAL_LENGTH = 1_000;
+
+export function emptyPlanCreateInput(): PlanCreateInput {
+	return { goal: "", startToday: false };
+}
+
+export function validatePlanCreateInput(
+	input: PlanCreateInput,
+): readonly PlanCreateIssue[] {
+	const goal = input.goal.trim();
+	if (Array.from(goal).length < 4) {
+		return [{ field: "goal", message: "请用至少 4 个字描述想完成的目标。" }];
+	}
+	if (Array.from(goal).length > MAX_PLAN_GOAL_LENGTH) {
+		return [
+			{
+				field: "goal",
+				message: `目标描述不能超过 ${MAX_PLAN_GOAL_LENGTH} 个字符。`,
+			},
+		];
+	}
+	return [];
+}
+
+export function planTaskProgress(tasks: readonly PlanningTaskView[]): {
+	completed: number;
+	total: number;
+} {
+	return {
+		completed: tasks.filter((task) => task.status === "completed").length,
+		total: tasks.length,
+	};
+}
+
+export function isPlanRevisionConfirmable(plan: PlanView): boolean {
+	return (
+		(plan.status === "awaiting-confirmation" ||
+			plan.status === "active" ||
+			plan.status === "paused") &&
+		plan.revision !== null &&
+		plan.revision.status === "proposed" &&
+		isSevenDayScheduleWindow(plan.revision.scheduleWindow) &&
+		plan.messages.every((message) => message.status === "complete")
+	);
+}
+
+export function isSevenDayScheduleWindow(window: PlanScheduleWindow): boolean {
+	try {
+		return (
+			Temporal.PlainDate.from(window.startDate).until(
+				Temporal.PlainDate.from(window.endDateInclusive),
+				{ largestUnit: "day" },
+			).days === 6
+		);
+	} catch {
+		return false;
+	}
+}
+
+/*
+ * Compatibility schedule types remain feature-internal while the calendar
+ * preview adapter is removed from app composition. New planning UI and service
+ * implementations must use PlanView/PlanningTaskView above.
+ */
 export type PlanPriority = "low" | "medium" | "high";
-export type PreferredDayPart =
-	| "morning"
-	| "afternoon"
-	| "evening"
-	| "flexible";
+export type PreferredDayPart = "morning" | "afternoon" | "evening" | "flexible";
 export type Weekday =
 	| "monday"
 	| "tuesday"
@@ -102,17 +341,11 @@ export interface Plan {
 	phases: readonly PlanPhase[];
 	milestones: readonly Milestone[];
 	tasks: readonly PlanTask[];
-	scheduleWindow: {
-		startDate: string;
-		endDateExclusive: string;
-	};
+	scheduleWindow: { startDate: string; endDateExclusive: string };
 	generationRun: GenerationRun;
 }
 
-export type PlanningBusyKind =
-	| "manual-block"
-	| "external"
-	| "committed-plan";
+export type PlanningBusyKind = "manual-block" | "external" | "committed-plan";
 
 export interface PlanningBusyWindow {
 	id: string;
@@ -173,19 +406,13 @@ export function validatePlanInput(
 	today: string,
 ): readonly PlanInputIssue[] {
 	const issues: PlanInputIssue[] = [];
-	if (input.goal.trim().length < 4) {
-		issues.push({
-			field: "goal",
-			message: "再具体一点：请用至少 4 个字描述想完成的目标。",
-		});
-	} else if (Array.from(input.goal.trim()).length > MAX_ACTIVE_GOAL_TEXT_LENGTH) {
-		issues.push({
-			field: "goal",
-			message: `目标描述不能超过 ${MAX_ACTIVE_GOAL_TEXT_LENGTH} 个字符。`,
-		});
-	}
+	const createIssues = validatePlanCreateInput({
+		goal: input.goal,
+		startToday: false,
+	});
+	issues.push(...createIssues);
 	if (!input.type) {
-		issues.push({ field: "type", message: "请选择长期计划或短期计划。" });
+		issues.push({ field: "type", message: "请选择计划类型。" });
 	}
 	if (!isoDatePattern.test(input.deadline)) {
 		issues.push({ field: "deadline", message: "请选择有效的截止日期。" });
@@ -210,7 +437,8 @@ export function assertValidProposal(item: ProposedScheduleItem): void {
 		throw new Error("计划草案缺少稳定标识。");
 	}
 	if (!item.title.trim()) throw new Error("计划草案标题不能为空。");
-	if (!item.timeZone.includes("/")) throw new Error("计划草案必须声明命名时区。");
+	if (!item.timeZone.includes("/"))
+		throw new Error("计划草案必须声明命名时区。");
 	if (
 		Temporal.Instant.compare(
 			Temporal.Instant.from(item.start),
@@ -265,7 +493,9 @@ export function detectPlanningConflicts(
 			proposalsOverlap(proposal, item),
 		)) {
 			const severity =
-				busy.kind === "committed-plan" ? ("warning" as const) : ("error" as const);
+				busy.kind === "committed-plan"
+					? ("warning" as const)
+					: ("error" as const);
 			conflicts.push({
 				proposalId: proposal.id,
 				busyWindowId: busy.id,
@@ -293,7 +523,9 @@ export function planHasBlockingConflicts(
 	return conflicts.some((conflict) => conflict.severity === "error");
 }
 
-export function cloneGeneratedDraft(draft: GeneratedPlanDraft): GeneratedPlanDraft {
+export function cloneGeneratedDraft(
+	draft: GeneratedPlanDraft,
+): GeneratedPlanDraft {
 	return {
 		plan: {
 			...draft.plan,

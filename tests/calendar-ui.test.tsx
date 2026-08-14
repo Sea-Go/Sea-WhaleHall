@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
-	EventEditor,
 	type EditorState,
+	EventEditor,
 } from "../src/views/client/features/calendar/CalendarPage";
 import { calendarScenarioEvents } from "../src/views/client/features/calendar/fixtures";
 
@@ -12,7 +12,7 @@ describe("calendar keyboard and form alternatives", () => {
 			event: null,
 			selection: null,
 			occurrenceStart: null,
-			presetKind: "plan",
+			presetKind: "manual-block",
 			returnFocus: null,
 		};
 		const markup = renderToStaticMarkup(
@@ -34,6 +34,7 @@ describe("calendar keyboard and form alternatives", () => {
 		expect(markup).toContain("延长");
 		expect(markup).toContain("每天重复 5 次");
 		expect(markup).toContain('type="submit"');
+		expect(markup).not.toContain("计划日程");
 	});
 
 	test("editable recurring event offers scope, delete, movement, and resize alternatives", () => {
@@ -60,6 +61,31 @@ describe("calendar keyboard and form alternatives", () => {
 		expect(markup).toContain("仅这一次");
 		expect(markup).toContain("整个系列");
 		expect(markup).toContain("删除");
+	});
+
+	test("locked model plan event offers an explicit rescheduling opt-in", () => {
+		const event = calendarScenarioEvents("normal").find(
+			(candidate) => candidate.scheduleOrigin === "model",
+		);
+		if (!event) throw new Error("Missing model plan fixture");
+		const markup = renderToStaticMarkup(
+			<EventEditor
+				editor={{
+					event: { ...event, userLocked: true },
+					selection: null,
+					occurrenceStart: null,
+					presetKind: "plan",
+					returnFocus: null,
+				}}
+				timeZone="Asia/Shanghai"
+				pending={false}
+				onClose={() => {}}
+				onSave={async () => {}}
+				onDelete={async () => {}}
+				onUnlock={async () => {}}
+			/>,
+		);
+		expect(markup).toContain("允许计划重新安排");
 	});
 
 	test("external event editor is visibly read-only", () => {
