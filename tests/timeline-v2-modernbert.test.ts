@@ -418,11 +418,13 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		await manifestRequested;
 
 		firstController.abort(new DOMException("first caller left", "AbortError"));
+		expect(underlyingSignal?.aborted).toBeFalse();
 		expect((await classifierError(() => first)).code).toBe(
 			"request_cancelled",
 		);
 		expect(manifestCalls).toBe(1);
 		expect(underlyingSignal).not.toBe(firstController.signal);
+		expect(underlyingSignal).not.toBe(secondController.signal);
 		releaseManifest();
 
 		await expect(second).resolves.toBeUndefined();
