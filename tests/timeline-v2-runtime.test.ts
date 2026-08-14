@@ -471,4 +471,52 @@ describe("Timeline v2 model runtime readiness", () => {
 		await runtime.close();
 		expect(repositoryCloseCount).toBe(1);
 	});
+
+	test("closes its repository when service shutdown rejects", async () => {
+		const runtime = await createTimelineV2Runtime({
+			agent: {} as AgentRuntime,
+			dataDirectory: dataDirectory(),
+			verifyTeacher: false,
+		});
+		const stopFailure = new Error("synthetic Timeline stop failure");
+		runtime.service.stop = () => Promise.reject(stopFailure);
+		const originalRepositoryClose = runtime.repository.close.bind(
+			runtime.repository,
+		);
+		let repositoryCloseCount = 0;
+		runtime.repository.close = () => {
+			repositoryCloseCount += 1;
+			originalRepositoryClose();
+		};
+
+		const closing = runtime.close();
+		expect(runtime.close()).toBe(closing);
+		await expect(closing).rejects.toBe(stopFailure);
+		expect(repositoryCloseCount).toBe(1);
+	});
+
+	test("closes its repository when synchronous shutdown sealing throws", async () => {
+		const runtime = await createTimelineV2Runtime({
+			agent: {} as AgentRuntime,
+			dataDirectory: dataDirectory(),
+			verifyTeacher: false,
+		});
+		const shutdownFailure = new Error("synthetic Timeline shutdown failure");
+		runtime.service.beginShutdown = () => {
+			throw shutdownFailure;
+		};
+		const originalRepositoryClose = runtime.repository.close.bind(
+			runtime.repository,
+		);
+		let repositoryCloseCount = 0;
+		runtime.repository.close = () => {
+			repositoryCloseCount += 1;
+			originalRepositoryClose();
+		};
+
+		const closing = runtime.close();
+		expect(runtime.close()).toBe(closing);
+		await expect(closing).rejects.toBe(shutdownFailure);
+		expect(repositoryCloseCount).toBe(1);
+	});
 });
