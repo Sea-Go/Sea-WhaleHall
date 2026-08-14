@@ -386,6 +386,51 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		expect(serialized).not.toContain("qwen");
 	});
 
+	test("keeps shared artifact verification independent from each caller signal", async () => {
+		const expected = manifest();
+		let releaseManifest: () => void = () => {
+			throw new Error("manifest gate was not initialized");
+		};
+		const manifestGate = new Promise<void>((resolve) => {
+			releaseManifest = resolve;
+		});
+		let markManifestRequested: () => void = () => {
+			throw new Error("manifest request gate was not initialized");
+		};
+		const manifestRequested = new Promise<void>((resolve) => {
+			markManifestRequested = resolve;
+		});
+		let manifestCalls = 0;
+		let underlyingSignal: AbortSignal | null | undefined;
+		const classifier = new ModernBertEpisodeClassifier(
+			options(async (_input, init) => {
+				manifestCalls += 1;
+				underlyingSignal = init?.signal;
+				markManifestRequested();
+				await manifestGate;
+				return Response.json(expected);
+			}, expected),
+		);
+		const firstController = new AbortController();
+		const secondController = new AbortController();
+		const first = classifier.verifyArtifact(firstController.signal);
+		const second = classifier.verifyArtifact(secondController.signal);
+		await manifestRequested;
+
+		firstController.abort(new DOMException("first caller left", "AbortError"));
+		expect(underlyingSignal?.aborted).toBeFalse();
+		expect((await classifierError(() => first)).code).toBe(
+			"request_cancelled",
+		);
+		expect(manifestCalls).toBe(1);
+		expect(underlyingSignal).not.toBe(firstController.signal);
+		expect(underlyingSignal).not.toBe(secondController.signal);
+		releaseManifest();
+
+		await expect(second).resolves.toBeUndefined();
+		expect(classifier.artifactVerified).toBeTrue();
+	});
+
 	test("rejects mismatched manifests and forged response correlation/artifact", async () => {
 		const expected = manifest();
 		let postMode: "correlation" | "input_hash" | "artifact" =
