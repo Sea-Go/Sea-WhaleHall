@@ -52,6 +52,17 @@ export interface ReflectionCollectorRepository {
 export interface ReflectionCloudHandoffRepository {
 	/** Returns only windows durably attributed to this authenticated account. */
 	listWindowsForAccount(accountId: string): Promise<EventWindowV1[]>;
+	/**
+	 * Releases one window after the encrypted proactive archive and Worker
+	 * receipt have both committed. The underlying local reflection remains; only
+	 * its cloud-handoff capability is consumed.
+	 */
+	acknowledgeWindowForAccount(
+		accountId: string,
+		windowId: string,
+	): Promise<boolean>;
+	/** Revokes every still-pending cloud handoff owned by this account. */
+	clearWindowsForAccount(accountId: string): Promise<number>;
 }
 
 export interface DurableReflectionJobRepository {
@@ -76,6 +87,11 @@ export interface DurableReflectionJobRepository {
 		nowMs: number,
 		leaseDurationMs: number,
 	): Promise<ReflectionJobV1>;
+	/**
+	 * Releases a shutdown-cancelled claim without consuming its failure budget.
+	 * A persisted result remains RESULT_PERSISTED; inference-only work returns READY.
+	 */
+	abandonClaim(windowId: string, nowMs: number): Promise<ReflectionJobV1>;
 	recordFailure(
 		windowId: string,
 		failure: ReflectionJobFailureV1,
@@ -204,6 +220,28 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 			.map((window) => clone(window));
 	}
 
+	async acknowledgeWindowForAccount(
+		accountId: string,
+		windowId: string,
+	): Promise<boolean> {
+		const owner = normalizeRequiredCloudOwnerAccountId(accountId);
+		const current = this.cloudOwners.get(windowId);
+		if (current === undefined) return true;
+		if (current !== owner) return false;
+		return this.cloudOwners.delete(windowId);
+	}
+
+	async clearWindowsForAccount(accountId: string): Promise<number> {
+		const owner = normalizeRequiredCloudOwnerAccountId(accountId);
+		let cleared = 0;
+		for (const [windowId, currentOwner] of this.cloudOwners) {
+			if (currentOwner !== owner) continue;
+			this.cloudOwners.delete(windowId);
+			cleared += 1;
+		}
+		return cleared;
+	}
+
 	async getWindow(windowId: string): Promise<EventWindowV1 | null> {
 		return clone(this.windows.get(windowId) ?? null);
 	}
@@ -307,6 +345,35 @@ export class InMemoryReflectionRepository implements ReflectionRepository {
 			state: "COMMITTING",
 			updatedAtMs: nowMs,
 			leaseExpiresAtMs: nowMs + leaseDurationMs,
+		};
+		this.jobs.set(windowId, next);
+		return clone(next);
+	}
+
+	async abandonClaim(
+		windowId: string,
+		nowMs: number,
+	): Promise<ReflectionJobV1> {
+		const current = this.requireJob(windowId);
+		if (
+			current.state !== "RUNNING" &&
+			current.state !== "RESULT_PERSISTED" &&
+			current.state !== "COMMITTING"
+		) {
+			throw new InvalidReflectionJobTransitionError(
+				current.state,
+				"abandon claim for",
+			);
+		}
+		const priorAttempt = Math.max(0, current.attempt - 1);
+		const next: ReflectionJobV1 = {
+			...current,
+			state: current.reflection ? "RESULT_PERSISTED" : "READY",
+			attempt: priorAttempt,
+			firstAttemptAtMs: priorAttempt === 0 ? null : current.firstAttemptAtMs,
+			updatedAtMs: nowMs,
+			nextAttemptAtMs: current.reflection ? null : nowMs,
+			leaseExpiresAtMs: null,
 		};
 		this.jobs.set(windowId, next);
 		return clone(next);

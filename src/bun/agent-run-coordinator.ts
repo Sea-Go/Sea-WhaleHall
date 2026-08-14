@@ -34,6 +34,10 @@ import type {
 	ConversationRpcResult,
 	ConversationRpcThread,
 } from "../shared/conversation";
+import {
+	isProactiveFeedbackItem,
+	type ProactiveFeedbackItem,
+} from "../shared/proactive-feedback";
 import type { TaskPlanningSession } from "../shared/task-planning";
 import {
 	type AgentToolName,
@@ -62,6 +66,13 @@ class AgentSessionChangedError extends Error {
 	constructor(message = "登录会话已在本地 Agent 操作期间发生变化。") {
 		super(message);
 		this.name = "AgentSessionChangedError";
+	}
+}
+
+class ActivityAnalysisOutputError extends Error {
+	constructor() {
+		super("Activity analysis sidecar completed without a valid summary.");
+		this.name = "ActivityAnalysisOutputError";
 	}
 }
 
@@ -213,9 +224,15 @@ function activityResultText(value: unknown): string | null {
 			: typeof value.text === "string"
 				? value.text
 				: null;
-	if (candidate === null || candidate.length > MAX_MESSAGE_CHARACTERS)
-		return null;
-	return candidate;
+	if (candidate === null) return null;
+	const message = candidate.trim();
+	return isProactiveFeedbackItem({
+		id: "validation",
+		generatedAtMs: 0,
+		message,
+	})
+		? message
+		: null;
 }
 
 function terminal(status: AgentRunSnapshot["status"]): boolean {
@@ -305,6 +322,30 @@ function internalFailure(error: unknown): AgentRunFailure {
 			error instanceof Error ? error.message : "本地 Agent 状态处理失败。",
 		retryable: false,
 	};
+}
+
+function isActivityOutputSidecarFailure(error: {
+	code: string;
+	message: string;
+}): boolean {
+	return error.code === "ACTIVITY_OUTPUT_INVALID";
+}
+
+function activityInvalidOutputFailure(): AgentRunFailure {
+	return {
+		code: "invalid-request",
+		message: "Activity analysis output failed local validation.",
+		retryable: false,
+	};
+}
+
+function isPersistedActivityInvalidOutput(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		value.code === "invalid-request" &&
+		value.message === "Activity analysis output failed local validation." &&
+		value.retryable === false
+	);
 }
 
 function validateConversationStart(input: StartConversationTurnRequest): void {
@@ -470,8 +511,11 @@ export interface AgentRunCoordinatorOptions {
 		jobId: string;
 		runId: string;
 		accountId: string;
+		sessionIdentity: AuthSessionIdentity;
 		status: "completed" | "failed" | "cancelled" | "interrupted";
 		failure: AgentRunFailure | null;
+		failureClass: "transient" | "invalid-output" | "terminal" | null;
+		feedback: ProactiveFeedbackItem | null;
 	}): void | Promise<void>;
 	now?: () => number;
 }
@@ -483,6 +527,17 @@ export type StartActivityAnalysisRun = {
 	analyses: readonly ActivityAnalysisWorkerResult[];
 	consumedScore: number;
 };
+
+export type ReconcileActivityAnalysisRun = StartActivityAnalysisRun & {
+	accountId: string;
+};
+
+export type ActivityRunReconciliation =
+	| "active"
+	| "completed"
+	| "retryable"
+	| "invalid-output"
+	| "invalid";
 
 interface ActiveRun {
 	accountId: string;
@@ -499,6 +554,7 @@ interface ActiveRun {
 	recoveredFromPersistence: boolean;
 	criticalOperation: ActiveRunCriticalOperation | null;
 	hostCalls: Set<Promise<void>>;
+	activityFailureClass?: "transient" | "invalid-output";
 	sidecarPlanningVersion?: number;
 }
 
@@ -822,6 +878,16 @@ export class AgentRunCoordinator
 			validateActivityAnalysisStart(input);
 			const identity = this.requireSession();
 			pendingStart = this.beginPendingStart(identity);
+			const clearEpoch = this.repository.assertProactiveFeedbackAcceptingWork(
+				identity.accountId,
+			);
+			this.assertSession(identity);
+			const policy = await this.inSession(identity, () =>
+				this.repository.getProactiveFeedbackPolicy(identity.accountId),
+			);
+			if (!policy.policy.enabled) {
+				throw new Error("Proactive feedback is disabled for this account.");
+			}
 			const existing = await this.inSession(identity, () =>
 				this.repository.getRun(identity.accountId, input.runId),
 			);
@@ -854,11 +920,41 @@ export class AgentRunCoordinator
 				requestId: input.requestId,
 				consumedScore: input.consumedScore,
 				analyses: structuredClone(input.analyses),
+				clearEpoch,
 			});
-			await this.persistRun(run);
+			try {
+				await this.persistRun(run);
+			} catch (error) {
+				// A clear marker may win while encrypted run preparation is awaiting
+				// Keychain work. No sidecar request exists yet, so unwind the local
+				// activation immediately and let the Worker retain the exact job.
+				this.discardActivityRun(run);
+				throw error;
+			}
 			this.assertRunSession(run);
+			const dispatchPolicy = await this.inSession(identity, () =>
+				this.repository.getProactiveFeedbackPolicy(identity.accountId),
+			);
+			if (!dispatchPolicy.policy.enabled) {
+				this.discardActivityRun(run);
+				throw new Error("Proactive feedback is disabled for this account.");
+			}
+			try {
+				// This synchronous repository check is deliberately adjacent to the
+				// sidecar request. A durable clear marker can therefore either win
+				// before dispatch, or the already-dispatched run is observed by the
+				// subsequent stop/cancel barrier; it cannot slip through an await gap.
+				this.repository.assertProactiveFeedbackAcceptingWork(
+					identity.accountId,
+					clearEpoch,
+				);
+				this.assertRunSession(run);
+			} catch (error) {
+				this.discardActivityRun(run);
+				throw error;
+			}
 			this.sidecar.trackRun(input.runId);
-			void this.sidecar
+			const dispatch = this.sidecar
 				.request(
 					"activity.start",
 					{
@@ -870,6 +966,7 @@ export class AgentRunCoordinator
 					{ requestId: input.requestId },
 				)
 				.catch((error) => this.failRun(input.runId, modelFailure(error)));
+			this.trackRunOperation(run, dispatch);
 		} finally {
 			pendingStart?.settle();
 		}
@@ -1181,9 +1278,228 @@ export class AgentRunCoordinator
 				run.lastSidecarSequence = frame.sequence;
 				await this.applySidecarEvent(run, frame);
 			})
-			.catch((error) =>
-				this.failRun(run.snapshot.runId, internalFailure(error)),
-			);
+			.catch((error) => {
+				if (error instanceof ActivityAnalysisOutputError) {
+					run.activityFailureClass = "invalid-output";
+					return this.failRun(
+						run.snapshot.runId,
+						activityInvalidOutputFailure(),
+					);
+				}
+				return this.failRun(run.snapshot.runId, internalFailure(error));
+			});
+	}
+
+	async cancelActivityRunsForAccount(accountId: string): Promise<string[]> {
+		requiredId(accountId, "accountId");
+		for (;;) {
+			const starts = [...this.pendingStarts]
+				.filter((start) => start.identity.accountId === accountId)
+				.map((start) => start.settled);
+			if (starts.length === 0) break;
+			await Promise.allSettled(starts);
+		}
+		const runs = [...this.active.values()].filter(
+			(run) =>
+				run.accountId === accountId &&
+				run.snapshot.kind === "activity-analysis" &&
+				!terminal(run.snapshot.status),
+		);
+		await Promise.all(
+			runs.map(async (run) => {
+				for (;;) {
+					const chain = run.chain;
+					await chain.catch(() => undefined);
+					if (run.chain === chain) break;
+				}
+				if (this.active.get(run.snapshot.runId) !== run) return;
+				this.abortRelayForRun(run.snapshot.runId);
+				await this.sidecar
+					.request(
+						"run.cancel",
+						{
+							runId: run.snapshot.runId,
+							reason: "proactive-feedback-disabled",
+						},
+						{
+							requestId: `activity-disable-${randomUUID()}`,
+							timeoutMs: 3_000,
+						},
+					)
+					.catch(() => undefined);
+				await this.finishCancelled(run, "主动反馈已关闭。");
+			}),
+		);
+		return runs.map((run) => run.snapshot.runId);
+	}
+
+	/**
+	 * Erases in-memory activity consumers without writing another copy of their
+	 * analyses. Used only behind the durable clear journal after the dispatcher
+	 * has stopped, so the Worker ledger and encrypted rows can be removed without
+	 * a cancellation write resurrecting them.
+	 */
+	async discardActivityRunsForAccount(accountId: string): Promise<string[]> {
+		requiredId(accountId, "accountId");
+		for (;;) {
+			const starts = [...this.pendingStarts]
+				.filter((start) => start.identity.accountId === accountId)
+				.map((start) => start.settled);
+			if (starts.length === 0) break;
+			await Promise.allSettled(starts);
+		}
+		const runs = [...this.active.values()].filter(
+			(run) =>
+				run.accountId === accountId &&
+				run.snapshot.kind === "activity-analysis",
+		);
+		await Promise.all(
+			runs.map(async (run) => {
+				this.abortRelayForRun(run.snapshot.runId);
+				await this.sidecar
+					.request(
+						"run.cancel",
+						{ runId: run.snapshot.runId, reason: "proactive-feedback-cleared" },
+						{
+							requestId: `activity-clear-${randomUUID()}`,
+							timeoutMs: 3_000,
+						},
+					)
+					.catch(() => undefined);
+				for (;;) {
+					const chain = run.chain;
+					await chain.catch(() => undefined);
+					if (run.chain === chain) break;
+				}
+				for (;;) {
+					const operations = [...run.hostCalls];
+					if (operations.length === 0) break;
+					await Promise.allSettled(operations);
+				}
+				this.discardActivityRun(run);
+			}),
+		);
+		return runs.map((run) => run.snapshot.runId);
+	}
+
+	/**
+	 * Quiesces only activity runs when an auth generation has already changed.
+	 * The durable Worker job remains retryable with its exact semantic request.
+	 */
+	async quiesceActivityRunsForSessionTransition(
+		accountId: string,
+	): Promise<string[]> {
+		requiredId(accountId, "accountId");
+		for (;;) {
+			const starts = [...this.pendingStarts]
+				.filter((start) => start.identity.accountId === accountId)
+				.map((start) => start.settled);
+			if (starts.length === 0) break;
+			await Promise.allSettled(starts);
+		}
+		const runs = [...this.active.values()].filter(
+			(run) =>
+				run.accountId === accountId &&
+				run.snapshot.kind === "activity-analysis" &&
+				!terminal(run.snapshot.status),
+		);
+		await Promise.all(
+			runs.map(async (run) => {
+				await run.chain.catch(() => undefined);
+				if (this.active.get(run.snapshot.runId) !== run) return;
+				run.activityFailureClass = "transient";
+				this.abortRelayForRun(run.snapshot.runId);
+				await this.sidecar
+					.request(
+						"run.cancel",
+						{ runId: run.snapshot.runId, reason: "session-transition" },
+						{
+							requestId: `activity-session-transition-${randomUUID()}`,
+							timeoutMs: 3_000,
+						},
+					)
+					.catch(() => undefined);
+				await this.finishCancelledForLogout(run);
+			}),
+		);
+		return runs.map((run) => run.snapshot.runId);
+	}
+
+	async reconcileOrphanedActivityRun(
+		input: ReconcileActivityAnalysisRun,
+	): Promise<ActivityRunReconciliation> {
+		requiredId(input.accountId, "accountId");
+		validateActivityAnalysisStart(input);
+		const identity = this.requireSession();
+		if (identity.accountId !== input.accountId) return "invalid";
+		const active = this.active.get(input.runId);
+		if (active) {
+			return active.accountId === input.accountId &&
+				active.snapshot.kind === "activity-analysis" &&
+				active.snapshot.activityJobId === input.jobId &&
+				active.snapshot.requestId === input.requestId &&
+				active.snapshot.analysisCount === input.analyses.length &&
+				active.snapshot.consumedScore === input.consumedScore &&
+				isRecord(active.recordInput) &&
+				active.recordInput.kind === "activity-analysis" &&
+				active.recordInput.jobId === input.jobId &&
+				active.recordInput.requestId === input.requestId &&
+				active.recordInput.consumedScore === input.consumedScore &&
+				Array.isArray(active.recordInput.analyses) &&
+				JSON.stringify(active.recordInput.analyses) ===
+					JSON.stringify(input.analyses)
+				? "active"
+				: "invalid";
+		}
+		const record = await this.inSession(identity, () =>
+			this.repository.getRun(input.accountId, input.runId),
+		);
+		if (!record) return "retryable";
+		if (record.workflowId !== input.jobId) return "invalid";
+		const snapshot = parsePersistedSnapshot(record.output);
+		if (
+			!snapshot ||
+			snapshot.kind !== "activity-analysis" ||
+			snapshot.runId !== input.runId ||
+			snapshot.activityJobId !== input.jobId ||
+			!isRecord(record.input) ||
+			record.input.kind !== "activity-analysis" ||
+			record.input.jobId !== input.jobId ||
+			record.input.requestId !== input.requestId ||
+			record.input.consumedScore !== input.consumedScore ||
+			!Array.isArray(record.input.analyses) ||
+			JSON.stringify(record.input.analyses) !==
+				JSON.stringify(input.analyses) ||
+			snapshot.requestId !== input.requestId ||
+			snapshot.analysisCount !== input.analyses.length ||
+			snapshot.consumedScore !== input.consumedScore
+		) {
+			return "invalid";
+		}
+		if (record.status === "completed") return "completed";
+		if (["failed", "cancelled", "interrupted"].includes(record.status)) {
+			if (isPersistedActivityInvalidOutput(record.error)) {
+				return "invalid-output";
+			}
+			return "retryable";
+		}
+		if (!["starting", "running", "cancelling"].includes(record.status)) {
+			return "invalid";
+		}
+		const updatedAtMs = this.now();
+		snapshot.status = "interrupted";
+		snapshot.revision += 1;
+		snapshot.updatedAtMs = updatedAtMs;
+		await this.inSession(identity, () =>
+			this.repository.putRun({
+				...record,
+				status: "interrupted",
+				output: snapshot,
+				updatedAtMs,
+				completedAtMs: updatedAtMs,
+			}),
+		);
+		return "retryable";
 	}
 
 	async interruptRuns(
@@ -1229,6 +1545,11 @@ export class AgentRunCoordinator
 					const hostCalls = [...run.hostCalls];
 					if (hostCalls.length === 0) break;
 					await Promise.allSettled(hostCalls);
+				}
+				if (run.snapshot.kind === "activity-analysis") {
+					// Logout/session replacement pauses durable activity work. It must not
+					// turn the same-account pending job into a terminal invalidation.
+					run.activityFailureClass = "transient";
 				}
 				if (run.criticalOperation) {
 					await run.criticalOperation.settled;
@@ -1604,20 +1925,36 @@ export class AgentRunCoordinator
 			case "run.cancelled":
 				await this.finishCancelled(run, event.reason ?? "运行已取消。");
 				return;
-			case "run.failed":
-				await this.failRun(run.snapshot.runId, {
-					code:
-						event.error.code === "MODEL_RELAY_UNAVAILABLE"
-							? "unavailable"
-							: event.error.code === "MODEL_RELAY_ERROR"
-								? "model-failed"
-								: "internal",
-					message: event.error.message,
-					retryable:
-						event.error.code === "MODEL_RELAY_UNAVAILABLE"
-							? false
-							: event.error.retryable,
-				});
+			case "run.failed": {
+				const invalidActivityOutput =
+					run.snapshot.kind === "activity-analysis" &&
+					isActivityOutputSidecarFailure(event.error);
+				if (invalidActivityOutput) {
+					run.activityFailureClass = "invalid-output";
+				} else if (run.snapshot.kind === "activity-analysis") {
+					// Provider/relay/protocol failures retain the exact semantic
+					// request. Only locally validated output advances the budget.
+					run.activityFailureClass = "transient";
+				}
+				await this.failRun(
+					run.snapshot.runId,
+					invalidActivityOutput
+						? activityInvalidOutputFailure()
+						: {
+								code:
+									event.error.code === "MODEL_RELAY_UNAVAILABLE"
+										? "unavailable"
+										: event.error.code === "MODEL_RELAY_ERROR"
+											? "model-failed"
+											: "internal",
+								message: event.error.message,
+								retryable:
+									event.error.code === "MODEL_RELAY_UNAVAILABLE"
+										? false
+										: event.error.retryable,
+							},
+				);
+			}
 		}
 	}
 
@@ -1710,14 +2047,16 @@ export class AgentRunCoordinator
 		} else {
 			const summary = activityResultText(result);
 			if (summary === null) {
-				throw new Error(
-					"Activity analysis sidecar completed without a valid summary.",
-				);
+				throw new ActivityAnalysisOutputError();
 			}
 			run.snapshot.result = summary;
 		}
 		run.snapshot.status = "completed";
-		await this.emit(run, { type: "run.completed", completedAtMs: this.now() });
+		await this.emit(
+			run,
+			{ type: "run.completed", completedAtMs: this.now() },
+			run.snapshot.kind !== "activity-analysis",
+		);
 		await this.finishRun(run, null);
 	}
 
@@ -1784,6 +2123,12 @@ export class AgentRunCoordinator
 		const run = this.active.get(runId);
 		if (!run || terminal(run.snapshot.status) || !this.isRunSessionCurrent(run))
 			return;
+		if (
+			run.snapshot.kind === "activity-analysis" &&
+			run.activityFailureClass !== "invalid-output"
+		) {
+			run.activityFailureClass = "transient";
+		}
 		await this.flushDelta(run);
 		run.snapshot.status = "failed";
 		run.snapshot.failure = failure;
@@ -1930,9 +2275,12 @@ export class AgentRunCoordinator
 		if (run.deltaTimer) clearTimeout(run.deltaTimer);
 		run.deltaTimer = null;
 		let persisted = false;
+		let persistenceFailure: { error: unknown } | null = null;
 		try {
 			await this.persistRun(run, failure, allowInvalidatedSession);
 			persisted = true;
+		} catch (error) {
+			persistenceFailure = { error };
 		} finally {
 			this.sidecar.untrackRun(run.snapshot.runId);
 			this.active.delete(run.snapshot.runId);
@@ -1941,23 +2289,62 @@ export class AgentRunCoordinator
 					this.approvedToolCalls.delete(key);
 			}
 		}
-		if (persisted && run.snapshot.kind === "activity-analysis") {
+		if (run.snapshot.kind === "activity-analysis") {
 			try {
-				await this.onActivityRunTerminal({
-					jobId: run.snapshot.activityJobId,
-					runId: run.snapshot.runId,
-					accountId: run.accountId,
-					status: run.snapshot.status as
-						| "completed"
-						| "failed"
-						| "cancelled"
-						| "interrupted",
-					failure: failure ?? run.snapshot.failure ?? null,
-				});
+				if (!persisted) {
+					await this.onActivityRunTerminal({
+						jobId: run.snapshot.activityJobId,
+						runId: run.snapshot.runId,
+						accountId: run.accountId,
+						sessionIdentity: structuredClone(run.sessionIdentity),
+						status: "interrupted",
+						failure: {
+							code: "internal",
+							message: "Activity feedback persistence did not complete.",
+							retryable: true,
+						},
+						failureClass: "transient",
+						feedback: null,
+					});
+				} else {
+					const feedback =
+						run.snapshot.status === "completed" && run.snapshot.result !== null
+							? {
+									id: `proactive-feedback-${run.snapshot.runId}`,
+									generatedAtMs: run.snapshot.updatedAtMs,
+									message: run.snapshot.result,
+								}
+							: null;
+					const terminalFailure = failure ?? run.snapshot.failure ?? null;
+					await this.onActivityRunTerminal({
+						jobId: run.snapshot.activityJobId,
+						runId: run.snapshot.runId,
+						accountId: run.accountId,
+						sessionIdentity: structuredClone(run.sessionIdentity),
+						status: run.snapshot.status as
+							| "completed"
+							| "failed"
+							| "cancelled"
+							| "interrupted",
+						failure: terminalFailure,
+						failureClass:
+							run.activityFailureClass === "invalid-output"
+								? "invalid-output"
+								: run.activityFailureClass === "transient"
+									? "transient"
+									: terminalFailure?.retryable
+										? "transient"
+										: run.snapshot.status === "completed"
+											? null
+											: "terminal",
+						feedback,
+					});
+				}
 			} catch {
 				// The durable activity ledger will recover a running job next launch.
 			}
 		}
+		if (persistenceFailure !== null) throw persistenceFailure.error;
 	}
 
 	private async resolveRecoveredApproval(
@@ -2076,6 +2463,33 @@ export class AgentRunCoordinator
 		}
 	}
 
+	private trackRunOperation(run: ActiveRun, operation: Promise<unknown>): void {
+		let settled!: Promise<void>;
+		settled = operation
+			.then(
+				() => undefined,
+				() => undefined,
+			)
+			.finally(() => run.hostCalls.delete(settled));
+		run.hostCalls.add(settled);
+	}
+
+	private discardActivityRun(run: ActiveRun): void {
+		if (run.deltaTimer) clearTimeout(run.deltaTimer);
+		run.deltaTimer = null;
+		run.pendingDelta = "";
+		this.abortRelayForRun(run.snapshot.runId);
+		this.sidecar.untrackRun(run.snapshot.runId);
+		if (this.active.get(run.snapshot.runId) === run) {
+			this.active.delete(run.snapshot.runId);
+		}
+		for (const key of [...this.approvedToolCalls.keys()]) {
+			if (key.startsWith(`${run.snapshot.runId}:`)) {
+				this.approvedToolCalls.delete(key);
+			}
+		}
+	}
+
 	private endCriticalOperation(
 		run: ActiveRun,
 		operation: ActiveRunCriticalOperation,
@@ -2113,7 +2527,13 @@ export class AgentRunCoordinator
 		allowInvalidatedSession = false,
 	): Promise<void> {
 		if (!allowInvalidatedSession) this.assertRunSession(run);
-		await this.repository.putRun({
+		const atomicActivityFeedback =
+			run.snapshot.kind === "activity-analysis" &&
+			run.snapshot.status === "completed" &&
+			run.snapshot.result !== null
+				? run.snapshot.result
+				: null;
+		const record: AgentRunRecord = {
 			accountId: run.accountId,
 			id: run.snapshot.runId,
 			conversationId:
@@ -2135,8 +2555,38 @@ export class AgentRunCoordinator
 			completedAtMs: terminal(run.snapshot.status)
 				? run.snapshot.updatedAtMs
 				: null,
-		});
-		if (!allowInvalidatedSession) this.assertRunSession(run);
+		};
+		if (atomicActivityFeedback !== null) {
+			const analyses = Array.isArray(run.recordInput.analyses)
+				? run.recordInput.analyses
+				: [];
+			await this.repository.completeProactiveFeedbackRun({
+				run: record,
+				sourceStreamIds: analyses.map((analysis) => {
+					if (!isActivityAnalysisWorkerResult(analysis)) {
+						throw new Error("Activity analysis source archive is invalid.");
+					}
+					return analysis.request_id;
+				}),
+				feedback: {
+					id: `proactive-feedback-${run.snapshot.runId}`,
+					generatedAtMs: run.snapshot.updatedAtMs,
+					message: atomicActivityFeedback,
+				},
+			});
+		} else {
+			await this.repository.putRun(record);
+		}
+		// completeProactiveFeedbackRun is the authoritative phase-one commit: it
+		// atomically stores the completed run, history row, and consumed source
+		// archives. A logout/session replacement racing after that commit must not
+		// turn the success into a transient failure and discard the Worker's runId;
+		// phase two can safely consume the exact proof while the presentation gate
+		// rejects the stale identity. Other writes still require a current session
+		// on both sides of the persistence boundary.
+		if (!allowInvalidatedSession && atomicActivityFeedback === null) {
+			this.assertRunSession(run);
+		}
 	}
 
 	private async resolveConversation(

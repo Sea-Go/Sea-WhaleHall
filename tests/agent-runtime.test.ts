@@ -293,6 +293,15 @@ class FakeLocalProcess implements LocalToolProcess {
 		this.pid = null;
 		for (const listener of this.failureListeners) listener(error);
 	}
+
+	emitFailureWhileOwnerIsRetained(error: LocalClientError): void {
+		for (const listener of this.failureListeners) listener(error);
+	}
+
+	releaseRetainedOwner(): void {
+		this.isRunning = false;
+		this.pid = null;
+	}
 }
 
 function monitoringStatus(
@@ -477,6 +486,41 @@ describe("AgentRuntime", () => {
 		await runtime.start();
 		await runtime.acknowledgeStartupGoalChange();
 		local.fail(new LocalClientError("PROCESS_EXITED", "native exited"));
+
+		await expect(runtime.listLocalTools()).resolves.toHaveLength(1);
+		expect(local.startCount).toBe(2);
+		expect(local.preparedStartupGoalChanges).toEqual([change, change]);
+	});
+
+	test("a retained failed owner cannot authorize a replacement without replaying the goal intent", async () => {
+		const local = new FakeLocalProcess();
+		const runtime = new AgentRuntime(local, {
+			requireStartupGoalPreparation: true,
+		});
+		const change: LocalEventGoalChange = {
+			previous: null,
+			next: {
+				goalId: "goal-retained-owner",
+				planId: null,
+				version: 1,
+				text: "Replay after exact tree cleanup",
+				activatedAtMs: 1_000,
+			},
+			occurredAtMs: 1_000,
+			deduplicationKey: "retained-owner-restart",
+		};
+		await runtime.prepareStartupGoalChange(change);
+		await runtime.start();
+		await runtime.acknowledgeStartupGoalChange();
+
+		// LocalToolClient can retain private ownership while cleanup begins. The
+		// failure callback must relock the startup handoff without trusting that
+		// transient owner state.
+		local.emitFailureWhileOwnerIsRetained(
+			new LocalClientError("PROTOCOL_ERROR", "native protocol failed"),
+		);
+		expect(local.isRunning).toBeTrue();
+		local.releaseRetainedOwner();
 
 		await expect(runtime.listLocalTools()).resolves.toHaveLength(1);
 		expect(local.startCount).toBe(2);

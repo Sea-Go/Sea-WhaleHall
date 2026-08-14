@@ -2239,6 +2239,7 @@ dependencies = [
  "tokio",
  "whalehall-local-core",
  "whalehall-local-protocol",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

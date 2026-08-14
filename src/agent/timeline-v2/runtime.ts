@@ -93,6 +93,7 @@ export type TimelineV2Runtime = {
 	 */
 	refreshEpisodeClassifier(): Promise<TimelineEpisodeClassifierRuntimeStatus>;
 	start(): Promise<void>;
+	beginShutdown(): void;
 	close(): Promise<void>;
 };
 
@@ -122,11 +123,13 @@ export class SwitchableTimelineEpisodeClassifier
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
 		context?: TimelineEpisodeClassificationContext,
+		signal?: AbortSignal,
 	): Promise<EpisodeClassificationV2> {
 		const active = this.active;
 		try {
-			return await active.classify(facts, goal, context);
+			return await active.classify(facts, goal, context, signal);
 		} catch (error) {
+			if (signal?.aborted) throw error;
 			if (
 				active === this.modernBert &&
 				this.active === active &&
@@ -134,7 +137,7 @@ export class SwitchableTimelineEpisodeClassifier
 			) {
 				this.useFallback();
 				this.onModernBertInvalidated(error);
-				return this.fallback.classify(facts, goal, context);
+				return this.fallback.classify(facts, goal, context, signal);
 			}
 			throw error;
 		}
@@ -219,6 +222,7 @@ export async function createTimelineV2Runtime(
 		null;
 	let verificationRetryIndex = 0;
 	let runtimeClosed = false;
+	const shutdownController = new AbortController();
 	const cancelVerificationRetry = (): void => {
 		if (verificationRetryTimer !== null) {
 			clearTimeout(verificationRetryTimer);
@@ -226,7 +230,7 @@ export async function createTimelineV2Runtime(
 		}
 	};
 	const promoteModernBert = (): void => {
-		if (modernBert === null) return;
+		if (runtimeClosed || modernBert === null) return;
 		cancelVerificationRetry();
 		verificationRetryIndex = 0;
 		classifier.useModernBert(modernBert);
@@ -239,6 +243,7 @@ export async function createTimelineV2Runtime(
 		};
 	};
 	const demoteModernBert = (error: unknown): void => {
+		if (runtimeClosed) return;
 		classifier.useFallback();
 		episodeClassifier = {
 			configured: true,
@@ -267,9 +272,10 @@ export async function createTimelineV2Runtime(
 		verificationRetryTimer = setTimeout(() => {
 			verificationRetryTimer = null;
 			if (runtimeClosed || modernBert === null) return;
-			void modernBert.verifyArtifact().then(
+			void modernBert.verifyArtifact(shutdownController.signal).then(
 				() => promoteModernBert(),
 				(retryError: unknown) => {
+					if (runtimeClosed) return;
 					demoteModernBert(retryError);
 					onError(retryError);
 					scheduleVerificationRetry(
@@ -281,6 +287,7 @@ export async function createTimelineV2Runtime(
 		}, delayMs);
 	};
 	handleModernBertInvalidation = (error) => {
+		if (runtimeClosed) return;
 		demoteModernBert(error);
 		try {
 			onError(error);
@@ -296,7 +303,7 @@ export async function createTimelineV2Runtime(
 			modernBert = new ModernBertEpisodeClassifier(
 				options.modernBert,
 			);
-			await modernBert.verifyArtifact();
+			await modernBert.verifyArtifact(shutdownController.signal);
 			promoteModernBert();
 		} catch (error) {
 			// Keep classification on the explicit cold-start implementation.
@@ -323,7 +330,9 @@ export async function createTimelineV2Runtime(
 				fetch: options.teacherFetch,
 			});
 			try {
-				await probeQwenHypothesisReadiness(client);
+				await probeQwenHypothesisReadiness(client, {
+					signal: shutdownController.signal,
+				});
 				inferenceReady = true;
 				hypotheses = new QwenCitedHypothesisGenerator(client);
 			} catch (error) {
@@ -375,6 +384,17 @@ export async function createTimelineV2Runtime(
 				)
 			: null;
 		const agentInput = new TimelineAgentInputAdapterV1(service);
+		let repositoryClosed = false;
+		let closePromise: Promise<void> | null = null;
+		const beginShutdown = (): void => {
+			if (runtimeClosed) return;
+			runtimeClosed = true;
+			cancelVerificationRetry();
+			shutdownController.abort(
+				new DOMException("Timeline v2 runtime is shutting down.", "AbortError"),
+			);
+			service.beginShutdown();
+		};
 		return {
 			service,
 			repository,
@@ -389,6 +409,9 @@ export async function createTimelineV2Runtime(
 			diagnostics,
 			teacherVerified: modelLockVerified,
 			async refreshEpisodeClassifier() {
+				if (runtimeClosed) {
+					throw new Error("Timeline v2 runtime is shutting down.");
+				}
 				cancelVerificationRetry();
 				verificationRetryIndex = 0;
 				if (modernBert === null) {
@@ -396,7 +419,9 @@ export async function createTimelineV2Runtime(
 				}
 				classifier.useFallback();
 				try {
-					await modernBert.refreshArtifact();
+					await modernBert.refreshArtifact(
+						shutdownController.signal,
+					);
 					promoteModernBert();
 				} catch (error) {
 					demoteModernBert(error);
@@ -406,16 +431,25 @@ export async function createTimelineV2Runtime(
 				return structuredClone(episodeClassifier);
 			},
 			start: () => service.start(),
-			async close() {
-				runtimeClosed = true;
-				cancelVerificationRetry();
-				await service.stop();
-				repository.close();
+			beginShutdown,
+			close() {
+				if (closePromise !== null) return closePromise;
+				beginShutdown();
+				closePromise = (async () => {
+					await service.stop();
+					if (repositoryClosed) return;
+					repositoryClosed = true;
+					repository.close();
+				})();
+				return closePromise;
 			},
 		};
 	} catch (error) {
 		runtimeClosed = true;
 		cancelVerificationRetry();
+		shutdownController.abort(
+			new DOMException("Timeline v2 runtime creation failed.", "AbortError"),
+		);
 		repository.close();
 		throw error;
 	}

@@ -34,7 +34,8 @@ describe("local Agent production boundary", () => {
 		).toBeTrue();
 		expect(dispatcher).not.toContain("raw_event");
 		expect(dispatcher).not.toContain("EventWindowV1");
-		expect(activityAgent).toContain("tools: {}");
+		expect(activityAgent).not.toContain('id: "whalehall-activity-analysis"');
+		expect(activityAgent).toContain('id: "whalehall-conversation"');
 		expect(activityAgent).toContain(
 			"skills: activityReflectionNativeSkillPaths",
 		);
@@ -43,7 +44,9 @@ describe("local Agent production boundary", () => {
 			"loadActivityReflectionNativeSkillContext",
 		);
 		expect(activityRuntime).toContain('toolChoice: "none"');
-		expect(activityAgent).toContain("绝不请求、推断或复述原始活动窗口");
+		expect(activityRuntime).toContain("不得要求、猜测或复述原始桌面内容");
+		expect(activityRuntime).toContain("agents.conversation.stream(");
+		expect(activityRuntime).not.toContain("agents.activity.stream(");
 	});
 
 	test("keeps the remote service surface limited to identity and opaque model relay", () => {
@@ -66,6 +69,20 @@ describe("local Agent production boundary", () => {
 		);
 	});
 
+	test("registers every client RPC as a concrete guarded BrowserView handler", () => {
+		const bunComposition = source("src/bun/index.ts");
+
+		expect(bunComposition).toContain(
+			"const guardedClientRequestHandlers = Object.fromEntries(",
+		);
+		expect(bunComposition).toContain("Object.keys(clientRequestHandlers)");
+		expect(bunComposition).toContain("dispatchClientRequest(method, input)");
+		expect(bunComposition).toContain("requests: guardedClientRequestHandlers");
+		expect(bunComposition).not.toContain(
+			"requests: (method, input) => dispatchClientRequest(method, input)",
+		);
+	});
+
 	test("quiesces activity reflection before stopping its Sidecar process owner", () => {
 		const bunComposition = source("src/bun/index.ts");
 		const shutdownStart = bunComposition.indexOf(
@@ -73,6 +90,10 @@ describe("local Agent production boundary", () => {
 		);
 		const nativeStartupLatch = bunComposition.indexOf(
 			"agent.beginShutdown();",
+			shutdownStart,
+		);
+		const deferredReflectionLatch = bunComposition.indexOf(
+			"deferredReflectionOperations.close();",
 			shutdownStart,
 		);
 		const shutdownSteps = bunComposition.indexOf(
@@ -98,6 +119,8 @@ describe("local Agent production boundary", () => {
 
 		expect(shutdownStart).toBeGreaterThanOrEqual(0);
 		expect(nativeStartupLatch).toBeGreaterThan(shutdownStart);
+		expect(deferredReflectionLatch).toBeGreaterThan(shutdownStart);
+		expect(deferredReflectionLatch).toBeLessThan(nativeStartupLatch);
 		expect(shutdownSteps).toBeGreaterThan(nativeStartupLatch);
 		expect(activityStep).toBeGreaterThanOrEqual(0);
 		expect(sidecarStep).toBeGreaterThan(activityStep);

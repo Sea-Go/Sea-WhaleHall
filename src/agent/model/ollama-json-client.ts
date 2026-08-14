@@ -14,6 +14,8 @@ export type OllamaJsonRequest<T> = {
 	temperature?: number;
 	timeoutMs?: number;
 	maxOutputTokens?: number;
+	/** Cancels queued work immediately and aborts an active HTTP request. */
+	signal?: AbortSignal;
 };
 
 export type OllamaJsonClientOptions = {
@@ -37,6 +39,8 @@ type QueueItem<T> = {
 	request: OllamaJsonRequest<T>;
 	resolve: (value: T) => void;
 	reject: (reason: Error) => void;
+	settled: boolean;
+	abortListener: (() => void) | null;
 };
 
 type OllamaChatResponse = {
@@ -46,6 +50,7 @@ type OllamaChatResponse = {
 export type OllamaClientErrorCode =
 	| "invalid_request"
 	| "http_error"
+	| "request_cancelled"
 	| "request_timeout"
 	| "transport_error"
 	| "invalid_response_envelope"
@@ -98,7 +103,27 @@ export class OllamaJsonClient {
 
 	generateJson<T>(request: OllamaJsonRequest<T>): Promise<T> {
 		return new Promise<T>((resolve, reject) => {
-			const item: QueueItem<T> = { request, resolve, reject };
+			const item: QueueItem<T> = {
+				request,
+				resolve,
+				reject,
+				settled: false,
+				abortListener: null,
+			};
+			if (request.signal?.aborted) {
+				item.settled = true;
+				reject(ollamaCancelledError());
+				return;
+			}
+			if (request.signal !== undefined) {
+				item.abortListener = () => {
+					this.removeQueuedItem(item);
+					this.rejectItem(item, ollamaCancelledError());
+				};
+				request.signal.addEventListener("abort", item.abortListener, {
+					once: true,
+				});
+			}
 			const queue = request.priority === "batch" ? this.batch : this.realtime;
 			queue.push(item as QueueItem<unknown>);
 			void this.drain();
@@ -112,10 +137,14 @@ export class OllamaJsonClient {
 			while (this.realtime.length > 0 || this.batch.length > 0) {
 				const item = this.realtime.shift() ?? this.batch.shift();
 				if (!item) break;
+				if (item.settled) continue;
 				try {
-					item.resolve(await this.executeWithSchemaRetry(item.request));
+					this.resolveItem(
+						item,
+						await this.executeWithSchemaRetry(item.request),
+					);
 				} catch (error) {
-					item.reject(safeOllamaError(error));
+					this.rejectItem(item, safeOllamaError(error));
 				}
 			}
 		} finally {
@@ -128,6 +157,7 @@ export class OllamaJsonClient {
 	): Promise<T> {
 		let lastError: OllamaClientError | null = null;
 		for (let attempt = 0; attempt < 2; attempt += 1) {
+			if (request.signal?.aborted) throw ollamaCancelledError();
 			try {
 				return await this.execute(request, attempt);
 			} catch (error) {
@@ -165,8 +195,13 @@ export class OllamaJsonClient {
 			);
 		}
 		const controller = new AbortController();
+		const onExternalAbort = () => controller.abort(request.signal?.reason);
+		if (request.signal !== undefined) {
+			request.signal.addEventListener("abort", onExternalAbort, { once: true });
+		}
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
+			if (request.signal?.aborted) throw ollamaCancelledError();
 			const messages =
 				attempt === 0
 					? request.messages
@@ -244,6 +279,7 @@ export class OllamaJsonClient {
 				"schema_mismatch",
 			);
 		} catch (error) {
+			if (request.signal?.aborted) throw ollamaCancelledError();
 			if (controller.signal.aborted) {
 				throw new OllamaClientError(
 					`Ollama request timed out after ${timeoutMs} ms.`,
@@ -254,6 +290,34 @@ export class OllamaJsonClient {
 			throw safeOllamaError(error);
 		} finally {
 			clearTimeout(timeout);
+			request.signal?.removeEventListener("abort", onExternalAbort);
+		}
+	}
+
+	private resolveItem<T>(item: QueueItem<T>, value: T): void {
+		if (item.settled) return;
+		item.settled = true;
+		this.removeAbortListener(item);
+		item.resolve(value);
+	}
+
+	private rejectItem<T>(item: QueueItem<T>, error: OllamaClientError): void {
+		if (item.settled) return;
+		item.settled = true;
+		this.removeAbortListener(item);
+		item.reject(error);
+	}
+
+	private removeAbortListener<T>(item: QueueItem<T>): void {
+		if (item.abortListener === null) return;
+		item.request.signal?.removeEventListener("abort", item.abortListener);
+		item.abortListener = null;
+	}
+
+	private removeQueuedItem<T>(item: QueueItem<T>): void {
+		for (const queue of [this.realtime, this.batch]) {
+			const index = queue.indexOf(item as QueueItem<unknown>);
+			if (index >= 0) queue.splice(index, 1);
 		}
 	}
 }
@@ -358,5 +422,13 @@ function safeOllamaError(error: unknown): OllamaClientError {
 		"Ollama request failed.",
 		true,
 		"transport_error",
+	);
+}
+
+function ollamaCancelledError(): OllamaClientError {
+	return new OllamaClientError(
+		"Ollama request was cancelled.",
+		true,
+		"request_cancelled",
 	);
 }

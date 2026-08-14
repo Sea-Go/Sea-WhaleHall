@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
 	LocalEventGoalChange,
 	LocalMonitoringStatus,
@@ -28,6 +31,7 @@ class FakeChild implements ChildTransport {
 	private closed = false;
 	endCalled = false;
 	killCalled = false;
+	readonly killSignals: Array<number | NodeJS.Signals | undefined> = [];
 
 	constructor(
 		private readonly onWrite: (
@@ -88,10 +92,11 @@ class FakeChild implements ChildTransport {
 		this.resolveExit(code);
 	}
 
-	kill(): void {
+	kill(signal?: number | NodeJS.Signals): void {
 		this.killCalled = true;
+		this.killSignals.push(signal);
 		if (this.lifecycle.throwOnKill) throw new Error("kill failed");
-		if (this.lifecycle.exitOnKill !== false) this.exit(143);
+		if (this.lifecycle.exitOnKill !== false) this.exit(137);
 	}
 }
 
@@ -330,9 +335,10 @@ describe("LocalToolClient", () => {
 		expect(gracefulWindowMs).toBe(10_000);
 		expect(shutdownSleeps).toEqual([10_000, 2_000]);
 		expect(child.killCalled).toBe(true);
+		expect(child.killSignals).toEqual(["SIGKILL"]);
 		expect(settled).toBe(false);
-		child.exit(143);
-		await expect(stopping).rejects.toMatchObject({ code: "STOP_FAILED" });
+		child.exit(137);
+		await expect(stopping).resolves.toBeUndefined();
 		expect(settled).toBe(true);
 	});
 
@@ -353,9 +359,10 @@ describe("LocalToolClient", () => {
 		await expect(client.stop()).rejects.toMatchObject({ code: "STOP_FAILED" });
 		expect(shutdownSleeps).toEqual([10_000, 2_000]);
 		expect(child.killCalled).toBe(true);
+		expect(child.killSignals).toEqual(["SIGKILL"]);
 		expect(client.isRunning).toBe(true);
 		child.exit(143);
-		await Promise.resolve();
+		await waitForClientStopped(client);
 		expect(client.isRunning).toBe(false);
 	});
 
@@ -377,10 +384,305 @@ describe("LocalToolClient", () => {
 		expect(shutdownSleeps).toEqual([10_000, 2_000]);
 		expect(child.endCalled).toBe(true);
 		expect(child.killCalled).toBe(true);
+		expect(child.killSignals).toEqual(["SIGKILL"]);
 		expect(client.isRunning).toBe(true);
 		child.exit(143);
-		await Promise.resolve();
+		await waitForClientStopped(client);
 		expect(client.isRunning).toBe(false);
+	});
+
+	test("restart waits for failed tree cleanup and never writes to the failed owner", async () => {
+		const failed = new FakeChild(() => {}, {
+			exitOnEnd: false,
+			exitOnKill: false,
+		});
+		const replacement = new FakeChild();
+		replacement.pid = 4343;
+		let spawnCalls = 0;
+		let replacementEnvironment: Readonly<Record<string, string>> | undefined;
+		const client = new LocalToolClient("fake", {
+			spawn: (_binaryPath, environment) => {
+				spawnCalls += 1;
+				if (spawnCalls === 2) replacementEnvironment = environment;
+				return spawnCalls === 1 ? failed : replacement;
+			},
+			shutdownSleep: async (durationMs) => {
+				if (durationMs === 2_000) await new Promise(() => {});
+			},
+		});
+		await client.start();
+		const pending = client.listTools();
+		failed.emitChunks("not-json\n");
+		await expect(pending).rejects.toMatchObject({ code: "PROTOCOL_ERROR" });
+		// The failed process tree remains privately owned until cleanup settles,
+		// but must never be projected as a usable native runtime.
+		expect(client.isRunning).toBeFalse();
+		expect(client.pid).toBeNull();
+		await expect(client.health()).rejects.toMatchObject({
+			code: "PROCESS_EXITED",
+		});
+
+		const change: LocalEventGoalChange = {
+			previous: null,
+			next: {
+				goalId: "goal-after-cleanup",
+				planId: null,
+				version: 1,
+				text: "Restart only after exact cleanup",
+				activatedAtMs: 1_000,
+			},
+			occurredAtMs: 1_000,
+			deduplicationKey: "failed-owner-restart",
+		};
+		let preparationSettled = false;
+		const preparation = client.prepareStartupGoalChange(change).then(() => {
+			preparationSettled = true;
+		});
+		await Bun.sleep(1);
+		expect(spawnCalls).toBe(1);
+		expect(preparationSettled).toBeFalse();
+
+		failed.exit(137);
+		await preparation;
+		expect(spawnCalls).toBe(1);
+		await client.start();
+		expect(spawnCalls).toBe(2);
+		expect(client.pid).toBe(4343);
+		expect(replacementEnvironment?.[STARTUP_GOAL_CHANGE_ENV]).toBe(
+			JSON.stringify(change),
+		);
+		await client.stop();
+	});
+
+	test.skipIf(process.platform === "win32")(
+		"detects an Observer survivor after graceful leader exit and removes its group",
+		async () => {
+			const directory = mkdtempSync(join(tmpdir(), "whalehall-local-tree-"));
+			const fixture = join(
+				import.meta.dir,
+				"fixtures",
+				"local-tool-process-tree.sh",
+			);
+			const client = new LocalToolClient(fixture, {
+				environment: { WHALEHALL_DATA_DIR: directory },
+				shutdownSleep: (durationMs) =>
+					durationMs === 10_000 ? Bun.sleep(250) : Bun.sleep(durationMs),
+			});
+			try {
+				await client.start();
+				const leaderPid = client.pid;
+				if (leaderPid === null) throw new Error("fixture leader did not start");
+				const observerPid = await waitForFixtureProcessId(
+					join(directory, "observer.pid"),
+				);
+				expect(isProcessAlive(leaderPid)).toBeTrue();
+				expect(isProcessAlive(observerPid)).toBeTrue();
+
+				await client.stop();
+
+				expect(
+					readFileSync(join(directory, "leader-exited"), "utf8").trim(),
+				).toBe("leader-exited");
+				expect(client.isRunning).toBeFalse();
+				expect(isProcessAlive(leaderPid)).toBeFalse();
+				expect(isProcessAlive(observerPid)).toBeFalse();
+				expect(isProcessGroupAlive(leaderPid)).toBeFalse();
+			} finally {
+				if (client.isRunning) await client.stop().catch(() => undefined);
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
+	test.skipIf(process.platform === "win32")(
+		"protocol failure retains ownership until the detached process tree is gone",
+		async () => {
+			const directory = mkdtempSync(
+				join(tmpdir(), "whalehall-local-protocol-"),
+			);
+			const failures: LocalClientError[] = [];
+			const client = new LocalToolClient(
+				join(
+					import.meta.dir,
+					"fixtures",
+					"local-tool-protocol-failure-tree.sh",
+				),
+				{ environment: { WHALEHALL_DATA_DIR: directory } },
+			);
+			client.onFailure((error) => failures.push(error));
+			try {
+				await client.start();
+				const { leaderPid, observerPid } = await waitForFixtureTree(directory);
+				await waitForClientStopped(client);
+
+				expect(
+					failures.some((error) => error.code === "PROTOCOL_ERROR"),
+				).toBeTrue();
+				expect(isProcessAlive(leaderPid)).toBeFalse();
+				expect(isProcessAlive(observerPid)).toBeFalse();
+				expect(isProcessGroupAlive(leaderPid)).toBeFalse();
+			} finally {
+				if (client.isRunning) await client.stop().catch(() => undefined);
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
+	test.skipIf(process.platform === "win32")(
+		"unexpected leader crash retains ownership until its Observer is reaped",
+		async () => {
+			const directory = mkdtempSync(join(tmpdir(), "whalehall-local-crash-"));
+			const failures: LocalClientError[] = [];
+			const client = new LocalToolClient(
+				join(import.meta.dir, "fixtures", "local-tool-crash-tree.sh"),
+				{ environment: { WHALEHALL_DATA_DIR: directory } },
+			);
+			client.onFailure((error) => failures.push(error));
+			try {
+				await client.start();
+				const { leaderPid, observerPid } = await waitForFixtureTree(directory);
+				expect(isProcessAlive(observerPid)).toBeTrue();
+				await waitForClientStopped(client);
+
+				expect(
+					failures.some((error) => error.code === "PROCESS_EXITED"),
+				).toBeTrue();
+				expect(isProcessAlive(leaderPid)).toBeFalse();
+				expect(isProcessAlive(observerPid)).toBeFalse();
+				expect(isProcessGroupAlive(leaderPid)).toBeFalse();
+			} finally {
+				if (client.isRunning) await client.stop().catch(() => undefined);
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
+	test("locks the Rust process Job and EOF cleanup behind Windows tree completion", () => {
+		const mainSource = readFileSync(
+			join(
+				import.meta.dir,
+				"..",
+				"whalehall-local",
+				"server",
+				"src",
+				"main.rs",
+			),
+			"utf8",
+		);
+		const serverSource = readFileSync(
+			join(import.meta.dir, "..", "whalehall-local", "server", "src", "lib.rs"),
+			"utf8",
+		);
+		const observerSource = readFileSync(
+			join(
+				import.meta.dir,
+				"..",
+				"whalehall-local",
+				"server",
+				"src",
+				"observer.rs",
+			),
+			"utf8",
+		);
+		const windowsTreeSource = readFileSync(
+			join(
+				import.meta.dir,
+				"..",
+				"whalehall-local",
+				"server",
+				"src",
+				"windows_process_tree.rs",
+			),
+			"utf8",
+		);
+		const eofCleanupStart = serverSource.indexOf("calls.abort_all();");
+		const supervisorShutdown = serverSource.indexOf(
+			"observer.shutdown().await;",
+			eofCleanupStart,
+		);
+		const remainingServicesShutdown = serverSource.indexOf(
+			"services.shutdown().await;",
+			eofCleanupStart,
+		);
+		expect(eofCleanupStart).toBeGreaterThanOrEqual(0);
+		expect(supervisorShutdown).toBeGreaterThan(eofCleanupStart);
+		expect(remainingServicesShutdown).toBeGreaterThan(supervisorShutdown);
+
+		const childShutdownStart = observerSource.indexOf(
+			'let _ = send_simple_command(&mut stdin, "shutdown-parent", "shutdown").await;',
+		);
+		const boundedWait = observerSource.indexOf(
+			"tokio::time::timeout(Duration::from_secs(2), child.wait()).await",
+			childShutdownStart,
+		);
+		const forcedKill = observerSource.indexOf(
+			"let _ = child.kill().await;",
+			boundedWait,
+		);
+		const exactReap = observerSource.indexOf(
+			"let _ = child.wait().await;",
+			forcedKill,
+		);
+		expect(childShutdownStart).toBeGreaterThanOrEqual(0);
+		expect(boundedWait).toBeGreaterThan(childShutdownStart);
+		expect(forcedKill).toBeGreaterThan(boundedWait);
+		expect(exactReap).toBeGreaterThan(forcedKill);
+
+		const jobInstallation = mainSource.indexOf(
+			"install_current_process_tree_job()?;",
+		);
+		const serveCompletion = mainSource.indexOf(
+			"let result = serve(BufReader::new(tokio::io::stdin()), tokio::io::stdout()).await;",
+		);
+		const returnResult = mainSource.indexOf("result", serveCompletion + 1);
+		expect(jobInstallation).toBeGreaterThanOrEqual(0);
+		expect(serveCompletion).toBeGreaterThan(jobInstallation);
+		expect(returnResult).toBeGreaterThan(serveCompletion);
+		expect(windowsTreeSource).toContain("JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE");
+		expect(windowsTreeSource).toContain("AssignProcessToJobObject(");
+		expect(windowsTreeSource).toContain("GetCurrentProcess()");
+		expect(windowsTreeSource).toContain(
+			"static CURRENT_PROCESS_TREE_JOB: Mutex<Option<OwnedHandle>>",
+		);
+	});
+
+	test("locks Windows forced tree close to exact taskkill and leader confirmation", () => {
+		const source = readFileSync(
+			join(import.meta.dir, "..", "src", "agent", "local-tool-client.ts"),
+			"utf8",
+		);
+		expect(source).toContain(
+			'const WINDOWS_TASKKILL_PATH = "C:\\\\Windows\\\\System32\\\\taskkill.exe";',
+		);
+		const windowsTreeStart = source.indexOf(
+			"function createWindowsProcessTree(processId: number)",
+		);
+		const exactTreeCommand = source.indexOf(
+			'cmd: [WINDOWS_TASKKILL_PATH, "/PID", String(processId), "/T", "/F"]',
+			windowsTreeStart,
+		);
+		const helperExitWait = source.indexOf("taskkill.exited", exactTreeCommand);
+		const unsuccessfulCommandGate = source.indexOf(
+			"if (exitCode !== 0)",
+			helperExitWait,
+		);
+		const treeConfirmation = source.indexOf(
+			"taskkillConfirmed = true",
+			unsuccessfulCommandGate,
+		);
+		expect(windowsTreeStart).toBeGreaterThanOrEqual(0);
+		expect(exactTreeCommand).toBeGreaterThan(windowsTreeStart);
+		expect(helperExitWait).toBeGreaterThan(exactTreeCommand);
+		expect(unsuccessfulCommandGate).toBeGreaterThan(helperExitWait);
+		expect(treeConfirmation).toBeGreaterThan(unsuccessfulCommandGate);
+
+		expect(source).toContain("leaderExitCode !== null &&");
+		expect(source).toContain("treeExited ||");
+		expect(source).toContain(
+			"ownedTree.leaderExitCompletesTree(leaderExitCode)",
+		);
+		expect(source).toContain("await taskkill.exited;");
+		expect(source).toContain("leaderExitCompletesTree: () => true");
 	});
 
 	test("injects only the explicitly prepared startup goal JSON", async () => {
@@ -956,6 +1258,66 @@ describe("LocalToolClient", () => {
 		expect(client.isRunning).toBe(false);
 	});
 });
+
+async function waitForFixtureProcessId(path: string): Promise<number> {
+	for (let attempt = 0; attempt < 200; attempt += 1) {
+		try {
+			const processId = Number.parseInt(readFileSync(path, "utf8").trim(), 10);
+			if (Number.isSafeInteger(processId) && processId > 0) return processId;
+		} catch {}
+		await Bun.sleep(10);
+	}
+	throw new Error("fixture Observer process identifier was not published");
+}
+
+async function waitForFixtureTree(directory: string): Promise<{
+	leaderPid: number;
+	observerPid: number;
+}> {
+	const [leaderPid, observerPid] = await Promise.all([
+		waitForFixtureProcessId(join(directory, "leader.pid")),
+		waitForFixtureProcessId(join(directory, "observer.pid")),
+	]);
+	return { leaderPid, observerPid };
+}
+
+async function waitForClientStopped(client: LocalToolClient): Promise<void> {
+	for (let attempt = 0; attempt < 300 && client.isRunning; attempt += 1) {
+		await Bun.sleep(10);
+	}
+	if (client.isRunning) {
+		throw new Error("LocalToolClient retained its process-tree owner too long");
+	}
+}
+
+function isProcessAlive(processId: number): boolean {
+	try {
+		process.kill(processId, 0);
+		return true;
+	} catch (error) {
+		if (isNoSuchProcess(error)) return false;
+		throw error;
+	}
+}
+
+function isProcessGroupAlive(processGroupId: number): boolean {
+	try {
+		process.kill(-processGroupId, 0);
+		return true;
+	} catch (error) {
+		if (isNoSuchProcess(error)) return false;
+		throw error;
+	}
+}
+
+function isNoSuchProcess(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		error.code === "ESRCH"
+	);
+}
 
 function desktopEvent(): DesktopEventV1 {
 	return {

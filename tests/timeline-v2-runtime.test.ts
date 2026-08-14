@@ -402,4 +402,73 @@ describe("Timeline v2 model runtime readiness", () => {
 			"artifactSha256",
 		);
 	});
+
+	test("forwards the exact abort signal through switchable active and fallback classifiers", async () => {
+		let receivedSignal: AbortSignal | undefined;
+		const fakeModernBert = {
+			artifactVerified: true,
+			async classify(
+				_facts: unknown,
+				_goal: unknown,
+				_context: unknown,
+				signal?: AbortSignal,
+			) {
+				receivedSignal = signal;
+				return {
+					activity: "development" as const,
+					goalRelevance: null,
+					confidence: 0.8,
+					entropy: 0.2,
+					oodScore: 0.1,
+					abstain: false,
+					modelVersion: "modernbert-test",
+				};
+			},
+		} as unknown as ModernBertEpisodeClassifier;
+		const classifier = new SwitchableTimelineEpisodeClassifier();
+		classifier.useModernBert(fakeModernBert);
+		const controller = new AbortController();
+		await classifier.classify([], null, undefined, controller.signal);
+		expect(receivedSignal).toBe(controller.signal);
+
+		classifier.useFallback();
+		controller.abort(new DOMException("shutdown", "AbortError"));
+		await expect(
+			classifier.classify([], null, undefined, controller.signal),
+		).rejects.toHaveProperty("name", "AbortError");
+	});
+
+	test("does not close its repository before blocked service shutdown settles", async () => {
+		const runtime = await createTimelineV2Runtime({
+			agent: {} as AgentRuntime,
+			dataDirectory: dataDirectory(),
+			verifyTeacher: false,
+		});
+		runtimes.push(runtime);
+		let releaseStop: () => void = () => {
+			throw new Error("stop gate was not initialized");
+		};
+		const stopGate = new Promise<void>((resolve) => {
+			releaseStop = resolve;
+		});
+		runtime.service.stop = () => stopGate;
+		const originalRepositoryClose = runtime.repository.close.bind(
+			runtime.repository,
+		);
+		let repositoryCloseCount = 0;
+		runtime.repository.close = () => {
+			repositoryCloseCount += 1;
+			originalRepositoryClose();
+		};
+
+		const closing = runtime.close();
+		expect(await runtime.service.runJobsNow()).toBe(0);
+		await Promise.resolve();
+		expect(repositoryCloseCount).toBe(0);
+		releaseStop();
+		await closing;
+		expect(repositoryCloseCount).toBe(1);
+		await runtime.close();
+		expect(repositoryCloseCount).toBe(1);
+	});
 });

@@ -579,14 +579,39 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 				nextAttemptAtMs: null,
 				leaseExpiresAtMs: nowMs + leaseDurationMs,
 				firstAttemptAtMs: row.first_attempt_at_ms ?? nowMs,
-				failureCode: null,
-				failureMessage: null,
 			};
 			this.updateJob(job);
 			return job;
 		});
 		const claimed = transaction.immediate();
 		return claimed ? structuredClone(claimed) : null;
+	}
+
+	async abandonWindowClaim(
+		windowId: string,
+		nowMs: number,
+	): Promise<TimelineJobV2> {
+		const transaction = this.database.transaction(() => {
+			const current = this.requireJob(windowId);
+			if (current.state !== "RUNNING") {
+				throw new Error(
+					`Cannot abandon timeline claim ${windowId} from ${current.state}.`,
+				);
+			}
+			const attempt = Math.max(0, current.attempt - 1);
+			const abandoned: TimelineJobV2 = {
+				...current,
+				state: "READY",
+				attempt,
+				firstAttemptAtMs: attempt === 0 ? null : current.firstAttemptAtMs,
+				updatedAtMs: nowMs,
+				nextAttemptAtMs: nowMs,
+				leaseExpiresAtMs: null,
+			};
+			this.updateJob(abandoned);
+			return abandoned;
+		});
+		return structuredClone(transaction.immediate());
 	}
 
 	async completeWindow(
@@ -703,6 +728,8 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 					updatedAtMs: nowMs,
 					nextAttemptAtMs: null,
 					leaseExpiresAtMs: null,
+					failureCode: null,
+					failureMessage: null,
 				};
 				this.updateJob(resultPersisted);
 				return resultPersisted;
@@ -778,12 +805,14 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 					result.agentInput.payloadHash,
 					sealedAgentInput,
 				);
-			const resultPersisted: TimelineJobV2 = {
+				const resultPersisted: TimelineJobV2 = {
 				...current,
 				state: "RESULT_PERSISTED",
 				updatedAtMs: nowMs,
-				nextAttemptAtMs: null,
-				leaseExpiresAtMs: null,
+					nextAttemptAtMs: null,
+					leaseExpiresAtMs: null,
+					failureCode: null,
+					failureMessage: null,
 			};
 			this.updateJob(resultPersisted);
 			return resultPersisted;
@@ -833,12 +862,14 @@ export class SqliteTimelineV2Repository implements TimelineV2Repository {
 					`Timeline job ${windowId} lost COMMITTING state.`,
 				);
 			}
-			const committed: TimelineJobV2 = {
+				const committed: TimelineJobV2 = {
 				...current,
 				state: "COMMITTED",
 				updatedAtMs: nowMs,
 				nextAttemptAtMs: null,
-				leaseExpiresAtMs: null,
+					leaseExpiresAtMs: null,
+					failureCode: null,
+					failureMessage: null,
 			};
 			this.updateJob(committed);
 			return committed;

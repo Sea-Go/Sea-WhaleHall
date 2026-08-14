@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,7 +8,11 @@ import {
 	type ActivityWindowSource,
 } from "../src/agent/activity-window-worker";
 import type { EventWindowV1 } from "../src/agent/reflection/types";
-import { stopActivityWindowDeliveryResources } from "../src/bun/activity-window-delivery-lifecycle";
+import {
+	ActivityWindowDeliveryLifecycle,
+	type ActivityWindowDeliveryStartAttempt,
+	stopActivityWindowDeliveryResources,
+} from "../src/bun/activity-window-delivery-lifecycle";
 import {
 	type ActivityReflectionSidecar,
 	MastraActivityReflectionAnalyzer,
@@ -24,6 +28,155 @@ afterEach(() => {
 });
 
 describe("activity window delivery shutdown", () => {
+	test("invalidates and joins an unpublished start before stop completes", async () => {
+		const gate = deferred<void>();
+		const order: string[] = [];
+		const lifecycle = testLifecycle(async (resource) => {
+			order.push(`release:${resource.id}`);
+		});
+		const start = lifecycle.start("account-a", async (attempt) => {
+			attempt.own({ id: "a" });
+			order.push("owned");
+			await gate.promise;
+			attempt.assertCurrent();
+			order.push("started");
+		});
+		await eventually(() => expect(order).toEqual(["owned"]));
+
+		let stopSettled = false;
+		const stop = lifecycle.stop().then(() => {
+			stopSettled = true;
+		});
+		await Promise.resolve();
+		expect(stopSettled).toBe(false);
+		gate.resolve();
+
+		await expect(start).rejects.toThrow("invalidated");
+		await stop;
+		expect(order).toEqual(["owned", "release:a"]);
+		expect(lifecycle.currentResources).toBeNull();
+		expect(lifecycle.isReady).toBe(false);
+	});
+
+	test("a synchronous close latch prevents a late start from becoming ready", async () => {
+		const gate = deferred<void>();
+		let releases = 0;
+		const lifecycle = testLifecycle(async () => {
+			releases += 1;
+		});
+		const start = lifecycle.start("account-a", async (attempt) => {
+			attempt.own({ id: "a" });
+			await gate.promise;
+			attempt.assertCurrent();
+		});
+		await eventually(() => expect(lifecycle.currentResources).not.toBeNull());
+
+		lifecycle.close();
+		const stop = lifecycle.stop();
+		gate.resolve();
+
+		await expect(start).rejects.toThrow("invalidated");
+		await stop;
+		expect(releases).toBe(1);
+		await expect(lifecycle.start("account-a", async () => {})).rejects.toThrow(
+			"closed",
+		);
+	});
+
+	test("deduplicates one exact start and rejects a competing owner", async () => {
+		const gate = deferred<void>();
+		let starts = 0;
+		const lifecycle = testLifecycle(async () => {});
+		const run = async (
+			attempt: ActivityWindowDeliveryStartAttempt<{ id: string }>,
+		): Promise<void> => {
+			starts += 1;
+			attempt.own({ id: "a" });
+			await gate.promise;
+		};
+		const first = lifecycle.start("account-a", run);
+		const duplicate = lifecycle.start("account-a", run);
+		await expect(lifecycle.start("account-b", async () => {})).rejects.toThrow(
+			"another session",
+		);
+		gate.resolve();
+		await Promise.all([first, duplicate]);
+		expect(starts).toBe(1);
+		expect(lifecycle.isReady).toBe(true);
+		await lifecycle.stop();
+	});
+
+	test("keeps the active attempt valid until stop invalidates its bundle", async () => {
+		const lifecycle = testLifecycle(async () => {});
+		let captured!: ActivityWindowDeliveryStartAttempt<{ id: string }>;
+		await lifecycle.start("account-a", async (attempt) => {
+			captured = attempt;
+			attempt.own({ id: "a" });
+		});
+
+		expect(captured.isCurrent()).toBe(true);
+		await lifecycle.start("account-a", async () => {
+			throw new Error("an exact ready start must stay idempotent");
+		});
+		expect(captured.isCurrent()).toBe(true);
+
+		const stop = lifecycle.stop();
+		expect(captured.isCurrent()).toBe(false);
+		await stop;
+		let replacement!: ActivityWindowDeliveryStartAttempt<{ id: string }>;
+		await lifecycle.start("account-a", async (attempt) => {
+			replacement = attempt;
+			attempt.own({ id: "replacement" });
+		});
+		expect(replacement.isCurrent()).toBe(true);
+		expect(captured.isCurrent()).toBe(false);
+		await lifecycle.stop();
+	});
+
+	test("retains a failed cleanup bundle for an exact stop retry", async () => {
+		let releaseAttempts = 0;
+		const lifecycle = testLifecycle(async () => {
+			releaseAttempts += 1;
+			if (releaseAttempts === 1) throw new Error("release failed");
+		});
+		await expect(
+			lifecycle.start("account-a", async (attempt) => {
+				attempt.own({ id: "a" });
+				throw new Error("start failed");
+			}),
+		).rejects.toThrow("start and cleanup both failed");
+		expect(lifecycle.currentResources).toEqual({ id: "a" });
+
+		await lifecycle.stop();
+		expect(releaseAttempts).toBe(2);
+		expect(lifecycle.currentResources).toBeNull();
+	});
+
+	test("production wiring closes and revalidates the exact attempt", () => {
+		const composition = readFileSync(
+			join(import.meta.dir, "../src/bun/index.ts"),
+			"utf8",
+		);
+		expect(composition).toContain("activityWindowDeliveryLifecycle.close();");
+		expect(composition).toContain(
+			"await activityWindowDeliveryLifecycle.start(key, async (attempt)",
+		);
+		expect(composition).toContain("await dispatcher.startAndRecover();");
+		expect(composition).toContain("await delivery.start();");
+		expect(
+			composition.indexOf("await dispatcher.startAndRecover();"),
+		).toBeLessThan(composition.indexOf("await delivery.start();"));
+		expect(composition.indexOf("await delivery.start();")).toBeLessThan(
+			composition.indexOf("\n\t\tdispatcher.start();"),
+		);
+		expect(
+			composition.match(/assertAttemptCurrent\(\);/g)?.length ?? 0,
+		).toBeGreaterThanOrEqual(5);
+		expect(composition).not.toContain(
+			"catch (error) {\n\t\tawait stopActivityWindowDelivery();",
+		);
+	});
+
 	test("closes the analyzer before draining each dependent resource", async () => {
 		const order: string[] = [];
 		await stopActivityWindowDeliveryResources({
@@ -49,6 +202,42 @@ describe("activity window delivery shutdown", () => {
 			},
 		});
 		expect(order).toEqual(["analyzer", "delivery", "dispatcher", "store"]);
+	});
+
+	test("reports every stop failure after attempting all owned resources", async () => {
+		const order: string[] = [];
+		const reported: string[] = [];
+		await expect(
+			stopActivityWindowDeliveryResources(
+				{
+					analyzer: {
+						close: () => {
+							order.push("analyzer");
+							throw new Error("analyzer stop failed");
+						},
+					},
+					delivery: {
+						stop: () => {
+							order.push("delivery");
+							throw new Error("delivery stop failed");
+						},
+					},
+					dispatcher: {
+						stop: () => {
+							order.push("dispatcher");
+						},
+					},
+					store: {
+						close: () => {
+							order.push("store");
+						},
+					},
+				},
+				(resource) => reported.push(resource),
+			),
+		).rejects.toThrow("did not stop every owned resource");
+		expect(order).toEqual(["analyzer", "delivery", "dispatcher", "store"]);
+		expect(reported).toEqual(["analyzer", "delivery"]);
 	});
 
 	test("aborts an in-flight analysis and preserves its durable outbox window", async () => {
@@ -127,6 +316,43 @@ describe("activity window delivery shutdown", () => {
 		}
 	});
 });
+
+function testLifecycle(
+	release: (resource: { id: string }) => Promise<void>,
+): ActivityWindowDeliveryLifecycle<string, { id: string }> {
+	return new ActivityWindowDeliveryLifecycle({
+		sameKey: (left, right) => left === right,
+		release,
+	});
+}
+
+function deferred<T>(): {
+	promise: Promise<T>;
+	resolve(value?: T): void;
+} {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((settle) => {
+		resolve = settle;
+	});
+	return {
+		promise,
+		resolve(value?: T) {
+			resolve(value as T);
+		},
+	};
+}
+
+async function eventually(assertion: () => void): Promise<void> {
+	for (let attempt = 0; attempt < 20; attempt += 1) {
+		try {
+			assertion();
+			return;
+		} catch {
+			await Promise.resolve();
+		}
+	}
+	assertion();
+}
 
 class MutableWindowSource implements ActivityWindowSource {
 	constructor(readonly windows: EventWindowV1[]) {}

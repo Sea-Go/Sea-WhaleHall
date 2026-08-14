@@ -169,6 +169,37 @@ describe("MastraSidecarClient shutdown", () => {
 		expect(harness.children).toHaveLength(1);
 	});
 
+	test("closes inbound host-call ingress and drains work accepted before the latch", async () => {
+		let releaseAccepted!: () => void;
+		const acceptedGate = new Promise<void>((resolve) => {
+			releaseAccepted = resolve;
+		});
+		const hostCalls: string[] = [];
+		const harness = createHarness(["succeed"], {}, undefined, async (call) => {
+			hostCalls.push(call.requestId);
+			if (call.requestId === "accepted-before-shutdown") await acceptedGate;
+			return {};
+		});
+		await harness.client.start();
+		harness.children[0]?.emitHostRequest("accepted-before-shutdown");
+		await waitFor(() => hostCalls.length === 1);
+		harness.children[0]?.emitHostRequest("queued-before-shutdown");
+		harness.client.beginShutdown();
+		harness.children[0]?.emitHostRequest("arrived-after-shutdown");
+
+		let stopped = false;
+		const stopping = harness.client.stop().then(() => {
+			stopped = true;
+		});
+		await Promise.resolve();
+		expect(stopped).toBeFalse();
+		expect(hostCalls).toEqual(["accepted-before-shutdown"]);
+
+		releaseAccepted();
+		await stopping;
+		expect(hostCalls).toEqual(["accepted-before-shutdown"]);
+	});
+
 	test("validates every shutdown budget when the client is constructed", () => {
 		for (const option of [
 			"shutdownProtocolTimeoutMs",
@@ -287,6 +318,33 @@ describe("MastraSidecarClient shutdown", () => {
 		harness.children[0]?.emitClose(null, "SIGKILL");
 		await expect(retry).resolves.toBeUndefined();
 	});
+
+	test("retries the exact interrupted run persistence before authorizing stop", async () => {
+		let attempts = 0;
+		const harness = createHarness(["succeed"], {}, async () => {
+			attempts += 1;
+			if (attempts <= 2) throw new Error("temporary repository failure");
+		});
+		await harness.client.start();
+		harness.client.trackRun("run-needing-interruption-proof");
+
+		await expect(harness.client.stop()).rejects.toEqual(
+			expect.objectContaining({ code: "STOP_FAILED" }),
+		);
+		expect(attempts).toBe(2);
+		expect(harness.interruptions).toEqual([
+			["run-needing-interruption-proof"],
+			["run-needing-interruption-proof"],
+		]);
+
+		await expect(harness.client.stop()).resolves.toBeUndefined();
+		expect(attempts).toBe(3);
+		expect(harness.interruptions).toEqual([
+			["run-needing-interruption-proof"],
+			["run-needing-interruption-proof"],
+			["run-needing-interruption-proof"],
+		]);
+	});
 });
 
 function createHarness(
@@ -300,6 +358,11 @@ function createHarness(
 			| "shutdownKillTimeoutMs"
 		>
 	> = {},
+	interruptionHandler: (
+		runIds: readonly string[],
+		reason: string,
+	) => void | Promise<void> = () => {},
+	hostCallHandler: MastraSidecarClientOptions["onHostCall"] = async () => ({}),
 ): {
 	client: MastraSidecarClient;
 	children: FakeSidecarChild[];
@@ -327,9 +390,12 @@ function createHarness(
 				modelId: "test-reflection-model",
 			},
 		},
-		onHostCall: async () => ({}),
+		onHostCall: hostCallHandler,
 		onRunEvent: () => {},
-		onInterrupted: (runIds) => interruptions.push([...runIds]),
+		onInterrupted: async (runIds, reason) => {
+			interruptions.push([...runIds]);
+			await interruptionHandler(runIds, reason);
+		},
 		onRestarted: () => {
 			restarts.count += 1;
 		},
@@ -388,6 +454,18 @@ class FakeSidecarChild extends EventEmitter {
 
 	emitError(error: Error): void {
 		this.emit("error", error);
+	}
+
+	emitHostRequest(requestId: string): void {
+		this.stdout.write(
+			encodeContentLengthFrame({
+				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				type: "request",
+				requestId,
+				method: "tool/call",
+				params: {},
+			} as ProtocolMessage),
+		);
 	}
 
 	private async accept(value: unknown): Promise<void> {

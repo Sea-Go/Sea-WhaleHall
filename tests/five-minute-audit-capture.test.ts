@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
 	mkdtempSync,
-	readFileSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -14,15 +14,15 @@ import {
 	AUDIT_CAPTURE_JOB_GRACE_MS,
 	AUDIT_CAPTURE_SETTLE_DELAY_MS,
 	AUDIT_CAPTURE_SETTLE_POLL_MS,
+	type AuditCaptureScheduler,
+	type AuditCaptureSettlementResult,
+	type AuditCaptureStore,
+	alignToCurrentOrNextBucket,
 	FileAuditCaptureStore,
 	FiveMinuteAuditCaptureCoordinator,
-	alignToCurrentOrNextBucket,
 	lastEffectiveAuditCursor,
-	settleEffectiveAuditAuthorities,
-	type AuditCaptureSettlementResult,
-	type AuditCaptureScheduler,
-	type AuditCaptureStore,
 	type PersistedAuditCaptureState,
+	settleEffectiveAuditAuthorities,
 } from "../src/bun/five-minute-audit-capture";
 
 class MemoryStore implements AuditCaptureStore {
@@ -216,10 +216,7 @@ describe("five-minute audit capture coordinator", () => {
 			},
 		);
 		expect(result).toEqual({ state: "pending" });
-		expect(visited).toEqual([
-			"sec2_0000000000000001",
-			"sec2_0000000000000002",
-		]);
+		expect(visited).toEqual(["sec2_0000000000000001", "sec2_0000000000000002"]);
 	});
 
 	test("start is bounded and idempotent while one capture is active", async () => {
@@ -263,16 +260,14 @@ describe("five-minute audit capture coordinator", () => {
 			capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS - 1,
 		);
 		expect(harness.settled).toHaveLength(0);
-		await harness.clock.advanceTo(
-			capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS,
-		);
+		await harness.clock.advanceTo(capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS);
 		expect(harness.settled).toEqual([
 			{ fromMs: capture.fromMs, toMs: capture.toMs },
 		]);
 		expect((await harness.coordinator.status())?.state).toBe("ready");
-		expect(
-			(await harness.coordinator.status())?.authoritativeCoverage,
-		).toBe("complete");
+		expect((await harness.coordinator.status())?.authoritativeCoverage).toBe(
+			"complete",
+		);
 
 		await harness.clock.advanceTo(capture.toMs + 60_000);
 		expect(harness.settled).toHaveLength(1);
@@ -288,9 +283,7 @@ describe("five-minute audit capture coordinator", () => {
 		expect(cancelled?.state).toBe("cancelled");
 		expect(repeated).toEqual(cancelled);
 
-		await harness.clock.advanceTo(
-			capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS,
-		);
+		await harness.clock.advanceTo(capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS);
 		expect(harness.settled).toHaveLength(0);
 	});
 
@@ -360,9 +353,7 @@ describe("five-minute audit capture coordinator", () => {
 		await coordinator.initialize();
 		const capture = await coordinator.start();
 
-		await clock.advanceTo(
-			capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS,
-		);
+		await clock.advanceTo(capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS);
 
 		const status = await coordinator.status();
 		expect(status?.state).toBe("failed");
@@ -383,9 +374,7 @@ describe("five-minute audit capture coordinator", () => {
 		await harness.coordinator.initialize();
 		const capture = await harness.coordinator.start();
 
-		await harness.clock.advanceTo(
-			capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS,
-		);
+		await harness.clock.advanceTo(capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS);
 		expect((await harness.coordinator.status())?.state).toBe("settling");
 		expect(attempts).toBe(1);
 
@@ -415,9 +404,7 @@ describe("five-minute audit capture coordinator", () => {
 		await harness.coordinator.initialize();
 		const capture = await harness.coordinator.start();
 		const deadline =
-			capture.toMs +
-			AUDIT_CAPTURE_DURATION_MS +
-			AUDIT_CAPTURE_JOB_GRACE_MS;
+			capture.toMs + AUDIT_CAPTURE_DURATION_MS + AUDIT_CAPTURE_JOB_GRACE_MS;
 
 		await harness.clock.advanceTo(deadline - 1);
 		expect((await harness.coordinator.status())?.state).toBe("settling");
@@ -442,18 +429,42 @@ describe("five-minute audit capture coordinator", () => {
 		});
 		await harness.coordinator.initialize();
 		const capture = await harness.coordinator.start();
-		await harness.clock.advanceTo(
-			capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS,
-		);
+		await harness.clock.advanceTo(capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS);
 
 		expect((await harness.coordinator.status())?.state).toBe("settling");
-		expect(
-			(await harness.coordinator.cancel(capture.captureId))?.state,
-		).toBe("cancelled");
+		expect((await harness.coordinator.cancel(capture.captureId))?.state).toBe(
+			"cancelled",
+		);
 
 		finishSettlement();
 		await drainMicrotasks();
 		expect((await harness.coordinator.status())?.state).toBe("cancelled");
+	});
+
+	test("shutdown waits for an in-flight settlement before timeline ownership ends", async () => {
+		let finishSettlement: () => void = () => {};
+		const settlement = new Promise<void>((resolve) => {
+			finishSettlement = resolve;
+		});
+		const harness = createHarness({
+			async settleRange() {
+				await settlement;
+				return { state: "ready" };
+			},
+		});
+		await harness.coordinator.initialize();
+		const capture = await harness.coordinator.start();
+		await harness.clock.advanceTo(capture.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS);
+		let drained = false;
+		const shutdown = harness.coordinator.shutdown().then(() => {
+			drained = true;
+		});
+		await Promise.resolve();
+		expect(drained).toBeFalse();
+		finishSettlement();
+		await shutdown;
+		expect(drained).toBeTrue();
+		await expect(harness.coordinator.start()).rejects.toThrow("unavailable");
 	});
 });
 
@@ -482,9 +493,7 @@ describe("file audit capture store", () => {
 			if (process.platform !== "win32") {
 				expect(metadata.mode & 0o777).toBe(0o600);
 			}
-			expect(readdirSync(directory)).toEqual([
-				"audit-capture-session.v1.json",
-			]);
+			expect(readdirSync(directory)).toEqual(["audit-capture-session.v1.json"]);
 			const text = readFileSync(path, "utf8");
 			expect(text).not.toContain("raw");
 			expect(text).not.toContain("text");
@@ -500,10 +509,10 @@ describe("file audit capture store", () => {
 		const path = join(directory, "audit-capture-session.v1.json");
 		try {
 			writeFileSync(path, '{"schemaVersion":"audit-capture-session.v1"}');
-				const coordinator = new FiveMinuteAuditCaptureCoordinator({
-					store: new FileAuditCaptureStore(path),
-					settleRange: async () => ({ state: "ready" }),
-				});
+			const coordinator = new FiveMinuteAuditCaptureCoordinator({
+				store: new FileAuditCaptureStore(path),
+				settleRange: async () => ({ state: "ready" }),
+			});
 			await coordinator.initialize();
 			await expect(coordinator.start()).rejects.toThrow("unavailable");
 		} finally {

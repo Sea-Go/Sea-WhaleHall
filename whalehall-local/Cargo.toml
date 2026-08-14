@@ -36,6 +36,12 @@ tokio-util = { version = "0.7", features = ["rt"] }
 whalehall-local-core = { path = "core" }
 whalehall-local-protocol = { path = "protocol" }
 whoami = { version = "2.1.2", default-features = false, features = ["std"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 zeroize = "1.8.2"
 
 [profile.release]

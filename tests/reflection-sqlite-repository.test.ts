@@ -67,7 +67,52 @@ describe("SqliteReflectionRepository", () => {
 			accountA,
 		]);
 		expect(await reopened.listWindowsForAccount("account-b")).toEqual([]);
+		expect(
+			await reopened.acknowledgeWindowForAccount(
+				"account-b",
+				accountA.windowId,
+			),
+		).toBe(false);
+		expect(
+			await reopened.acknowledgeWindowForAccount(
+				"account-a",
+				accountA.windowId,
+			),
+		).toBe(true);
+		expect(
+			await reopened.acknowledgeWindowForAccount(
+				"account-a",
+				accountA.windowId,
+			),
+		).toBe(true);
+		expect(await reopened.listWindowsForAccount("account-a")).toEqual([]);
 		reopened.close();
+	});
+
+	test("clears only the requested account cloud handoffs", async () => {
+		const { repository } = createRepository();
+		await repository.saveCollector(collectorSnapshot(0, null), null);
+		const accountA = eventWindow("window-account-a", "cursor-a", 1_100);
+		await repository.sealWindow(
+			accountA,
+			collectorSnapshot(1, "cursor-a"),
+			0,
+			"account-a",
+		);
+		const accountB = eventWindow("window-account-b", "cursor-b", 1_200);
+		await repository.sealWindow(
+			accountB,
+			collectorSnapshot(2, "cursor-b"),
+			1,
+			"account-b",
+		);
+
+		expect(await repository.clearWindowsForAccount("account-a")).toBe(1);
+		expect(await repository.listWindowsForAccount("account-a")).toEqual([]);
+		expect(await repository.listWindowsForAccount("account-b")).toEqual([
+			accountB,
+		]);
+		repository.close();
 	});
 
 	test("journals one reflection per deterministic window and resumes commit", async () => {
@@ -126,6 +171,54 @@ describe("SqliteReflectionRepository", () => {
 		expect(await repository.claimNextRunnable(1_199, 100)).toBeNull();
 		const reclaimed = await repository.claimNextRunnable(1_200, 100);
 		expect(reclaimed).toMatchObject({ state: "RUNNING", attempt: 2 });
+		repository.close();
+	});
+
+	test("abandons a claim without consuming its attempt or failure budget", async () => {
+		const { repository } = createRepository();
+		await repository.saveCollector(collectorSnapshot(0, null), null);
+		const window = eventWindow();
+		await repository.sealWindow(
+			window,
+			collectorSnapshot(1, "cursor-1"),
+			0,
+			null,
+		);
+		expect(await repository.claimNextRunnable(1_100, 30_000)).toMatchObject({
+			state: "RUNNING",
+			attempt: 1,
+			firstAttemptAtMs: 1_100,
+		});
+
+		expect(await repository.abandonClaim(window.windowId, 1_101)).toMatchObject(
+			{
+				state: "READY",
+				attempt: 0,
+				firstAttemptAtMs: null,
+				lastFailure: null,
+				leaseExpiresAtMs: null,
+			},
+		);
+		expect(await repository.claimNextRunnable(1_101, 30_000)).toMatchObject({
+			state: "RUNNING",
+			attempt: 1,
+			firstAttemptAtMs: 1_101,
+		});
+		const reflection = reflectionFor(window);
+		await repository.persistResult(window.windowId, reflection, 1_102);
+		await repository.beginCommit(window.windowId, 1_103, 30_000);
+		expect(await repository.abandonClaim(window.windowId, 1_104)).toMatchObject({
+			state: "RESULT_PERSISTED",
+			attempt: 0,
+			firstAttemptAtMs: null,
+			reflection,
+			leaseExpiresAtMs: null,
+		});
+		expect(await repository.claimNextRunnable(1_104, 30_000)).toMatchObject({
+			state: "COMMITTING",
+			attempt: 1,
+			reflection,
+		});
 		repository.close();
 	});
 

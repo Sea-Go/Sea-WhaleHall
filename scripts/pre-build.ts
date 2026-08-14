@@ -1,5 +1,6 @@
-import { buildNative } from "./build-native";
 import { buildAgentHost } from "./build-agent-host";
+import { buildNative } from "./build-native";
+import { ensureElectrobunSignalForwarding } from "./electrobun-signal-forwarding";
 import { stageViewAssets } from "./stage-view-assets";
 
 function run(command: string[]): void {
@@ -9,10 +10,14 @@ function run(command: string[]): void {
 		stderr: "inherit",
 	});
 	if (result.exitCode !== 0) {
-		throw new Error(`Command failed (${result.exitCode}): ${command.join(" ")}`);
+		throw new Error(
+			`Command failed (${result.exitCode}): ${command.join(" ")}`,
+		);
 	}
 }
 
+console.log("[prebuild] verifying Electrobun lifecycle signal forwarding");
+ensureElectrobunSignalForwarding();
 console.log("[prebuild] building React views");
 run(["bun", "x", "vite", "build"]);
 stageViewAssets();

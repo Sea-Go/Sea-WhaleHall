@@ -1,4 +1,10 @@
 mod observer;
+#[cfg(windows)]
+mod windows_process_tree;
+
+#[cfg(windows)]
+#[doc(hidden)]
+pub use windows_process_tree::install_current_process_tree_job;
 
 use std::io;
 use std::sync::Arc;

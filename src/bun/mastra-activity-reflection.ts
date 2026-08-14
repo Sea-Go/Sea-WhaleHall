@@ -10,6 +10,7 @@ import {
 	createActivityReflectionPrompt,
 } from "../agent/activity-reflection-prompt";
 import type { AgentHostMethod } from "../agent/mastra-host/protocol";
+import { MastraSidecarError } from "./mastra-sidecar-client";
 
 /** The model timeout plus bounded private-stdio and workflow overhead. */
 export const DEFAULT_MASTRA_ACTIVITY_REFLECTION_TIMEOUT_MS = 210_000;
@@ -74,21 +75,32 @@ export class MastraActivityReflectionAnalyzer implements ActivityEventAnalyzer {
 		});
 		const timeout = setTimeout(abort, this.timeoutMs);
 		try {
-			const modelOutput = await this.options.sidecar.request<unknown>(
-				"reflection.analyze",
-				{
-					invocationId,
-					requestId: prompt.requestId,
-					userPrompt: prompt.userPrompt,
-					signalSegmentIds: prompt.signalSegmentIds,
-					candidateActivities: prompt.candidateActivities,
-				},
-				{
-					requestId: `reflection:${request.request_id}`,
-					timeoutMs: this.timeoutMs,
-					signal: controller.signal,
-				},
-			);
+			let modelOutput: unknown;
+			try {
+				modelOutput = await this.options.sidecar.request<unknown>(
+					"reflection.analyze",
+					{
+						invocationId,
+						requestId: prompt.requestId,
+						userPrompt: prompt.userPrompt,
+						signalSegmentIds: prompt.signalSegmentIds,
+						candidateActivities: prompt.candidateActivities,
+					},
+					{
+						requestId: `reflection:${request.request_id}`,
+						timeoutMs: this.timeoutMs,
+						signal: controller.signal,
+					},
+				);
+			} catch (error) {
+				if (
+					error instanceof MastraSidecarError &&
+					error.code === "ACTIVITY_OUTPUT_INVALID"
+				) {
+					throw new ActivityEventWorkerClientError("invalid_response", true);
+				}
+				throw error;
+			}
 			if (controller.signal.aborted) {
 				throw new ActivityEventWorkerClientError("request_timeout", true);
 			}

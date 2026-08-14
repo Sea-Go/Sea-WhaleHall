@@ -69,6 +69,7 @@ export class TimelineV2Collector {
 	private state: TimelineCollectorState = "RECOVERING";
 	private timer: ReflectionTimerHandle | null = null;
 	private deadlinesDeferred = false;
+	private disposed = false;
 	private operationTail: Promise<void> = Promise.resolve();
 
 	constructor(options: TimelineCollectorOptions) {
@@ -214,6 +215,7 @@ export class TimelineV2Collector {
 	}
 
 	dispose(): void {
+		this.disposed = true;
 		this.cancelTimer();
 		this.deadlinesDeferred = false;
 	}
@@ -524,6 +526,7 @@ export class TimelineV2Collector {
 
 	private armDeadline(deadlineAtMs: number): void {
 		this.cancelTimer();
+		if (this.disposed) return;
 		this.timer = this.clock.setTimer(() => {
 			this.timer = null;
 			if (this.onDeadlineReady) {

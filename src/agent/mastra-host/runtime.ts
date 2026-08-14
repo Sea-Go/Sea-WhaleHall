@@ -10,6 +10,7 @@ import {
 } from "../../shared/activity-analysis-contract";
 import {
 	activityReflectionModelOutputSchema,
+	createActivityReflectionProviderOutputSchema,
 	createActivityReflectionRuntimeOutputSchema,
 	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
 } from "../activity-reflection-prompt";
@@ -482,8 +483,25 @@ export class AgentHostRuntime {
 			throw error;
 		}
 		if (result.status === "success") {
-			return activityReflectionWorkflowOutcomeSchema.parse(result.result)
-				.modelOutput;
+			const outcome = activityReflectionWorkflowOutcomeSchema.parse(
+				result.result,
+			);
+			if (outcome.kind === "invalid-output") {
+				throw runtimeError(
+					"ACTIVITY_OUTPUT_INVALID",
+					"Activity reflection output failed its semantic contract.",
+				);
+			}
+			return outcome.modelOutput;
+		}
+		if (
+			result.status === "failed" &&
+			isActivityReflectionInvalidOutput(result.error)
+		) {
+			throw runtimeError(
+				"ACTIVITY_OUTPUT_INVALID",
+				"Activity reflection output failed its semantic contract.",
+			);
 		}
 		if (result.status === "failed") throw asError(result.error);
 		throw runtimeError(
@@ -828,12 +846,18 @@ export class AgentHostRuntime {
 					originatingRequestId: record.snapshot.requestId,
 				},
 				async () => {
-					const stream = await agents.activity.stream(
-						activityAnalysisPrompt(activity),
+					const stream = await agents.conversation.stream(
+						activityConversationPrompt(activity),
 						{
 							runId: record.snapshot.runId,
 							abortSignal: record.controller.signal,
 							requestContext: this.createRequestContext(record),
+							// Proactive feedback uses the same assistant identity and
+							// instructions as an interactive conversation, but it must not
+							// read/write chat memory or execute tools in the background.
+							activeTools: [],
+							toolChoice: "none",
+							maxSteps: 1,
 						},
 					);
 					let text = "";
@@ -843,7 +867,7 @@ export class AgentHostRuntime {
 							text += chunk.payload.text;
 							if (text.length > maxConversationCharacters) {
 								throw runtimeError(
-									"INVALID_REQUEST",
+									"ACTIVITY_OUTPUT_INVALID",
 									"Activity analysis response is too large.",
 								);
 							}
@@ -855,7 +879,7 @@ export class AgentHostRuntime {
 							chunk.type === "tool-result"
 						) {
 							throw runtimeError(
-								"INTERNAL_ERROR",
+								"ACTIVITY_OUTPUT_INVALID",
 								"Activity analysis Agent attempted to use a forbidden Tool.",
 							);
 						}
@@ -864,7 +888,7 @@ export class AgentHostRuntime {
 					const finishReason = await stream.finishReason;
 					if (finishReason === "suspended" || stream.status === "suspended") {
 						throw runtimeError(
-							"INTERNAL_ERROR",
+							"ACTIVITY_OUTPUT_INVALID",
 							"Activity analysis Agent suspended unexpectedly.",
 						);
 					}
@@ -872,7 +896,7 @@ export class AgentHostRuntime {
 					if (!text && finalText) text = finalText;
 					if (!text.trim()) {
 						throw runtimeError(
-							"INTERNAL_ERROR",
+							"ACTIVITY_OUTPUT_INVALID",
 							"Activity analysis Agent returned an empty summary.",
 						);
 					}
@@ -1126,6 +1150,11 @@ export class AgentHostRuntime {
 		return relay.runInContext(
 			{ runId: invocationId, originatingRequestId: requestId },
 			async () => {
+				const providerOutputSchema =
+					createActivityReflectionProviderOutputSchema(
+						signalSegmentIds,
+						candidateActivities,
+					);
 				const runtimeOutputSchema = createActivityReflectionRuntimeOutputSchema(
 					signalSegmentIds,
 					candidateActivities,
@@ -1148,16 +1177,24 @@ export class AgentHostRuntime {
 					modelSettings: { temperature: 0 },
 					context: [nativeSkillContext],
 					structuredOutput: {
-						schema: runtimeOutputSchema,
+						schema: providerOutputSchema,
 						errorStrategy: "strict",
 						// This one-step call has no Tools, so native structured output
 						// can constrain CPU Ollama without the former tool/schema conflict.
 						jsonPromptInjection: false,
 					},
 				});
-				return activityReflectionModelOutputSchema.parse(
-					runtimeOutputSchema.parse(result.object),
+				const runtimeOutput = runtimeOutputSchema.safeParse(result.object);
+				if (!runtimeOutput.success) {
+					return { kind: "invalid-output" as const };
+				}
+				const modelOutput = activityReflectionModelOutputSchema.safeParse(
+					runtimeOutput.data,
 				);
+				if (!modelOutput.success) {
+					return { kind: "invalid-output" as const };
+				}
+				return { kind: "completed" as const, modelOutput: modelOutput.data };
 			},
 		);
 	}
@@ -1432,7 +1469,6 @@ export class AgentHostRuntime {
 		record.controller.abort(reason ?? "Run cancelled");
 		this.agents?.conversation.abortRunStream(record.snapshot.runId);
 		this.agents?.planning.abortRunStream(record.snapshot.runId);
-		this.agents?.activity.abortRunStream(record.snapshot.runId);
 		record.snapshot.status = "cancelled";
 		record.snapshot.terminalState = "cancelled";
 		record.toolProposals.clear();
@@ -1749,7 +1785,9 @@ function answersMatchTail(
 	});
 }
 
-function activityAnalysisPrompt(context: ActivityAnalysisRunContext): string {
+function activityConversationPrompt(
+	context: ActivityAnalysisRunContext,
+): string {
 	const serializedAnalyses = JSON.stringify(context.analyses);
 	if (serializedAnalyses.length > MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS) {
 		throw runtimeError(
@@ -1758,12 +1796,15 @@ function activityAnalysisPrompt(context: ActivityAnalysisRunContext): string {
 		);
 	}
 	return [
+		"这是由 WhaleHall 主动发起的一次桌宠反馈，不是用户发送的普通聊天消息。",
 		"以下是已经由活动 Worker 整理过的事件和分数，不是原始活动窗口。",
-		"只能根据这些 Worker 结果生成后台反思摘要；不得要求或猜测原始桌面内容，不得调用任何工具。",
+		"请以 WhaleHall 对话助手一致的人格向用户表达，但只能根据这些 Worker 结果生成反馈。",
+		"不得要求、猜测或复述原始桌面内容，不得调用任何工具，也不得声称已经执行了操作。",
 		`可消费总分：${context.consumedScore}`,
 		"Worker 结果：",
 		serializedAnalyses,
 		"请用简洁中文输出：事件主题、分数含义、以及一个谨慎的下一步建议。",
+		"允许使用简单 Markdown 的加粗、斜体和列表；不要输出 HTML、链接、图片或代码围栏。",
 	].join("\n");
 }
 
@@ -2030,4 +2071,13 @@ function asError(error: unknown): Error {
 		return new Error(error.diagnostic.replace(/[\r\n]+/g, " ").slice(0, 1_000));
 	}
 	return new Error("Agent runtime operation failed.");
+}
+
+function isActivityReflectionInvalidOutput(error: unknown): boolean {
+	return (
+		isRecord(error) &&
+		error.name === "AgentHostRuntimeError" &&
+		isRecord(error.payload) &&
+		error.payload.code === "ACTIVITY_OUTPUT_INVALID"
+	);
 }

@@ -3,12 +3,30 @@ import { createHash, webcrypto } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import {
+	type ActivityAnalysisWorkerResult,
+	isActivityAnalysisWorkerResult,
+} from "../shared/activity-analysis-contract";
+import {
 	AGENT_READ_PERMISSION_IDS,
 	type AgentReadPermissionsSnapshot,
 } from "../shared/agent-permissions";
 import type { AgentRunStatus as SharedAgentRunStatus } from "../shared/agent-runs";
 import type { CalendarEvent } from "../shared/calendar";
 import type { PlanningAuthoritySnapshot } from "../shared/planning-authority";
+import {
+	type ClearProactiveFeedbackResult,
+	DEFAULT_PROACTIVE_FEEDBACK_POLICY,
+	isListProactiveFeedbackRequest,
+	isProactiveFeedbackItem,
+	isProactiveFeedbackPolicy,
+	type ListProactiveFeedbackRequest,
+	PROACTIVE_FEEDBACK_HISTORY_DEFAULT_LIMIT,
+	PROACTIVE_FEEDBACK_HISTORY_MAX_LIMIT,
+	type ProactiveFeedbackItem,
+	type ProactiveFeedbackPage,
+	type ProactiveFeedbackPolicy,
+	type ProactiveFeedbackPolicySnapshot,
+} from "../shared/proactive-feedback";
 import type {
 	AgentPermission,
 	PendingToolApproval,
@@ -24,7 +42,7 @@ import {
 	planningDraftDigest,
 } from "./planning-authority-digest";
 
-const DATABASE_SCHEMA_VERSION = 3;
+const DATABASE_SCHEMA_VERSION = 7;
 // Database schema version 2 was never published or used by a released build,
 // so no schema-2 ciphertext exists to migrate. Existing ciphertext remains
 // bound to schema=1; table evolution must not make account records undecryptable.
@@ -36,6 +54,7 @@ const MAX_LIST_LIMIT = 1_000;
 const MAX_DATA_CENTER_BATCH_BODY_BYTES = 15 * 1024 * 1024;
 const DATA_CENTER_CONSUMER_AUDIT_RETENTION_MS = 31 * 24 * 60 * 60 * 1_000;
 const MAX_DATA_CENTER_CONSUMER_AUDITS_PER_ACCOUNT = 1_000;
+const ORPHANED_ACTIVITY_RUN_GRACE_MS = 24 * 60 * 60 * 1_000;
 
 export interface AgentConversationRecord {
 	accountId: string;
@@ -115,6 +134,44 @@ export interface AgentRunRecord {
 	createdAtMs: number;
 	updatedAtMs: number;
 	completedAtMs: number | null;
+}
+
+export interface ProactiveFeedbackEventStreamArchive {
+	accountId: string;
+	id: string;
+	sourceWindowId: string;
+	windowStartedAtMs: number;
+	windowEndedAtMs: number;
+	analysis: ActivityAnalysisWorkerResult;
+	archivedAtMs: number;
+	consumedAtMs: number | null;
+	consumedRunId: string | null;
+}
+
+export interface CompleteProactiveFeedbackRunInput {
+	run: AgentRunRecord;
+	sourceStreamIds: readonly string[];
+	feedback: ProactiveFeedbackItem;
+}
+
+export interface CompletedProactiveFeedbackRunExpectation {
+	accountId: string;
+	runId: string;
+	jobId: string;
+	originatingRequestId: string;
+	consumedScore: number;
+	analyses: readonly ActivityAnalysisWorkerResult[];
+}
+
+export interface ProactiveFeedbackCleanupResult {
+	deletedEventStreamCount: number;
+	deletedHistoryCount: number;
+}
+
+export interface ClearPendingProactiveFeedbackResult {
+	clearedAtMs: number;
+	deletedEventStreamCount: number;
+	deletedRunCount: number;
 }
 
 export interface AgentCalendarEventRecord {
@@ -268,6 +325,25 @@ export class PlanningAuthorityRevisionConflictError extends Error {
 	}
 }
 
+export class ProactiveFeedbackPolicyRevisionConflictError extends Error {
+	constructor(
+		public readonly expectedRevision: number,
+		public readonly actualRevision: number,
+	) {
+		super(
+			`Proactive feedback policy changed concurrently (expected ${expectedRevision}, actual ${actualRevision}).`,
+		);
+		this.name = "ProactiveFeedbackPolicyRevisionConflictError";
+	}
+}
+
+export class ProactiveFeedbackPolicyDisabledError extends Error {
+	constructor() {
+		super("Proactive feedback is disabled for this account.");
+		this.name = "ProactiveFeedbackPolicyDisabledError";
+	}
+}
+
 type AccountRow = {
 	key_id: string;
 	key_version: number;
@@ -366,6 +442,36 @@ type RunRow = {
 	created_at_ms: number;
 	updated_at_ms: number;
 	completed_at_ms: number | null;
+};
+
+type ProactiveFeedbackPolicyRow = CipherRow & {
+	revision: number;
+	enabled: number;
+	retention: string;
+	updated_at_ms: number;
+};
+
+type ProactiveFeedbackEventStreamRow = CipherRow & {
+	stream_id: string;
+	source_window_id: string;
+	window_started_at_ms: number;
+	window_ended_at_ms: number;
+	archived_at_ms: number;
+	consumed_at_ms: number | null;
+	consumed_run_id: string | null;
+};
+
+type ProactiveFeedbackHistoryRow = CipherRow & {
+	feedback_id: string;
+	run_id: string;
+	generated_at_ms: number;
+};
+
+type PreparedRun = {
+	record: AgentRunRecord;
+	input: PreparedCipher;
+	output: PreparedCipher | null;
+	error: PreparedCipher | null;
 };
 
 type CalendarEventRow = CipherRow & {
@@ -1608,6 +1714,25 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	}
 
 	async putRun(record: AgentRunRecord): Promise<AgentRunRecord> {
+		const prepared = await this.prepareRun(record);
+		if (isActivityAnalysisRecord(record)) {
+			const clearEpoch = activityAnalysisClearEpoch(record);
+			const persist = this.database.transaction(() => {
+				this.assertProactiveFeedbackEpochAccepting(
+					record.accountId,
+					clearEpoch,
+					true,
+				);
+				this.upsertPreparedRun(prepared);
+			});
+			persist.immediate();
+		} else {
+			this.upsertPreparedRun(prepared);
+		}
+		return structuredClone(record);
+	}
+
+	private async prepareRun(record: AgentRunRecord): Promise<PreparedRun> {
 		validateRun(record);
 		const [input, output, error] = await Promise.all([
 			this.encryptJson(
@@ -1636,6 +1761,11 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 						record.error,
 					),
 		]);
+		return { record: structuredClone(record), input, output, error };
+	}
+
+	private upsertPreparedRun(prepared: PreparedRun): void {
+		const { record, input, output, error } = prepared;
 		this.database
 			.query(
 				`INSERT INTO agent_runs
@@ -1687,7 +1817,6 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				record.updatedAtMs,
 				record.completedAtMs,
 			);
-		return structuredClone(record);
 	}
 
 	async getRun(
@@ -1712,6 +1841,1014 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			)
 			.all(accountId, limit) as RunRow[];
 		return Promise.all(rows.map((row) => this.runFromRow(accountId, row)));
+	}
+
+	async getProactiveFeedbackPolicy(
+		accountId: string,
+	): Promise<ProactiveFeedbackPolicySnapshot> {
+		validateIdentifier(accountId, "accountId");
+		await this.accountContext(accountId);
+		const row = this.database
+			.query(
+				`SELECT revision, enabled, retention, key_version, cipher_version,
+				        policy_nonce AS nonce, policy_ciphertext AS ciphertext,
+				        updated_at_ms
+				 FROM proactive_feedback_policy WHERE account_id = ?`,
+			)
+			.get(accountId) as ProactiveFeedbackPolicyRow | null;
+		if (!row) {
+			return {
+				policy: { ...DEFAULT_PROACTIVE_FEEDBACK_POLICY },
+				revision: 0,
+				updatedAtMs: null,
+			};
+		}
+		const policy = await this.decryptJson(
+			accountId,
+			"proactive_feedback_policy",
+			accountId,
+			"policy",
+			row,
+		);
+		if (
+			!isProactiveFeedbackPolicy(policy) ||
+			policy.enabled !== (row.enabled === 1) ||
+			String(policy.retention) !== row.retention
+		) {
+			throw decryptionFailure();
+		}
+		return {
+			policy: structuredClone(policy),
+			revision: row.revision,
+			updatedAtMs: row.updated_at_ms,
+		};
+	}
+
+	async setProactiveFeedbackPolicy(
+		accountId: string,
+		policy: ProactiveFeedbackPolicy,
+		expectedRevision: number,
+	): Promise<ProactiveFeedbackPolicySnapshot> {
+		validateIdentifier(accountId, "accountId");
+		if (!isProactiveFeedbackPolicy(policy)) {
+			throw invalidArgument("Proactive feedback policy is invalid.");
+		}
+		validateRevision(expectedRevision);
+		const updatedAtMs = this.now();
+		validateTimestamp(updatedAtMs, "updatedAtMs");
+		const encrypted = await this.encryptJson(
+			accountId,
+			"proactive_feedback_policy",
+			accountId,
+			"policy",
+			policy,
+		);
+		const update = this.database.transaction(() => {
+			const current = this.database
+				.query(
+					"SELECT revision FROM proactive_feedback_policy WHERE account_id = ?",
+				)
+				.get(accountId) as { revision: number } | null;
+			const actualRevision = current?.revision ?? 0;
+			if (actualRevision !== expectedRevision) {
+				throw new ProactiveFeedbackPolicyRevisionConflictError(
+					expectedRevision,
+					actualRevision,
+				);
+			}
+			const revision = actualRevision + 1;
+			this.database
+				.query(
+					`INSERT INTO proactive_feedback_policy
+					 (account_id, revision, enabled, retention, key_version,
+					  cipher_version, policy_nonce, policy_ciphertext, updated_at_ms)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(account_id) DO UPDATE SET
+					  revision = excluded.revision,
+					  enabled = excluded.enabled,
+					  retention = excluded.retention,
+					  key_version = excluded.key_version,
+					  cipher_version = excluded.cipher_version,
+					  policy_nonce = excluded.policy_nonce,
+					  policy_ciphertext = excluded.policy_ciphertext,
+					  updated_at_ms = excluded.updated_at_ms`,
+				)
+				.run(
+					accountId,
+					revision,
+					policy.enabled ? 1 : 0,
+					String(policy.retention),
+					encrypted.keyVersion,
+					encrypted.cipherVersion,
+					encrypted.nonce,
+					encrypted.ciphertext,
+					updatedAtMs,
+				);
+			return revision;
+		});
+		const revision = update.immediate();
+		return {
+			policy: structuredClone(policy),
+			revision,
+			updatedAtMs,
+		};
+	}
+
+	async beginProactiveFeedbackClear(accountId: string): Promise<void> {
+		validateIdentifier(accountId, "accountId");
+		this.requireOpen();
+		if (this.accountRow(accountId) === null) {
+			await this.accountContext(accountId);
+		}
+		const requestedAtMs = this.now();
+		validateTimestamp(requestedAtMs, "requestedAtMs");
+		const begin = this.database.transaction(() => {
+			if (this.proactiveFeedbackClearPending(accountId)) return;
+			const promotesPendingReset =
+				this.proactiveFeedbackPendingReset(accountId);
+			if (!promotesPendingReset) {
+				this.advanceProactiveFeedbackClearEpoch(accountId);
+			}
+			this.database
+				.query(
+					`INSERT INTO proactive_feedback_clear_journal
+					 (account_id, requested_at_ms) VALUES (?, ?)`,
+				)
+				.run(accountId, requestedAtMs);
+			if (promotesPendingReset) {
+				this.database
+					.query(
+						"DELETE FROM proactive_feedback_pending_reset_journal WHERE account_id = ?",
+					)
+					.run(accountId);
+			}
+		});
+		begin.immediate();
+	}
+
+	async beginProactiveFeedbackPendingReset(accountId: string): Promise<void> {
+		validateIdentifier(accountId, "accountId");
+		this.requireOpen();
+		// Existing accounts can establish the reset journal without opening their
+		// encryption key. This lets a capability-loss activation fail closed even
+		// while Keychain is temporarily unavailable. A genuinely new account still
+		// needs its normal account/key bootstrap before the FK-backed marker exists.
+		if (this.accountRow(accountId) === null) {
+			await this.accountContext(accountId);
+		}
+		const requestedAtMs = this.now();
+		validateTimestamp(requestedAtMs, "requestedAtMs");
+		const begin = this.database.transaction(() => {
+			if (this.proactiveFeedbackPendingReset(accountId)) return;
+			if (this.proactiveFeedbackClearPending(accountId)) {
+				throw new ProactiveFeedbackPolicyDisabledError();
+			}
+			this.advanceProactiveFeedbackClearEpoch(accountId);
+			this.database
+				.query(
+					`INSERT INTO proactive_feedback_pending_reset_journal
+					 (account_id, requested_at_ms) VALUES (?, ?)`,
+				)
+				.run(accountId, requestedAtMs);
+		});
+		begin.immediate();
+	}
+
+	async isProactiveFeedbackClearPending(accountId: string): Promise<boolean> {
+		validateIdentifier(accountId, "accountId");
+		this.requireOpen();
+		return (
+			this.database
+				.query(
+					"SELECT 1 AS pending FROM proactive_feedback_clear_journal WHERE account_id = ?",
+				)
+				.get(accountId) !== null
+		);
+	}
+
+	async isProactiveFeedbackPendingReset(accountId: string): Promise<boolean> {
+		validateIdentifier(accountId, "accountId");
+		this.requireOpen();
+		return this.proactiveFeedbackPendingReset(accountId);
+	}
+
+	async completeProactiveFeedbackClear(accountId: string): Promise<void> {
+		validateIdentifier(accountId, "accountId");
+		this.requireOpen();
+		this.database
+			.query(
+				"DELETE FROM proactive_feedback_clear_journal WHERE account_id = ?",
+			)
+			.run(accountId);
+	}
+
+	async completeProactiveFeedbackPendingReset(
+		accountId: string,
+	): Promise<void> {
+		validateIdentifier(accountId, "accountId");
+		this.requireOpen();
+		this.database
+			.query(
+				"DELETE FROM proactive_feedback_pending_reset_journal WHERE account_id = ?",
+			)
+			.run(accountId);
+	}
+
+	/**
+	 * Synchronous dispatch barrier for the final no-await handoff to the activity
+	 * sidecar. The clear journal and policy row share the same SQLite authority,
+	 * so either the dispatch or a concurrent clear/disable wins one local turn;
+	 * there is no asynchronous check-to-request gap.
+	 */
+	assertProactiveFeedbackAcceptingWork(
+		accountId: string,
+		expectedClearEpoch?: number,
+	): number {
+		validateIdentifier(accountId, "accountId");
+		this.requireOpen();
+		if (
+			expectedClearEpoch !== undefined &&
+			(!Number.isSafeInteger(expectedClearEpoch) || expectedClearEpoch < 0)
+		) {
+			throw invalidArgument("Proactive feedback clear epoch is invalid.");
+		}
+		const clearEpoch = this.proactiveFeedbackClearEpoch(accountId);
+		this.assertProactiveFeedbackEpochAccepting(
+			accountId,
+			expectedClearEpoch ?? clearEpoch,
+			true,
+		);
+		return clearEpoch;
+	}
+
+	/**
+	 * Persists the normalized first-stage result before the plaintext Worker
+	 * ledger is allowed to acknowledge the source window.
+	 */
+	async archiveProactiveFeedbackEventStream(
+		record: ProactiveFeedbackEventStreamArchive,
+	): Promise<ProactiveFeedbackEventStreamArchive> {
+		validateProactiveFeedbackEventStream(record);
+		const clearEpoch = this.proactiveFeedbackClearEpoch(record.accountId);
+		this.assertProactiveFeedbackEpochAccepting(
+			record.accountId,
+			clearEpoch,
+			false,
+		);
+		if (record.consumedAtMs !== null || record.consumedRunId !== null) {
+			throw invalidArgument(
+				"A new proactive feedback archive must be pending.",
+			);
+		}
+		const existing = await this.getProactiveFeedbackEventStream(
+			record.accountId,
+			record.id,
+		);
+		if (existing) {
+			if (!sameProactiveFeedbackArchive(existing, record)) {
+				throw invalidArgument("Proactive feedback stream id collision.");
+			}
+			// A replay may prove an old archive identity, but it must not report
+			// acceptance while a user-requested destructive clear is in progress.
+			// Keep ordinary policy-disable recovery behavior unchanged; only the
+			// durable clear journal is an erasure barrier for existing rows.
+			this.assertProactiveFeedbackEpochAccepting(
+				record.accountId,
+				clearEpoch,
+				false,
+			);
+			return existing;
+		}
+		const archive = await this.encryptJson(
+			record.accountId,
+			"proactive_feedback_event_streams",
+			record.id,
+			"archive",
+			proactiveFeedbackArchivePayload(record),
+		);
+		const insert = this.database.transaction(() => {
+			this.assertProactiveFeedbackEpochAccepting(
+				record.accountId,
+				clearEpoch,
+				true,
+			);
+			const result = this.database
+				.query(
+					`INSERT OR IGNORE INTO proactive_feedback_event_streams
+					 (account_id, stream_id, source_window_id, window_started_at_ms,
+					  window_ended_at_ms, key_version, cipher_version, archive_nonce,
+					  archive_ciphertext, archived_at_ms, consumed_at_ms, consumed_run_id)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+				)
+				.run(
+					record.accountId,
+					record.id,
+					record.sourceWindowId,
+					record.windowStartedAtMs,
+					record.windowEndedAtMs,
+					archive.keyVersion,
+					archive.cipherVersion,
+					archive.nonce,
+					archive.ciphertext,
+					record.archivedAtMs,
+				);
+			if (result.changes !== 1) {
+				throw invalidArgument("Proactive feedback stream id collision.");
+			}
+		});
+		insert.immediate();
+		return structuredClone(record);
+	}
+
+	async getProactiveFeedbackEventStream(
+		accountId: string,
+		streamId: string,
+	): Promise<ProactiveFeedbackEventStreamArchive | null> {
+		validateIdentifier(accountId, "accountId");
+		validateIdentifier(streamId, "streamId");
+		const row = this.database
+			.query(
+				`SELECT stream_id, source_window_id, window_started_at_ms,
+				        window_ended_at_ms, key_version, cipher_version,
+				        archive_nonce AS nonce, archive_ciphertext AS ciphertext,
+				        archived_at_ms, consumed_at_ms, consumed_run_id
+				 FROM proactive_feedback_event_streams
+				 WHERE account_id = ? AND stream_id = ?`,
+			)
+			.get(accountId, streamId) as ProactiveFeedbackEventStreamRow | null;
+		if (!row) return null;
+		const payload = await this.decryptJson(
+			accountId,
+			"proactive_feedback_event_streams",
+			streamId,
+			"archive",
+			row,
+		);
+		const record: ProactiveFeedbackEventStreamArchive = {
+			accountId,
+			id: row.stream_id,
+			sourceWindowId: row.source_window_id,
+			windowStartedAtMs: row.window_started_at_ms,
+			windowEndedAtMs: row.window_ended_at_ms,
+			analysis: isRecord(payload)
+				? (payload.analysis as ActivityAnalysisWorkerResult)
+				: (null as never),
+			archivedAtMs: row.archived_at_ms,
+			consumedAtMs: row.consumed_at_ms,
+			consumedRunId: row.consumed_run_id,
+		};
+		if (
+			!isRecord(payload) ||
+			payload.sourceWindowId !== row.source_window_id ||
+			payload.windowStartedAtMs !== row.window_started_at_ms ||
+			payload.windowEndedAtMs !== row.window_ended_at_ms ||
+			!isActivityAnalysisWorkerResult(payload.analysis) ||
+			payload.analysis.request_id !== streamId
+		) {
+			throw decryptionFailure();
+		}
+		validateProactiveFeedbackEventStream(record);
+		return record;
+	}
+
+	/** Atomically publishes a completed run, history projection, and source consumption. */
+	async completeProactiveFeedbackRun(
+		input: CompleteProactiveFeedbackRunInput,
+	): Promise<ProactiveFeedbackItem> {
+		validateCompleteProactiveFeedbackRun(input);
+		const clearEpoch = activityAnalysisClearEpoch(input.run);
+		const sourceStreamIds = [...new Set(input.sourceStreamIds)];
+		const inputAnalyses = new Map(
+			(
+				input.run.input as { analyses: ActivityAnalysisWorkerResult[] }
+			).analyses.map((analysis) => [analysis.request_id, analysis] as const),
+		);
+		const sourceArchives = await Promise.all(
+			sourceStreamIds.map((streamId) =>
+				this.getProactiveFeedbackEventStream(input.run.accountId, streamId),
+			),
+		);
+		for (let index = 0; index < sourceStreamIds.length; index += 1) {
+			const streamId = sourceStreamIds[index]!;
+			const archive = sourceArchives[index];
+			const analysis = inputAnalyses.get(streamId);
+			if (
+				!archive ||
+				!analysis ||
+				JSON.stringify(archive.analysis) !== JSON.stringify(analysis) ||
+				(archive.consumedRunId !== null &&
+					archive.consumedRunId !== input.run.id)
+			) {
+				throw invalidArgument(
+					"Proactive feedback completion archive identity is invalid.",
+				);
+			}
+		}
+		const priorHistory = this.database
+			.query(
+				`SELECT feedback_id, run_id, key_version, cipher_version,
+				        message_nonce AS nonce, message_ciphertext AS ciphertext,
+				        generated_at_ms
+				 FROM proactive_feedback_history
+				 WHERE account_id = ? AND (feedback_id = ? OR run_id = ?)`,
+			)
+			.get(
+				input.run.accountId,
+				input.feedback.id,
+				input.run.id,
+			) as ProactiveFeedbackHistoryRow | null;
+		let verifiedExisting = false;
+		if (priorHistory) {
+			const [priorMessage, priorRun] = await Promise.all([
+				this.decryptText(
+					input.run.accountId,
+					"proactive_feedback_history",
+					priorHistory.feedback_id,
+					"message",
+					priorHistory,
+				),
+				this.getRun(input.run.accountId, input.run.id),
+			]);
+			const priorSources = (
+				this.database
+					.query(
+						`SELECT stream_id FROM proactive_feedback_event_streams
+						 WHERE account_id = ? AND consumed_run_id = ?
+						 ORDER BY stream_id`,
+					)
+					.all(input.run.accountId, input.run.id) as Array<{
+					stream_id: string;
+				}>
+			).map((row) => row.stream_id);
+			verifiedExisting =
+				priorHistory.feedback_id === input.feedback.id &&
+				priorHistory.run_id === input.run.id &&
+				priorHistory.generated_at_ms === input.feedback.generatedAtMs &&
+				priorMessage === input.feedback.message &&
+				JSON.stringify(priorRun) === JSON.stringify(input.run) &&
+				JSON.stringify(priorSources) ===
+					JSON.stringify([...sourceStreamIds].sort());
+			if (!verifiedExisting) {
+				throw invalidArgument("Proactive feedback completion collision.");
+			}
+		} else {
+			const priorRun = await this.getRun(input.run.accountId, input.run.id);
+			if (priorRun?.status === "completed") {
+				throw invalidArgument(
+					"Completed activity run is missing its atomic feedback history.",
+				);
+			}
+		}
+		const [preparedRun, message] = await Promise.all([
+			this.prepareRun(input.run),
+			this.encryptText(
+				input.run.accountId,
+				"proactive_feedback_history",
+				input.feedback.id,
+				"message",
+				input.feedback.message,
+			),
+		]);
+		const complete = this.database.transaction(() => {
+			this.assertProactiveFeedbackEpochAccepting(
+				input.run.accountId,
+				clearEpoch,
+				true,
+			);
+			const existingHistory = this.database
+				.query(
+					`SELECT feedback_id, run_id, generated_at_ms
+					 FROM proactive_feedback_history
+					 WHERE account_id = ? AND (feedback_id = ? OR run_id = ?)`,
+				)
+				.get(input.run.accountId, input.feedback.id, input.run.id) as {
+				feedback_id: string;
+				run_id: string;
+				generated_at_ms: number;
+			} | null;
+			if (
+				existingHistory &&
+				(!verifiedExisting ||
+					existingHistory.feedback_id !== input.feedback.id ||
+					existingHistory.run_id !== input.run.id ||
+					existingHistory.generated_at_ms !== input.feedback.generatedAtMs)
+			) {
+				throw invalidArgument("Proactive feedback completion collision.");
+			}
+			for (const streamId of sourceStreamIds) {
+				const stream = this.database
+					.query(
+						`SELECT consumed_run_id FROM proactive_feedback_event_streams
+						 WHERE account_id = ? AND stream_id = ?`,
+					)
+					.get(input.run.accountId, streamId) as {
+					consumed_run_id: string | null;
+				} | null;
+				if (
+					!stream ||
+					(stream.consumed_run_id && stream.consumed_run_id !== input.run.id)
+				) {
+					throw invalidArgument(
+						"Proactive feedback completion has missing or mismatched sources.",
+					);
+				}
+			}
+			this.upsertPreparedRun(preparedRun);
+			if (!existingHistory) {
+				this.database
+					.query(
+						`INSERT INTO proactive_feedback_history
+						 (account_id, feedback_id, run_id, key_version, cipher_version,
+						  message_nonce, message_ciphertext, generated_at_ms)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					)
+					.run(
+						input.run.accountId,
+						input.feedback.id,
+						input.run.id,
+						message.keyVersion,
+						message.cipherVersion,
+						message.nonce,
+						message.ciphertext,
+						input.feedback.generatedAtMs,
+					);
+			}
+			for (const streamId of sourceStreamIds) {
+				this.database
+					.query(
+						`UPDATE proactive_feedback_event_streams
+						 SET consumed_at_ms = COALESCE(consumed_at_ms, ?),
+						     consumed_run_id = COALESCE(consumed_run_id, ?)
+						 WHERE account_id = ? AND stream_id = ?`,
+					)
+					.run(
+						input.feedback.generatedAtMs,
+						input.run.id,
+						input.run.accountId,
+						streamId,
+					);
+			}
+		});
+		complete.immediate();
+		return structuredClone(input.feedback);
+	}
+
+	async listProactiveFeedback(
+		accountId: string,
+		request: ListProactiveFeedbackRequest = {},
+	): Promise<ProactiveFeedbackPage> {
+		validateIdentifier(accountId, "accountId");
+		if (!isListProactiveFeedbackRequest(request)) {
+			throw invalidArgument("Proactive feedback list request is invalid.");
+		}
+		const limit = request.limit ?? PROACTIVE_FEEDBACK_HISTORY_DEFAULT_LIMIT;
+		if (limit > PROACTIVE_FEEDBACK_HISTORY_MAX_LIMIT) {
+			throw invalidArgument("Proactive feedback list limit is invalid.");
+		}
+		const cursor = request.cursor;
+		const rows = this.database
+			.query(
+				`SELECT feedback_id, run_id, key_version, cipher_version,
+				        message_nonce AS nonce, message_ciphertext AS ciphertext,
+				        generated_at_ms
+				 FROM proactive_feedback_history
+				 WHERE account_id = ?
+				   AND (? IS NULL OR generated_at_ms < ? OR
+				        (generated_at_ms = ? AND feedback_id < ?))
+				 ORDER BY generated_at_ms DESC, feedback_id DESC
+				 LIMIT ?`,
+			)
+			.all(
+				accountId,
+				cursor?.generatedAtMs ?? null,
+				cursor?.generatedAtMs ?? null,
+				cursor?.generatedAtMs ?? null,
+				cursor?.id ?? null,
+				limit + 1,
+			) as ProactiveFeedbackHistoryRow[];
+		const hasMore = rows.length > limit;
+		const pageRows = rows.slice(0, limit);
+		const items = await Promise.all(
+			pageRows.map(async (row): Promise<ProactiveFeedbackItem> => {
+				const message = await this.decryptText(
+					accountId,
+					"proactive_feedback_history",
+					row.feedback_id,
+					"message",
+					row,
+				);
+				const item = {
+					id: row.feedback_id,
+					generatedAtMs: row.generated_at_ms,
+					message,
+				};
+				if (!isProactiveFeedbackItem(item)) throw decryptionFailure();
+				return item;
+			}),
+		);
+		const last = hasMore ? items.at(-1) : undefined;
+		return {
+			items,
+			nextCursor: last
+				? { generatedAtMs: last.generatedAtMs, id: last.id }
+				: null,
+		};
+	}
+
+	/**
+	 * Decrypts and verifies the complete phase-one/phase-two identity before a
+	 * recovered Worker job may consume its local receipt without another model call.
+	 */
+	async verifyCompletedProactiveFeedbackRun(
+		expected: CompletedProactiveFeedbackRunExpectation,
+	): Promise<boolean> {
+		validateCompletedProactiveFeedbackRunExpectation(expected);
+		const run = await this.getRun(expected.accountId, expected.runId);
+		if (
+			!run ||
+			run.status !== "completed" ||
+			run.workflowId !== expected.jobId ||
+			run.completedAtMs === null ||
+			!isRecord(run.input) ||
+			run.input.kind !== "activity-analysis" ||
+			run.input.jobId !== expected.jobId ||
+			run.input.requestId !== expected.originatingRequestId ||
+			run.input.consumedScore !== expected.consumedScore ||
+			!Array.isArray(run.input.analyses) ||
+			JSON.stringify(run.input.analyses) !==
+				JSON.stringify(expected.analyses) ||
+			!isRecord(run.output) ||
+			run.output.kind !== "activity-analysis" ||
+			typeof run.output.result !== "string"
+		) {
+			return false;
+		}
+		const history = this.database
+			.query(
+				`SELECT feedback_id, run_id, key_version, cipher_version,
+				        message_nonce AS nonce, message_ciphertext AS ciphertext,
+				        generated_at_ms
+				 FROM proactive_feedback_history
+				 WHERE account_id = ? AND run_id = ?`,
+			)
+			.get(
+				expected.accountId,
+				expected.runId,
+			) as ProactiveFeedbackHistoryRow | null;
+		if (
+			!history ||
+			history.feedback_id !== `proactive-feedback-${expected.runId}` ||
+			history.generated_at_ms !== run.completedAtMs
+		) {
+			return false;
+		}
+		const message = await this.decryptText(
+			expected.accountId,
+			"proactive_feedback_history",
+			history.feedback_id,
+			"message",
+			history,
+		);
+		if (
+			run.output.result !== message ||
+			!isProactiveFeedbackItem({
+				id: history.feedback_id,
+				generatedAtMs: history.generated_at_ms,
+				message,
+			})
+		) {
+			return false;
+		}
+		const expectedSourceIds = expected.analyses
+			.map((analysis) => analysis.request_id)
+			.sort();
+		const consumedSourceIds = (
+			this.database
+				.query(
+					`SELECT stream_id FROM proactive_feedback_event_streams
+					 WHERE account_id = ? AND consumed_run_id = ?
+					 ORDER BY stream_id`,
+				)
+				.all(expected.accountId, expected.runId) as Array<{ stream_id: string }>
+		).map((row) => row.stream_id);
+		if (
+			JSON.stringify(consumedSourceIds) !== JSON.stringify(expectedSourceIds)
+		) {
+			return false;
+		}
+		const expectedAnalyses = new Map(
+			expected.analyses.map(
+				(analysis) => [analysis.request_id, analysis] as const,
+			),
+		);
+		for (const streamId of consumedSourceIds) {
+			const archive = await this.getProactiveFeedbackEventStream(
+				expected.accountId,
+				streamId,
+			);
+			if (
+				!archive ||
+				archive.consumedRunId !== expected.runId ||
+				archive.consumedAtMs !== run.completedAtMs ||
+				JSON.stringify(archive.analysis) !==
+					JSON.stringify(expectedAnalyses.get(streamId))
+			) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	async clearPendingProactiveFeedbackData(
+		accountId: string,
+	): Promise<ClearPendingProactiveFeedbackResult> {
+		validateIdentifier(accountId, "accountId");
+		await this.accountContext(accountId);
+		const clearedAtMs = this.now();
+		// The caller must first establish the durable reset marker. Its transaction
+		// rotates the work epoch before this asynchronous scan/decrypt begins, so a
+		// stale putRun/archive cannot revive after the three-store reset completes.
+		if (!this.proactiveFeedbackPendingReset(accountId)) {
+			throw new ProactiveFeedbackPolicyDisabledError();
+		}
+		const activityRunIds = await this.activityAnalysisRunIds(accountId);
+		const clear = this.database.transaction(() => {
+			const deletedEventStreamCount = this.database
+				.query(
+					`DELETE FROM proactive_feedback_event_streams
+					 WHERE account_id = ? AND consumed_at_ms IS NULL`,
+				)
+				.run(accountId).changes;
+			let deletedRunCount = 0;
+			const deleteRun = this.database.query(
+				`DELETE FROM agent_runs WHERE account_id = ? AND run_id = ?
+				 AND NOT EXISTS (
+				  SELECT 1 FROM proactive_feedback_history
+				  WHERE account_id = ? AND run_id = ?
+				 )`,
+			);
+			for (const runId of activityRunIds) {
+				deletedRunCount += deleteRun.run(
+					accountId,
+					runId,
+					accountId,
+					runId,
+				).changes;
+			}
+			return { deletedEventStreamCount, deletedRunCount };
+		});
+		return { clearedAtMs, ...clear.immediate() };
+	}
+
+	async clearProactiveFeedbackData(
+		accountId: string,
+	): Promise<ClearProactiveFeedbackResult> {
+		validateIdentifier(accountId, "accountId");
+		const clearedAtMs = this.now();
+		const activityRunIds = await this.activityAnalysisRunIds(accountId);
+		const clear = this.database.transaction(() => {
+			this.database
+				.query(
+					"DELETE FROM proactive_feedback_event_streams WHERE account_id = ?",
+				)
+				.run(accountId);
+			this.database
+				.query("DELETE FROM proactive_feedback_history WHERE account_id = ?")
+				.run(accountId);
+			const deleteRun = this.database.query(
+				"DELETE FROM agent_runs WHERE account_id = ? AND run_id = ?",
+			);
+			for (const runId of activityRunIds) deleteRun.run(accountId, runId);
+		});
+		clear.immediate();
+		return { clearedAtMs };
+	}
+
+	async deleteActivityAnalysisRuns(
+		accountId: string,
+		runIds: readonly string[],
+	): Promise<number> {
+		validateIdentifier(accountId, "accountId");
+		const unique = [...new Set(runIds)];
+		for (const runId of unique) validateIdentifier(runId, "runId");
+		const records = await Promise.all(
+			unique.map((runId) => this.getRun(accountId, runId)),
+		);
+		const activityRuns = records
+			.filter(
+				(record): record is AgentRunRecord =>
+					record !== null &&
+					isRecord(record.input) &&
+					record.input.kind === "activity-analysis",
+			)
+			.map((record) => ({ id: record.id, updatedAtMs: record.updatedAtMs }));
+		const remove = this.database.transaction(() => {
+			let deleted = 0;
+			const statement = this.database.query(
+				`DELETE FROM agent_runs
+				 WHERE account_id = ? AND run_id = ? AND updated_at_ms = ?
+				 AND NOT EXISTS (
+				  SELECT 1 FROM proactive_feedback_history
+				  WHERE account_id = ? AND run_id = ?
+				 )`,
+			);
+			for (const run of activityRuns) {
+				deleted += statement.run(
+					accountId,
+					run.id,
+					run.updatedAtMs,
+					accountId,
+					run.id,
+				).changes;
+			}
+			return deleted;
+		});
+		return remove.immediate();
+	}
+
+	async cleanupProactiveFeedback(
+		accountId: string,
+		nowMs = this.now(),
+		protectedRunIds: readonly string[] = [],
+	): Promise<ProactiveFeedbackCleanupResult> {
+		validateIdentifier(accountId, "accountId");
+		validateTimestamp(nowMs, "nowMs");
+		const protectedRuns = [...new Set(protectedRunIds)];
+		for (const runId of protectedRuns) validateIdentifier(runId, "runId");
+		const protectedSet = new Set(protectedRuns);
+		const orphanCutoff = Math.max(0, nowMs - ORPHANED_ACTIVITY_RUN_GRACE_MS);
+		const orphanRows = this.database
+			.query(
+				`SELECT * FROM agent_runs
+				 WHERE account_id = ? AND updated_at_ms < ?
+				   AND workflow_id GLOB 'activity_analysis_*'
+				   AND run_id GLOB 'activity-run-activity_analysis_*'
+				 ORDER BY run_id`,
+			)
+			.all(accountId, orphanCutoff) as RunRow[];
+		const orphanRecords = await Promise.all(
+			orphanRows.map((row) => this.runFromRow(accountId, row)),
+		);
+		const orphanActivityRuns = orphanRecords
+			.filter(
+				(record) =>
+					!protectedSet.has(record.id) &&
+					isRecord(record.input) &&
+					record.input.kind === "activity-analysis",
+			)
+			.map((record) => ({ id: record.id, updatedAtMs: record.updatedAtMs }));
+		const snapshot = await this.getProactiveFeedbackPolicy(accountId);
+		const cutoff =
+			snapshot.policy.retention === "forever"
+				? null
+				: Math.max(0, nowMs - snapshot.policy.retention * 24 * 60 * 60 * 1_000);
+		const cleanup = this.database.transaction(() => {
+			const expiredRuns =
+				cutoff === null
+					? []
+					: (this.database
+							.query(
+								`SELECT run_id FROM proactive_feedback_history
+								 WHERE account_id = ? AND generated_at_ms < ?
+								 ORDER BY run_id`,
+							)
+							.all(accountId, cutoff) as Array<{ run_id: string }>);
+			let deletedEventStreamCount = 0;
+			const deleteStreams = this.database.query(
+				`DELETE FROM proactive_feedback_event_streams
+				 WHERE account_id = ? AND consumed_at_ms IS NOT NULL
+				   AND consumed_at_ms < ? AND consumed_run_id = ?`,
+			);
+			let deletedHistoryCount = 0;
+			const deleteHistory = this.database.query(
+				`DELETE FROM proactive_feedback_history
+				 WHERE account_id = ? AND generated_at_ms < ? AND run_id = ?`,
+			);
+			const deleteRun = this.database.query(
+				"DELETE FROM agent_runs WHERE account_id = ? AND run_id = ?",
+			);
+			for (const row of expiredRuns) {
+				if (protectedSet.has(row.run_id)) continue;
+				deletedEventStreamCount += deleteStreams.run(
+					accountId,
+					cutoff,
+					row.run_id,
+				).changes;
+				deletedHistoryCount += deleteHistory.run(
+					accountId,
+					cutoff,
+					row.run_id,
+				).changes;
+				deleteRun.run(accountId, row.run_id);
+			}
+			const deleteOrphan = this.database.query(
+				`DELETE FROM agent_runs
+				 WHERE account_id = ? AND run_id = ? AND updated_at_ms = ?
+				   AND updated_at_ms < ?
+				   AND workflow_id GLOB 'activity_analysis_*'
+				   AND run_id GLOB 'activity-run-activity_analysis_*'
+				   AND NOT EXISTS (
+				    SELECT 1 FROM proactive_feedback_history
+				    WHERE account_id = ? AND run_id = ?
+				   )`,
+			);
+			for (const run of orphanActivityRuns) {
+				deleteOrphan.run(
+					accountId,
+					run.id,
+					run.updatedAtMs,
+					orphanCutoff,
+					accountId,
+					run.id,
+				);
+			}
+			return { deletedEventStreamCount, deletedHistoryCount };
+		});
+		return cleanup.immediate();
+	}
+
+	private proactiveFeedbackPolicyEnabled(accountId: string): boolean {
+		if (
+			this.proactiveFeedbackClearPending(accountId) ||
+			this.proactiveFeedbackPendingReset(accountId)
+		) {
+			return false;
+		}
+		const row = this.database
+			.query(
+				"SELECT enabled FROM proactive_feedback_policy WHERE account_id = ?",
+			)
+			.get(accountId) as { enabled: number } | null;
+		return row === null || row.enabled === 1;
+	}
+
+	private proactiveFeedbackClearEpoch(accountId: string): number {
+		const row = this.database
+			.query(
+				"SELECT epoch FROM proactive_feedback_clear_epochs WHERE account_id = ?",
+			)
+			.get(accountId) as { epoch: number } | null;
+		return row?.epoch ?? 0;
+	}
+
+	private advanceProactiveFeedbackClearEpoch(accountId: string): void {
+		this.database
+			.query(
+				`INSERT INTO proactive_feedback_clear_epochs (account_id, epoch)
+				 VALUES (?, 1)
+				 ON CONFLICT(account_id) DO UPDATE SET epoch = epoch + 1`,
+			)
+			.run(accountId);
+	}
+
+	private assertProactiveFeedbackEpochAccepting(
+		accountId: string,
+		expectedClearEpoch: number,
+		requireEnabledPolicy: boolean,
+	): void {
+		if (
+			this.proactiveFeedbackClearPending(accountId) ||
+			this.proactiveFeedbackPendingReset(accountId) ||
+			this.proactiveFeedbackClearEpoch(accountId) !== expectedClearEpoch ||
+			(requireEnabledPolicy && !this.proactiveFeedbackPolicyEnabled(accountId))
+		) {
+			throw new ProactiveFeedbackPolicyDisabledError();
+		}
+	}
+
+	private proactiveFeedbackClearPending(accountId: string): boolean {
+		return (
+			this.database
+				.query(
+					"SELECT 1 AS pending FROM proactive_feedback_clear_journal WHERE account_id = ?",
+				)
+				.get(accountId) !== null
+		);
+	}
+
+	private proactiveFeedbackPendingReset(accountId: string): boolean {
+		return (
+			this.database
+				.query(
+					"SELECT 1 AS pending FROM proactive_feedback_pending_reset_journal WHERE account_id = ?",
+				)
+				.get(accountId) !== null
+		);
+	}
+
+	private async activityAnalysisRunIds(accountId: string): Promise<string[]> {
+		const rows = this.database
+			.query("SELECT * FROM agent_runs WHERE account_id = ? ORDER BY run_id")
+			.all(accountId) as RunRow[];
+		const records = await Promise.all(
+			rows.map((row) => this.runFromRow(accountId, row)),
+		);
+		return records
+			.filter(
+				(record) =>
+					isRecord(record.input) && record.input.kind === "activity-analysis",
+			)
+			.map((record) => record.id);
 	}
 
 	async putCalendarEvent(
@@ -2918,6 +4055,74 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
 				);
 
+				CREATE TABLE IF NOT EXISTS proactive_feedback_policy (
+					account_id TEXT PRIMARY KEY,
+					revision INTEGER NOT NULL CHECK (revision > 0),
+					enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+					retention TEXT NOT NULL CHECK (retention IN ('7', '30', '90', 'forever')),
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					policy_nonce BLOB NOT NULL,
+					policy_ciphertext BLOB NOT NULL,
+					updated_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS proactive_feedback_clear_journal (
+					account_id TEXT PRIMARY KEY,
+					requested_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS proactive_feedback_clear_epochs (
+					account_id TEXT PRIMARY KEY,
+					epoch INTEGER NOT NULL CHECK (epoch >= 0),
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS proactive_feedback_pending_reset_journal (
+					account_id TEXT PRIMARY KEY,
+					requested_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS proactive_feedback_event_streams (
+					account_id TEXT NOT NULL,
+					stream_id TEXT NOT NULL,
+					source_window_id TEXT NOT NULL,
+					window_started_at_ms INTEGER NOT NULL,
+					window_ended_at_ms INTEGER NOT NULL,
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					archive_nonce BLOB NOT NULL,
+					archive_ciphertext BLOB NOT NULL,
+					archived_at_ms INTEGER NOT NULL,
+					consumed_at_ms INTEGER,
+					consumed_run_id TEXT,
+					PRIMARY KEY (account_id, stream_id),
+					UNIQUE (account_id, source_window_id),
+					CHECK ((consumed_at_ms IS NULL) = (consumed_run_id IS NULL)),
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+				CREATE INDEX IF NOT EXISTS proactive_feedback_event_streams_by_state
+					ON proactive_feedback_event_streams(account_id, consumed_at_ms, archived_at_ms, stream_id);
+
+				CREATE TABLE IF NOT EXISTS proactive_feedback_history (
+					account_id TEXT NOT NULL,
+					feedback_id TEXT NOT NULL,
+					run_id TEXT NOT NULL,
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					message_nonce BLOB NOT NULL,
+					message_ciphertext BLOB NOT NULL,
+					generated_at_ms INTEGER NOT NULL,
+					PRIMARY KEY (account_id, feedback_id),
+					UNIQUE (account_id, run_id),
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+				CREATE INDEX IF NOT EXISTS proactive_feedback_history_keyset
+					ON proactive_feedback_history(account_id, generated_at_ms DESC, feedback_id DESC);
+
 				CREATE TABLE IF NOT EXISTS calendar_revisions (
 					account_id TEXT PRIMARY KEY,
 					revision INTEGER NOT NULL CHECK (revision >= 0),
@@ -3247,6 +4452,163 @@ function validateRun(record: AgentRunRecord): void {
 	validateTimestamp(record.updatedAtMs, "updatedAtMs");
 	if (record.completedAtMs !== null) {
 		validateTimestamp(record.completedAtMs, "completedAtMs");
+	}
+}
+
+function isActivityAnalysisRecord(record: AgentRunRecord): boolean {
+	return isRecord(record.input) && record.input.kind === "activity-analysis";
+}
+
+function activityAnalysisClearEpoch(record: AgentRunRecord): number {
+	if (!isActivityAnalysisRecord(record)) return 0;
+	const epoch = (record.input as Record<string, unknown>).clearEpoch;
+	// Schema-v4 and earlier activity runs predate the first user clear. Treat
+	// their missing epoch as zero; the first durable clear advances to one and
+	// permanently prevents those records from being written back afterward.
+	if (epoch === undefined) return 0;
+	if (!Number.isSafeInteger(epoch) || (epoch as number) < 0) {
+		throw invalidArgument("Activity analysis clear epoch is invalid.");
+	}
+	return epoch as number;
+}
+
+function proactiveFeedbackArchivePayload(
+	record: ProactiveFeedbackEventStreamArchive,
+): {
+	sourceWindowId: string;
+	windowStartedAtMs: number;
+	windowEndedAtMs: number;
+	analysis: ActivityAnalysisWorkerResult;
+} {
+	return {
+		sourceWindowId: record.sourceWindowId,
+		windowStartedAtMs: record.windowStartedAtMs,
+		windowEndedAtMs: record.windowEndedAtMs,
+		analysis: structuredClone(record.analysis),
+	};
+}
+
+function sameProactiveFeedbackArchive(
+	left: ProactiveFeedbackEventStreamArchive,
+	right: ProactiveFeedbackEventStreamArchive,
+): boolean {
+	return (
+		left.accountId === right.accountId &&
+		left.id === right.id &&
+		left.sourceWindowId === right.sourceWindowId &&
+		left.windowStartedAtMs === right.windowStartedAtMs &&
+		left.windowEndedAtMs === right.windowEndedAtMs &&
+		JSON.stringify(left.analysis) === JSON.stringify(right.analysis)
+	);
+}
+
+function validateProactiveFeedbackEventStream(
+	record: ProactiveFeedbackEventStreamArchive,
+): void {
+	validateIdentifier(record.accountId, "accountId");
+	validateIdentifier(record.id, "streamId");
+	validateIdentifier(record.sourceWindowId, "sourceWindowId");
+	validateTimestamp(record.windowStartedAtMs, "windowStartedAtMs");
+	validateTimestamp(record.windowEndedAtMs, "windowEndedAtMs");
+	validateTimestamp(record.archivedAtMs, "archivedAtMs");
+	if (record.windowEndedAtMs < record.windowStartedAtMs) {
+		throw invalidArgument("Proactive feedback event stream range is invalid.");
+	}
+	if (
+		!isActivityAnalysisWorkerResult(record.analysis) ||
+		record.analysis.request_id !== record.id
+	) {
+		throw invalidArgument(
+			"Proactive feedback event stream analysis is invalid.",
+		);
+	}
+	if ((record.consumedAtMs === null) !== (record.consumedRunId === null)) {
+		throw invalidArgument("Proactive feedback event stream state is invalid.");
+	}
+	if (record.consumedAtMs !== null) {
+		validateTimestamp(record.consumedAtMs, "consumedAtMs");
+		validateIdentifier(record.consumedRunId!, "consumedRunId");
+	}
+}
+
+function validateCompleteProactiveFeedbackRun(
+	input: CompleteProactiveFeedbackRunInput,
+): void {
+	validateRun(input.run);
+	if (
+		input.run.status !== "completed" ||
+		input.run.completedAtMs === null ||
+		input.run.completedAtMs !== input.feedback.generatedAtMs ||
+		!isProactiveFeedbackItem(input.feedback) ||
+		!isRecord(input.run.input) ||
+		input.run.input.kind !== "activity-analysis" ||
+		!Array.isArray(input.run.input.analyses) ||
+		!isRecord(input.run.output) ||
+		input.run.output.kind !== "activity-analysis" ||
+		input.run.output.result !== input.feedback.message
+	) {
+		throw invalidArgument("Completed proactive feedback run is invalid.");
+	}
+	const analysisIds: string[] = [];
+	for (const analysis of input.run.input.analyses) {
+		if (!isActivityAnalysisWorkerResult(analysis)) {
+			throw invalidArgument(
+				"Completed proactive feedback sources are invalid.",
+			);
+		}
+		analysisIds.push(analysis.request_id);
+	}
+	const sourceIds = [...new Set(input.sourceStreamIds)];
+	for (const sourceId of sourceIds) validateIdentifier(sourceId, "streamId");
+	if (
+		sourceIds.length < 1 ||
+		sourceIds.length !== input.sourceStreamIds.length ||
+		sourceIds.length !== analysisIds.length ||
+		new Set(analysisIds).size !== analysisIds.length ||
+		analysisIds.some((id) => !sourceIds.includes(id))
+	) {
+		throw invalidArgument("Completed proactive feedback sources do not match.");
+	}
+}
+
+function validateCompletedProactiveFeedbackRunExpectation(
+	expected: CompletedProactiveFeedbackRunExpectation,
+): void {
+	validateIdentifier(expected.accountId, "accountId");
+	validateIdentifier(expected.runId, "runId");
+	validateIdentifier(expected.jobId, "jobId");
+	validateIdentifier(expected.originatingRequestId, "originatingRequestId");
+	if (
+		!Number.isFinite(expected.consumedScore) ||
+		expected.consumedScore < 0 ||
+		!Array.isArray(expected.analyses) ||
+		expected.analyses.length < 1
+	) {
+		throw invalidArgument(
+			"Completed proactive feedback expectation is invalid.",
+		);
+	}
+	const sourceIds = new Set<string>();
+	let score = 0;
+	for (const analysis of expected.analyses) {
+		if (
+			!isActivityAnalysisWorkerResult(analysis) ||
+			sourceIds.has(analysis.request_id)
+		) {
+			throw invalidArgument(
+				"Completed proactive feedback expectation sources are invalid.",
+			);
+		}
+		sourceIds.add(analysis.request_id);
+		score += analysis.score;
+	}
+	if (
+		!Number.isFinite(score) ||
+		Math.abs(score - expected.consumedScore) > 1e-9
+	) {
+		throw invalidArgument(
+			"Completed proactive feedback expectation score is invalid.",
+		);
 	}
 }
 

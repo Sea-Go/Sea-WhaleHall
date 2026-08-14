@@ -61,6 +61,8 @@ export interface RemoteAuthSessionManagerOptions {
 	onBeforeSessionClear?: (accountId: string | null) => Promise<void>;
 	/** Must durably prepare account-owned local state before current is exposed. */
 	onBeforeSessionActivate?: (identity: AuthSessionIdentity) => Promise<void>;
+	/** Runs after current is published; failure revokes that activation fail closed. */
+	onSessionActivated?: (identity: AuthSessionIdentity) => Promise<void>;
 	onSessionExpired?: () => void;
 }
 
@@ -79,6 +81,9 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	private readonly onBeforeSessionActivate: (
 		identity: AuthSessionIdentity,
 	) => Promise<void>;
+	private readonly onSessionActivated: (
+		identity: AuthSessionIdentity,
+	) => Promise<void>;
 	private readonly onSessionExpired: () => void;
 	private current: {
 		session: RemoteAuthSession;
@@ -91,6 +96,8 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	} | null = null;
 	private generation = 0;
 	private transitionTail = Promise.resolve();
+	private readonly remoteSettlements = new Set<Promise<void>>();
+	private acceptingWork = true;
 
 	constructor(
 		private readonly credentials: SecureCredentialStore,
@@ -109,6 +116,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			options.onBeforeSessionClear ?? (async () => {});
 		this.onBeforeSessionActivate =
 			options.onBeforeSessionActivate ?? (async () => {});
+		this.onSessionActivated = options.onSessionActivated ?? (async () => {});
 		this.onSessionExpired = options.onSessionExpired ?? (() => {});
 	}
 
@@ -116,6 +124,34 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		return this.current?.generation === this.generation
 			? cloneSession(this.current.session)
 			: null;
+	}
+
+	/** Waits until every already-started transition and refresh has settled. */
+	async drain(): Promise<void> {
+		for (;;) {
+			const transition = this.transitionTail;
+			const refresh = this.refreshPromise?.operation ?? null;
+			const remoteSettlements = [...this.remoteSettlements];
+			await Promise.allSettled(
+				refresh === null
+					? [transition, ...remoteSettlements]
+					: [transition, refresh, ...remoteSettlements],
+			);
+			if (
+				this.transitionTail === transition &&
+				(this.refreshPromise?.operation ?? null) === refresh &&
+				remoteSettlements.every(
+					(settlement) => !this.remoteSettlements.has(settlement),
+				) &&
+				this.remoteSettlements.size === 0
+			) {
+				return;
+			}
+		}
+	}
+
+	beginShutdown(): void {
+		this.acceptingWork = false;
 	}
 
 	get accountId(): string | null {
@@ -129,21 +165,46 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	}
 
 	async restoreSession(): Promise<RemoteAuthSession | null> {
+		this.requireAcceptingWork();
 		this.requireConfigured();
+		const previousAccountId = this.current?.session.user.id ?? null;
 		const generation = ++this.generation;
 		let refreshToken: string | null;
-		try {
-			refreshToken = await this.credentials.read(REFRESH_TOKEN_KEY);
-		} catch (error) {
-			throw credentialFailure(error);
+		if (previousAccountId !== null) {
+			// Restoring over a live session is an account replacement, just like a
+			// new sign-in. Run the old-owner barrier before reading its credential;
+			// only a fully successful cleanup may carry that token into the network.
+			this.current = null;
+			this.refreshPromise = null;
+			refreshToken = await this.clearLiveSessionForReplacement(
+				previousAccountId,
+				true,
+			);
+		} else {
+			try {
+				refreshToken = await this.credentials.read(REFRESH_TOKEN_KEY);
+			} catch (error) {
+				throw credentialFailure(error);
+			}
 		}
 		if (!refreshToken) return null;
 		return this.refreshWith(refreshToken, generation);
 	}
 
 	async signIn(credentials: AuthCredentials): Promise<RemoteAuthSession> {
+		this.requireAcceptingWork();
 		this.requireConfigured();
+		const previousAccountId = this.current?.session.user.id ?? null;
 		const generation = ++this.generation;
+		if (previousAccountId !== null) {
+			// A replacement sign-in is an immediate ownership boundary, not a
+			// speculative request layered over the live account. Invalidate the old
+			// session and finish its local cleanup before waiting on the network so a
+			// failed or slow login cannot leave an unauthenticated cloud owner active.
+			this.current = null;
+			this.refreshPromise = null;
+			await this.clearLiveSessionForReplacement(previousAccountId, false);
+		}
 		let response: Response;
 		try {
 			response = await this.request("/v1/auth/sessions", {
@@ -201,6 +262,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	}
 
 	async signOut(): Promise<void> {
+		this.requireAcceptingWork();
 		this.generation += 1;
 		const accountId = this.current?.session.user.id ?? null;
 		const accessToken = this.current?.accessToken ?? null;
@@ -222,14 +284,14 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				throw credentialFailure(error);
 			}
 			if (barrierError) throw barrierError;
-		});
-
-		if (!accessToken || !this.baseUrl) return;
-		void this.request("/v1/auth/sessions/current", {
-			method: "DELETE",
-			headers: { authorization: `Bearer ${accessToken}` },
-		}).catch(() => {
-			// Remote revoke is explicitly best effort and cannot reopen AuthGate.
+			if (accessToken && this.baseUrl) {
+				this.trackBestEffortRemote(
+					this.request("/v1/auth/sessions/current", {
+						method: "DELETE",
+						headers: { authorization: `Bearer ${accessToken}` },
+					}),
+				);
+			}
 		});
 	}
 
@@ -238,6 +300,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		init: RequestInit,
 		purpose: ModelRelayPurpose,
 	): Promise<Response> {
+		this.requireAcceptingWork();
 		if (path !== "/v1/chat/completions") {
 			throw new RemoteAuthError(
 				"unexpected",
@@ -267,6 +330,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 
 	/** Sends a bearer-only request to a code-owned DataCenter path. */
 	async bearerFetch(path: string, init: RequestInit = {}): Promise<Response> {
+		this.requireAcceptingWork();
 		if (
 			path !== "/v1/agent/register" &&
 			!/^\/v1\/devices\/[a-f0-9-]{36}\/consents\/(activity|browser|presence)$/iu.test(
@@ -439,6 +503,43 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		return cloneSession(payload);
 	}
 
+	private async clearLiveSessionForReplacement(
+		accountId: string,
+		captureRefreshToken: boolean,
+	): Promise<string | null> {
+		return this.withTransitionLock(async () => {
+			const failures: unknown[] = [];
+			try {
+				await this.onBeforeSessionClear(accountId);
+			} catch (error) {
+				failures.push(error);
+			}
+
+			let refreshToken: string | null = null;
+			if (captureRefreshToken) {
+				try {
+					refreshToken = await this.credentials.read(REFRESH_TOKEN_KEY);
+				} catch (error) {
+					failures.push(credentialFailure(error));
+				}
+			}
+			try {
+				await this.credentials.delete(REFRESH_TOKEN_KEY);
+			} catch (error) {
+				failures.push(credentialFailure(error));
+			}
+
+			if (failures.length === 1) throw failures[0];
+			if (failures.length > 1) {
+				throw new AggregateError(
+					failures,
+					"Session replacement cleanup did not complete.",
+				);
+			}
+			return refreshToken;
+		});
+	}
+
 	private async expireLocalSession(
 		expectedGeneration = this.generation,
 	): Promise<void> {
@@ -552,8 +653,56 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				accessToken: payload.accessToken,
 				generation,
 			};
+			try {
+				await this.onSessionActivated({ ...nextIdentity });
+			} catch (error) {
+				await this.revokeFailedActivation(
+					nextIdentity,
+					error,
+					expectedCurrent !== undefined,
+				);
+			}
+			if (!this.isCurrentSession(nextIdentity)) return false;
 			return true;
 		});
+	}
+
+	private async revokeFailedActivation(
+		identity: AuthSessionIdentity,
+		activationError: unknown,
+		notifySessionExpired: boolean,
+	): Promise<never> {
+		// A newer transition has already invalidated current and queued its own
+		// account-clear barrier behind this lock. Do not delete the refresh token it
+		// may need to restore or clear a winning session out of order.
+		if (!this.isCurrentSession(identity)) throw activationError;
+
+		this.generation += 1;
+		this.current = null;
+		this.refreshPromise = null;
+		const failures: unknown[] = [activationError];
+		try {
+			await this.onBeforeSessionClear(identity.accountId);
+		} catch (error) {
+			failures.push(error);
+		}
+		try {
+			await this.credentials.delete(REFRESH_TOKEN_KEY);
+		} catch (error) {
+			failures.push(credentialFailure(error));
+		}
+		if (notifySessionExpired) {
+			try {
+				this.onSessionExpired();
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		if (failures.length === 1) throw activationError;
+		throw new AggregateError(
+			failures,
+			"Session activation and its fail-closed cleanup did not complete.",
+		);
 	}
 
 	private requireCurrentAuthorization(): {
@@ -573,6 +722,15 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			throw new RemoteAuthError("expired", "登录会话已被新的操作取代。", 401);
 		}
 		return { accessToken: current.accessToken, identity };
+	}
+
+	private requireAcceptingWork(): void {
+		if (!this.acceptingWork) {
+			throw new RemoteAuthError(
+				"unexpected",
+				"WhaleHall 正在安全退出，新的认证请求已停止。",
+			);
+		}
 	}
 
 	private async assertResponseSession(
@@ -613,6 +771,17 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			redirect: "error",
 			signal: init.signal ?? AbortSignal.timeout(this.requestTimeoutMs),
 		});
+	}
+
+	private trackBestEffortRemote(operation: Promise<unknown>): void {
+		let settlement!: Promise<void>;
+		settlement = operation
+			.then(
+				() => undefined,
+				() => undefined,
+			)
+			.finally(() => this.remoteSettlements.delete(settlement));
+		this.remoteSettlements.add(settlement);
 	}
 
 	private requireConfigured(): URL {

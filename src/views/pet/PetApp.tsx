@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
-import { CanvasPetRenderer } from "./CanvasPetRenderer";
 import { PetBehaviorController } from "./behavior";
+import { CanvasPetRenderer } from "./CanvasPetRenderer";
+import { PetActivityFeedbackBubble } from "./PetActivityFeedbackBubble";
 import { petApi } from "./rpc";
 
 export function PetApp() {
@@ -17,7 +18,9 @@ export function PetApp() {
 				petApi.interacted(event);
 			},
 		});
-		behavior = new PetBehaviorController({ play: (action) => renderer.play(action) });
+		behavior = new PetBehaviorController({
+			play: (action) => renderer.play(action),
+		});
 		behavior.setEnabled(false);
 		renderer.mount(canvas);
 		const unsubscribeState = petApi.onState((state) => {
@@ -33,6 +36,7 @@ export function PetApp() {
 		const behaviorTimer = window.setTimeout(() => behavior.start(true), 900);
 		petApi.ready();
 		return () => {
+			petApi.unready();
 			window.clearTimeout(behaviorTimer);
 			document.removeEventListener("visibilitychange", handleVisibility);
 			unsubscribeState();
@@ -42,5 +46,10 @@ export function PetApp() {
 		};
 	}, []);
 
-	return <canvas ref={canvasRef} aria-label="WhaleHall 可交互桌面伙伴" />;
+	return (
+		<div className="pet-stage">
+			<canvas ref={canvasRef} aria-label="WhaleHall 可交互桌面伙伴" />
+			<PetActivityFeedbackBubble />
+		</div>
+	);
 }

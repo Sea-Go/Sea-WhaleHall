@@ -109,8 +109,14 @@ export class TimelineV2Service {
 
 	private started = false;
 	private acceptingPush = false;
+	private shutdownRequested = false;
+	private readonly shutdownController = new AbortController();
 	private pushGeneration = 0;
 	private operationTail: Promise<void> = Promise.resolve();
+	private jobPumpTail: Promise<void> = Promise.resolve();
+	private readonly activeJobPumps = new Set<Promise<number>>();
+	private startPromise: Promise<void> | null = null;
+	private stopPromise: Promise<void> | null = null;
 	private unsubscribe: (() => void) | null = null;
 	private eventTimer: ReturnType<typeof setTimeout> | null = null;
 	private jobTimer: ReturnType<typeof setTimeout> | null = null;
@@ -191,8 +197,15 @@ export class TimelineV2Service {
 		});
 	}
 
-	async start(): Promise<void> {
-		if (this.started) return;
+	start(): Promise<void> {
+		this.assertRuntimeOpen();
+		if (this.startPromise !== null) return this.startPromise;
+		const startPromise = this.startInternal();
+		this.startPromise = startPromise;
+		return startPromise;
+	}
+
+	private async startInternal(): Promise<void> {
 		this.started = true;
 		this.acceptingPush = false;
 		this.unsubscribe = this.transport.onSemanticEvent(() => {
@@ -207,13 +220,17 @@ export class TimelineV2Service {
 		});
 		try {
 			await this.collector.recover({ deferDeadline: true });
+			this.assertRuntimeOpen();
 			await this.transport.start();
+			this.assertRuntimeOpen();
 			for (;;) {
 				const generation = this.pushGeneration;
 				await this.pullBacklog();
+				this.assertRuntimeOpen();
 				if (generation === this.pushGeneration) break;
 			}
 			await this.collector.resumeDeadlines();
+			this.assertRuntimeOpen();
 			this.acceptingPush = true;
 			this.armEventPoll(this.eventPollMs);
 			this.armJobPoll(0);
@@ -227,18 +244,47 @@ export class TimelineV2Service {
 		}
 	}
 
-	async stop(): Promise<void> {
+	/** Synchronously seals every ingress and aborts active local inference. */
+	beginShutdown(): void {
+		if (this.shutdownRequested) return;
+		this.shutdownRequested = true;
 		this.started = false;
 		this.acceptingPush = false;
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.cancelTimers();
-		await this.operationTail;
 		this.collector.dispose();
+		this.shutdownController.abort(
+			new DOMException("Timeline v2 is shutting down.", "AbortError"),
+		);
+	}
+
+	stop(): Promise<void> {
+		if (this.stopPromise !== null) return this.stopPromise;
+		this.beginShutdown();
+		this.stopPromise = this.settleShutdown();
+		return this.stopPromise;
+	}
+
+	private async settleShutdown(): Promise<void> {
+		await this.startPromise?.catch(() => undefined);
+		for (;;) {
+			const operationTail = this.operationTail;
+			const pumps = [...this.activeJobPumps];
+			await Promise.allSettled([operationTail, ...pumps]);
+			if (
+				operationTail === this.operationTail &&
+				this.activeJobPumps.size === 0
+			) {
+				return;
+			}
+		}
 	}
 
 	async pullNow(): Promise<void> {
+		this.assertRuntimeOpen();
 		await this.enqueue(async () => {
+			this.assertRuntimeOpen();
 			await this.pullBacklog();
 			await this.collector.flushCountDue();
 			await this.collector.flushDue();
@@ -246,7 +292,8 @@ export class TimelineV2Service {
 	}
 
 	async runJobsNow(maxJobs = 100): Promise<number> {
-		return this.jobs.runUntilIdle(maxJobs);
+		if (this.shutdownRequested) return 0;
+		return this.trackJobPump(maxJobs);
 	}
 
 	async getStatus(): Promise<{
@@ -264,18 +311,26 @@ export class TimelineV2Service {
 	async releaseAgentInputs(
 		agentInputIds: readonly string[] | null = null,
 	): Promise<number> {
-		return this.repository.releaseAgentInputs(
-			agentInputIds,
-			this.clock.nowMs(),
-		);
+		this.assertRuntimeOpen();
+		return this.enqueue(async () => {
+			this.assertRuntimeOpen();
+			return this.repository.releaseAgentInputs(
+				agentInputIds,
+				this.clock.nowMs(),
+			);
+		});
 	}
 
 	async queryAgentInputs(
 		query: Omit<AgentInputQuery, "nowMs"> = {},
 	): Promise<AgentInputQueryResult> {
-		return this.repository.queryAgentInputs({
-			...query,
-			nowMs: this.clock.nowMs(),
+		this.assertRuntimeOpen();
+		return this.enqueue(async () => {
+			this.assertRuntimeOpen();
+			return this.repository.queryAgentInputs({
+				...query,
+				nowMs: this.clock.nowMs(),
+			});
 		});
 	}
 
@@ -283,27 +338,38 @@ export class TimelineV2Service {
 		agentInputId: string,
 		leaseToken: string,
 	): Promise<AgentInputEnvelopeV1> {
-		return this.repository.commitAgentInput(
-			agentInputId,
-			leaseToken,
-			this.clock.nowMs(),
-		);
+		this.assertRuntimeOpen();
+		return this.enqueue(async () => {
+			this.assertRuntimeOpen();
+			return this.repository.commitAgentInput(
+				agentInputId,
+				leaseToken,
+				this.clock.nowMs(),
+			);
+		});
 	}
 
 	async discardForAuthorizationRevocation(
 		cursor: string | null = null,
 	): Promise<void> {
-		await this.collector.discardForAuthorizationRevocation(cursor);
+		this.assertRuntimeOpen();
+		await this.enqueue(async () => {
+			this.assertRuntimeOpen();
+			await this.collector.discardForAuthorizationRevocation(cursor);
+		});
 	}
 
 	private async pullBacklog(): Promise<void> {
+		this.assertRuntimeOpen();
 		for (;;) {
+			this.assertRuntimeOpen();
 			const page = await this.transport.querySemanticEvents({
 				consumerId: this.consumerId,
 				limit: this.pullLimit,
 				includeContent: true,
 			});
 			for (const rawEvent of page.events) {
+				this.assertRuntimeOpen();
 				await this.ingest(rawEvent);
 			}
 			if (page.events.length === 0 || !page.hasMore) return;
@@ -311,6 +377,7 @@ export class TimelineV2Service {
 	}
 
 	private async ingest(rawEvent: SemanticEventV2): Promise<void> {
+		this.assertRuntimeOpen();
 		if (
 			this.lastCommittedCursor !== null &&
 			compareSemanticCursors(
@@ -332,6 +399,7 @@ export class TimelineV2Service {
 		}
 		const event = structuredClone(rawEvent);
 		await this.collector.ingest(event);
+		this.assertRuntimeOpen();
 		await this.transport.commitSemanticEventCursor(
 			this.consumerId,
 			rawEvent.cursor,
@@ -340,7 +408,11 @@ export class TimelineV2Service {
 	}
 
 	private coordinateDeadline(): void {
-		if (!this.started || !this.acceptingPush) return;
+		if (
+			this.shutdownRequested ||
+			!this.started ||
+			!this.acceptingPush
+		) return;
 		void this.enqueue(async () => {
 			await this.pullBacklog();
 			await this.collector.flushDue();
@@ -348,7 +420,11 @@ export class TimelineV2Service {
 	}
 
 	private coordinateCount(): void {
-		if (!this.started || !this.acceptingPush) return;
+		if (
+			this.shutdownRequested ||
+			!this.started ||
+			!this.acceptingPush
+		) return;
 		void this.enqueue(async () => {
 			await this.pullBacklog();
 			await this.collector.flushCountDue();
@@ -356,22 +432,35 @@ export class TimelineV2Service {
 	}
 
 	private armEventPoll(delayMs: number): void {
-		if (!this.started || this.eventTimer !== null) return;
+		if (
+			this.shutdownRequested ||
+			!this.started ||
+			this.eventTimer !== null
+		) return;
 		this.eventTimer = this.clock.setTimer(() => {
 			this.eventTimer = null;
+			if (this.shutdownRequested) return;
 			void this.pullNow()
-				.catch(this.onError)
+				.catch((error) => {
+					if (!this.shutdownRequested) this.onError(error);
+				})
 				.finally(() => this.armEventPoll(this.eventPollMs));
 		}, delayMs);
 	}
 
 	private armJobPoll(delayMs: number): void {
-		if (!this.started || this.jobTimer !== null) return;
+		if (
+			this.shutdownRequested ||
+			!this.started ||
+			this.jobTimer !== null
+		) return;
 		this.jobTimer = this.clock.setTimer(() => {
 			this.jobTimer = null;
-			void this.jobs
-				.runUntilIdle()
-				.catch(this.onError)
+			if (this.shutdownRequested) return;
+			void this.trackJobPump(100)
+				.catch((error) => {
+					if (!this.shutdownRequested) this.onError(error);
+				})
 				.finally(() => this.armJobPoll(this.jobPollMs));
 		}, delayMs);
 	}
@@ -384,6 +473,34 @@ export class TimelineV2Service {
 		if (this.jobTimer !== null) {
 			this.clock.clearTimer(this.jobTimer);
 			this.jobTimer = null;
+		}
+	}
+
+	private trackJobPump(maxJobs: number): Promise<number> {
+		if (this.shutdownRequested) return Promise.resolve(0);
+		const pump = this.jobPumpTail.then(() => {
+			if (this.shutdownRequested) return 0;
+			return this.jobs.runUntilIdle(
+				maxJobs,
+				this.shutdownController.signal,
+			);
+		});
+		this.jobPumpTail = pump.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.activeJobPumps.add(pump);
+		void pump.finally(() => {
+			this.activeJobPumps.delete(pump);
+		}).catch(() => {
+			// The direct caller or scheduled poll owns the original rejection.
+		});
+		return pump;
+	}
+
+	private assertRuntimeOpen(): void {
+		if (this.shutdownRequested) {
+			throw new Error("Timeline v2 service is shutting down.");
 		}
 	}
 

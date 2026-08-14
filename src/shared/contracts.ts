@@ -1,19 +1,18 @@
-import type { RPCSchema } from 'electrobun/bun';
-import type { PetActionId } from './pet-actions';
-import type { PetPresentationEvent } from './pet-presentation';
-import type { ActiveGoalContextV1 } from './goal-context';
-import type { AuthCredentials, AuthRpcResult, AuthSession } from './auth';
+import type { RPCSchema } from "electrobun/bun";
+import type {
+	LocalMonitoringConfigure,
+	LocalMonitoringPermissionCheckState,
+	LocalMonitoringPermissionState,
+	LocalMonitoringStatus,
+	LocalRuntimeStatus,
+	LocalVaultKeyStatus,
+	LocalVaultLegacyMigrationResult,
+} from "../agent/local-protocol";
 import type {
 	AgentReadPermissionsRpcResult,
 	AgentReadPermissionsSnapshot,
 	SetAgentReadPermissionsRequest,
-} from './agent-permissions';
-import type {
-	CalendarBatchMutationResult,
-	CalendarLoadResponse,
-	CalendarMutation,
-	CalendarMutationResult,
-} from './calendar';
+} from "./agent-permissions";
 import type {
 	AgentRunAccepted,
 	AgentRunCommandAccepted,
@@ -28,94 +27,100 @@ import type {
 	StartConversationTurnRequest,
 	StartTaskPlanningRunRequest,
 	SubmitPlanningClarificationRequest,
-} from './agent-runs';
+} from "./agent-runs";
+import type { AppUpdateSnapshot } from "./app-update";
+import type { AuthCredentials, AuthRpcResult, AuthSession } from "./auth";
 import type {
-	LocalRuntimeStatus,
-	LocalMonitoringConfigure,
-	LocalMonitoringPermissionCheckState,
-	LocalMonitoringPermissionState,
-	LocalMonitoringStatus,
-	LocalVaultKeyStatus,
-	LocalVaultLegacyMigrationResult,
-} from '../agent/local-protocol';
+	CalendarBatchMutationResult,
+	CalendarLoadResponse,
+	CalendarMutation,
+	CalendarMutationResult,
+} from "./calendar";
 import type {
 	ConversationRpcResult,
 	ConversationRpcSendResult,
 	ConversationRpcThread,
-} from './conversation';
-import type {
-	TaskPlanningAnswer,
-	TaskPlanningInput,
-	TaskPlanningRpcResult,
-	TaskPlanningSession,
-} from './task-planning';
+} from "./conversation";
+import type { ActiveGoalContextV1 } from "./goal-context";
+import type { PetActionId } from "./pet-actions";
+import type { PetPresentationEvent } from "./pet-presentation";
 import type {
 	CommitPlanningDraftRequest,
 	PlanningAuthorityRpcResult,
 	PlanningAuthoritySnapshot,
 	PlanningCommitResult,
 	SavePlanningDraftRequest,
-} from './planning-authority';
+} from "./planning-authority";
+import type {
+	ClearProactiveFeedbackResult,
+	ListProactiveFeedbackRequest,
+	ProactiveFeedbackAvailable,
+	ProactiveFeedbackPage,
+	ProactiveFeedbackPolicySnapshot,
+	ProactiveFeedbackRpcResult,
+	SetProactiveFeedbackPolicyRequest,
+} from "./proactive-feedback";
+import type {
+	TaskPlanningAnswer,
+	TaskPlanningInput,
+	TaskPlanningRpcResult,
+	TaskPlanningSession,
+} from "./task-planning";
 
 export type {
+	ActiveGoalContextV1,
 	AgentReadPermissionsRpcResult,
 	AgentReadPermissionsSnapshot,
-	SetAgentReadPermissionsRequest,
+	AgentRunAccepted,
+	AgentRunCommandAccepted,
+	AgentRunEventEnvelope,
+	AgentRunRestorableSummary,
+	AgentRunRpcResult,
+	AgentRunSnapshot,
 	AuthRpcResult,
 	AuthSession,
 	CalendarBatchMutationResult,
 	CalendarLoadResponse,
 	CalendarMutation,
 	CalendarMutationResult,
-	LocalRuntimeStatus,
+	CancelAgentRunRequest,
+	ClearProactiveFeedbackResult,
+	CommitPlanningDraftRequest,
+	ConversationRpcResult,
+	ConversationRpcSendResult,
+	ConversationRpcThread,
+	DecideAgentToolApprovalRequest,
+	GetAgentRunSnapshotRequest,
+	ListProactiveFeedbackRequest,
+	ListRestorableAgentRunsRequest,
 	LocalMonitoringConfigure,
 	LocalMonitoringPermissionCheckState,
 	LocalMonitoringPermissionState,
 	LocalMonitoringStatus,
+	LocalRuntimeStatus,
 	LocalVaultKeyStatus,
 	LocalVaultLegacyMigrationResult,
 	PetPresentationEvent,
-	ActiveGoalContextV1,
-};
-
-export type {
-	AgentRunAccepted,
-	AgentRunCommandAccepted,
-	AgentRunEventEnvelope,
-	AgentRunRestorableSummary,
-	AgentRunRpcResult,
-	AgentRunSnapshot,
-	CancelAgentRunRequest,
-	DecideAgentToolApprovalRequest,
-	GetAgentRunSnapshotRequest,
-	ListRestorableAgentRunsRequest,
+	PlanningAuthorityRpcResult,
+	PlanningAuthoritySnapshot,
+	PlanningCommitResult,
+	ProactiveFeedbackAvailable,
+	ProactiveFeedbackPage,
+	ProactiveFeedbackPolicySnapshot,
+	ProactiveFeedbackRpcResult,
+	SavePlanningDraftRequest,
+	SetAgentReadPermissionsRequest,
+	SetProactiveFeedbackPolicyRequest,
 	StartConversationTurnRequest,
 	StartTaskPlanningRunRequest,
 	SubmitPlanningClarificationRequest,
-};
-
-export type {
-	ConversationRpcResult,
-	ConversationRpcSendResult,
-	ConversationRpcThread,
-};
-
-export type {
 	TaskPlanningAnswer,
 	TaskPlanningInput,
 	TaskPlanningRpcResult,
 	TaskPlanningSession,
 };
 
-export type {
-	CommitPlanningDraftRequest,
-	PlanningAuthorityRpcResult,
-	PlanningAuthoritySnapshot,
-	PlanningCommitResult,
-	SavePlanningDraftRequest,
-};
-
-export type PetMood = 'idle' | 'happy' | 'busy' | 'error';
+export type PetMood = "idle" | "happy" | "busy" | "error";
 
 /** Canonical, model-independent action identifier shared by every pet surface. */
 export type PetAnimationId = PetActionId;
@@ -127,7 +132,7 @@ export type PetState = {
 	/** Registry id resolved by the renderer; unknown ids safely fall back to whale. */
 	modelId?: string;
 	environment?: {
-		weather?: 'clear' | 'cloudy' | 'rain' | 'snow';
+		weather?: "clear" | "cloudy" | "rain" | "snow";
 		temperatureC?: number;
 		holiday?: string;
 		/** Local calendar day in MM-DD form. */
@@ -139,26 +144,26 @@ export type PetState = {
 
 export type PetInteractionMessage = {
 	kind:
-		| 'hover'
-		| 'hoverEnd'
-		| 'click'
-		| 'doubleClick'
-		| 'rapidClick'
-		| 'pet'
-		| 'petEnd'
-		| 'poke'
-		| 'dragStart'
-		| 'dragEnd';
+		| "hover"
+		| "hoverEnd"
+		| "click"
+		| "doubleClick"
+		| "rapidClick"
+		| "pet"
+		| "petEnd"
+		| "poke"
+		| "dragStart"
+		| "dragEnd";
 	action: PetAnimationId;
 	modelId: string;
-	zone?: 'head' | 'face' | 'body' | 'tail' | 'limb' | null;
+	zone?: "head" | "face" | "body" | "tail" | "limb" | null;
 	pointerId?: number;
 	dragDelta?: { x: number; y: number };
 };
 
 export type NativePetDragState = {
 	dragging: boolean;
-	reason?: 'pointerup' | 'webview' | 'hidden' | 'disposed';
+	reason?: "pointerup" | "webview" | "hidden" | "disposed";
 };
 
 export type FiveMinuteAuditFileExportRequest = {
@@ -176,12 +181,7 @@ export type FiveMinuteAuditFileExportRequest = {
  * A basename is returned only after a new mode-0600 file has been completed.
  */
 export type FiveMinuteAuditFileExportResult = {
-	status:
-		| 'exported'
-		| 'cancelled'
-		| 'invalid_range'
-		| 'not_ready'
-		| 'failed';
+	status: "exported" | "cancelled" | "invalid_range" | "not_ready" | "failed";
 	basename: string | null;
 };
 
@@ -261,6 +261,38 @@ export type MonitoringPermissionSettingsTarget =
 export type ClientRPC = {
 	bun: RPCSchema<{
 		requests: {
+			getAppUpdateStatus: {
+				params: Record<string, never>;
+				response: AppUpdateSnapshot;
+			};
+			checkForAppUpdate: {
+				params: Record<string, never>;
+				response: AppUpdateSnapshot;
+			};
+			downloadAppUpdate: {
+				params: Record<string, never>;
+				response: AppUpdateSnapshot;
+			};
+			installAppUpdateAndRestart: {
+				params: Record<string, never>;
+				response: AppUpdateSnapshot;
+			};
+			getProactiveFeedbackPolicy: {
+				params: Record<string, never>;
+				response: ProactiveFeedbackRpcResult<ProactiveFeedbackPolicySnapshot>;
+			};
+			setProactiveFeedbackPolicy: {
+				params: SetProactiveFeedbackPolicyRequest;
+				response: ProactiveFeedbackRpcResult<ProactiveFeedbackPolicySnapshot>;
+			};
+			listProactiveFeedback: {
+				params: ListProactiveFeedbackRequest;
+				response: ProactiveFeedbackRpcResult<ProactiveFeedbackPage>;
+			};
+			clearProactiveFeedbackData: {
+				params: Record<string, never>;
+				response: ProactiveFeedbackRpcResult<ClearProactiveFeedbackResult>;
+			};
 			getAgentReadPermissions: {
 				params: Record<string, never>;
 				response: AgentReadPermissionsRpcResult<AgentReadPermissionsSnapshot>;
@@ -316,9 +348,9 @@ export type ClientRPC = {
 			migrateLegacyContentVault: {
 				params: Record<string, never>;
 				response:
-					| { status: 'cancelled'; vault: LocalVaultKeyStatus }
+					| { status: "cancelled"; vault: LocalVaultKeyStatus }
 					| {
-							status: 'completed';
+							status: "completed";
 							result: LocalVaultLegacyMigrationResult;
 					  };
 			};
@@ -430,6 +462,8 @@ export type ClientRPC = {
 	webview: RPCSchema<{
 		requests: Record<never, never>;
 		messages: {
+			appUpdateStatusChanged: AppUpdateSnapshot;
+			proactiveFeedbackAvailable: ProactiveFeedbackAvailable;
 			agentRunEvent: AgentRunEventEnvelope;
 			authSessionExpired: Record<string, never>;
 			localStatusChanged: LocalRuntimeStatus;

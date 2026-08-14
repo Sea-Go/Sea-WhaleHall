@@ -674,6 +674,39 @@ describe("Timeline v2 ModernBERT episode classifier", () => {
 		).toBe("schema_mismatch");
 	});
 
+	test("cancels an active request even when fetch ignores AbortSignal", async () => {
+		const expected = manifest();
+		let markInferenceEntered: () => void = () => {
+			throw new Error("inference gate was not initialized");
+		};
+		const inferenceEntered = new Promise<void>((resolve) => {
+			markInferenceEntered = resolve;
+		});
+		const classifier = new ModernBertEpisodeClassifier(
+			options(async (input) => {
+				if (String(input) === MANIFEST_URL) return Response.json(expected);
+				markInferenceEntered();
+				return new Promise<Response>(() => {
+					// Deliberately ignores AbortSignal.
+				});
+			}, expected),
+		);
+		await classifier.verifyArtifact();
+		const controller = new AbortController();
+		const classifying = classifier.classify(
+			[fact()],
+			goal(),
+			classificationContext(),
+			controller.signal,
+		);
+		await inferenceEntered;
+		controller.abort(new DOMException("shutdown", "AbortError"));
+		expect((await classifierError(() => classifying)).code).toBe(
+			"request_cancelled",
+		);
+		expect(classifier.artifactVerified).toBeTrue();
+	});
+
 	test("times out independently of fetch cooperation and rejects oversized responses", async () => {
 		const expected = manifest();
 		const timedOut = new ModernBertEpisodeClassifier(

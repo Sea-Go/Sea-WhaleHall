@@ -160,6 +160,9 @@ export class DataCenterSyncService {
 		agentId: string;
 		context: DataCenterEncryptionContext;
 	} | null = null;
+	private closed = false;
+	private stopping = false;
+	private stopPromise: Promise<void> | null = null;
 	private desiredRunning = false;
 	private loopController: AbortController | null = null;
 	private loopPromise: Promise<void> | null = null;
@@ -184,7 +187,9 @@ export class DataCenterSyncService {
 	}
 
 	start(): void {
-		if (!this.options.configuration.enabled) return;
+		if (!this.options.configuration.enabled || this.closed || this.stopping) {
+			return;
+		}
 		this.desiredRunning = true;
 		if (this.loopPromise) {
 			this.wake();
@@ -196,25 +201,54 @@ export class DataCenterSyncService {
 		this.loopPromise = this.superviseLoop(loop, controller);
 	}
 
+	/** Permanently closes synchronization ingress before asynchronous shutdown. */
+	beginShutdown(): void {
+		this.closed = true;
+		this.requestStop();
+	}
+
 	wake(): void {
 		this.wakeWaiter?.();
 	}
 
-	async stop(): Promise<void> {
+	stop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise;
+		this.stopping = true;
+		this.requestStop();
+		const stopping = this.drainStopped().finally(() => {
+			if (this.stopPromise !== stopping) return;
+			this.stopPromise = null;
+			this.stopping = false;
+		});
+		this.stopPromise = stopping;
+		return stopping;
+	}
+
+	private requestStop(): void {
 		this.desiredRunning = false;
 		this.encryptionContextCache = null;
 		this.loopController?.abort();
 		this.wake();
+	}
+
+	private async drainStopped(): Promise<void> {
 		// Per-attempt request scopes race both signed and bearer transports against
 		// this lifecycle abort, so even an auth-transition callback can drain the
 		// synchronization loop without waiting on its own bearer transport.
-		await this.loopPromise;
-		await this.serialTail;
+		for (;;) {
+			const loop = this.loopPromise;
+			const serial = this.serialTail;
+			await loop;
+			await serial;
+			if (this.loopPromise === null && this.serialTail === serial) return;
+		}
 	}
 
 	/** Drains a bounded number of durable operations for the current session. */
 	async syncOnce(signal?: AbortSignal): Promise<boolean> {
-		if (!this.options.configuration.enabled) return false;
+		if (!this.options.configuration.enabled || this.closed || this.stopping) {
+			return false;
+		}
 		const identity = this.options.auth.captureCurrentSession();
 		if (!identity) return false;
 		return this.serialize(async () => {
@@ -271,7 +305,7 @@ export class DataCenterSyncService {
 		if (this.loopController !== controller) return;
 		this.loopController = null;
 		this.loopPromise = null;
-		if (this.desiredRunning) {
+		if (this.desiredRunning && !this.closed && !this.stopping) {
 			try {
 				this.start();
 			} catch (error) {

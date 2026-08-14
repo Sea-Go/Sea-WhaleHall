@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ActivityEventWorkerRequest } from "../src/agent/activity-event-worker";
+import {
+	type ActivityEventWorkerRequest,
+	validateActivityEventWorkerResponse,
+} from "../src/agent/activity-event-worker";
 import {
 	ACTIVITY_REFLECTION_SYSTEM_PROMPT,
 	type ActivityReflectionModelOutput,
 	activityReflectionModelOutputSchema,
 	activityReflectionOutputToWorkerResponse,
 	createActivityReflectionPrompt,
+	createActivityReflectionRuntimeOutputSchema,
 } from "../src/agent/activity-reflection-prompt";
 import { ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES } from "../src/agent/activity-reflection-skill-names";
 import {
@@ -21,6 +25,7 @@ import {
 	type ActivityReflectionSidecar,
 	MastraActivityReflectionAnalyzer,
 } from "../src/bun/mastra-activity-reflection";
+import { MastraSidecarError } from "../src/bun/mastra-sidecar-client";
 import { isActivityAnalysisWorkerResult } from "../src/shared/activity-analysis-contract";
 
 function requestFixture(
@@ -140,6 +145,32 @@ describe("MastraActivityReflectionAnalyzer", () => {
 			score: 0,
 			score_reason: "证据不足，计 0 分",
 		};
+		expect(isActivityAnalysisWorkerResult(receipt)).toBeFalse();
+	});
+
+	test("rejects deterministic control characters in Worker output", () => {
+		const receipt = {
+			request_id: "control-character-output",
+			events: [
+				{
+					time: "00:00:01-00:00:02",
+					action: "推测：正在进行编程",
+					source_event_ids: ["source-1"],
+					activity: "development",
+					goal_relevance: "direct",
+					confidence: 0.72,
+					reason_codes: ["editor_activity"],
+					evidence: ["编辑器持续前台且存在交互"],
+					started_at_ms: 1_000,
+					ended_at_ms: 2_000,
+				},
+			],
+			score: 0.75,
+			score_reason: "与当前目标直接相关",
+		};
+		expect(isActivityAnalysisWorkerResult(receipt)).toBeTrue();
+		receipt.events[0]!.evidence = ["安全文本\u0085隐藏控制内容"];
+
 		expect(isActivityAnalysisWorkerResult(receipt)).toBeFalse();
 	});
 
@@ -274,6 +305,66 @@ describe("MastraActivityReflectionAnalyzer", () => {
 				ended_at_ms: 3_000,
 			}),
 		]);
+	});
+
+	test("canonicalizes repeated segment tokens inside one model event", () => {
+		const output = createActivityReflectionRuntimeOutputSchema(
+			["segment-1"],
+			["other_unknown"],
+		).parse({
+			events: [
+				{
+					action: "不确定：具体活动无法判断",
+					activity: "other_unknown",
+					goal_relevance: "uncertain",
+					confidence: 0.2,
+					reason_codes: ["evidence_limited"],
+					evidence: ["现有证据不足"],
+					signal_segment_ids: ["segment-1", "segment-1", "segment-1"],
+					started_at_ms: null,
+					ended_at_ms: null,
+				},
+			],
+			score: 0,
+			score_reason: "证据不足，暂不累计分数",
+		});
+
+		const response = activityReflectionOutputToWorkerResponse(
+			output,
+			requestFixture(),
+		);
+		expect(response).toMatchObject({
+			events: [
+				{
+					action: "不确定：具体活动无法判断",
+					started_at_ms: 1_000,
+					ended_at_ms: 2_000,
+				},
+			],
+			score: 0,
+		});
+		expect(() =>
+			validateActivityEventWorkerResponse(response, response.request_id),
+		).not.toThrow();
+	});
+
+	test("still rejects one local segment claimed by multiple model events", () => {
+		const first = modelOutputFixture().events[0]!;
+		const output: ActivityReflectionModelOutput = {
+			...modelOutputFixture(),
+			events: [
+				first,
+				{
+					...first,
+					action: "推测：正在查阅技术资料",
+					activity: "research",
+				},
+			],
+		};
+
+		expect(() =>
+			activityReflectionOutputToWorkerResponse(output, requestFixture()),
+		).toThrow("invalid_response");
 	});
 
 	test("preserves a valid short model time slice and fills only missing endpoints", () => {
@@ -561,23 +652,32 @@ describe("MastraActivityReflectionAnalyzer", () => {
 		) as Array<Record<string, unknown>>;
 		expect(compressed).toHaveLength(3);
 		for (const event of compressed) {
-			expect(Object.keys(event).sort()).toEqual(["message", "time", "tools"]);
+			expect(Object.keys(event).sort()).toEqual([
+				"context_only",
+				"message",
+				"time",
+				"tools",
+			]);
+			expect(event.context_only).toBeFalse();
 		}
 		expect(compressed).toEqual([
 			{
 				time: "00:00:01-00:00:01",
 				tools: "WhaleHall 原生桌面观察器（application.foregroundChanged）",
 				message: null,
+				context_only: false,
 			},
 			{
 				time: "00:00:01-00:00:01",
 				tools: "WhaleHall 编辑器观察器（editor.documentChanged）",
 				message: { language: "TypeScript", text: "private source text" },
+				context_only: false,
 			},
 			{
 				time: "00:00:02-00:00:02",
 				tools: "WhaleHall 输入观察器（input.activityAggregated）",
 				message: null,
+				context_only: false,
 			},
 		]);
 		expect(
@@ -620,12 +720,20 @@ describe("MastraActivityReflectionAnalyzer", () => {
 				bucketEndedAtMs: 2_300,
 				keyCount: 13,
 			},
+			context_only: false,
 		});
 	});
 
 	test("adds a local factual signal index without copying private payload values", () => {
 		const request = requestFixture("signal-index-window");
 		request.raw_event = {
+			contextOnly: [
+				{
+					kind: "browser.tabNavigated",
+					occurredAtMs: 900,
+					payload: { title: "earlier context" },
+				},
+			],
 			events: [
 				{
 					kind: "application.foregroundChanged",
@@ -643,6 +751,20 @@ describe("MastraActivityReflectionAnalyzer", () => {
 			],
 		};
 		const prompt = createActivityReflectionPrompt(request).userPrompt;
+		const compressedLine = prompt
+			.split("\n")
+			.find((line) => line.startsWith("COMPRESSED_ACTIVITY_EVENTS_JSON="));
+		expect(compressedLine).toBeDefined();
+		const evidence = JSON.parse(
+			compressedLine!.slice("COMPRESSED_ACTIVITY_EVENTS_JSON=".length),
+		) as Array<Record<string, unknown>>;
+		expect(evidence[0]).toMatchObject({
+			context_only: true,
+			message: { title: "earlier context" },
+		});
+		expect(
+			evidence.slice(1).every((item) => item.context_only === false),
+		).toBeTrue();
 		const signalIndex = prompt
 			.split("\n")
 			.find((line) => line.startsWith("LOCAL_SIGNAL_INDEX_JSON="));
@@ -650,6 +772,7 @@ describe("MastraActivityReflectionAnalyzer", () => {
 		expect(signalIndex).toContain("浏览器资料观察");
 		expect(signalIndex).not.toContain("private editor");
 		expect(signalIndex).not.toContain("private browser");
+		expect(signalIndex).not.toContain("earlier context");
 	});
 
 	test("rejects malformed model output before it can reach the score ledger", async () => {
@@ -667,6 +790,27 @@ describe("MastraActivityReflectionAnalyzer", () => {
 		await expect(
 			analyzer.analyze(requestFixture("invalid-model-output")),
 		).rejects.toThrow("invalid_response");
+	});
+
+	test("classifies Sidecar semantic rejection as deterministic model output", async () => {
+		const sidecar: ActivityReflectionSidecar = {
+			async request<TResult = unknown>(): Promise<TResult> {
+				throw new MastraSidecarError(
+					"ACTIVITY_OUTPUT_INVALID",
+					"sanitized semantic rejection",
+					false,
+				);
+			},
+		};
+		const analyzer = new MastraActivityReflectionAnalyzer({ sidecar });
+
+		await expect(
+			analyzer.analyze(requestFixture("sidecar-semantic-rejection")),
+		).rejects.toMatchObject({
+			name: "ActivityEventWorkerClientError",
+			code: "invalid_response",
+			retryable: true,
+		});
 	});
 
 	test("cancels its matching relay invocation without dropping the durable outbox item", async () => {

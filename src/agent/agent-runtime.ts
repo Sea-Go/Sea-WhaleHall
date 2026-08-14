@@ -391,7 +391,11 @@ export class AgentRuntime {
 
 	private handleFailure(error: LocalClientError): void {
 		this.activeCalls.clear();
-		if (this.options.requireStartupGoalPreparation && !this.local.isRunning) {
+		// A failed native owner may remain privately retained while its exact
+		// process tree is being reaped. That ownership is not proof that the
+		// process is usable, and a replacement must always replay the authoritative
+		// startup goal boundary before it can collect new events.
+		if (this.options.requireStartupGoalPreparation) {
 			this.startupGoalPrepared = false;
 		}
 		if (this.status.state !== "stopped")

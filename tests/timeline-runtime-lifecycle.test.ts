@@ -6,6 +6,7 @@ import {
 
 class TestRuntime {
 	startCount = 0;
+	beginShutdownCount = 0;
 	closeCount = 0;
 
 	constructor(
@@ -16,6 +17,10 @@ class TestRuntime {
 	async start(): Promise<void> {
 		this.startCount += 1;
 		await this.startImplementation();
+	}
+
+	beginShutdown(): void {
+		this.beginShutdownCount += 1;
 	}
 
 	async close(): Promise<void> {
@@ -191,5 +196,27 @@ describe("Timeline runtime lifecycle", () => {
 		await expect(lifecycle.ensureStarted()).rejects.toThrow(
 			"Timeline runtime lifecycle is closed.",
 		);
+	});
+
+	test("beginShutdown seals ingress without closing the published owner", async () => {
+		const runtime = new TestRuntime();
+		const lifecycle = new TimelineRuntimeLifecycle({
+			createRuntime: async () => runtime,
+			retryDelaysMs: [5],
+		});
+		await lifecycle.ensureStarted();
+
+		lifecycle.beginShutdown();
+		lifecycle.beginShutdown();
+		expect(runtime.beginShutdownCount).toBe(2);
+		expect(runtime.closeCount).toBe(0);
+		await expect(lifecycle.ensureStarted()).rejects.toThrow(
+			"Timeline runtime lifecycle is closed.",
+		);
+
+		const closing = lifecycle.close();
+		expect(lifecycle.close()).toBe(closing);
+		await closing;
+		expect(runtime.closeCount).toBe(1);
 	});
 });
