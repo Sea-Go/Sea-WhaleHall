@@ -1,12 +1,51 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+	developmentQaWindowSize,
+	DevelopmentQaAuthSession,
+	isDevelopmentQaMode,
+} from "../src/bun/development-qa-auth";
 
 const repositoryRoot = join(import.meta.dir, "..");
 const configPath = join(repositoryRoot, "electrobun.config.ts");
 const configUrl = pathToFileURL(configPath).href;
 
 describe("stable macOS release build gate", () => {
+	test("keeps the in-memory QA login fail-closed outside an explicitly enabled dev runtime", () => {
+		expect(isDevelopmentQaMode("dev", { WHALEHALL_QA_MODE: "1" })).toBe(true);
+		for (const channel of ["canary", "stable"] as const) {
+			expect(isDevelopmentQaMode(channel, { WHALEHALL_QA_MODE: "1" })).toBe(false);
+		}
+		expect(isDevelopmentQaMode("dev", {})).toBe(false);
+		expect(isDevelopmentQaMode("dev", { WHALEHALL_QA_MODE: "true" })).toBe(false);
+	});
+
+	test("allows only the two visual QA sizes behind the same dev-only gate", () => {
+		const enabled = {
+			WHALEHALL_QA_MODE: "1",
+			WHALEHALL_QA_WINDOW_WIDTH: "1440",
+			WHALEHALL_QA_WINDOW_HEIGHT: "900",
+		};
+		expect(developmentQaWindowSize("dev", enabled)).toEqual({ width: 1440, height: 900 });
+		expect(developmentQaWindowSize("stable", enabled)).toBeNull();
+		expect(
+			developmentQaWindowSize("dev", {
+				...enabled,
+				WHALEHALL_QA_WINDOW_WIDTH: "1600",
+			}),
+		).toBeNull();
+	});
+
+	test("QA session accepts only public experience credentials and expires in memory", () => {
+		const auth = new DevelopmentQaAuthSession();
+		expect(auth.signIn("demo@whalehall.local", "wrong", 1_000)).toBeNull();
+		const session = auth.signIn("DEMO@WHALEHALL.LOCAL", "whalehall", 1_000);
+		expect(session?.user.email).toBe("demo@whalehall.local");
+		expect(auth.restore(1_001)?.id).toBe("development-qa-session");
+		expect(auth.restore(1_000 + 12 * 60 * 60 * 1_000)).toBeNull();
+	});
+
 	test("terminates config evaluation before Electrobun can fall back to unsigned defaults", async () => {
 		const result = await evaluateConfig("stable", {});
 		expect(result.exitCode).not.toBe(0);

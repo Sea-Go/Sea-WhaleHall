@@ -15,6 +15,7 @@ use whalehall_local_core::observations::{
     ObservationJournal, ObservationJournalError, ObservationKeyAvailability, ObservationKeyStatus,
     ObservationKeyStorageMode,
 };
+use whalehall_local_core::planning::{PlanningStore, PlanningStoreError};
 use whalehall_local_core::sensors::accessibility_tree::{
     AccessibilityConfig, AccessibilityService, SystemAccessibilityProvider,
 };
@@ -37,14 +38,17 @@ use whalehall_local_core::sensors::vscode_edit_bridge::{
     VscodeEditBridgeConfig, VscodeEditBridgeService,
 };
 use whalehall_local_protocol::{
-    AuditQueryFiveMinutesParams, AuditQueryFiveMinutesResult, DesktopEventFrame,
-    DesktopEventFrameKind, EventCommitParams, EventGoalChangeParams, EventGoalChangeResult,
-    EventQueryParams, MAX_JSONL_LINE_BYTES, MonitoringConfigureParams, OutboundMessage, Request,
+    AuditQueryFiveMinutesParams, AuditQueryFiveMinutesResult, CalendarGetParams,
+    CalendarListParams, CalendarMutateParams, DesktopEventFrame, DesktopEventFrameKind,
+    EventCommitParams, EventGoalChangeParams, EventGoalChangeResult, EventQueryParams,
+    MAX_JSONL_LINE_BYTES, MonitoringConfigureParams, OutboundMessage, PlanningGetParams,
+    PlanningListParams, PlanningMutateParams, PlanningOperationGetParams, PlanningOutboxAckParams,
+    PlanningOutboxListParams, PlanningUpsertParams, PlanningVaultReferencesParams, Request,
     Response, RuntimeHealth, SemanticCommitParams, SemanticEventFrame, SemanticEventFrameKind,
     SemanticQueryParams, ToolCallParams, ToolCallResult, ToolCancelParams, ToolCancelResult,
     ToolListResult, VaultDeleteBatchParams, VaultKeyAvailability, VaultKeyStatusResult,
-    VaultKeyStorageMode, VaultMigrateLegacyKeyParams, VaultMigrateLegacyKeyResult,
-    VaultOpenBatchParams, VaultSealBatchParams, error_codes,
+    VaultKeyStorageMode, VaultListRecordsParams, VaultMigrateLegacyKeyParams,
+    VaultMigrateLegacyKeyResult, VaultOpenBatchParams, VaultSealBatchParams, error_codes,
 };
 
 use observer::{ObserverSupervisor, ObserverSupervisorConfig};
@@ -534,6 +538,7 @@ struct ResidentServices {
 struct ObservationServices {
     journal: ObservationJournal,
     observer: ObserverSupervisor,
+    planning_store: PlanningStore,
 }
 
 impl ResidentServices {
@@ -584,6 +589,13 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let planning_store = PlanningStore::open(
+        services
+            .activity
+            .database_path()
+            .with_file_name("planning.sqlite3"),
+    )
+    .map_err(io::Error::other)?;
     let retention_task =
         EventRetentionTask::start(event_journal.clone(), EVENT_RETENTION_CLEANUP_INTERVAL);
     let observation_retention_task = ObservationRetentionTask::start(
@@ -595,6 +607,7 @@ where
     let observation_services = ObservationServices {
         journal: observation_journal.clone(),
         observer: observer.clone(),
+        planning_store,
     };
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -849,6 +862,7 @@ fn dispatch_request(
     let ObservationServices {
         journal: observation_journal,
         observer,
+        planning_store,
     } = observation_services;
     match request.method.as_str() {
         "runtime.health" => {
@@ -1200,6 +1214,223 @@ fn dispatch_request(
             };
             let _ = output.send(OutboundMessage::Response(response));
         }
+        "vault.listRecords" => {
+            let params: VaultListRecordsParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid vault.listRecords parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match observation_journal.list_vault_records(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => observation_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "planning.list" => {
+            let params: PlanningListParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid planning.list parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.list_plans(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "planning.vaultReferences" => {
+            let params: PlanningVaultReferencesParams = match serde_json::from_value(request.params)
+            {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid planning.vaultReferences parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.list_vault_references(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "planning.get" => {
+            let params: PlanningGetParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid planning.get parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.get_plan(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "planning.operation.get" => {
+            let params: PlanningOperationGetParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid planning.operation.get parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.get_operation_result(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "planning.upsert" => {
+            let params: PlanningUpsertParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid planning.upsert parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.upsert_plan(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "planning.mutate" => {
+            let params: PlanningMutateParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid planning.mutate parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.mutate_plan(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "calendar.list" => {
+            let params: CalendarListParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid calendar.list parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.list_calendar(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "calendar.get" => {
+            let params: CalendarGetParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid calendar.get parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.get_calendar_event(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "calendar.mutate" => {
+            let params: CalendarMutateParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid calendar.mutate parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.mutate_calendar(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "planning.outbox.list" => {
+            let params: PlanningOutboxListParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid planning.outbox.list parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.list_outbox(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
+        "planning.outbox.ack" => {
+            let params: PlanningOutboxAckParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    let _ = output.send(OutboundMessage::Response(Response::failure(
+                        Some(request.id),
+                        error_codes::INVALID_ARGUMENTS,
+                        format!("Invalid planning.outbox.ack parameters: {error}"),
+                    )));
+                    return;
+                }
+            };
+            let response = match planning_store.acknowledge_outbox(&params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => planning_error_response(request.id, error),
+            };
+            let _ = output.send(OutboundMessage::Response(response));
+        }
         "event.query" => {
             let params: EventQueryParams = match serde_json::from_value(request.params) {
                 Ok(params) => params,
@@ -1274,6 +1505,63 @@ fn dispatch_request(
                 "METHOD_NOT_FOUND",
                 format!("Unknown method: {method}"),
             )));
+        }
+    }
+}
+
+fn planning_error_response(id: String, error: PlanningStoreError) -> Response {
+    match error {
+        PlanningStoreError::StaleVersion {
+            aggregate_type,
+            aggregate_id,
+            expected,
+            actual,
+        } => Response::failure_with_details(
+            Some(id),
+            error_codes::INVALID_ARGUMENTS,
+            format!(
+                "Stale {aggregate_type} version for {aggregate_id}: expected {expected:?}, actual {actual:?}"
+            ),
+            serde_json::json!({
+                "reason": "stale-version",
+                "aggregateType": aggregate_type,
+                "aggregateId": aggregate_id,
+                "expectedVersion": expected,
+                "actualVersion": actual,
+            }),
+        ),
+        PlanningStoreError::NotFound {
+            aggregate_type,
+            aggregate_id,
+        } => Response::failure_with_details(
+            Some(id),
+            error_codes::INVALID_ARGUMENTS,
+            format!("{aggregate_type} {aggregate_id} does not exist"),
+            serde_json::json!({
+                "reason": "not-found",
+                "aggregateType": aggregate_type,
+                "aggregateId": aggregate_id,
+            }),
+        ),
+        PlanningStoreError::IdempotencyConflict { operation_id } => Response::failure_with_details(
+            Some(id),
+            error_codes::INVALID_ARGUMENTS,
+            format!("operationId {operation_id} was reused with different request data"),
+            serde_json::json!({
+                "reason": "idempotency-conflict",
+                "operationId": operation_id,
+            }),
+        ),
+        error
+        @ (PlanningStoreError::Configuration(_) | PlanningStoreError::ImmutableHistory(_)) => {
+            Response::failure(Some(id), error_codes::INVALID_ARGUMENTS, error.to_string())
+        }
+        PlanningStoreError::Io(_) | PlanningStoreError::Sqlite(_) | PlanningStoreError::Json(_) => {
+            Response::failure(
+                Some(id),
+                error_codes::INTERNAL_ERROR,
+                "Planning store operation failed",
+            )
         }
     }
 }
@@ -1565,6 +1853,452 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exposes_durable_planning_calendar_outbox_and_operation_jsonl_methods() {
+        let (mut input, server_input) = duplex(128 * 1024);
+        let (server_output, output) = duplex(128 * 1024);
+        let (directory, activity) = test_activity();
+        let server = tokio::spawn(serve_with_activity(
+            BufReader::new(server_input),
+            server_output,
+            activity,
+        ));
+        let draft = serde_json::json!({
+            "schemaVersion": "planning.v1",
+            "planId": "plan-jsonl",
+            "version": 1,
+            "planType": null,
+            "status": "draft",
+            "analysisState": "awaiting-analysis",
+            "analysisDiagnostic": null,
+            "goal": null,
+            "sealedContentRef": "vault-ref-jsonl",
+            "redactedContent": false,
+            "startToday": false,
+            "timeZone": "Asia/Shanghai",
+            "effectiveStartDate": null,
+            "schedulingWindow": null,
+            "activeRevisionId": null,
+            "proposedRevisionId": null,
+            "currentEstimate": null,
+            "tasks": [],
+            "conversation": [],
+            "revisions": [],
+            "estimateSnapshots": [],
+            "observationEvidence": [],
+            "adjustments": [],
+            "runtimePayload": {
+                "sourceKey": "local-runtime",
+                "manifestRecordId": "manifest-jsonl"
+            },
+            "autoScheduleAuthorized": false,
+            "monitoringMode": "manual-only",
+            "createdAtMs": 1_000,
+            "updatedAtMs": 1_000
+        });
+        let mut stale = draft.clone();
+        stale["version"] = serde_json::json!(2);
+        stale["updatedAtMs"] = serde_json::json!(2_000);
+        let requests = [
+            serde_json::json!({
+                "id": "planning-create",
+                "method": "planning.upsert",
+                "params": {
+                    "operationId": "planning-create-op",
+                    "expectedVersion": null,
+                    "plan": draft,
+                    "calendarEvents": [],
+                    "outbox": [{
+                        "entryId": "planning-created-entry",
+                        "kind": "plan-changed",
+                        "aggregateId": "plan-jsonl",
+                        "payload": {"planId": "plan-jsonl", "version": 1},
+                        "createdAtMs": 1_000
+                    }]
+                }
+            }),
+            serde_json::json!({
+                "id": "planning-recover",
+                "method": "planning.operation.get",
+                "params": {"operationId": "planning-create-op"}
+            }),
+            serde_json::json!({
+                "id": "planning-list",
+                "method": "planning.list",
+                "params": {"statuses": ["draft"], "limit": 10}
+            }),
+            serde_json::json!({
+                "id": "planning-vault-references",
+                "method": "planning.vaultReferences",
+                "params": {"limit": 10}
+            }),
+            serde_json::json!({
+                "id": "planning-get",
+                "method": "planning.get",
+                "params": {"planId": "plan-jsonl"}
+            }),
+            serde_json::json!({
+                "id": "calendar-list",
+                "method": "calendar.list",
+                "params": {
+                    "sourcePlanId": "plan-jsonl",
+                    "fromDate": "2026-08-14",
+                    "toDateExclusive": "2026-08-21"
+                }
+            }),
+            serde_json::json!({
+                "id": "outbox-list",
+                "method": "planning.outbox.list",
+                "params": {"status": "pending", "limit": 10}
+            }),
+            serde_json::json!({
+                "id": "outbox-ack",
+                "method": "planning.outbox.ack",
+                "params": {
+                    "operationId": "ack-created-entry",
+                    "entryIds": ["planning-created-entry"],
+                    "deliveredAtMs": 2_000
+                }
+            }),
+            serde_json::json!({
+                "id": "planning-stale",
+                "method": "planning.mutate",
+                "params": {
+                    "operationId": "planning-stale-op",
+                    "expectedVersion": 0,
+                    "plan": stale,
+                    "calendarEvents": null,
+                    "outbox": []
+                }
+            }),
+        ];
+        for request in requests {
+            input
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&request).expect("encode request")
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write planning request");
+        }
+        input.shutdown().await.expect("close input");
+
+        let mut output = BufReader::new(output);
+        let mut frames = Vec::new();
+        loop {
+            let mut line = String::new();
+            if output.read_line(&mut line).await.expect("read response") == 0 {
+                break;
+            }
+            let frame = serde_json::from_str::<Value>(&line).expect("parse JSONL response");
+            if frame.get("id").is_some() {
+                frames.push(frame);
+            }
+        }
+        server.await.expect("join server").expect("server result");
+        let by_id = |id: &str| {
+            frames
+                .iter()
+                .find(|frame| frame["id"] == id)
+                .unwrap_or_else(|| panic!("missing {id} response"))
+        };
+        assert_eq!(
+            by_id("planning-create")["result"]["plan"]["analysisState"],
+            "awaiting-analysis"
+        );
+        assert_eq!(
+            by_id("planning-create")["result"]["plan"]["planType"],
+            Value::Null
+        );
+        assert_eq!(
+            by_id("planning-create")["result"]["plan"]["effectiveStartDate"],
+            Value::Null
+        );
+        assert_eq!(
+            by_id("planning-recover")["result"]["method"],
+            "planning.upsert"
+        );
+        assert_eq!(
+            by_id("planning-recover")["result"]["plan"]["runtimePayload"]["sourceKey"],
+            "local-runtime"
+        );
+        assert_eq!(
+            by_id("planning-list")["result"]["plans"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            by_id("planning-vault-references")["result"]["references"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            by_id("planning-vault-references")["result"]["references"][0]["sealedContentRef"],
+            "vault-ref-jsonl"
+        );
+        assert!(
+            by_id("planning-vault-references")["result"]["references"][0]
+                .get("runtimePayload")
+                .is_none()
+        );
+        assert_eq!(
+            by_id("planning-get")["result"]["plan"]["planId"],
+            "plan-jsonl"
+        );
+        assert_eq!(
+            by_id("calendar-list")["result"]["events"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            by_id("outbox-list")["result"]["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            by_id("outbox-ack")["result"]["entries"][0]["status"],
+            "delivered"
+        );
+        assert_eq!(by_id("planning-stale")["ok"], false);
+        assert_eq!(
+            by_id("planning-stale")["error"]["details"]["reason"],
+            "stale-version"
+        );
+        assert!(directory.path().join("planning.sqlite3").exists());
+    }
+
+    #[tokio::test]
+    async fn calendar_jsonl_actor_defaults_to_user_and_reserves_runtime_auto_moves() {
+        let (mut input, server_input) = duplex(128 * 1024);
+        let (server_output, output) = duplex(128 * 1024);
+        let (_directory, activity) = test_activity();
+        let server = tokio::spawn(serve_with_activity(
+            BufReader::new(server_input),
+            server_output,
+            activity,
+        ));
+        let estimate = serde_json::json!({
+            "estimatedCompletionDate": "2026-08-20",
+            "confidence": 0.8,
+            "assessedAtMs": 1_000,
+            "evidenceThroughMs": null,
+            "basis": "本地确定性测试估时",
+            "modelVersion": "test-model-v1"
+        });
+        let active_plan = serde_json::json!({
+            "schemaVersion": "planning.v1",
+            "planId": "plan-calendar-actor",
+            "version": 1,
+            "planType": "short-term",
+            "status": "active",
+            "analysisState": "ready",
+            "analysisDiagnostic": null,
+            "goal": null,
+            "sealedContentRef": "vault-calendar-actor",
+            "redactedContent": false,
+            "startToday": true,
+            "timeZone": "Asia/Shanghai",
+            "effectiveStartDate": "2026-08-14",
+            "schedulingWindow": {
+                "startDate": "2026-08-14",
+                "endDateInclusive": "2026-08-20"
+            },
+            "activeRevisionId": "revision-calendar-actor-1",
+            "proposedRevisionId": null,
+            "currentEstimate": estimate,
+            "tasks": [{
+                "taskId": "task-calendar-actor",
+                "title": "sealed",
+                "description": "",
+                "dependencyTaskIds": [],
+                "estimatedEffortMinutes": 60,
+                "status": "pending"
+            }],
+            "conversation": [],
+            "revisions": [{
+                "revisionId": "revision-calendar-actor-1",
+                "planVersion": 1,
+                "createdAtMs": 1_000,
+                "reason": "activation",
+                "estimate": null,
+                "payload": {}
+            }],
+            "estimateSnapshots": [],
+            "observationEvidence": [],
+            "adjustments": [],
+            "runtimePayload": {},
+            "autoScheduleAuthorized": true,
+            "monitoringMode": "manual-only",
+            "createdAtMs": 1_000,
+            "updatedAtMs": 1_000
+        });
+        let event = serde_json::json!({
+            "schemaVersion": "calendar.v1",
+            "eventId": "event-calendar-actor",
+            "title": "计划任务",
+            "sealedContentRef": null,
+            "redactedContent": true,
+            "kind": "plan",
+            "state": "committed",
+            "schedule": {
+                "allDay": false,
+                "start": "2026-08-14T09:00:00+08:00",
+                "end": "2026-08-14T10:00:00+08:00",
+                "timeZone": "Asia/Shanghai"
+            },
+            "recurrence": null,
+            "occurrenceId": null,
+            "sourcePlanId": "plan-calendar-actor",
+            "sourceTaskId": "task-calendar-actor",
+            "scheduleOrigin": "model",
+            "userLocked": false,
+            "editable": true,
+            "version": 1
+        });
+        let mut moved = event.clone();
+        moved["version"] = serde_json::json!(2);
+        moved["schedule"]["start"] = serde_json::json!("2026-08-15T09:00:00+08:00");
+        moved["schedule"]["end"] = serde_json::json!("2026-08-15T10:00:00+08:00");
+        let mut user_edit = moved.clone();
+        user_edit["version"] = serde_json::json!(3);
+        user_edit["schedule"]["start"] = serde_json::json!("2026-08-16T09:00:00+08:00");
+        user_edit["schedule"]["end"] = serde_json::json!("2026-08-16T10:00:00+08:00");
+        let mut locked = user_edit.clone();
+        locked["userLocked"] = serde_json::json!(true);
+        let mut unlocked = locked.clone();
+        unlocked["version"] = serde_json::json!(4);
+        unlocked["userLocked"] = serde_json::json!(false);
+        let requests = [
+            serde_json::json!({
+                "id": "actor-plan-create",
+                "method": "planning.upsert",
+                "params": {
+                    "operationId": "actor-plan-create-op",
+                    "expectedVersion": null,
+                    "plan": active_plan,
+                    "calendarEvents": [],
+                    "outbox": []
+                }
+            }),
+            serde_json::json!({
+                "id": "actor-runtime-create",
+                "method": "calendar.mutate",
+                "params": {
+                    "operationId": "actor-runtime-create-op",
+                    "actor": "planning-runtime",
+                    "mutations": [{"action": "upsert", "expectedVersion": null, "event": event}],
+                    "outbox": []
+                }
+            }),
+            serde_json::json!({
+                "id": "actor-runtime-move",
+                "method": "calendar.mutate",
+                "params": {
+                    "operationId": "actor-runtime-move-op",
+                    "actor": "planning-runtime",
+                    "mutations": [{"action": "upsert", "expectedVersion": 1, "event": moved}],
+                    "outbox": []
+                }
+            }),
+            serde_json::json!({
+                "id": "actor-default-user-rejected",
+                "method": "calendar.mutate",
+                "params": {
+                    "operationId": "actor-default-user-rejected-op",
+                    "mutations": [{"action": "upsert", "expectedVersion": 2, "event": user_edit}],
+                    "outbox": []
+                }
+            }),
+            serde_json::json!({
+                "id": "actor-user-lock",
+                "method": "calendar.mutate",
+                "params": {
+                    "operationId": "actor-user-lock-op",
+                    "actor": "user",
+                    "mutations": [{"action": "upsert", "expectedVersion": 2, "event": locked}],
+                    "outbox": []
+                }
+            }),
+            serde_json::json!({
+                "id": "actor-user-unlock",
+                "method": "calendar.mutate",
+                "params": {
+                    "operationId": "actor-user-unlock-op",
+                    "actor": "user",
+                    "mutations": [{"action": "upsert", "expectedVersion": 3, "event": unlocked}],
+                    "outbox": []
+                }
+            }),
+        ];
+        for request in requests {
+            input
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&request).expect("encode request")
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write actor request");
+        }
+        input.shutdown().await.expect("close actor input");
+
+        let mut output = BufReader::new(output);
+        let mut frames = Vec::new();
+        loop {
+            let mut line = String::new();
+            if output
+                .read_line(&mut line)
+                .await
+                .expect("read actor response")
+                == 0
+            {
+                break;
+            }
+            let frame = serde_json::from_str::<Value>(&line).expect("parse actor JSONL");
+            if frame.get("id").is_some() {
+                frames.push(frame);
+            }
+        }
+        server
+            .await
+            .expect("join actor server")
+            .expect("actor server result");
+        let by_id = |id: &str| {
+            frames
+                .iter()
+                .find(|frame| frame["id"] == id)
+                .unwrap_or_else(|| panic!("missing {id} response"))
+        };
+        assert_eq!(by_id("actor-plan-create")["ok"], true);
+        assert_eq!(by_id("actor-runtime-create")["ok"], true);
+        assert_eq!(by_id("actor-runtime-move")["ok"], true);
+        assert_eq!(by_id("actor-default-user-rejected")["ok"], false);
+        assert_eq!(
+            by_id("actor-default-user-rejected")["error"]["code"],
+            error_codes::INVALID_ARGUMENTS
+        );
+        assert_eq!(by_id("actor-user-lock")["ok"], true);
+        assert_eq!(
+            by_id("actor-user-lock")["result"]["outcomes"][0]["event"]["userLocked"],
+            true
+        );
+        assert_eq!(by_id("actor-user-unlock")["ok"], true);
+        assert_eq!(
+            by_id("actor-user-unlock")["result"]["outcomes"][0]["event"]["userLocked"],
+            false
+        );
+    }
+
+    #[tokio::test]
     async fn handles_health_list_malformed_and_multiple_requests() {
         let (mut input, server_input) = duplex(16 * 1024);
         let (server_output, output) = duplex(16 * 1024);
@@ -1652,6 +2386,12 @@ mod tests {
             .expect("write vault status");
         input
             .write_all(
+                b"{\"id\":\"vault-list\",\"method\":\"vault.listRecords\",\"params\":{\"namespace\":\"planning.runtime.v1\",\"createdBeforeMs\":9007199254740991,\"limit\":10}}\n",
+            )
+            .await
+            .expect("write metadata-only vault inventory");
+        input
+            .write_all(
                 b"{\"id\":\"invalid-migration\",\"method\":\"vault.migrateLegacyKey\",\"params\":{\"confirm\":false}}\n",
             )
             .await
@@ -1702,6 +2442,11 @@ mod tests {
             by_id("vault-status")["result"]["availability"].as_str(),
             Some("available" | "migration_required" | "unavailable")
         ));
+        assert_eq!(
+            by_id("vault-list")["result"]["records"],
+            serde_json::json!([])
+        );
+        assert_eq!(by_id("vault-list")["result"]["nextCursor"], Value::Null);
         assert!(by_id("vault-status")["result"]["interactiveMigrationAvailable"].is_boolean());
         assert_eq!(by_id("invalid-migration")["ok"], false);
         assert_eq!(by_id("forbidden-refresh-prompt")["ok"], false);

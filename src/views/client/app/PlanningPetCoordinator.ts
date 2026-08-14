@@ -10,19 +10,20 @@ import type {
  */
 export class PlanningPetCoordinator {
 	private stopListening: (() => void) | null = null;
-	private previousStatus: ReturnType<PlanningController["getSnapshot"]>["status"];
+	private previousState: ReturnType<PlanningController["getSnapshot"]>;
 	private enabled = true;
+	private analysisInFlight = false;
 
 	constructor(
 		private readonly planning: PlanningController,
 		private readonly pet: PetPresentationBridge,
 	) {
-		this.previousStatus = planning.getSnapshot().status;
+		this.previousState = planning.getSnapshot();
 	}
 
 	start(): void {
 		if (this.stopListening) return;
-		this.previousStatus = this.planning.getSnapshot().status;
+		this.previousState = this.planning.getSnapshot();
 		this.stopListening = this.planning.subscribe(() => this.handleStateChange());
 	}
 
@@ -36,23 +37,30 @@ export class PlanningPetCoordinator {
 	}
 
 	private handleStateChange(): void {
-		const currentStatus = this.planning.getSnapshot().status;
-		const previousStatus = this.previousStatus;
-		this.previousStatus = currentStatus;
+		const current = this.planning.getSnapshot();
+		const previous = this.previousState;
+		this.previousState = current;
 		if (!this.enabled) return;
 
-		if (currentStatus === "generating" && previousStatus !== "generating") {
+		if (isPlanningAnalysisPending(current) && !isPlanningAnalysisPending(previous)) {
+			this.analysisInFlight = true;
 			this.emit({ kind: "plan-generation-started" });
 			return;
 		}
-		if (currentStatus === "review" && previousStatus === "generating") {
+		if (
+			(current.status === "awaiting-confirmation" || current.status === "draft") &&
+			this.analysisInFlight
+		) {
+			this.analysisInFlight = false;
 			this.emit({ kind: "plan-generation-succeeded" });
 			return;
 		}
 		if (
-			currentStatus === "generation-error" &&
-			previousStatus !== "generation-error"
+			this.analysisInFlight &&
+			(current.status === "model-unavailable" || current.status === "error") &&
+			current.status !== previous.status
 		) {
+			this.analysisInFlight = false;
 			this.emit({ kind: "plan-generation-failed" });
 		}
 	}
@@ -63,4 +71,15 @@ export class PlanningPetCoordinator {
 			// guard keeps presentation feedback outside the planning failure path.
 		});
 	}
+}
+
+function isPlanningAnalysisPending(
+	state: ReturnType<PlanningController["getSnapshot"]>,
+): boolean {
+	return (
+		state.status === "creating" ||
+		(state.status === "updating" &&
+			(state.operation === "send-message" ||
+				state.operation === "retry-analysis"))
+	);
 }

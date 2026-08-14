@@ -11,6 +11,7 @@ export type CalendarEventKind =
 	| "external"
 	| "break";
 export type CalendarEventState = "proposed" | "committed";
+export type CalendarScheduleOrigin = "model" | "user";
 
 export interface TimedSchedule {
 	allDay: false;
@@ -41,6 +42,12 @@ export interface CalendarEvent {
 	recurrence: Recurrence | null;
 	occurrenceId: string | null;
 	sourcePlanId: string | null;
+	/** Stable task ownership for planned work; null for non-task calendar entries. */
+	sourceTaskId: string | null;
+	/** Identifies whether planning automation or the user created this schedule. */
+	scheduleOrigin: CalendarScheduleOrigin | null;
+	/** User-edited planned work is protected from future automatic rescheduling. */
+	userLocked: boolean;
 	editable: boolean;
 	version: number;
 }
@@ -114,7 +121,8 @@ export class CalendarDomainError extends Error {
 			| "invalid-version"
 			| "external-editable"
 			| "invalid-recurrence"
-			| "invalid-occurrence",
+			| "invalid-occurrence"
+			| "invalid-planning-metadata",
 		message: string,
 	) {
 		super(message);
@@ -138,6 +146,25 @@ export function assertValidCalendarEvent(event: CalendarEvent): void {
 		throw new CalendarDomainError(
 			"external-editable",
 			"外部日历默认必须保持只读。",
+		);
+	}
+	if (
+		typeof event.userLocked !== "boolean" ||
+		(event.kind !== "plan" &&
+			(event.sourcePlanId !== null ||
+				event.sourceTaskId !== null ||
+				event.scheduleOrigin !== null ||
+				event.userLocked)) ||
+		(event.sourceTaskId !== null && event.sourcePlanId === null) ||
+		(event.scheduleOrigin === "model" &&
+			(event.sourcePlanId === null || event.sourceTaskId === null)) ||
+		(event.scheduleOrigin !== null &&
+			event.scheduleOrigin !== "model" &&
+			event.scheduleOrigin !== "user")
+	) {
+		throw new CalendarDomainError(
+			"invalid-planning-metadata",
+			"计划日程的计划来源、任务来源与锁定状态不一致。",
 		);
 	}
 
@@ -198,6 +225,15 @@ export function cloneCalendarEvent(event: CalendarEvent): CalendarEvent {
 				}
 			: null,
 	};
+}
+
+export function canUserUnlockPlanEvent(event: CalendarEvent): boolean {
+	return (
+		event.editable &&
+		event.kind === "plan" &&
+		event.scheduleOrigin === "model" &&
+		event.userLocked
+	);
 }
 
 function eventDates(event: CalendarEvent): {

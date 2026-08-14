@@ -106,10 +106,9 @@ export async function createWhaleHallReflectionRuntime(
 			repository,
 			inference,
 			identity,
-			// The v1 planning mock does not restore a goal across application
-			// launches. Clear any recovered collector goal before native sensors
-			// start so early events cannot be attributed to a stale account goal.
-			startupGoal: null,
+			// Preserve the durable executing-task goal across launches. The local
+			// PlanningRuntime reconciles it against the current calendar after the
+			// native planning store becomes available.
 			onWindowSealed: options.onWindowSealed,
 			sinks: options.onFeedback
 				? [

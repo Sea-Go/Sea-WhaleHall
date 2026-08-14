@@ -14,6 +14,7 @@ export type {
 	CalendarMutationResult,
 	TimedSchedule,
 } from "./domain";
+export { canUserUnlockPlanEvent } from "./domain";
 export {
 	WhaleCalendar,
 	type CalendarOccurrenceSelection,

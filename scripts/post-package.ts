@@ -1,3 +1,7 @@
-import { verifyMacWrapperFromEnvironment } from "./macos-build-security";
+import {
+	prepareDevelopmentMacWrapperFromEnvironment,
+	verifyMacWrapperFromEnvironment,
+} from "./macos-build-security";
 
+prepareDevelopmentMacWrapperFromEnvironment();
 verifyMacWrapperFromEnvironment();

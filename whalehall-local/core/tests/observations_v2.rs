@@ -16,8 +16,8 @@ use whalehall_local_protocol::{
     GoalContext, ObservationIntervalV2, ObservationSensorV2, ObservationSourceV2,
     ObservationSubjectV2, RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2,
     SemanticCommitParams, SemanticContentStateV2, SemanticCountClassV2, SemanticQueryParams,
-    VaultDeleteBatchParams, VaultOpenBatchParams, VaultSealBatchParams, VaultSealRecord,
-    semantic_event_kinds,
+    VaultDeleteBatchParams, VaultListRecordsParams, VaultOpenBatchParams, VaultSealBatchParams,
+    VaultSealRecord, semantic_event_kinds,
 };
 
 const SECRET: &str = "绝不能出现在SQLite明文里的浏览器正文";
@@ -1249,4 +1249,115 @@ fn exact_vault_deletion_keeps_high_frequency_mutable_storage_bounded() {
         .query_row("PRAGMA page_count", [], |row| row.get(0))
         .expect("read page count");
     assert!(page_size * page_count < 4 * 1024 * 1024);
+}
+
+#[test]
+fn vault_metadata_inventory_is_namespace_scoped_paginated_and_key_independent() {
+    let directory = tempfile::tempdir().expect("create vault inventory directory");
+    let journal = memory_journal(&directory, Duration::from_secs(7 * 24 * 60 * 60));
+    let secret = "inventory-must-never-return-this-content";
+    journal
+        .seal_vault_batch(&VaultSealBatchParams {
+            namespace: "planning.runtime.v1".to_owned(),
+            records: ["record-b", "record-a", "record-c"]
+                .into_iter()
+                .map(|record_id| VaultSealRecord {
+                    record_id: record_id.to_owned(),
+                    schema_version: "planning.runtime.chunk.v1".to_owned(),
+                    content: json!({"secret": secret, "recordId": record_id}),
+                    expires_at_ms: None,
+                })
+                .collect(),
+        })
+        .expect("seal planning inventory fixtures");
+    journal
+        .seal_vault_batch(&VaultSealBatchParams {
+            namespace: "another.namespace".to_owned(),
+            records: vec![VaultSealRecord {
+                record_id: "record-hidden".to_owned(),
+                schema_version: "other.v1".to_owned(),
+                content: json!({"secret": secret}),
+                expires_at_ms: None,
+            }],
+        })
+        .expect("seal other namespace fixture");
+
+    let first = journal
+        .list_vault_records(&VaultListRecordsParams {
+            namespace: "planning.runtime.v1".to_owned(),
+            created_before_ms: 9_007_199_254_740_991,
+            cursor: None,
+            limit: 2,
+        })
+        .expect("list first metadata page");
+    assert_eq!(
+        first
+            .records
+            .iter()
+            .map(|record| record.record_id.as_str())
+            .collect::<Vec<_>>(),
+        ["record-a", "record-b"]
+    );
+    assert!(first.next_cursor.is_some());
+    let encoded = serde_json::to_string(&first).expect("serialize metadata page");
+    assert!(!encoded.contains(secret));
+    assert!(!encoded.contains("contentHash"));
+    assert!(!encoded.contains("keyVersion"));
+
+    drop(journal);
+    let unavailable = ObservationJournal::open_with_config(ObservationJournalConfig {
+        database_path: directory.path().join("observation-journal.sqlite3"),
+        raw_content_retention: Duration::from_secs(7 * 24 * 60 * 60),
+        derived_retention: Duration::from_secs(30 * 24 * 60 * 60),
+        broadcast_capacity: 16,
+        key_provider: Arc::new(UnavailableObservationKeyProvider),
+        device_id: None,
+        session_id: None,
+    })
+    .expect("reopen metadata inventory without a content key");
+    let second = unavailable
+        .list_vault_records(&VaultListRecordsParams {
+            namespace: "planning.runtime.v1".to_owned(),
+            created_before_ms: 9_007_199_254_740_991,
+            cursor: first.next_cursor.clone(),
+            limit: 2,
+        })
+        .expect("list second metadata page without decrypting");
+    assert_eq!(second.records.len(), 1);
+    assert_eq!(second.records[0].record_id, "record-c");
+    assert!(second.next_cursor.is_none());
+
+    let wrong_scope = unavailable.list_vault_records(&VaultListRecordsParams {
+        namespace: "another.namespace".to_owned(),
+        created_before_ms: 9_007_199_254_740_991,
+        cursor: first.next_cursor,
+        limit: 2,
+    });
+    assert!(
+        wrong_scope.is_err(),
+        "cursor must be bound to its namespace"
+    );
+
+    unavailable
+        .delete_vault_batch(&VaultDeleteBatchParams {
+            namespace: "planning.runtime.v1".to_owned(),
+            record_ids: vec!["record-b".to_owned()],
+        })
+        .expect("delete one exact inventory record without a content key");
+    let remaining = unavailable
+        .list_vault_records(&VaultListRecordsParams {
+            namespace: "planning.runtime.v1".to_owned(),
+            created_before_ms: 9_007_199_254_740_991,
+            cursor: None,
+            limit: 10,
+        })
+        .expect("list metadata after exact deletion");
+    assert_eq!(
+        remaining
+            .records
+            .iter()
+            .map(|record| record.record_id.as_str())
+            .collect::<Vec<_>>(),
+        ["record-a", "record-c"]
+    );
 }

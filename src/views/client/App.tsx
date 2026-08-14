@@ -1,14 +1,14 @@
 import { AppShell } from "./app/AppShell";
 import { applyAppearancePreferences } from "./app/appearance";
+import { qaControlsEnabled } from "./app/qa-mode";
 import { AuthGate } from "./features/auth/public";
 import { PlanningController } from "./features/planning/public";
 import { MonitoringController } from "./features/monitoring/public";
 import { ReportController } from "./features/reports/public";
 import { PreferencesController } from "./features/settings/public";
 import { DataCenterAuthService } from "./infrastructure/auth/DataCenterAuthService";
-import { MockCalendarService } from "./infrastructure/calendar/MockCalendarService";
-import { CalendarPlanningGateway } from "./infrastructure/planning/CalendarPlanningGateway";
-import { MockPlanningGenerationService } from "./infrastructure/planning/MockPlanningGenerationService";
+import { ElectrobunCalendarService } from "./infrastructure/calendar/ElectrobunCalendarService";
+import { ElectrobunPlanningService } from "./infrastructure/planning/ElectrobunPlanningService";
 import { MockReportService } from "./infrastructure/reports/MockReportService";
 import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
 import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
@@ -18,17 +18,11 @@ import {
 	CloudSyncController,
 } from "./features/settings/public";
 import { MockPreferencesService } from "./infrastructure/settings/MockPreferencesService";
-import {
-	ActiveGoalSyncCoordinator,
-	clearGoalBeforeAccountTransition,
-} from "./goal-sync";
 import { Temporal } from "temporal-polyfill";
 import { useEffect, useRef } from "react";
 
 const authService = new DataCenterAuthService();
-const calendarService = new MockCalendarService();
-const planningGenerator = new MockPlanningGenerationService();
-const planningCalendarGateway = new CalendarPlanningGateway(calendarService);
+const calendarService = new ElectrobunCalendarService();
 const planningTimeZone =
 	Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
 const currentDate = () =>
@@ -36,34 +30,8 @@ const currentDate = () =>
 		.toPlainDate()
 		.toString();
 const planningController = new PlanningController(
-	planningGenerator,
-	planningCalendarGateway,
-	currentDate,
-	() => planningTimeZone,
+	new ElectrobunPlanningService(),
 );
-const activeGoalSynchronizer = new ActiveGoalSyncCoordinator({
-	send: async (goal) => {
-		if (!hasElectrobunRuntime()) {
-			throw new Error("Electrobun runtime is not ready.");
-		}
-		const { clientApi } = await import("./rpc");
-		const response = await clientApi.setActiveGoalContext(goal);
-		return response.goal;
-	},
-	onRetry: (attempt) => {
-		if (attempt !== 1 && attempt % 30 !== 0) return;
-		console.warn("[planning] active goal sync is waiting for runtime ACK", {
-			operation: "set-active-goal-context",
-			category: "transport",
-			attempt,
-		});
-	},
-});
-planningController.subscribe(() => {
-	activeGoalSynchronizer.setDesired(
-		planningController.getActiveGoalContext(),
-	);
-});
 const reportController = new ReportController(
 	new MockReportService(),
 	currentDate,
@@ -84,16 +52,7 @@ export function App() {
 	const logoutPendingRef = useRef(false);
 	const enableQaControls =
 		typeof window !== "undefined" &&
-		new URLSearchParams(window.location.search).get("qa") === "1";
-
-	useEffect(() => {
-		// The planning mock does not restore a goal across launches. Sync its
-		// initial null state so a persisted runtime goal cannot survive a restart
-		// or a previous account session without a matching visible plan.
-		activeGoalSynchronizer.setDesired(
-			planningController.getActiveGoalContext(),
-		);
-	}, []);
+		qaControlsEnabled(window.location);
 
 	useEffect(() => {
 		function syncAppearanceFromPreferences() {
@@ -121,13 +80,7 @@ export function App() {
 						onLogout={() => {
 							if (logoutPendingRef.current) return;
 							logoutPendingRef.current = true;
-							void clearGoalBeforeAccountTransition({
-								clearLocalGoal: () => {
-									planningController.clearActiveGoalContext();
-								},
-								synchronizer: activeGoalSynchronizer,
-								transition: logout,
-							}).finally(() => {
+							void Promise.resolve(logout()).finally(() => {
 								logoutPendingRef.current = false;
 							});
 						}}
@@ -144,12 +97,4 @@ export function App() {
 			)}
 		/>
 	);
-}
-
-function hasElectrobunRuntime(): boolean {
-	return (
-		typeof window !== "undefined" &&
-		"__electrobun" in window &&
-		"__electrobunBunBridge" in window
-		);
 }

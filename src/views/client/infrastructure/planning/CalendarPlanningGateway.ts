@@ -127,6 +127,9 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 				recurrence: null,
 				occurrenceId: null,
 				sourcePlanId: plan.id,
+				sourceTaskId: proposal.taskId,
+				scheduleOrigin: "model",
+				userLocked: false,
 				editable: true,
 				version: 0,
 			};

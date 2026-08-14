@@ -50,6 +50,9 @@ function timed(
 		recurrence: null,
 		occurrenceId: null,
 		sourcePlanId: `plan-${id}`,
+		sourceTaskId: `task-${id}`,
+		scheduleOrigin: "model",
+		userLocked: false,
 		editable: true,
 		version: 1,
 		...overrides,
@@ -79,7 +82,12 @@ const breakEvent = timed(
 	"散步与恢复",
 	"2026-07-29T08:15:00Z",
 	"2026-07-29T08:45:00Z",
-	{ kind: "break", sourcePlanId: null },
+	{
+		kind: "break",
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+	},
 );
 const allDay: CalendarEvent = {
 	id: "launch-day",
@@ -94,6 +102,9 @@ const allDay: CalendarEvent = {
 	recurrence: null,
 	occurrenceId: null,
 	sourcePlanId: "plan-launch",
+	sourceTaskId: "task-launch",
+	scheduleOrigin: "model",
+	userLocked: false,
 	editable: true,
 	version: 1,
 };
@@ -102,14 +113,25 @@ const manual = timed(
 	"已占用 · 家庭时间",
 	"2026-07-29T10:00:00Z",
 	"2026-07-29T11:00:00Z",
-	{ kind: "manual-block", sourcePlanId: null },
+	{
+		kind: "manual-block",
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+	},
 );
 const external = timed(
 	"external-team",
 	"产品周会 · 外部日历",
 	"2026-07-31T02:00:00Z",
 	"2026-07-31T03:00:00Z",
-	{ kind: "external", editable: false, sourcePlanId: null },
+	{
+		kind: "external",
+		editable: false,
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+	},
 );
 const proposed = timed(
 	"proposed-reading",

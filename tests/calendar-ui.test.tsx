@@ -62,6 +62,31 @@ describe("calendar keyboard and form alternatives", () => {
 		expect(markup).toContain("删除");
 	});
 
+	test("locked model plan event offers an explicit rescheduling opt-in", () => {
+		const event = calendarScenarioEvents("normal").find(
+			(candidate) => candidate.scheduleOrigin === "model",
+		);
+		if (!event) throw new Error("Missing model plan fixture");
+		const markup = renderToStaticMarkup(
+			<EventEditor
+				editor={{
+					event: { ...event, userLocked: true },
+					selection: null,
+					occurrenceStart: null,
+					presetKind: "plan",
+					returnFocus: null,
+				}}
+				timeZone="Asia/Shanghai"
+				pending={false}
+				onClose={() => {}}
+				onSave={async () => {}}
+				onDelete={async () => {}}
+				onUnlock={async () => {}}
+			/>,
+		);
+		expect(markup).toContain("允许计划重新安排");
+	});
+
 	test("external event editor is visibly read-only", () => {
 		const event = calendarScenarioEvents("external")[0];
 		if (!event) throw new Error("Missing external fixture");

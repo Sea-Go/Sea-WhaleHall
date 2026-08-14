@@ -41,6 +41,7 @@ import {
 	timeZoneOffsetLabel,
 } from "./date-time";
 import {
+	canUserUnlockPlanEvent,
 	cloneCalendarEvent,
 	type CalendarEvent,
 	type CalendarEventKind,
@@ -175,6 +176,7 @@ interface EventEditorProps {
 		scope: RecurrenceScope,
 		setError: (message: string) => void,
 	) => Promise<void>;
+	onUnlock?: (setError: (message: string) => void) => Promise<void>;
 }
 
 export function EventEditor({
@@ -184,6 +186,7 @@ export function EventEditor({
 	onClose,
 	onSave,
 	onDelete,
+	onUnlock,
 }: EventEditorProps) {
 	const [form, setForm] = useState(() => initialEditorForm(editor, timeZone));
 	const [error, setError] = useState<string | null>(null);
@@ -529,6 +532,7 @@ export function EventEditor({
 					) : null}
 
 					<footer className="calendar-dialog__footer">
+						<div className="calendar-dialog__footer-actions">
 						{editor.event?.editable ? (
 							<Button
 								type="button"
@@ -543,6 +547,19 @@ export function EventEditor({
 						) : (
 							<span />
 						)}
+						{editor.event && canUserUnlockPlanEvent(editor.event) &&
+						onUnlock ? (
+							<Button
+								type="button"
+								variant="secondary"
+								size="small"
+								disabled={pending}
+								onClick={() => void onUnlock(setError)}
+							>
+								允许计划重新安排
+							</Button>
+						) : null}
+						</div>
 						<div>
 							<Button
 								type="button"
@@ -611,6 +628,13 @@ export function CalendarPage({
 	useEffect(() => {
 		void controller.load(initialScenario ?? undefined);
 	}, [controller, initialScenario]);
+
+	useEffect(() => {
+		if (!service.subscribe) return;
+		return service.subscribe(() => {
+			void controller.load();
+		});
+	}, [controller, service]);
 
 	useEffect(() => {
 		if (range.currentDate) setMiniAnchor(range.currentDate.slice(0, 10));
@@ -743,6 +767,15 @@ export function CalendarPage({
 				: null,
 			occurrenceId: base?.occurrenceId ?? null,
 			sourcePlanId: form.kind === "plan" ? (base?.sourcePlanId ?? null) : null,
+			sourceTaskId: form.kind === "plan" ? (base?.sourceTaskId ?? null) : null,
+			scheduleOrigin:
+				form.kind === "plan" ? (base?.scheduleOrigin ?? "user") : null,
+			userLocked:
+				form.kind === "plan"
+					? base?.scheduleOrigin === "model"
+						? true
+						: (base?.userLocked ?? false)
+					: false,
 			editable: true,
 			version: base?.version ?? 0,
 		};
@@ -808,6 +841,23 @@ export function CalendarPage({
 					? "已仅删除这一次。"
 					: "日程已删除，可撤销。",
 			);
+		} finally {
+			setEditorPending(false);
+		}
+	}
+
+	async function unlockEditor(setError: (message: string) => void) {
+		const event = editor?.event;
+		if (!event) return;
+		setEditorPending(true);
+		try {
+			const result = await controller.setPlanEventLocked(event.id, false);
+			if (!result.ok) {
+				setError(result.conflict.message || "暂时无法解除锁定，请重试。");
+				return;
+			}
+			closeEditor();
+			onNotify("已允许计划重新安排该时段。");
 		} finally {
 			setEditorPending(false);
 		}
@@ -1164,6 +1214,7 @@ export function CalendarPage({
 					onClose={closeEditor}
 					onSave={saveEditor}
 					onDelete={deleteEditor}
+					onUnlock={unlockEditor}
 				/>
 			) : null}
 		</div>

@@ -1,644 +1,527 @@
 import {
-	cloneGeneratedDraft,
-	detectPlanningConflicts,
-	emptyPlanInput,
-	planHasBlockingConflicts,
-	validatePlanInput,
-	type GeneratedPlanDraft,
-	type GenerationStatus,
-	type PlanInput,
-	type PlanInputIssue,
-	type PlanningConflict,
-	type ProposedScheduleItem,
+	emptyPlanCreateInput,
+	isPlanRevisionConfirmable,
+	validatePlanCreateInput,
+	type PlanCreateInput,
+	type PlanCreateIssue,
+	type PlanStatus,
+	type PlanSummaryView,
+	type PlanTaskStatus,
+	type PlanView,
 } from "./domain";
-import { Temporal } from "temporal-polyfill";
 import {
-	cloneActiveGoalContext,
-	type ActiveGoalContextV1,
-} from "../../../../shared/goal-context";
-import type {
-	PlanApplyResult,
-	PlanningCalendarGateway,
-	PlanningGenerationService,
+	PlanningServiceError,
+	type PlanningService,
+	type PlanningServiceErrorCode,
 } from "./planning-service";
 
-export type PlanningWizardStep =
-	| "describe"
-	| "type"
-	| "constraints"
-	| "generate"
-	| "structure"
-	| "schedule"
-	| "confirm";
-
-export type PlanningState =
-	| { status: "initial" }
-	| {
-			status: "drafting";
-			step: "describe" | "type" | "constraints";
-			input: PlanInput;
-			issues: readonly PlanInputIssue[];
-	  }
-	| {
-			status: "generating";
-			step: "generate";
-			input: PlanInput;
-			completedStatuses: readonly GenerationStatus[];
-			activeStatus: GenerationStatus;
-			revision: number;
-	  }
-	| {
-			status: "generation-error";
-			step: "generate";
-			input: PlanInput;
-			message: string;
-			revision: number;
-	  }
-	| {
-			status: "empty-draft";
-			step: "schedule";
-			input: PlanInput;
-			message: string;
-			suggestions: readonly string[];
-			revision: number;
-	  }
-	| {
-			status: "review";
-			step: "structure" | "schedule" | "confirm";
-			input: PlanInput;
-			draft: GeneratedPlanDraft;
-			message: string | null;
-	  }
-	| {
-			status: "applying";
-			step: "confirm";
-			input: PlanInput;
-			draft: GeneratedPlanDraft;
-			applyId: string;
-	  }
-	| {
-			status: "success";
-			planTitle: string;
-			committedCount: number;
-			warnings: readonly PlanningConflict[];
-	  }
-	| {
-			status: "partial-failure";
-			step: "confirm";
-			input: PlanInput;
-			draft: GeneratedPlanDraft;
-			result: Extract<PlanApplyResult, { kind: "partial" | "failure" }>;
-	  }
-	| { status: "cancelled"; message: string };
-
-const generationStatuses: readonly GenerationStatus[] = [
-	"understood",
-	"split-phases",
-	"checking-calendar",
-	"arranging",
-	"ready",
-];
-
-function isDrafting(state: PlanningState): state is Extract<
-	PlanningState,
-	{ status: "drafting" }
-> {
-	return state.status === "drafting";
+export interface PlanningContent {
+	plans: readonly PlanSummaryView[];
+	plan: PlanView;
 }
 
-function validationFieldsForStep(
-	step: "describe" | "type" | "constraints",
-): readonly PlanInputIssue["field"][] {
-	if (step === "describe") return ["goal"];
-	if (step === "type") return ["type"];
-	return ["deadline", "weeklyCapacityHours"];
+export type PlanningOperation =
+	| "create"
+	| "send-message"
+	| "confirm-revision"
+	| "set-task-status"
+	| "confirm-observation"
+	| "pause"
+	| "resume"
+	| "complete"
+	| "archive"
+	| "undo-adjustment"
+	| "retry-analysis";
+
+export type PlanningState =
+	| { status: "idle" }
+	| { status: "loading"; cached: PlanningContent | null }
+	| {
+			status: "empty";
+			input: PlanCreateInput;
+			issue: PlanCreateIssue | null;
+	  }
+	| {
+			status: "create";
+			input: PlanCreateInput;
+			issue: PlanCreateIssue | null;
+			existingPlans: readonly PlanSummaryView[];
+	  }
+	| {
+			status: "creating";
+			input: PlanCreateInput;
+			existingPlans: readonly PlanSummaryView[];
+	  }
+	| {
+			status: PlanStatus;
+			content: PlanningContent;
+	  }
+	| {
+			status: "updating";
+			content: PlanningContent;
+			operation: Exclude<PlanningOperation, "create">;
+	  }
+	| {
+			status: "model-unavailable";
+			content: PlanningContent | null;
+			message: string;
+			retryable: boolean;
+	  }
+	| {
+			status: "stale";
+			content: PlanningContent;
+			message: string;
+	  }
+	| {
+			status: "offline";
+			cached: PlanningContent | null;
+			message: string;
+			retryable: boolean;
+	  }
+	| {
+			status: "error";
+			cached: PlanningContent | null;
+			message: string;
+			retryable: boolean;
+	  };
+
+function productErrorMessage(code: PlanningServiceErrorCode): string {
+	switch (code) {
+		case "model-unavailable":
+			return "本地模型暂时不可用。你的消息已保留，可在模型恢复后继续分析。";
+		case "stale-version":
+			return "计划已在别处更新。请载入最新版本后再操作。";
+		case "offline":
+			return "本地计划服务暂时离线，已保留最近一次可用内容。";
+		case "conflict":
+			return "这次调整与已确认安排冲突，原计划没有被覆盖。";
+		case "validation":
+			return "请求内容不完整，请检查后重试。";
+		case "not-found":
+			return "没有找到这个计划，它可能已被归档。";
+		case "unknown":
+			return "计划服务暂时无法完成操作，请稍后重试。";
+	}
 }
 
 export class PlanningController {
-	private state: PlanningState = { status: "initial" };
+	private state: PlanningState = { status: "idle" };
 	private readonly listeners = new Set<() => void>();
+	private stopServiceSubscription: (() => void) | null = null;
+	private requestSequence = 0;
 	private operationSequence = 0;
-	private generationRevision = 0;
-	private goalVersion = 0;
-	private activeGoal: ActiveGoalContextV1 | null = null;
-	private applyPromise: Promise<PlanApplyResult | null> | null = null;
+	private selectedPlanId: string | null = null;
+	private returnContent: PlanningContent | null = null;
+	private pendingCreate:
+		| {
+				input: PlanCreateInput;
+				existingPlans: readonly PlanSummaryView[];
+				operationId: string;
+		  }
+		| null = null;
 
 	constructor(
-		private readonly generator: PlanningGenerationService,
-		private readonly calendar: PlanningCalendarGateway,
-		private readonly today: () => string,
-		private readonly timeZone: () => string,
+		private readonly service: PlanningService,
 		private readonly createId: () => string = () => crypto.randomUUID(),
-		private readonly nowMs: () => number = () => Date.now(),
 	) {}
 
 	getSnapshot = (): PlanningState => this.state;
 	getServerSnapshot = (): PlanningState => this.state;
-	getActiveGoalContext = (): ActiveGoalContextV1 | null =>
-		cloneActiveGoalContext(this.activeGoal);
-
-	clearActiveGoalContext(): boolean {
-		if (this.activeGoal === null) return false;
-		this.activeGoal = null;
-		this.notify();
-		return true;
-	}
 
 	subscribe = (listener: () => void): (() => void) => {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
 	};
 
-	start(): void {
+	async initialize(preferredPlanId?: string): Promise<void> {
+		if (!this.stopServiceSubscription) {
+			this.stopServiceSubscription = this.service.subscribe((event) => {
+				const content = this.currentContent();
+				if (this.state.status === "updating" || this.state.status === "creating") {
+					return;
+				}
+				if (
+					event.planId === null ||
+					content === null ||
+					event.planId === content.plan.id
+				) {
+					void this.load(content?.plan.id);
+				}
+			});
+		}
+		await this.load(preferredPlanId);
+	}
+
+	dispose(): void {
+		this.stopServiceSubscription?.();
+		this.stopServiceSubscription = null;
+		this.requestSequence += 1;
 		this.operationSequence += 1;
-		this.applyPromise = null;
-		this.setState({
-			status: "drafting",
-			step: "describe",
-			input: emptyPlanInput(),
-			issues: [],
-		});
 	}
 
-	updateInput(patch: Partial<PlanInput>): void {
-		if (!isDrafting(this.state)) return;
-		this.setState({
-			...this.state,
-			input: { ...this.state.input, ...patch },
-			issues: this.state.issues.filter(
-				(issue) => !(issue.field in patch),
-			),
-		});
-	}
-
-	next(): void {
-		if (!isDrafting(this.state)) return;
-		const fields = validationFieldsForStep(this.state.step);
-		const issues = this.validate().filter((issue) => fields.includes(issue.field));
-		if (issues.length > 0) {
-			this.setState({ ...this.state, issues });
-			return;
-		}
-		if (this.state.step === "describe") {
-			this.setState({ ...this.state, step: "type", issues: [] });
-			return;
-		}
-		if (this.state.step === "type") {
-			this.setState({
-				...this.state,
-				step: "constraints",
-				input: {
-					...this.state.input,
-					deadline:
-						this.state.input.deadline ||
-						this.suggestDeadline(
-							this.state.input.goal,
-							this.state.input.type,
-						),
-				},
-				issues: [],
-			});
-			return;
-		}
-		void this.generate();
-	}
-
-	back(): void {
-		if (isDrafting(this.state)) {
-			const step =
-				this.state.step === "constraints"
-					? "type"
-					: this.state.step === "type"
-						? "describe"
-						: "describe";
-			this.setState({ ...this.state, step, issues: [] });
-			return;
-		}
-		if (this.state.status === "review") {
-			if (this.state.step === "confirm") {
-				this.setState({ ...this.state, step: "schedule", message: null });
-			} else if (this.state.step === "schedule") {
-				this.setState({ ...this.state, step: "structure", message: null });
-			}
-		}
-	}
-
-	async generate(): Promise<void> {
-		const source = this.inputFromState();
-		if (!source) return;
-		const issues = this.validate(source);
-		if (issues.length > 0) {
-			this.setState({
-				status: "drafting",
-				step:
-					issues.some((issue) => issue.field === "goal")
-						? "describe"
-						: issues.some((issue) => issue.field === "type")
-							? "type"
-							: "constraints",
-				input: source,
-				issues,
-			});
-			return;
-		}
-
-		const sequence = ++this.operationSequence;
-		const revision = ++this.generationRevision;
-		this.setState({
-			status: "generating",
-			step: "generate",
-			input: source,
-			completedStatuses: [],
-			activeStatus: "understood",
-			revision,
-		});
+	async load(preferredPlanId?: string): Promise<void> {
+		const sequence = ++this.requestSequence;
+		const cached = this.currentContent();
+		this.setState({ status: "loading", cached });
 		try {
-			const endDateExclusive = this.addDay(source.deadline);
-			const availability = await this.calendar.loadAvailability({
-				startDate: this.today(),
-				endDateExclusive,
-				timeZone: this.timeZone(),
-			});
-			if (sequence !== this.operationSequence) return;
-
-			const generated = await this.generator.generate(source, availability, {
-				today: this.today(),
-				timeZone: this.timeZone(),
-				revision,
-				isCancelled: () => sequence !== this.operationSequence,
-				onStatus: (status) => {
-					if (sequence !== this.operationSequence) return;
-					const index = generationStatuses.indexOf(status);
-					this.setState({
-						status: "generating",
-						step: "generate",
-						input: source,
-						completedStatuses: generationStatuses.slice(0, index),
-						activeStatus: status,
-						revision,
-					});
-				},
-			});
-			if (sequence !== this.operationSequence) return;
-			const draft = this.refreshConflicts(generated);
-			if (draft.proposals.length === 0) {
+			const plans = await this.service.listPlans();
+			if (sequence !== this.requestSequence) return;
+			if (plans.length === 0) {
+				this.selectedPlanId = null;
+				this.returnContent = null;
 				this.setState({
-					status: "empty-draft",
-					step: "schedule",
-					input: source,
-					message: "当前约束下没有可安排的时间。",
-					suggestions:
-						draft.suggestions.length > 0
-							? draft.suggestions
-							: ["延后截止日期", "缩小目标范围", "增加每周可投入时间"],
-					revision,
+					status: "empty",
+					input: emptyPlanCreateInput(),
+					issue: null,
 				});
 				return;
 			}
-			this.setState({
-				status: "review",
-				step: "structure",
-				input: source,
-				draft,
-				message: null,
-			});
+
+			const selectedId = this.choosePlanId(plans, preferredPlanId);
+			const plan = await this.service.getPlan(selectedId);
+			if (sequence !== this.requestSequence) return;
+			this.selectedPlanId = plan.id;
+			const content = { plans, plan };
+			this.returnContent = content;
+			this.setLoaded(content);
 		} catch (reason) {
-			if (sequence !== this.operationSequence) return;
-			this.setState({
-				status: "generation-error",
-				step: "generate",
-				input: source,
-				message:
-					reason instanceof Error
-						? reason.message
-						: "计划生成失败，请稍后重试。",
-				revision,
-			});
+			if (sequence !== this.requestSequence) return;
+			this.setFailure(reason, cached);
 		}
 	}
 
-	retryGeneration(): Promise<void> {
-		return this.generate();
-	}
-
-	editConstraints(): void {
-		const input = this.inputFromState();
-		if (!input || this.state.status === "applying") return;
-		this.operationSequence += 1;
-		this.setState({
-			status: "drafting",
-			step: "constraints",
-			input,
-			issues: [],
-		});
-	}
-
-	openSchedule(): void {
-		if (this.state.status !== "review") return;
-		this.setState({ ...this.state, step: "schedule", message: null });
-	}
-
-	openConfirm(): void {
-		if (this.state.status !== "review") return;
-		const draft = this.refreshConflicts(this.state.draft);
-		if (planHasBlockingConflicts(draft.conflicts)) {
-			this.setState({
-				...this.state,
-				step: "schedule",
-				draft,
-				message: "仍有不可用时间冲突，请先移动或删除对应安排。",
-			});
+	beginCreate(): void {
+		if (this.state.status === "updating" || this.state.status === "creating") {
 			return;
 		}
-		this.setState({ ...this.state, step: "confirm", draft, message: null });
-	}
-
-	updateProposal(
-		proposalId: string,
-		patch: Pick<ProposedScheduleItem, "title" | "start" | "end">,
-	): void {
-		if (this.state.status !== "review") return;
-		const proposals = this.state.draft.proposals.map((item) =>
-			item.id === proposalId ? { ...item, ...patch, version: item.version + 1 } : item,
-		);
-		const draft = this.refreshConflicts({ ...this.state.draft, proposals });
-		this.setState({ ...this.state, draft, message: "草案已更新，尚未写入日历。" });
-	}
-
-	deleteProposal(proposalId: string): void {
-		if (this.state.status !== "review") return;
-		const draft = this.refreshConflicts({
-			...this.state.draft,
-			proposals: this.state.draft.proposals.filter(
-				(item) => item.id !== proposalId,
-			),
+		const content = this.currentContent();
+		this.returnContent = content;
+		this.pendingCreate = null;
+		this.setState({
+			status: "create",
+			input: emptyPlanCreateInput(),
+			issue: null,
+			existingPlans: content?.plans ?? [],
 		});
+	}
+
+	updateCreateInput(patch: Partial<PlanCreateInput>): void {
+		if (this.state.status !== "empty" && this.state.status !== "create") return;
+		this.pendingCreate = null;
 		this.setState({
 			...this.state,
-			draft,
-			message: "已从草案移除，正式日历没有变化。",
+			input: { ...this.state.input, ...patch },
+			issue: patch.goal === undefined ? this.state.issue : null,
 		});
 	}
 
-	async apply(): Promise<PlanApplyResult | null> {
-		if (this.applyPromise) return this.applyPromise;
-		if (this.state.status !== "review" || this.state.step !== "confirm") {
-			return null;
+	cancelCreate(): void {
+		if (this.state.status !== "create") return;
+		this.pendingCreate = null;
+		if (this.returnContent) {
+			this.setLoaded(this.returnContent);
+			return;
 		}
-		const draft = this.refreshConflicts(this.state.draft);
-		if (
-			draft.proposals.length === 0 ||
-			planHasBlockingConflicts(draft.conflicts)
-		) {
-			this.setState({
-				...this.state,
-				step: "schedule",
-				draft,
-				message:
-					draft.proposals.length === 0
-						? "草案中没有可写入的安排。"
-						: "请先处理所有不可用时间冲突。",
-			});
-			return null;
-		}
-		const applyId = this.createId();
-		const input = this.state.input;
 		this.setState({
-			status: "applying",
-			step: "confirm",
-			input,
-			draft,
-			applyId,
+			status: "empty",
+			input: emptyPlanCreateInput(),
+			issue: null,
 		});
-		const request = this.performApply(input, draft, applyId);
-		this.applyPromise = request;
-		void request.finally(() => {
-			if (this.applyPromise === request) this.applyPromise = null;
-		});
-		return request;
 	}
 
-	retryApply(): Promise<PlanApplyResult | null> {
-		if (this.state.status !== "partial-failure") return Promise.resolve(null);
-		if (this.applyPromise) return this.applyPromise;
-		const applyId = this.createId();
-		const { input, draft, result } = this.state;
-		this.setState({
-			status: "applying",
-			step: "confirm",
-			input,
-			draft,
-			applyId,
-		});
-		const request = this.performApply(
-			input,
-			draft,
-			applyId,
-			result.committedCount,
+	async createPlanDraft(): Promise<void> {
+		if (this.state.status !== "empty" && this.state.status !== "create") return;
+		const issue = validatePlanCreateInput(this.state.input)[0] ?? null;
+		if (issue) {
+			this.setState({ ...this.state, issue });
+			return;
+		}
+		const input = {
+			...this.state.input,
+			goal: this.state.input.goal.trim(),
+		};
+		const existingPlans =
+			this.state.status === "create" ? this.state.existingPlans : [];
+		const pending = { input, existingPlans, operationId: this.createId() };
+		this.pendingCreate = pending;
+		await this.performCreate(pending);
+	}
+
+	async selectPlan(planId: string): Promise<void> {
+		if (!planId.trim() || planId === this.selectedPlanId) return;
+		await this.load(planId);
+	}
+
+	async sendMessage(content: string): Promise<void> {
+		const text = content.trim();
+		if (!text) return;
+		await this.mutate("send-message", (plan) =>
+			this.service.sendPlanMessage({
+				planId: plan.id,
+				content: text,
+				operationId: this.createId(),
+				expectedVersion: plan.version,
+			}),
 		);
-		this.applyPromise = request;
-		void request.finally(() => {
-			if (this.applyPromise === request) this.applyPromise = null;
-		});
-		return request;
 	}
 
-	returnToSchedule(): void {
-		if (this.state.status !== "partial-failure") return;
+	async confirmLatestRevision(): Promise<void> {
+		const content = this.currentContent();
+		if (!content || !isPlanRevisionConfirmable(content.plan)) return;
+		const revision = content.plan.revision;
+		if (!revision) return;
+		await this.mutate("confirm-revision", (plan) =>
+			this.service.confirmPlanRevision({
+				planId: plan.id,
+				revisionId: revision.revisionId,
+				operationId: this.createId(),
+				expectedVersion: plan.version,
+			}),
+		);
+	}
+
+	async setTaskStatus(taskId: string, status: PlanTaskStatus): Promise<void> {
+		if (!taskId.trim()) return;
+		await this.mutate("set-task-status", (plan) =>
+			this.service.setTaskStatus({
+				planId: plan.id,
+				taskId,
+				status,
+				operationId: this.createId(),
+				expectedVersion: plan.version,
+			}),
+		);
+	}
+
+	async confirmObservationAttribution(
+		observationId: string,
+		taskId: string | null,
+	): Promise<void> {
+		if (!observationId.trim()) return;
+		await this.mutate("confirm-observation", (plan) =>
+			this.service.confirmObservationAttribution({
+				planId: plan.id,
+				observationId,
+				taskId,
+				operationId: this.createId(),
+				expectedVersion: plan.version,
+			}),
+		);
+	}
+
+	pausePlan(): Promise<void> {
+		return this.changeStatus("pause", (plan) =>
+			this.service.pausePlan(this.writeContext(plan)),
+		);
+	}
+
+	resumePlan(): Promise<void> {
+		return this.changeStatus("resume", (plan) =>
+			this.service.resumePlan(this.writeContext(plan)),
+		);
+	}
+
+	completePlan(): Promise<void> {
+		return this.changeStatus("complete", (plan) =>
+			this.service.completePlan(this.writeContext(plan)),
+		);
+	}
+
+	archivePlan(): Promise<void> {
+		return this.changeStatus("archive", (plan) =>
+			this.service.archivePlan(this.writeContext(plan)),
+		);
+	}
+
+	async undoAdjustment(adjustmentId: string): Promise<void> {
+		const adjustment = this.currentContent()?.plan.adjustments.find(
+			(item) => item.id === adjustmentId,
+		);
+		if (!adjustment?.canUndo) return;
+		await this.mutate("undo-adjustment", (plan) =>
+			this.service.undoPlanAdjustment({
+				planId: plan.id,
+				adjustmentId,
+				adjustmentVersion: adjustment.version,
+				operationId: this.createId(),
+				expectedVersion: plan.version,
+			}),
+		);
+	}
+
+	retryPendingAnalysis(): Promise<void> {
+		return this.changeStatus("retry-analysis", (plan) =>
+			this.service.retryPendingAnalysis(this.writeContext(plan)),
+		);
+	}
+
+	async retry(): Promise<void> {
+		const content = this.currentContent();
+		if (!content && this.pendingCreate) {
+			await this.performCreate(this.pendingCreate);
+			return;
+		}
+		if (this.state.status === "model-unavailable" && content) {
+			await this.retryPendingAnalysis();
+			return;
+		}
+		await this.load(content?.plan.id);
+	}
+
+	private async performCreate(pending: {
+		input: PlanCreateInput;
+		existingPlans: readonly PlanSummaryView[];
+		operationId: string;
+	}): Promise<void> {
+		const sequence = ++this.operationSequence;
 		this.setState({
-			status: "review",
-			step: "schedule",
-			input: this.state.input,
-			draft: this.state.draft,
-			message: this.state.result.message,
+			status: "creating",
+			input: pending.input,
+			existingPlans: pending.existingPlans,
 		});
-	}
-
-	cancel(): void {
-		if (this.state.status === "applying") return;
-		this.operationSequence += 1;
-		this.applyPromise = null;
-		this.setState({
-			status: "cancelled",
-			message: "已取消制定计划；草案没有写入正式日历。",
-		});
-	}
-
-	reset(): void {
-		this.operationSequence += 1;
-		this.applyPromise = null;
-		this.setState({ status: "initial" });
-	}
-
-	private async performApply(
-		input: PlanInput,
-		draft: GeneratedPlanDraft,
-		applyId: string,
-		previouslyCommittedCount = 0,
-	): Promise<PlanApplyResult> {
 		try {
-			const attempt = await this.calendar.applyPlan(
-				draft.plan,
-				draft.proposals,
-				applyId,
-			);
-			if (attempt.ok) {
-				const result: PlanApplyResult = {
-					...attempt,
-					committedCount:
-						previouslyCommittedCount + attempt.committedCount,
-				};
-				this.goalVersion += 1;
-				this.activeGoal = {
-					schemaVersion: "active-goal.v1",
-					goalId: draft.plan.id,
-					planId: draft.plan.id,
-					version: this.goalVersion,
-					text: input.goal.trim(),
-					activatedAtMs: this.nowMs(),
-				};
-				this.setState({
-					status: "success",
-					planTitle: draft.plan.title,
-					committedCount: result.committedCount,
-					warnings: result.warnings,
-				});
-				return result;
-			}
-
-			const result: Extract<
-				PlanApplyResult,
-				{ kind: "partial" | "failure" }
-			> =
-				attempt.kind === "failure" && previouslyCommittedCount > 0
-					? {
-							ok: false,
-							kind: "partial",
-							applyId: attempt.applyId,
-							committedCount: previouslyCommittedCount,
-							failedProposalIds: attempt.failedProposalIds,
-							message: `先前已有 ${previouslyCommittedCount} 项写入成功；本次重试失败。${attempt.message}`,
-						}
-					: attempt.kind === "partial"
-						? {
-								...attempt,
-								committedCount:
-									previouslyCommittedCount + attempt.committedCount,
-							}
-						: attempt;
-			const retryDraft =
-				result.kind === "partial"
-					? {
-							...draft,
-							proposals: draft.proposals.filter((proposal) =>
-								result.failedProposalIds.includes(proposal.id),
-							),
-						}
-					: draft;
-			this.setState({
-				status: "partial-failure",
-				step: "confirm",
-				input,
-				draft: retryDraft,
-				result,
+			const result = await this.service.createPlanDraft({
+				input: pending.input,
+				operationId: pending.operationId,
 			});
-			return result;
-		} catch {
-			const result: Extract<
-				PlanApplyResult,
-				{ kind: "partial" | "failure" }
-			> =
-				previouslyCommittedCount > 0
-					? {
-							ok: false,
-							kind: "partial",
-							applyId,
-							committedCount: previouslyCommittedCount,
-							failedProposalIds: draft.proposals.map((item) => item.id),
-							message: `先前已有 ${previouslyCommittedCount} 项写入成功；本次重试失败。`,
-						}
-					: {
-							ok: false,
-							kind: "failure",
-							applyId,
-							committedCount: 0,
-							failedProposalIds: draft.proposals.map((item) => item.id),
-							message: "写入失败，没有任何草案进入正式日历。请重试。",
-						};
-			this.setState({
-				status: "partial-failure",
-				step: "confirm",
-				input,
-				draft,
-				result,
-			});
-			return result;
+			if (sequence !== this.operationSequence) return;
+			this.pendingCreate = null;
+			await this.load(result.planId);
+		} catch (reason) {
+			if (sequence !== this.operationSequence) return;
+			this.setFailure(reason, this.returnContent);
 		}
 	}
 
-	private refreshConflicts(draft: GeneratedPlanDraft): GeneratedPlanDraft {
-		const cloned = cloneGeneratedDraft(draft);
+	private changeStatus(
+		operation: Extract<
+			PlanningOperation,
+			"pause" | "resume" | "complete" | "archive" | "retry-analysis"
+		>,
+		action: (plan: PlanView) => Promise<void>,
+	): Promise<void> {
+		return this.mutate(operation, action);
+	}
+
+	private writeContext(plan: PlanView) {
 		return {
-			...cloned,
-			conflicts: detectPlanningConflicts(
-				cloned.proposals,
-				cloned.busyWindows,
-			),
+			planId: plan.id,
+			operationId: this.createId(),
+			expectedVersion: plan.version,
 		};
 	}
 
-	private validate(input = this.inputFromState()): readonly PlanInputIssue[] {
-		if (!input) return [];
-		return validatePlanInput(input, this.today());
+	private async mutate(
+		operation: Exclude<PlanningOperation, "create">,
+		action: (plan: PlanView) => Promise<void>,
+	): Promise<void> {
+		if (this.state.status === "updating" || this.state.status === "creating") {
+			return;
+		}
+		const content = this.currentContent();
+		if (!content) return;
+		const sequence = ++this.operationSequence;
+		this.setState({ status: "updating", content, operation });
+		try {
+			await action(content.plan);
+			if (sequence !== this.operationSequence) return;
+			await this.load(content.plan.id);
+		} catch (reason) {
+			if (sequence !== this.operationSequence) return;
+			let latest = content;
+			if (
+				reason instanceof PlanningServiceError &&
+				reason.code === "model-unavailable"
+			) {
+				latest = (await this.readContent(content.plan.id)) ?? content;
+			}
+			this.setFailure(reason, latest);
+		}
 	}
 
-	private inputFromState(): PlanInput | null {
+	private async readContent(planId: string): Promise<PlanningContent | null> {
+		try {
+			const [plans, plan] = await Promise.all([
+				this.service.listPlans(),
+				this.service.getPlan(planId),
+			]);
+			return { plans, plan };
+		} catch {
+			return null;
+		}
+	}
+
+	private choosePlanId(
+		plans: readonly PlanSummaryView[],
+		preferredPlanId?: string,
+	): string {
+		const preferred = preferredPlanId ?? this.selectedPlanId;
+		if (preferred && plans.some((plan) => plan.id === preferred)) return preferred;
+		const first = plans[0];
+		if (!first) throw new Error("Expected at least one plan summary.");
+		return (
+			plans.find((plan) => plan.status === "active") ??
+			plans.find((plan) => plan.status === "awaiting-confirmation") ??
+			plans.find((plan) => plan.status === "draft") ??
+			first
+		).id;
+	}
+
+	private currentContent(): PlanningContent | null {
+		if ("content" in this.state && this.state.content !== null) {
+			return this.state.content;
+		}
 		if (
-			this.state.status === "drafting" ||
-			this.state.status === "generating" ||
-			this.state.status === "generation-error" ||
-			this.state.status === "empty-draft" ||
-			this.state.status === "review" ||
-			this.state.status === "applying" ||
-			this.state.status === "partial-failure"
+			(this.state.status === "loading" ||
+				this.state.status === "offline" ||
+				this.state.status === "error") &&
+			this.state.cached
 		) {
-			return this.state.input;
+			return this.state.cached;
 		}
 		return null;
 	}
 
-	private addDay(date: string): string {
-		return Temporal.PlainDate.from(date).add({ days: 1 }).toString();
+	private setLoaded(content: PlanningContent): void {
+		this.setState({ status: content.plan.status, content });
 	}
 
-	private suggestDeadline(goal: string, type: PlanInput["type"]): string {
-		const today = Temporal.PlainDate.from(this.today());
-		const beforeMonth = goal.match(/(\d{1,2})\s*月前/u);
-		const byMonthEnd = goal.match(/(\d{1,2})\s*月底前/u);
-		const matchedMonth = Number(beforeMonth?.[1] ?? byMonthEnd?.[1] ?? 0);
-		if (matchedMonth >= 1 && matchedMonth <= 12) {
-			const year = matchedMonth < today.month ? today.year + 1 : today.year;
-			if (beforeMonth) {
-				return Temporal.PlainDate.from({
-					year,
-					month: matchedMonth,
-					day: 1,
-				})
-					.subtract({ days: 1 })
-					.toString();
-			}
-			return Temporal.PlainDate.from({
-				year,
-				month: matchedMonth,
-				day: 1,
-			})
-				.add({ months: 1 })
-				.subtract({ days: 1 })
-				.toString();
+	private setFailure(reason: unknown, cached: PlanningContent | null): void {
+		const error =
+			reason instanceof PlanningServiceError
+				? reason
+				: new PlanningServiceError("unknown", "Unknown planning failure", {
+						cause: reason,
+				  });
+		const message = productErrorMessage(error.code);
+		if (error.code === "model-unavailable") {
+			this.setState({
+				status: "model-unavailable",
+				content: cached,
+				message,
+				retryable: error.retryable,
+			});
+			return;
 		}
-		return today
-			.add({ days: type === "long-term" ? 90 : 14 })
-			.toString();
+		if (error.code === "stale-version" && cached) {
+			this.setState({ status: "stale", content: cached, message });
+			return;
+		}
+		if (error.code === "offline") {
+			this.setState({
+				status: "offline",
+				cached,
+				message,
+				retryable: error.retryable,
+			});
+			return;
+		}
+		this.setState({
+			status: "error",
+			cached,
+			message,
+			retryable: error.retryable,
+		});
 	}
 
 	private setState(state: PlanningState): void {

@@ -2,6 +2,7 @@ import type { CalendarService } from "./calendar-service";
 import type { CalendarScenarioId } from "./fixtures";
 import {
 	assertValidCalendarEvent,
+	canUserUnlockPlanEvent,
 	cloneCalendarEvent,
 	createOccurrenceOverride,
 	type CalendarBatchMutationResult,
@@ -115,7 +116,6 @@ export class CalendarController {
 		event: CalendarEvent,
 		recurrenceScope: RecurrenceScope | null = null,
 	): Promise<CalendarMutationResult> {
-		assertValidCalendarEvent(event);
 		const before = this.state.events.find((item) => item.id === event.id) ?? null;
 		if (!before?.editable) {
 			return this.rejectLocally(
@@ -131,7 +131,29 @@ export class CalendarController {
 				"请先选择修改本次、后续或整个系列。",
 			);
 		}
-		return this.runMutation("update", before, event, recurrenceScope);
+		const userEdited =
+			before.kind === "plan" && before.scheduleOrigin === "model"
+				? { ...event, userLocked: true }
+				: event;
+		assertValidCalendarEvent(userEdited);
+		return this.runMutation("update", before, userEdited, recurrenceScope);
+	}
+
+	async setPlanEventLocked(
+		eventId: string,
+		userLocked: boolean,
+	): Promise<CalendarMutationResult> {
+		const before = this.state.events.find((event) => event.id === eventId) ?? null;
+		if (!before || (!userLocked && !canUserUnlockPlanEvent(before))) {
+			return this.rejectLocally(
+				eventId,
+				"read-only-event",
+				"只有可编辑的模型计划日程可以更改自动排程锁定。",
+			);
+		}
+		const after = { ...before, userLocked };
+		assertValidCalendarEvent(after);
+		return this.runMutation("update", before, after, null);
 	}
 
 	async delete(
