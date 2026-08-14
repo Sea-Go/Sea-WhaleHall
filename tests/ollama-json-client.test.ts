@@ -122,6 +122,55 @@ describe("OllamaJsonClient", () => {
 		expect(order).toEqual(["batch-1", "realtime", "batch-2"]);
 	});
 
+	test("external abort cancels both active and queued requests immediately", async () => {
+		let fetchCalls = 0;
+		let fetchStartedResolve!: () => void;
+		const fetchStarted = new Promise<void>((resolve) => {
+			fetchStartedResolve = resolve;
+		});
+		const client = new OllamaJsonClient({
+			fetch: async (_input, init) => {
+				fetchCalls += 1;
+				fetchStartedResolve();
+				const signal = init?.signal;
+				return new Promise<Response>((_resolve, reject) => {
+					signal?.addEventListener("abort", () => reject(signal.reason), {
+						once: true,
+					});
+				});
+			},
+		});
+		const activeController = new AbortController();
+		const active = client.generateJson({
+			messages: [{ role: "user", content: "active" }],
+			schema,
+			validate: isLabel,
+			signal: activeController.signal,
+		});
+		await fetchStarted;
+
+		const queuedController = new AbortController();
+		const queued = client.generateJson({
+			messages: [{ role: "user", content: "queued" }],
+			schema,
+			validate: isLabel,
+			signal: queuedController.signal,
+		});
+		queuedController.abort();
+		await expect(queued).rejects.toMatchObject({
+			code: "request_cancelled",
+			retryable: true,
+		});
+		expect(fetchCalls).toBe(1);
+
+		activeController.abort();
+		await expect(active).rejects.toMatchObject({
+			code: "request_cancelled",
+			retryable: true,
+		});
+		expect(fetchCalls).toBe(1);
+	});
+
 	test("requires an explicit HTTPS allowlist entry for a remote endpoint", () => {
 		expect(
 			() => new OllamaJsonClient({ baseUrl: "https://example.com" }),

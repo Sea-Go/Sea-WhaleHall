@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrivateTrainingWindowExportCoordinator } from "../src/bun/private-training-window-export";
@@ -70,8 +70,7 @@ describe("private training window local RPC boundary", () => {
 				scope: "all_committed",
 				windowCount: 2,
 				completedWindowCount: 2,
-				basename:
-					"whalehall-training-2027-01-15T08-00-00Z-package012345678",
+				basename: "whalehall-training-2027-01-15T08-00-00Z-package012345678",
 				failureCode: null,
 				updatedAtMs: 1_800_000_000_000,
 			});
@@ -99,10 +98,10 @@ describe("private training window local RPC boundary", () => {
 		}
 	});
 
-		test("uses a 24-hour cutoff and does not choose a path without consent", async () => {
-			let choseDirectory = false;
-			let exported = false;
-			let listOptions: unknown;
+	test("uses a 24-hour cutoff and does not choose a path without consent", async () => {
+		let choseDirectory = false;
+		let exported = false;
+		let listOptions: unknown;
 		const coordinator = new PrivateTrainingWindowExportCoordinator({
 			getExporter: () => ({
 				async exportToNewDirectory() {
@@ -110,8 +109,8 @@ describe("private training window local RPC boundary", () => {
 					return {} as never;
 				},
 			}),
-				async listCommittedWindowIds(options) {
-					listOptions = options;
+			async listCommittedWindowIds(options) {
+				listOptions = options;
 				return ["timeline_window_1"];
 			},
 			dialogs: {
@@ -132,12 +131,12 @@ describe("private training window local RPC boundary", () => {
 		coordinator.start({ scope: "last_24_hours" });
 		const completed = await waitForTerminal(coordinator);
 		expect(completed.state).toBe("cancelled");
-			expect(listOptions).toEqual({
-				endedAtOrAfterMs: 113_600_000,
-				availableAtMs: 200_000_000,
-				order: "oldest_first",
-				limit: 10_001,
-			});
+		expect(listOptions).toEqual({
+			endedAtOrAfterMs: 113_600_000,
+			availableAtMs: 200_000_000,
+			order: "oldest_first",
+			limit: 10_001,
+		});
 		expect(choseDirectory).toBeFalse();
 		expect(exported).toBeFalse();
 	});
@@ -191,9 +190,7 @@ describe("private training window local RPC boundary", () => {
 					limit: 1,
 				},
 			]);
-			expect(exportCalls).toEqual([
-				{ windowIds: ["timeline_window_latest"] },
-			]);
+			expect(exportCalls).toEqual([{ windowIds: ["timeline_window_latest"] }]);
 		} finally {
 			rmSync(parent, { recursive: true, force: true });
 		}
@@ -229,6 +226,49 @@ describe("private training window local RPC boundary", () => {
 		expect(response.state).toBe("failed");
 		expect(response.failureCode).toBe("invalid_request");
 		expect(touchedNativeState).toBeFalse();
+	});
+
+	test("shutdown drains a scheduled export and refuses new work", async () => {
+		let scheduled: (() => void) | null = null;
+		let exported = false;
+		const coordinator = new PrivateTrainingWindowExportCoordinator({
+			getExporter: () => ({
+				async exportToNewDirectory() {
+					exported = true;
+					return {} as never;
+				},
+			}),
+			async listCommittedWindowIds() {
+				return ["timeline_window_1"];
+			},
+			dialogs: {
+				async confirmDecryptedTrainingExport() {
+					return false;
+				},
+				async chooseDirectory() {
+					return null;
+				},
+			},
+			participantId: "participant-internal",
+			sessionTimezone: "Asia/Shanghai",
+			createId: () => "job-01234567",
+			schedule: (run) => {
+				scheduled = run;
+			},
+		});
+		coordinator.start({ scope: "latest_committed" });
+		let drained = false;
+		const shutdown = coordinator.shutdown().then(() => {
+			drained = true;
+		});
+		await Promise.resolve();
+		expect(drained).toBeFalse();
+		(scheduled as (() => void) | null)?.();
+		await shutdown;
+		expect(exported).toBeFalse();
+		expect(coordinator.start({ scope: "latest_committed" }).state).toBe(
+			"cancelled",
+		);
 	});
 });
 

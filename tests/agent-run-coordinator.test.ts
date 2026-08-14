@@ -38,30 +38,40 @@ describe("AgentRunCoordinator", () => {
 	test("stores a no-tool activity analysis locally without exposing it through renderer APIs", async () => {
 		const harness = createHarness();
 		const runId = "activity-run-private";
+		const analysis = {
+			request_id: "worker-request-private",
+			score: 0,
+			score_reason: "goal-relevant activity",
+			events: [
+				{
+					source_event_ids: ["sealed-window-only"],
+					activity: "development",
+					goal_relevance: "direct",
+					confidence: 0.9,
+					reason_codes: ["worker"],
+					evidence: ["Worker summary only"],
+					started_at_ms: 1,
+					ended_at_ms: 2,
+				},
+			],
+		};
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-window-only",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
 		await harness.coordinator.startActivityAnalysis({
 			jobId: "activity-job-private",
 			runId,
 			requestId: "activity-request-private",
 			consumedScore: 0,
-			analyses: [
-				{
-					request_id: "worker-request-private",
-					score: 0,
-					score_reason: "goal-relevant activity",
-					events: [
-						{
-							source_event_ids: ["sealed-window-only"],
-							activity: "development",
-							goal_relevance: "direct",
-							confidence: 0.9,
-							reason_codes: ["worker"],
-							evidence: ["Worker summary only"],
-							started_at_ms: 1,
-							ended_at_ms: 2,
-						},
-					],
-				},
-			],
+			analyses: [analysis],
 		});
 		expect(harness.sidecar.calls).toEqual([
 			expect.objectContaining({ method: "activity.start" }),
@@ -116,6 +126,624 @@ describe("AgentRunCoordinator", () => {
 				status: "completed",
 			}),
 		]);
+	});
+
+	test("does not dispatch an activity model request after a durable clear marker wins the final handoff", async () => {
+		const harness = createHarness();
+		const analysis = activityAnalysisResult(
+			"worker-request-clear-race",
+			"sealed-clear-race",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-clear-race",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+
+		const secondPolicyRead = deferred();
+		const releaseSecondPolicyRead = deferred();
+		const readPolicy = harness.repository.getProactiveFeedbackPolicy.bind(
+			harness.repository,
+		);
+		let policyReadCount = 0;
+		harness.repository.getProactiveFeedbackPolicy = async (accountId) => {
+			const snapshot = await readPolicy(accountId);
+			policyReadCount += 1;
+			if (policyReadCount === 2) {
+				secondPolicyRead.resolve();
+				await releaseSecondPolicyRead.promise;
+			}
+			return snapshot;
+		};
+
+		const starting = harness.coordinator.startActivityAnalysis({
+			jobId: "activity-job-clear-race",
+			runId: "activity-run-clear-race",
+			requestId: "activity-request-clear-race",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		await secondPolicyRead.promise;
+		await harness.repository.beginProactiveFeedbackClear("account-a");
+		releaseSecondPolicyRead.resolve();
+
+		await expect(starting).rejects.toThrow(
+			"Proactive feedback is disabled for this account.",
+		);
+		expect(
+			harness.sidecar.calls.filter((call) => call.method === "activity.start"),
+		).toEqual([]);
+		expect(harness.sidecar.tracked.has("activity-run-clear-race")).toBeFalse();
+		await expect(
+			harness.coordinator.cancelActivityRunsForAccount("account-a"),
+		).resolves.toEqual([]);
+
+		await harness.repository.clearProactiveFeedbackData("account-a");
+		await harness.repository.completeProactiveFeedbackClear("account-a");
+		await expect(
+			harness.repository.getRun("account-a", "activity-run-clear-race"),
+		).resolves.toBeNull();
+	});
+
+	test("discards an already-active activity run during clear without persisting it again", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-discard-clear";
+		const analysis = activityAnalysisResult(
+			"worker-request-discard-clear",
+			"sealed-discard-clear",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-discard-clear",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await harness.coordinator.startActivityAnalysis({
+			jobId: "activity-job-discard-clear",
+			runId,
+			requestId: "activity-request-discard-clear",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		expect(harness.coordinator.modelPurposeForRun(runId)).toBe("activity");
+		expect(harness.sidecar.tracked.has(runId)).toBeTrue();
+
+		await harness.repository.beginProactiveFeedbackClear("account-a");
+		await expect(
+			harness.coordinator.discardActivityRunsForAccount("account-a"),
+		).resolves.toEqual([runId]);
+		expect(() => harness.coordinator.modelPurposeForRun(runId)).toThrow();
+		expect(harness.sidecar.tracked.has(runId)).toBeFalse();
+		expect(harness.sidecar.calls).toContainEqual(
+			expect.objectContaining({
+				method: "run.cancel",
+				params: expect.objectContaining({ runId }),
+			}),
+		);
+
+		await harness.repository.clearProactiveFeedbackData("account-a");
+		await harness.repository.completeProactiveFeedbackClear("account-a");
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				runId,
+				1,
+				{
+					kind: "run.failed",
+					error: { code: "INTERNAL_ERROR", message: "late", retryable: true },
+				},
+				"failed",
+			),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await expect(
+			harness.repository.getRun("account-a", runId),
+		).resolves.toBeNull();
+	});
+
+	test("defers the same activity semantics when atomic feedback persistence fails", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-persistence-failure";
+		const jobId = "activity-job-persistence-failure";
+		const analysis = {
+			request_id: "worker-request-persistence-failure",
+			score: 1,
+			score_reason: "与当前目标直接相关",
+			events: [
+				{
+					source_event_ids: ["sealed-persistence-failure"],
+					activity: "development",
+					goal_relevance: "direct",
+					confidence: 0.9,
+					reason_codes: ["worker"],
+					evidence: ["活动证据"],
+					started_at_ms: 1,
+					ended_at_ms: 2,
+				},
+			],
+		};
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-persistence-failure",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await harness.coordinator.startActivityAnalysis({
+			jobId,
+			runId,
+			requestId: "activity-request-persistence-failure",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		harness.repository.completeProactiveFeedbackRun = async () => {
+			throw new Error("simulated encrypted repository outage");
+		};
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				runId,
+				2,
+				{
+					kind: "run.completed",
+					result: { summary: "当前活动与目标相关，建议继续当前任务。" },
+				},
+				"completed",
+			),
+		);
+		await waitFor(() => harness.activityTerminals.length === 1);
+		expect(harness.activityTerminals).toEqual([
+			expect.objectContaining({
+				jobId,
+				runId,
+				accountId: "account-a",
+				status: "interrupted",
+				failureClass: "transient",
+				feedback: null,
+			}),
+		]);
+		expect(harness.sidecar.tracked.has(runId)).toBe(false);
+		await expect(
+			harness.repository.getRun("account-a", runId),
+		).resolves.toEqual(expect.objectContaining({ status: "running" }));
+		await expect(
+			harness.repository.listProactiveFeedback("account-a"),
+		).resolves.toEqual({ items: [], nextCursor: null });
+		await expect(
+			harness.repository.getProactiveFeedbackEventStream(
+				"account-a",
+				analysis.request_id,
+			),
+		).resolves.toEqual(expect.objectContaining({ consumedAtMs: null }));
+	});
+
+	test("keeps an atomic activity completion authoritative when the session changes after commit", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-session-race-after-commit";
+		const jobId = "activity-job-session-race-after-commit";
+		const analysis = activityAnalysisResult(
+			"worker-request-session-race-after-commit",
+			"sealed-session-race-after-commit",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-session-race-after-commit",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await harness.coordinator.startActivityAnalysis({
+			jobId,
+			runId,
+			requestId: "activity-request-session-race-after-commit",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+
+		const complete = harness.repository.completeProactiveFeedbackRun.bind(
+			harness.repository,
+		);
+		harness.repository.completeProactiveFeedbackRun = async (input) => {
+			const result = await complete(input);
+			// The encrypted transaction is committed, then logout wins before the
+			// repository promise returns to the coordinator.
+			harness.account.current = null;
+			harness.account.generation += 1;
+			return result;
+		};
+
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				runId,
+				2,
+				{
+					kind: "run.completed",
+					result: { summary: "当前活动与目标相关，建议继续当前任务。" },
+				},
+				"completed",
+			),
+		);
+
+		await waitFor(() => harness.activityTerminals.length === 1);
+		expect(harness.activityTerminals).toEqual([
+			expect.objectContaining({
+				jobId,
+				runId,
+				status: "completed",
+				feedback: expect.objectContaining({
+					message: "当前活动与目标相关，建议继续当前任务。",
+				}),
+			}),
+		]);
+		await expect(
+			harness.repository.verifyCompletedProactiveFeedbackRun({
+				accountId: "account-a",
+				runId,
+				jobId,
+				originatingRequestId: "activity-request-session-race-after-commit",
+				consumedScore: 1,
+				analyses: [analysis],
+			}),
+		).resolves.toBe(true);
+	});
+
+	test("keeps an in-flight activity job retryable across logout and same-account return", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-logout-retry";
+		const jobId = "activity-job-logout-retry";
+		const analysis = {
+			request_id: "worker-request-logout-retry",
+			score: 1,
+			score_reason: "与当前目标直接相关",
+			events: [
+				{
+					source_event_ids: ["sealed-logout-retry"],
+					activity: "development",
+					goal_relevance: "direct",
+					confidence: 0.9,
+					reason_codes: ["worker"],
+					evidence: ["活动证据"],
+					started_at_ms: 1,
+					ended_at_ms: 2,
+				},
+			],
+		};
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-logout-retry",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await harness.coordinator.startActivityAnalysis({
+			jobId,
+			runId,
+			requestId: "activity-request-logout-retry",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
+		);
+		await waitFor(
+			async () =>
+				(await harness.repository.getRun("account-a", runId))?.status ===
+				"running",
+		);
+
+		harness.account.current = null;
+		harness.account.generation += 1;
+		await harness.coordinator.cancelAllForAccount("account-a");
+		expect(harness.activityTerminals).toEqual([
+			expect.objectContaining({
+				jobId,
+				runId,
+				accountId: "account-a",
+				status: "cancelled",
+				failureClass: "transient",
+				feedback: null,
+			}),
+		]);
+
+		harness.account.current = "account-a";
+		harness.account.generation += 1;
+		const restarted = restartCoordinator(harness);
+		await expect(
+			restarted.reconcileOrphanedActivityRun({
+				accountId: "account-a",
+				runId,
+				jobId,
+				requestId: "activity-request-logout-retry",
+				consumedScore: 1,
+				analyses: [analysis],
+			}),
+		).resolves.toBe("retryable");
+	});
+
+	test("quiesces an old activity generation as retryable during same-account activation", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-session-transition";
+		const jobId = "activity-job-session-transition";
+		const analysis = activityAnalysisResult(
+			"worker-request-session-transition",
+			"sealed-session-transition",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-session-transition",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await harness.coordinator.startActivityAnalysis({
+			jobId,
+			runId,
+			requestId: "activity-request-session-transition",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		harness.account.generation += 1;
+		await expect(
+			harness.coordinator.quiesceActivityRunsForSessionTransition("account-a"),
+		).resolves.toEqual([runId]);
+		expect(harness.activityTerminals).toEqual([
+			expect.objectContaining({
+				jobId,
+				runId,
+				status: "cancelled",
+				failureClass: "transient",
+				feedback: null,
+			}),
+		]);
+		await expect(
+			harness.repository.getRun("account-a", runId),
+		).resolves.toEqual(expect.objectContaining({ status: "cancelled" }));
+	});
+
+	test("persists invalid activity output classification across restart reconciliation", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-invalid-output";
+		const jobId = "activity-job-invalid-output";
+		const analysis = {
+			request_id: "worker-request-invalid-output",
+			score: 1,
+			score_reason: "与当前目标直接相关",
+			events: [
+				{
+					source_event_ids: ["sealed-invalid-output"],
+					activity: "development",
+					goal_relevance: "direct",
+					confidence: 0.9,
+					reason_codes: ["worker"],
+					evidence: ["活动证据"],
+					started_at_ms: 1,
+					ended_at_ms: 2,
+				},
+			],
+		};
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-invalid-output",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await harness.coordinator.startActivityAnalysis({
+			jobId,
+			runId,
+			requestId: "activity-request-invalid-output",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				runId,
+				2,
+				{ kind: "run.completed", result: { summary: "非法\u0001正文" } },
+				"completed",
+			),
+		);
+		await waitFor(() => harness.activityTerminals.length === 1);
+		expect(harness.activityTerminals[0]).toMatchObject({
+			jobId,
+			runId,
+			failureClass: "invalid-output",
+			sessionIdentity: {
+				accountId: "account-a",
+				sessionId: "session-account-a-1",
+				generation: 1,
+			},
+		});
+		await expect(
+			harness.repository.getRun("account-a", runId),
+		).resolves.toEqual(
+			expect.objectContaining({
+				status: "failed",
+				error: {
+					code: "invalid-request",
+					message: "Activity analysis output failed local validation.",
+					retryable: false,
+				},
+			}),
+		);
+		const recovered = restartCoordinator(harness);
+		await expect(
+			recovered.reconcileOrphanedActivityRun({
+				accountId: "account-a",
+				runId,
+				jobId,
+				requestId: "activity-request-invalid-output",
+				consumedScore: 1,
+				analyses: [analysis],
+			}),
+		).resolves.toBe("invalid-output");
+	});
+
+	test("keeps provider, relay, and host failures on the same retryable activity semantics", async () => {
+		const harness = createHarness();
+		const failures = [
+			{
+				code: "MODEL_RELAY_ERROR" as const,
+				message: "provider returned HTTP 500",
+				retryable: true,
+			},
+			{
+				code: "MODEL_RELAY_UNAVAILABLE" as const,
+				message: "personal relay key is temporarily unavailable",
+				retryable: false,
+			},
+			{
+				code: "INTERNAL_ERROR" as const,
+				message: "provider returned HTTP 429 through the SDK",
+				retryable: false,
+			},
+		];
+		for (const [index, error] of failures.entries()) {
+			const runId = `activity-run-transient-${index}`;
+			const jobId = `activity-job-transient-${index}`;
+			const requestId = `activity-request-transient-${index}`;
+			const analysis = activityAnalysisResult(
+				`worker-request-transient-${index}`,
+				`sealed-transient-${index}`,
+			);
+			await harness.repository.archiveProactiveFeedbackEventStream({
+				accountId: "account-a",
+				id: analysis.request_id,
+				sourceWindowId: `sealed-transient-${index}`,
+				windowStartedAtMs: 1,
+				windowEndedAtMs: 2,
+				analysis,
+				archivedAtMs: harness.clock(),
+				consumedAtMs: null,
+				consumedRunId: null,
+			});
+			await harness.coordinator.startActivityAnalysis({
+				jobId,
+				runId,
+				requestId,
+				consumedScore: 1,
+				analyses: [analysis],
+			});
+			harness.coordinator.acceptSidecarEvent(
+				runEvent(runId, 1, { kind: "run.failed", error }, "failed"),
+			);
+			await waitFor(() => harness.activityTerminals.length === index + 1);
+			expect(harness.activityTerminals[index]).toMatchObject({
+				jobId,
+				runId,
+				status: "failed",
+				failureClass: "transient",
+				feedback: null,
+			});
+			await expect(
+				restartCoordinator(harness).reconcileOrphanedActivityRun({
+					accountId: "account-a",
+					jobId,
+					runId,
+					requestId,
+					consumedScore: 1,
+					analyses: [analysis],
+				}),
+			).resolves.toBe("retryable");
+		}
+	});
+
+	test("keeps an activity start transport rejection on the same semantic attempt", async () => {
+		const harness = createHarness();
+		const sidecar = new RecordingSidecar();
+		sidecar.request = async () => {
+			throw new Error("provider connection failed before run.started");
+		};
+		const coordinator = restartCoordinator(harness, sidecar);
+		const analysis = activityAnalysisResult(
+			"worker-request-start-rejection",
+			"sealed-start-rejection",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-start-rejection",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await coordinator.startActivityAnalysis({
+			jobId: "activity-job-start-rejection",
+			runId: "activity-run-start-rejection",
+			requestId: "activity-request-start-rejection",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		await waitFor(() => harness.activityTerminals.length === 1);
+		expect(harness.activityTerminals).toEqual([
+			expect.objectContaining({
+				jobId: "activity-job-start-rejection",
+				runId: "activity-run-start-rejection",
+				status: "failed",
+				failureClass: "transient",
+				feedback: null,
+			}),
+		]);
+	});
+
+	test("retries a claim crash before run persistence without advancing semantics", async () => {
+		const harness = createHarness();
+		await expect(
+			harness.coordinator.reconcileOrphanedActivityRun({
+				accountId: "account-a",
+				runId: "activity-run-claim-crash",
+				jobId: "activity-job-claim-crash",
+				requestId: "activity-request-claim-crash",
+				consumedScore: 1,
+				analyses: [
+					activityAnalysisResult(
+						"worker-request-claim-crash",
+						"sealed-claim-crash",
+					),
+				],
+			}),
+		).resolves.toBe("retryable");
 	});
 
 	test("lists a still-running active turn as restorable in the same Bun process", async () => {
@@ -1113,6 +1741,26 @@ class MemoryKeyStore implements CredentialKeyStore {
 	): Promise<{ deleted: boolean }> {
 		return { deleted: this.keys.delete(referenceKey(reference)) };
 	}
+}
+
+function activityAnalysisResult(requestId: string, sourceEventId: string) {
+	return {
+		request_id: requestId,
+		score: 1,
+		score_reason: "与当前目标直接相关",
+		events: [
+			{
+				source_event_ids: [sourceEventId],
+				activity: "development",
+				goal_relevance: "direct",
+				confidence: 0.9,
+				reason_codes: ["worker"],
+				evidence: ["活动证据"],
+				started_at_ms: 1,
+				ended_at_ms: 2,
+			},
+		],
+	};
 }
 
 function createHarness(): {

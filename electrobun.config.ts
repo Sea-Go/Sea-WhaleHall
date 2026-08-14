@@ -1,3 +1,4 @@
+import { createPublicKey } from "node:crypto";
 import type { ElectrobunConfig } from "electrobun";
 import { MACOS_OUTER_ENTITLEMENTS } from "./scripts/macos-build-security";
 
@@ -12,7 +13,10 @@ function failClosedReleaseBuild(message: string): never {
 	process.exit(1);
 }
 
-function currentTarget(): { os: "macos" | "linux" | "win"; arch: "arm64" | "x64" } {
+function currentTarget(): {
+	os: "macos" | "linux" | "win";
+	arch: "arm64" | "x64";
+} {
 	const os =
 		process.platform === "darwin"
 			? "macos"
@@ -24,11 +28,13 @@ function currentTarget(): { os: "macos" | "linux" | "win"; arch: "arm64" | "x64"
 }
 
 const target = currentTarget();
-const nativeBinary = target.os === "win" ? "whalehall-local.exe" : "whalehall-local";
+const nativeBinary =
+	target.os === "win" ? "whalehall-local.exe" : "whalehall-local";
 const nativeSource = `.native/${target.os}-${target.arch}/${nativeBinary}`;
-const credentialHelperBinary = target.os === "win"
-	? "whalehall-credential-helper.exe"
-	: "whalehall-credential-helper";
+const credentialHelperBinary =
+	target.os === "win"
+		? "whalehall-credential-helper.exe"
+		: "whalehall-credential-helper";
 const credentialHelperSource = `.native/${target.os}-${target.arch}/${credentialHelperBinary}`;
 const nodeBinary = target.os === "win" ? "node.exe" : "node";
 const nodeSource = `.native/${target.os}-${target.arch}/${nodeBinary}`;
@@ -40,11 +46,14 @@ const buildEnvironment =
 		?.slice("--env=".length) ??
 	process.env.ELECTROBUN_BUILD_ENV ??
 	"dev";
+const stableBuild = buildEnvironment === "stable";
 const stableMacBuild = target.os === "macos" && buildEnvironment === "stable";
+const stableWindowsBuild = target.os === "win" && buildEnvironment === "stable";
 const releaseSigningRequired =
-	stableMacBuild ||
-	process.env.WHALEHALL_RELEASE_SIGNING_REQUIRED === "true";
-const macCodeSigningEnabled = Boolean(process.env.ELECTROBUN_DEVELOPER_ID?.trim());
+	stableMacBuild || process.env.WHALEHALL_RELEASE_SIGNING_REQUIRED === "true";
+const macCodeSigningEnabled = Boolean(
+	process.env.ELECTROBUN_DEVELOPER_ID?.trim(),
+);
 if (target.os === "macos" && releaseSigningRequired && !macCodeSigningEnabled) {
 	failClosedReleaseBuild(
 		"ELECTROBUN_DEVELOPER_ID is required for every stable or explicitly signed macOS build.",
@@ -59,13 +68,68 @@ if (
 		"WHALEHALL_APPLE_TEAM_ID must be the 10-character Apple Team ID for a signed macOS build.",
 	);
 }
-if (
-	stableMacBuild &&
-	process.env.WHALEHALL_MACOS_NOTARIZE !== "true"
-) {
+if (stableMacBuild && process.env.WHALEHALL_MACOS_NOTARIZE !== "true") {
 	failClosedReleaseBuild(
 		"Stable macOS builds require WHALEHALL_MACOS_NOTARIZE=true; unsigned or unnotarized stable artifacts are forbidden.",
 	);
+}
+const releaseVersion = stableBuild
+	? process.env.WHALEHALL_RELEASE_VERSION?.trim()
+	: "0.1.0";
+if (stableBuild && !/^\d+\.\d+\.\d+$/.test(releaseVersion ?? "")) {
+	failClosedReleaseBuild(
+		"WHALEHALL_RELEASE_VERSION must be an exact stable SemVer (x.y.z) for a stable build.",
+	);
+}
+if (stableBuild) {
+	const publicKeySpkiBase64 =
+		process.env.WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64?.trim() ?? "";
+	try {
+		if (
+			publicKeySpkiBase64 === "" ||
+			Buffer.from(publicKeySpkiBase64, "base64").toString("base64") !==
+				publicKeySpkiBase64
+		) {
+			throw new Error("not canonical base64");
+		}
+		const publicKey = createPublicKey({
+			key: Buffer.from(publicKeySpkiBase64, "base64"),
+			format: "der",
+			type: "spki",
+		});
+		if (publicKey.asymmetricKeyType !== "ed25519") {
+			throw new Error("not Ed25519");
+		}
+	} catch {
+		failClosedReleaseBuild(
+			"WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64 must contain a valid Ed25519 SPKI DER public key for a stable build.",
+		);
+	}
+}
+if (stableWindowsBuild) {
+	for (const variable of [
+		"WHALEHALL_WINDOWS_CERTIFICATE_PATH",
+		"WHALEHALL_WINDOWS_CERTIFICATE_PASSWORD",
+		"WHALEHALL_WINDOWS_CERTIFICATE_SHA1",
+		"WHALEHALL_WINDOWS_PUBLISHER",
+		"WHALEHALL_WINDOWS_SIGNTOOL_PATH",
+	] as const) {
+		if (!process.env[variable]?.trim()) {
+			failClosedReleaseBuild(
+				`${variable} is required for every stable Windows build.`,
+			);
+		}
+	}
+	if (
+		!/^[A-F0-9]{40}$/.test(
+			process.env.WHALEHALL_WINDOWS_CERTIFICATE_SHA1?.trim().toUpperCase() ??
+				"",
+		)
+	) {
+		failClosedReleaseBuild(
+			"WHALEHALL_WINDOWS_CERTIFICATE_SHA1 must be the signing certificate's 40-character SHA-1 thumbprint.",
+		);
+	}
 }
 const nativeCopies: Record<string, string> = {
 	[nativeSource]: `native/${nativeBinary}`,
@@ -85,7 +149,7 @@ export default {
 	app: {
 		name: "WhaleHall",
 		identifier: "com.seago.whalehall",
-		version: "0.1.0",
+		version: releaseVersion ?? "0.1.0",
 		description: "A desktop AI agent shell with an animated whale companion.",
 	},
 	build: {
@@ -93,6 +157,14 @@ export default {
 		bun: {
 			entrypoint: "src/bun/index.ts",
 			sourcemap: "external",
+			define: {
+				"process.env.WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64":
+					JSON.stringify(
+						stableBuild
+							? process.env.WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64?.trim()
+							: "",
+					),
+			},
 		},
 		copy: {
 			"dist/views": "views",
@@ -143,7 +215,14 @@ export default {
 	},
 	scripts: {
 		preBuild: "scripts/pre-build.ts",
+		postBuild: "scripts/app-update-sign-windows.ts",
 		postWrap: "scripts/post-wrap.ts",
-		postPackage: "scripts/post-package.ts",
+		postPackage: "scripts/app-update-post-package.ts",
+	},
+	release: {
+		baseUrl: stableBuild
+			? "https://github.com/Sea-Go/Sea-WhaleHall/releases/latest/download"
+			: "",
+		generatePatch: false,
 	},
 } satisfies ElectrobunConfig;

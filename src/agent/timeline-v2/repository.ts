@@ -102,6 +102,10 @@ export interface TimelineV2Repository {
 		nowMs: number,
 		leaseDurationMs: number,
 	): Promise<TimelineJobV2 | null>;
+	abandonWindowClaim(
+		windowId: string,
+		nowMs: number,
+	): Promise<TimelineJobV2>;
 	completeWindow(
 		result: PersistTimelineResult,
 		nowMs: number,
@@ -268,11 +272,33 @@ export class InMemoryTimelineV2Repository implements TimelineV2Repository {
 			updatedAtMs: nowMs,
 			nextAttemptAtMs: null,
 			leaseExpiresAtMs: nowMs + leaseDurationMs,
-			failureCode: null,
-			failureMessage: null,
 		};
 		this.jobs.set(candidate.windowId, claimed);
 		return clone(claimed);
+	}
+
+	async abandonWindowClaim(
+		windowId: string,
+		nowMs: number,
+	): Promise<TimelineJobV2> {
+		const current = this.requireJob(windowId);
+		if (current.state !== "RUNNING") {
+			throw new Error(
+				`Cannot abandon timeline claim ${windowId} from ${current.state}.`,
+			);
+		}
+		const attempt = Math.max(0, current.attempt - 1);
+		const abandoned: TimelineJobV2 = {
+			...current,
+			state: "READY",
+			attempt,
+			firstAttemptAtMs: attempt === 0 ? null : current.firstAttemptAtMs,
+			updatedAtMs: nowMs,
+			nextAttemptAtMs: nowMs,
+			leaseExpiresAtMs: null,
+		};
+		this.jobs.set(windowId, abandoned);
+		return clone(abandoned);
 	}
 
 	async completeWindow(
@@ -323,6 +349,8 @@ export class InMemoryTimelineV2Repository implements TimelineV2Repository {
 			updatedAtMs: nowMs,
 			nextAttemptAtMs: null,
 			leaseExpiresAtMs: null,
+			failureCode: null,
+			failureMessage: null,
 		};
 		this.jobs.set(result.windowId, resultPersisted);
 		return this.finalizeWindowCommit(result.windowId, nowMs);
@@ -353,6 +381,8 @@ export class InMemoryTimelineV2Repository implements TimelineV2Repository {
 		const committed: TimelineJobV2 = {
 			...committing,
 			state: "COMMITTED",
+			failureCode: null,
+			failureMessage: null,
 		};
 		this.jobs.set(windowId, committed);
 		return clone(committed);

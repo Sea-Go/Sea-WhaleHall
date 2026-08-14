@@ -21,5 +21,8 @@ tokio.workspace = true
 whalehall-local-core.workspace = true
 whalehall-local-protocol.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

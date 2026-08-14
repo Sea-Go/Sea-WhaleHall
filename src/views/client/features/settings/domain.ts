@@ -38,7 +38,6 @@ export const APPEARANCE_THEME_LABELS: Record<AppearanceTheme, string> = {
 
 export type InterfaceDensity = "comfortable" | "compact";
 export type CalendarDefaultView = "day" | "week" | "month";
-export type ActivityRetentionDays = 7 | 30 | 90;
 
 export interface PreferenceValues {
 	appearance: {
@@ -61,9 +60,7 @@ export interface PreferenceValues {
 		startWeekOnMonday: boolean;
 	};
 	privacy: {
-		activityInsights: boolean;
 		browserInsights: boolean;
-		retentionDays: ActivityRetentionDays;
 	};
 }
 
@@ -95,9 +92,7 @@ export function createDefaultPreferences(): PreferenceValues {
 			startWeekOnMonday: true,
 		},
 		privacy: {
-			activityInsights: true,
 			browserInsights: false,
-			retentionDays: 30,
 		},
 	};
 }
@@ -140,9 +135,7 @@ export function preferenceValuesEqual(
 		left.calendar.defaultView === right.calendar.defaultView &&
 		left.calendar.showWeekends === right.calendar.showWeekends &&
 		left.calendar.startWeekOnMonday === right.calendar.startWeekOnMonday &&
-		left.privacy.activityInsights === right.privacy.activityInsights &&
-		left.privacy.browserInsights === right.privacy.browserInsights &&
-		left.privacy.retentionDays === right.privacy.retentionDays
+		left.privacy.browserInsights === right.privacy.browserInsights
 	);
 }
 
@@ -193,18 +186,18 @@ function parsePreferenceValues(
 		return null;
 	}
 
-	const theme =
-		isAppearanceTheme(appearance.theme)
-			? appearance.theme
-			: allowLegacyTheme && appearance.theme === "ocean"
-				? "observatory"
+	const theme = isAppearanceTheme(appearance.theme)
+		? appearance.theme
+		: allowLegacyTheme && appearance.theme === "ocean"
+			? "observatory"
 			: allowLegacyTheme && appearance.theme === undefined
 				? "observatory"
 				: null;
 	if (
 		theme === null ||
-		!((appearance.density === "comfortable" ||
-			appearance.density === "compact") &&
+		!(
+			(appearance.density === "comfortable" ||
+				appearance.density === "compact") &&
 			typeof appearance.reduceMotion === "boolean" &&
 			typeof pet.visible === "boolean" &&
 			typeof pet.reactionsEnabled === "boolean" &&
@@ -216,11 +209,8 @@ function parsePreferenceValues(
 				calendar.defaultView === "month") &&
 			typeof calendar.showWeekends === "boolean" &&
 			typeof calendar.startWeekOnMonday === "boolean" &&
-			typeof privacy.activityInsights === "boolean" &&
-			typeof privacy.browserInsights === "boolean" &&
-			(privacy.retentionDays === 7 ||
-				privacy.retentionDays === 30 ||
-				privacy.retentionDays === 90))
+			typeof privacy.browserInsights === "boolean"
+		)
 	) {
 		return null;
 	}
@@ -246,9 +236,7 @@ function parsePreferenceValues(
 			startWeekOnMonday: calendar.startWeekOnMonday,
 		},
 		privacy: {
-			activityInsights: privacy.activityInsights,
 			browserInsights: privacy.browserInsights,
-			retentionDays: privacy.retentionDays,
 		},
 	};
 }

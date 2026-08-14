@@ -1,11 +1,10 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
+import { z } from "zod";
 import {
 	activityReflectionActivitySchema,
 	activityReflectionModelOutputSchema,
 	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
-	type ActivityReflectionModelOutput,
 } from "../activity-reflection-prompt";
-import { z } from "zod";
 
 /**
  * The input is a complete prompt built by the desktop client. It remains in
@@ -31,11 +30,18 @@ export const activityReflectionWorkflowInputSchema = z
 	})
 	.strict();
 
-export const activityReflectionWorkflowOutcomeSchema = z
-	.object({
-		modelOutput: activityReflectionModelOutputSchema,
-	})
-	.strict();
+export const activityReflectionWorkflowOutcomeSchema = z.discriminatedUnion(
+	"kind",
+	[
+		z
+			.object({
+				kind: z.literal("completed"),
+				modelOutput: activityReflectionModelOutputSchema,
+			})
+			.strict(),
+		z.object({ kind: z.literal("invalid-output") }).strict(),
+	],
+);
 
 export type ActivityReflectionWorkflowInput = z.infer<
 	typeof activityReflectionWorkflowInputSchema
@@ -51,7 +57,7 @@ export interface ActivityReflectionWorkflowDriverInput
 
 export type ActivityReflectionWorkflowDriver = (
 	input: ActivityReflectionWorkflowDriverInput,
-) => Promise<ActivityReflectionModelOutput>;
+) => Promise<ActivityReflectionWorkflowOutcome>;
 
 export const activityReflectionWorkflowId = "activity-reflection";
 export const activityReflectionWorkflowStepId = "invoke-reflection-model";
@@ -68,9 +74,8 @@ export function createActivityReflectionWorkflow(
 		id: activityReflectionWorkflowStepId,
 		inputSchema: activityReflectionWorkflowInputSchema,
 		outputSchema: activityReflectionWorkflowOutcomeSchema,
-		execute: async ({ inputData, abortSignal }) => ({
-			modelOutput: await driver({ ...inputData, abortSignal }),
-		}),
+		execute: async ({ inputData, abortSignal }) =>
+			driver({ ...inputData, abortSignal }),
 	});
 
 	return createWorkflow({

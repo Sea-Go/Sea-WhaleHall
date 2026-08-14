@@ -54,7 +54,7 @@ export function isActivityAnalysisWorkerResult(
 export function serializedActivityAnalysisLength(
 	results: readonly ActivityAnalysisWorkerResult[],
 ): number {
-	return JSON.stringify(results).length;
+	return new TextEncoder().encode(JSON.stringify(results)).byteLength;
 }
 
 function isActivityAnalysisWorkerEvent(
@@ -134,8 +134,24 @@ function isBoundedString(
 	return (
 		typeof value === "string" &&
 		(allowEmpty || value.length > 0) &&
-		value.length <= maximum
+		value.length <= maximum &&
+		!containsDisallowedControlCharacter(value)
 	);
+}
+
+function containsDisallowedControlCharacter(value: string): boolean {
+	for (const character of value) {
+		const codePoint = character.codePointAt(0);
+		if (codePoint === undefined) continue;
+		if (
+			codePoint <= 0x08 ||
+			(codePoint >= 0x0b && codePoint <= 0x1f) ||
+			(codePoint >= 0x7f && codePoint <= 0x9f)
+		) {
+			return true;
+		}
+	}
+	return false;
 }
 
 function isScore(value: unknown): value is number {

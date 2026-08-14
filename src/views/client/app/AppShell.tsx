@@ -3,8 +3,9 @@ import {
 	Cat,
 	ChartNoAxesCombined,
 	ChevronUp,
+	History,
+	Info,
 	LogOut,
-	MessageCircle,
 	Palette,
 	Settings,
 	ShieldCheck,
@@ -14,51 +15,73 @@ import {
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	AppUpdateAttentionMark,
+	type AppUpdateController,
+} from "../features/app-update/public";
+import type { AuditExportService } from "../features/audit-export/public";
 import type { AuthUser } from "../features/auth/public";
 import {
-	CalendarPage,
 	CalendarController,
+	CalendarPage,
 	type CalendarService,
 } from "../features/calendar/public";
 import {
-	PlanningPage,
-	type PlanningController,
-} from "../features/planning/public";
-import {
-	ReportsPage,
-	type ReportController,
-} from "../features/reports/public";
+	type MonitoringController,
+	MonitoringStatusControl,
+} from "../features/monitoring/public";
 import type { PetPresentationBridge } from "../features/pet-bridge/public";
 import {
-	ConversationPage,
-	type ConversationPageActions,
-	type ConversationPageState,
-} from "../features/conversation/public";
-import type { AuditExportService } from "../features/audit-export/public";
+	type PlanningController,
+	PlanningPage,
+} from "../features/planning/public";
 import {
-	MonitoringStatusControl,
-	type MonitoringController,
-} from "../features/monitoring/public";
+	type ProactiveFeedbackHistoryController,
+	ProactiveFeedbackHistoryPage,
+	type ProactiveFeedbackPolicyController,
+} from "../features/proactive-feedback/public";
+import { type ReportController, ReportsPage } from "../features/reports/public";
 import {
-	SettingsPage,
 	type AgentPermissionsController,
 	type PreferencesController,
 	type PreferencesSnapshot,
 	type SettingsCategory,
+	SettingsPage,
 } from "../features/settings/public";
 import { ConfirmationDialog } from "../shared/ui/ConfirmationDialog";
 import { applyAppearancePreferences } from "./appearance";
-import { PlanningSchedulePreview } from "./PlanningSchedulePreview";
-import { PlanningPetCoordinator } from "./PlanningPetCoordinator";
 import { PAGE_LABELS, type PageId } from "./navigation";
+import { PlanningPetCoordinator } from "./PlanningPetCoordinator";
+import { PlanningSchedulePreview } from "./PlanningSchedulePreview";
 
-type MenuAction = "account" | "appearance" | "pet" | "privacy" | "logout";
+type MenuAction =
+	| "account"
+	| "appearance"
+	| "pet"
+	| "privacy"
+	| "about"
+	| "logout";
 
 const navigationItems = [
-	{ id: "planning", label: PAGE_LABELS.planning, icon: Target, disabled: false },
-	{ id: "calendar", label: PAGE_LABELS.calendar, icon: CalendarDays, disabled: false },
-	{ id: "conversation", label: PAGE_LABELS.conversation, icon: MessageCircle, disabled: false },
-	{ id: "reports", label: PAGE_LABELS.reports, icon: ChartNoAxesCombined, disabled: false },
+	{
+		id: "planning",
+		label: PAGE_LABELS.planning,
+		icon: Target,
+		disabled: false,
+	},
+	{
+		id: "calendar",
+		label: PAGE_LABELS.calendar,
+		icon: CalendarDays,
+		disabled: false,
+	},
+	{ id: "history", label: PAGE_LABELS.history, icon: History, disabled: false },
+	{
+		id: "reports",
+		label: PAGE_LABELS.reports,
+		icon: ChartNoAxesCombined,
+		disabled: false,
+	},
 ] as const satisfies ReadonlyArray<{
 	id: PageId;
 	label: string;
@@ -71,6 +94,7 @@ const userMenuItems = [
 	{ id: "appearance", label: "外观", icon: Palette },
 	{ id: "pet", label: "桌宠设置", icon: Cat },
 	{ id: "privacy", label: "数据与隐私", icon: ShieldCheck },
+	{ id: "about", label: "关于与更新", icon: Info },
 ] as const satisfies ReadonlyArray<{
 	id: Exclude<MenuAction, "logout">;
 	label: string;
@@ -89,8 +113,9 @@ export interface AppShellProps {
 	petBridge: PetPresentationBridge;
 	monitoringController: MonitoringController;
 	auditExportService: AuditExportService;
-	conversationState: ConversationPageState;
-	conversationActions?: ConversationPageActions;
+	proactiveFeedbackHistoryController: ProactiveFeedbackHistoryController;
+	proactiveFeedbackPolicyController?: ProactiveFeedbackPolicyController;
+	appUpdateController?: AppUpdateController;
 	initialPage?: PageId;
 	enableQaControls?: boolean;
 }
@@ -107,8 +132,9 @@ export function AppShell({
 	petBridge,
 	monitoringController,
 	auditExportService,
-	conversationState,
-	conversationActions,
+	proactiveFeedbackHistoryController,
+	proactiveFeedbackPolicyController,
+	appUpdateController,
 	initialPage = "calendar",
 	enableQaControls = false,
 }: AppShellProps) {
@@ -186,7 +212,8 @@ export function AppShell({
 		}
 
 		document.addEventListener("pointerdown", handleOutsidePointer);
-		return () => document.removeEventListener("pointerdown", handleOutsidePointer);
+		return () =>
+			document.removeEventListener("pointerdown", handleOutsidePointer);
 	}, [userMenuOpen]);
 
 	useEffect(() => {
@@ -219,19 +246,17 @@ export function AppShell({
 	const handlePreferencesApplied = useCallback(
 		(snapshot: PreferencesSnapshot) => {
 			applyAppearancePreferences(snapshot.values.appearance);
-			petReactionsEnabledRef.current =
-				snapshot.values.pet.reactionsEnabled;
-			planningPetCoordinator.setEnabled(
-				snapshot.values.pet.reactionsEnabled,
-			);
-			void petBridge.setVisible(snapshot.values.pet.visible);
+			petReactionsEnabledRef.current = snapshot.values.pet.reactionsEnabled;
+			planningPetCoordinator.setEnabled(snapshot.values.pet.reactionsEnabled);
 		},
-		[petBridge, planningPetCoordinator],
+		[planningPetCoordinator],
 	);
 
 	function handleMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
 		const menuItems = Array.from(
-			userMenuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [],
+			userMenuRef.current?.querySelectorAll<HTMLButtonElement>(
+				'[role="menuitem"]',
+			) ?? [],
 		);
 		if (menuItems.length === 0) return;
 
@@ -243,7 +268,11 @@ export function AppShell({
 
 		if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
 		event.preventDefault();
-		const currentIndex = menuItems.findIndex((item) => item === document.activeElement);
+		const activeElement = document.activeElement;
+		const currentIndex =
+			activeElement instanceof HTMLButtonElement
+				? menuItems.indexOf(activeElement)
+				: -1;
 		const nextIndex =
 			event.key === "Home"
 				? 0
@@ -293,7 +322,9 @@ export function AppShell({
 							>
 								<Icon size={18} strokeWidth={1.9} aria-hidden="true" />
 								<span>{item.label}</span>
-								{active ? <span className="primary-navigation__active-dot" /> : null}
+								{active ? (
+									<span className="primary-navigation__active-dot" />
+								) : null}
 							</button>
 						);
 					})}
@@ -317,7 +348,10 @@ export function AppShell({
 							onKeyDown={handleMenuKeyDown}
 						>
 							<div className="user-menu__header">
-								<span className="user-avatar user-avatar--small" aria-hidden="true">
+								<span
+									className="user-avatar user-avatar--small"
+									aria-hidden="true"
+								>
 									{user.initials}
 								</span>
 								<div>
@@ -338,6 +372,11 @@ export function AppShell({
 										>
 											<Icon size={16} aria-hidden="true" />
 											<span>{item.label}</span>
+											{item.id === "about" && appUpdateController ? (
+												<AppUpdateAttentionMark
+													controller={appUpdateController}
+												/>
+											) : null}
 										</button>
 									);
 								})}
@@ -371,11 +410,18 @@ export function AppShell({
 							<strong>{user.displayName}</strong>
 							<small>已登录 · 本地就绪</small>
 						</span>
-						<ChevronUp
-							className={userMenuOpen ? "user-entry__chevron--open" : undefined}
-							size={17}
-							aria-hidden="true"
-						/>
+						<span className="user-entry__status">
+							{appUpdateController ? (
+								<AppUpdateAttentionMark controller={appUpdateController} />
+							) : null}
+							<ChevronUp
+								className={
+									userMenuOpen ? "user-entry__chevron--open" : undefined
+								}
+								size={17}
+								aria-hidden="true"
+							/>
+						</span>
 					</button>
 				</div>
 			</aside>
@@ -400,10 +446,9 @@ export function AppShell({
 						showScenarioControl={enableQaControls}
 					/>
 				) : null}
-				{activePage === "conversation" ? (
-					<ConversationPage
-						state={conversationState}
-						actions={conversationActions}
+				{activePage === "history" ? (
+					<ProactiveFeedbackHistoryPage
+						controller={proactiveFeedbackHistoryController}
 					/>
 				) : null}
 				{activePage === "reports" ? (
@@ -416,10 +461,17 @@ export function AppShell({
 						monitoringController={monitoringController}
 						auditExportService={auditExportService}
 						agentPermissionsController={agentPermissionsController}
+						proactiveFeedbackPolicyController={
+							proactiveFeedbackPolicyController
+						}
+						appUpdateController={appUpdateController}
 						category={settingsCategory}
 						onCategoryChange={setSettingsCategory}
 						onLogout={() => setLogoutDialogOpen(true)}
 						onPreferencesApplied={handlePreferencesApplied}
+						onProactiveFeedbackCleared={() =>
+							proactiveFeedbackHistoryController.notifyCleared()
+						}
 					/>
 				) : null}
 			</main>

@@ -193,6 +193,7 @@ export type ModernBertClassifierErrorCode =
 	| "artifact_manifest_mismatch"
 	| "invalid_input"
 	| "input_too_large"
+	| "request_cancelled"
 	| "request_timeout"
 	| "transport_error"
 	| "http_error"
@@ -357,34 +358,38 @@ export class ModernBertEpisodeClassifier
 		return this.expectedArtifact.runtime.modelVersion;
 	}
 
-	async verifyArtifact(): Promise<void> {
+	async verifyArtifact(signal?: AbortSignal): Promise<void> {
+		throwIfModernBertAborted(signal);
 		if (this.verified) return;
-		await this.runVerification();
+		await this.runVerification(signal);
 	}
 
 	/**
 	 * Re-fetches the pinned manifest without sending EvidenceFact content.
 	 * Classification is demoted until the exact artifact is verified again.
 	 */
-	async refreshArtifact(): Promise<void> {
+	async refreshArtifact(signal?: AbortSignal): Promise<void> {
+		throwIfModernBertAborted(signal);
 		this.verified = false;
-		await this.runVerification();
+		await this.runVerification(signal);
 	}
 
-	private async runVerification(): Promise<void> {
+	private async runVerification(signal?: AbortSignal): Promise<void> {
 		if (!this.verification) {
-			this.verification = this.verifyArtifactOnce().finally(() => {
+			this.verification = this.verifyArtifactOnce(signal).finally(() => {
 				this.verification = null;
 			});
 		}
-		await this.verification;
+		await waitForModernBertOperation(this.verification, signal);
 	}
 
 	async classify(
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
 		context?: TimelineEpisodeClassificationContext,
+		signal?: AbortSignal,
 	): Promise<EpisodeClassificationV2> {
+		throwIfModernBertAborted(signal);
 		if (!this.verified) {
 			throw new ModernBertClassifierError(
 				"artifact_not_verified",
@@ -412,6 +417,7 @@ export class ModernBertEpisodeClassifier
 			);
 		}
 		const inputHash = await this.hasher.sha256(inputJson);
+		throwIfModernBertAborted(signal);
 		if (!isSha256(inputHash)) {
 			throw new ModernBertClassifierError(
 				"invalid_config",
@@ -426,6 +432,7 @@ export class ModernBertEpisodeClassifier
 				requestSchemaVersion: MODERNBERT_REQUEST_SCHEMA_VERSION,
 			}),
 		);
+		throwIfModernBertAborted(signal);
 		if (!isSha256(correlationHash)) {
 			throw new ModernBertClassifierError(
 				"invalid_config",
@@ -449,7 +456,8 @@ export class ModernBertEpisodeClassifier
 				},
 				body: canonicalJson(request),
 				redirect: "error",
-			});
+			}, signal);
+			throwIfModernBertAborted(signal);
 			const response = validateClassificationResponse(
 				value,
 				goal !== null,
@@ -480,6 +488,7 @@ export class ModernBertEpisodeClassifier
 				this.expectedArtifact,
 				this.hasher,
 			);
+			throwIfModernBertAborted(signal);
 			return {
 				activity: response.classification.activity,
 				goalRelevance: response.classification.goalRelevance,
@@ -497,12 +506,13 @@ export class ModernBertEpisodeClassifier
 		}
 	}
 
-	private async verifyArtifactOnce(): Promise<void> {
+	private async verifyArtifactOnce(signal?: AbortSignal): Promise<void> {
 		const value = await this.fetchJson(this.manifestEndpoint, {
 			method: "GET",
 			headers: this.headers,
 			redirect: "error",
-		});
+		}, signal);
+		throwIfModernBertAborted(signal);
 		validateManifest(value, "artifact_manifest_mismatch");
 		if (canonicalJson(value) !== this.expectedManifestJson) {
 			throw new ModernBertClassifierError(
@@ -516,10 +526,14 @@ export class ModernBertEpisodeClassifier
 	private async fetchJson(
 		url: string,
 		init: RequestInit,
+		signal?: AbortSignal,
 	): Promise<unknown> {
+		throwIfModernBertAborted(signal);
 		const controller = new AbortController();
 		let timedOut = false;
+		let cancelled = false;
 		let timer: ReturnType<typeof setTimeout> | null = null;
+		let abortListener: (() => void) | null = null;
 		const timeout = new Promise<never>((_resolve, reject) => {
 			timer = setTimeout(() => {
 				timedOut = true;
@@ -533,6 +547,15 @@ export class ModernBertEpisodeClassifier
 				);
 			}, this.timeoutMs);
 		});
+		const cancellation = new Promise<never>((_resolve, reject) => {
+			if (!signal) return;
+			abortListener = () => {
+				cancelled = true;
+				controller.abort(signal.reason);
+				reject(modernBertCancellationError());
+			};
+			signal.addEventListener("abort", abortListener, { once: true });
+		});
 		try {
 			return await Promise.race([
 				(async () => {
@@ -543,6 +566,7 @@ export class ModernBertEpisodeClassifier
 							signal: controller.signal,
 						});
 					} catch {
+						if (cancelled) throw modernBertCancellationError();
 						if (timedOut) {
 							throw new ModernBertClassifierError(
 								"request_timeout",
@@ -597,9 +621,13 @@ export class ModernBertEpisodeClassifier
 					}
 				})(),
 				timeout,
+				cancellation,
 			]);
 		} finally {
 			if (timer !== null) clearTimeout(timer);
+			if (signal && abortListener) {
+				signal.removeEventListener("abort", abortListener);
+			}
 		}
 	}
 }
@@ -611,7 +639,38 @@ function invalidatesVerifiedArtifact(error: unknown): boolean {
 		"invalid_config",
 		"invalid_input",
 		"input_too_large",
+		"request_cancelled",
 	].includes(error.code);
+}
+
+function modernBertCancellationError(): ModernBertClassifierError {
+	return new ModernBertClassifierError(
+		"request_cancelled",
+		"ModernBERT request was cancelled.",
+		true,
+	);
+}
+
+function throwIfModernBertAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw modernBertCancellationError();
+}
+
+async function waitForModernBertOperation<T>(
+	operation: Promise<T>,
+	signal?: AbortSignal,
+): Promise<T> {
+	throwIfModernBertAborted(signal);
+	if (!signal) return operation;
+	let abortListener: (() => void) | null = null;
+	const cancellation = new Promise<never>((_resolve, reject) => {
+		abortListener = () => reject(modernBertCancellationError());
+		signal.addEventListener("abort", abortListener, { once: true });
+	});
+	try {
+		return await Promise.race([operation, cancellation]);
+	} finally {
+		if (abortListener) signal.removeEventListener("abort", abortListener);
+	}
 }
 
 function normalizeEndpoints(options: ModernBertClassifierOptions): {

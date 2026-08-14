@@ -170,6 +170,14 @@ export class SidecarModelRelayBridge {
 
 	abortAll(): void {
 		this.options.transport.abortAll();
+	}
+
+	beginShutdown(): void {
+		this.options.transport.beginShutdown();
+	}
+
+	async abortAllAndDrain(): Promise<void> {
+		await this.options.transport.abortAllAndDrain();
 		this.active.clear();
 	}
 

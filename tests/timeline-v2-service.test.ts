@@ -11,8 +11,10 @@ import type {
 import {
 	DeterministicTimelineHypothesisGenerator,
 	InMemoryTimelineV2Repository,
+	TimelineV2JobRunner,
 	TimelineV2Service,
 	type SemanticEventV2,
+	type TimelineV2Processor,
 } from "../src/agent/timeline-v2";
 
 class FakeClock implements ReflectionClock {
@@ -36,6 +38,24 @@ class FakeClock implements ReflectionClock {
 
 	clearTimer(handle: ReflectionTimerHandle): void {
 		this.timers.delete(handle as unknown as number);
+	}
+
+	setNow(nowMs: number): void {
+		this.now = nowMs;
+	}
+
+	pendingTimerCount(): number {
+		return this.timers.size;
+	}
+
+	runNextTimer(): void {
+		const next = [...this.timers.entries()].sort(
+			([leftId, left], [rightId, right]) =>
+				left.atMs - right.atMs || leftId - rightId,
+		)[0];
+		if (!next) throw new Error("No pending fake timer.");
+		this.timers.delete(next[0]);
+		next[1].callback();
 	}
 }
 
@@ -719,5 +739,182 @@ describe("TimelineV2Service", () => {
 			correctsTimelineId: null,
 		});
 		await service.stop();
+	});
+
+	test("tracks a direct job pump until its active inference settles", async () => {
+		const clock = new FakeClock();
+		const transport = new FakeSemanticTransport([
+			foreground(1, 1_000),
+			textChange(2, 2_000, "shutdown tracking"),
+		]);
+		const repository = new InMemoryTimelineV2Repository();
+		const deterministic = new DeterministicTimelineHypothesisGenerator();
+		let releaseInference: () => void = () => {
+			throw new Error("inference gate was not initialized");
+		};
+		let markInferenceEntered: (() => void) | null = null;
+		const inferenceEntered = new Promise<void>((resolve) => {
+			markInferenceEntered = resolve;
+		});
+		const inferenceGate = new Promise<void>((resolve) => {
+			releaseInference = resolve;
+		});
+		const service = new TimelineV2Service({
+			transport,
+			repository,
+			identity: {
+				collectorId: "collector.timeline-v2.direct-pump-shutdown",
+				deviceId: "device-1",
+				sessionId: "session-1",
+			},
+			hypotheses: {
+				async generate(episodes, facts, goal, signal) {
+					markInferenceEntered?.();
+					await inferenceGate;
+					return deterministic.generate(episodes, facts, goal, signal);
+				},
+			},
+			clock,
+			effectiveEventThreshold: 2,
+			eventPollMs: 60_000,
+			jobPollMs: 60_000,
+		});
+
+		await service.start();
+		const pumping = service.runJobsNow();
+		await inferenceEntered;
+		let stopped = false;
+		const stopping = service.stop().then(() => {
+			stopped = true;
+		});
+		await Promise.resolve();
+		expect(stopped).toBeFalse();
+
+		releaseInference();
+		expect(await pumping).toBe(0);
+		await stopping;
+		expect(stopped).toBeTrue();
+		const windows = (await repository.readAuditRange(0, 10_000)).windows;
+		expect(await repository.getJob(windows[0]!.windowId)).toMatchObject({
+			state: "READY",
+			attempt: 0,
+			firstAttemptAtMs: null,
+		});
+	});
+
+	test("beginShutdown cancels timers and an in-flight timer cannot rearm them", async () => {
+		const clock = new FakeClock();
+		const service = new TimelineV2Service({
+			transport: new FakeSemanticTransport([]),
+			repository: new InMemoryTimelineV2Repository(),
+			identity: {
+				collectorId: "collector.timeline-v2.timer-shutdown",
+				deviceId: "device-1",
+				sessionId: "session-1",
+			},
+			hypotheses: new DeterministicTimelineHypothesisGenerator(),
+			clock,
+			eventPollMs: 60_000,
+			jobPollMs: 60_000,
+		});
+
+		await service.start();
+		expect(clock.pendingTimerCount()).toBe(2);
+		clock.runNextTimer();
+		service.beginShutdown();
+		await service.stop();
+		await Promise.resolve();
+		expect(clock.pendingTimerCount()).toBe(0);
+		await expect(service.pullNow()).rejects.toThrow("shutting down");
+		expect(await service.runJobsNow()).toBe(0);
+	});
+
+	test("shutdown abort restores an aged retry claim without consuming its failure budget", async () => {
+		const clock = new FakeClock();
+		const repository = new InMemoryTimelineV2Repository();
+		const seed = new TimelineV2Service({
+			transport: new FakeSemanticTransport([
+				foreground(1, 1_000),
+				textChange(2, 2_000, "aged retry"),
+			]),
+			repository,
+			identity: {
+				collectorId: "collector.timeline-v2.aged-abort",
+				deviceId: "device-1",
+				sessionId: "session-1",
+			},
+			hypotheses: new DeterministicTimelineHypothesisGenerator(),
+			clock,
+			effectiveEventThreshold: 2,
+			eventPollMs: 60_000,
+			jobPollMs: 60_000,
+		});
+		await seed.start();
+		await seed.stop();
+		const window = (await repository.readAuditRange(0, 10_000)).windows[0]!;
+		const firstClaim = await repository.claimNextWindow(clock.nowMs(), 1_000);
+		expect(firstClaim?.windowId).toBe(window.windowId);
+		await repository.recordWindowFailure(window.windowId, {
+			nowMs: clock.nowMs(),
+			code: "PRIOR_TRANSIENT",
+			message: "historical failure",
+			nextAttemptAtMs: clock.nowMs(),
+			terminal: false,
+		});
+		const firstAttemptAtMs = clock.nowMs();
+		clock.setNow(firstAttemptAtMs + 24 * 60 * 60 * 1_000 + 1);
+
+		let markProcessing: (() => void) | null = null;
+		const processing = new Promise<void>((resolve) => {
+			markProcessing = resolve;
+		});
+		const processor = {
+			async process(_window: unknown, signal?: AbortSignal) {
+				markProcessing?.();
+				return await new Promise<never>((_resolve, reject) => {
+					if (signal?.aborted) {
+						reject(signal.reason);
+						return;
+					}
+					signal?.addEventListener(
+						"abort",
+						() => reject(signal.reason),
+						{ once: true },
+					);
+				});
+			},
+		} as unknown as TimelineV2Processor;
+		const runner = new TimelineV2JobRunner({
+			repository,
+			processor,
+			clock,
+			jitter: () => 0,
+		});
+		const controller = new AbortController();
+		const running = runner.runNext(controller.signal);
+		await processing;
+		controller.abort(new DOMException("shutdown", "AbortError"));
+		expect(await running).toBe("abandoned");
+		expect(await repository.getJob(window.windowId)).toMatchObject({
+			state: "READY",
+			attempt: 1,
+			firstAttemptAtMs,
+			failureCode: "PRIOR_TRANSIENT",
+			failureMessage: "historical failure",
+			leaseExpiresAtMs: null,
+		});
+
+		const restartClaim = await repository.claimNextWindow(
+			clock.nowMs(),
+			1_000,
+		);
+		expect(restartClaim).toMatchObject({
+			windowId: window.windowId,
+			state: "RUNNING",
+			attempt: 2,
+			firstAttemptAtMs,
+			failureCode: "PRIOR_TRANSIENT",
+			failureMessage: "historical failure",
+		});
 	});
 });

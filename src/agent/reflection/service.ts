@@ -146,6 +146,9 @@ export class DesktopReflectionService {
 	private catchUpRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private activeJobPump: Promise<void> | null = null;
 	private lastCommittedCursor: string | null = null;
+	private readonly shutdownController = new AbortController();
+	private shutdownRequested = false;
+	private stopPromise: Promise<void> | null = null;
 
 	constructor(options: DesktopReflectionServiceOptions) {
 		this.transport = options.transport;
@@ -208,6 +211,7 @@ export class DesktopReflectionService {
 	}
 
 	async start(): Promise<void> {
+		this.assertStartupOpen();
 		if (this.started) return;
 		this.started = true;
 		this.acceptingLiveEvents = false;
@@ -234,6 +238,7 @@ export class DesktopReflectionService {
 
 		try {
 			await this.collector.recover({ deferDeadline: true });
+			this.assertStartupOpen();
 			const startupCloudOwnerAccountId = this.cloudOwnerAccountId();
 			const recoveredCloudOwnerAccountId =
 				this.collector.getSnapshot().cloudOwnerEpoch.accountId;
@@ -254,6 +259,7 @@ export class DesktopReflectionService {
 				await this.transport.prepareStartupGoalChange(null);
 			}
 			await this.transport.start();
+			this.assertStartupOpen();
 			for (;;) {
 				const generation = this.pausedLiveGeneration;
 				await this.pullBacklog();
@@ -273,6 +279,7 @@ export class DesktopReflectionService {
 				);
 			}
 			await this.transport.acknowledgeStartupGoalChange();
+			this.assertStartupOpen();
 			if (changesCloudOwner && startupCloudOwnerAccountId !== null) {
 				// Backlog and recovered evidence were handled under the anonymous epoch.
 				// Only events materialized after this durable cutover may belong to login.
@@ -281,8 +288,10 @@ export class DesktopReflectionService {
 			const resumeDeadlines = this.enqueue(() =>
 				this.collector.resumeDeadlines(),
 			);
+			this.assertStartupOpen();
 			this.acceptingLiveEvents = true;
 			await resumeDeadlines;
+			this.assertStartupOpen();
 			this.armJobPump(0);
 			this.armEventPoll(this.eventPollMs);
 		} catch (error) {
@@ -295,7 +304,13 @@ export class DesktopReflectionService {
 		}
 	}
 
-	async stop(): Promise<void> {
+	/**
+	 * Synchronously seals every ingress/rearm path and cancels active inference.
+	 * Repository ownership remains valid until stop() has joined accepted work.
+	 */
+	beginShutdown(): void {
+		if (this.shutdownRequested) return;
+		this.shutdownRequested = true;
 		this.acceptingLiveEvents = false;
 		this.started = false;
 		this.unsubscribeLive?.();
@@ -311,9 +326,21 @@ export class DesktopReflectionService {
 		this.cancelDeadlineRetry();
 		this.cancelCountRetry();
 		this.cancelCatchUpRetry();
-		await this.operationTail;
-		await this.activeJobPump;
 		this.collector.dispose();
+		this.shutdownController.abort(
+			new DOMException("Reflection service is shutting down.", "AbortError"),
+		);
+	}
+
+	stop(): Promise<void> {
+		this.beginShutdown();
+		if (this.stopPromise !== null) return this.stopPromise;
+		this.stopPromise = (async () => {
+			await this.operationTail;
+			await this.activeJobPump;
+			this.collector.dispose();
+		})();
+		return this.stopPromise;
 	}
 
 	async setActiveGoal(
@@ -348,6 +375,9 @@ export class DesktopReflectionService {
 
 	async pullNow(): Promise<void> {
 		await this.enqueue(async () => {
+			if (this.shutdownRequested) {
+				throw new Error("DesktopReflectionService is shutting down.");
+			}
 			if (!this.acceptingLiveEvents && this.started) {
 				await this.restorePausedLiveFastPath();
 				return;
@@ -357,7 +387,7 @@ export class DesktopReflectionService {
 	}
 
 	async runJobsNow(maxJobs = 100): Promise<ReflectionJobRunResult[]> {
-		return this.jobs.runUntilIdle(maxJobs);
+		return this.jobs.runUntilIdle(maxJobs, this.shutdownController.signal);
 	}
 
 	async getStatus(): Promise<{
@@ -542,11 +572,12 @@ export class DesktopReflectionService {
 	}
 
 	private armJobPump(delayMs: number): void {
-		if (!this.started || this.jobTimer !== null) return;
+		if (this.shutdownRequested || !this.started || this.jobTimer !== null)
+			return;
 		this.jobTimer = this.clock.setTimer(() => {
 			this.jobTimer = null;
 			const pump = this.jobs
-				.runUntilIdle()
+				.runUntilIdle(100, this.shutdownController.signal)
 				.then(() => undefined)
 				.catch(this.onError)
 				.finally(() => {
@@ -558,7 +589,8 @@ export class DesktopReflectionService {
 	}
 
 	private armEventPoll(delayMs: number): void {
-		if (!this.started || this.eventPollTimer !== null) return;
+		if (this.shutdownRequested || !this.started || this.eventPollTimer !== null)
+			return;
 		this.eventPollTimer = this.clock.setTimer(() => {
 			this.eventPollTimer = null;
 			void this.enqueue(async () => {
@@ -575,7 +607,7 @@ export class DesktopReflectionService {
 	}
 
 	private coordinateDeadline(_deadlineAtMs: number): void {
-		if (!this.started) return;
+		if (this.shutdownRequested || !this.started) return;
 		void this.enqueue(async () => {
 			if (!this.started) return;
 			try {
@@ -593,7 +625,8 @@ export class DesktopReflectionService {
 		// Startup replay has its own materialization barrier and calls
 		// resumeDeadlines(), which resolves count before time. Avoid starting a
 		// second pull concurrently with that barrier.
-		if (!this.started || !this.acceptingLiveEvents) return;
+		if (this.shutdownRequested || !this.started || !this.acceptingLiveEvents)
+			return;
 		void this.enqueue(async () => {
 			if (!this.started) return;
 			try {
@@ -608,7 +641,12 @@ export class DesktopReflectionService {
 	}
 
 	private scheduleDeadlineRetry(): void {
-		if (!this.started || this.deadlineRetryTimer !== null) return;
+		if (
+			this.shutdownRequested ||
+			!this.started ||
+			this.deadlineRetryTimer !== null
+		)
+			return;
 		this.deadlineRetryTimer = this.clock.setTimer(() => {
 			this.deadlineRetryTimer = null;
 			this.coordinateDeadline(this.clock.nowMs());
@@ -622,7 +660,12 @@ export class DesktopReflectionService {
 	}
 
 	private scheduleCountRetry(): void {
-		if (!this.started || this.countRetryTimer !== null) return;
+		if (
+			this.shutdownRequested ||
+			!this.started ||
+			this.countRetryTimer !== null
+		)
+			return;
 		this.countRetryTimer = this.clock.setTimer(() => {
 			this.countRetryTimer = null;
 			this.coordinateCount(this.clock.nowMs());
@@ -636,13 +679,18 @@ export class DesktopReflectionService {
 	}
 
 	private pauseLiveFastPath(): void {
-		if (!this.started) return;
+		if (this.shutdownRequested || !this.started) return;
 		this.acceptingLiveEvents = false;
 		this.scheduleCatchUpRetry();
 	}
 
 	private scheduleCatchUpRetry(): void {
-		if (!this.started || this.catchUpRetryTimer !== null) return;
+		if (
+			this.shutdownRequested ||
+			!this.started ||
+			this.catchUpRetryTimer !== null
+		)
+			return;
 		this.catchUpRetryTimer = this.clock.setTimer(() => {
 			this.catchUpRetryTimer = null;
 			void this.enqueue(async () => {
@@ -689,6 +737,12 @@ export class DesktopReflectionService {
 			() => undefined,
 		);
 		return result;
+	}
+
+	private assertStartupOpen(): void {
+		if (this.shutdownRequested) {
+			throw new Error("DesktopReflectionService is shutting down.");
+		}
 	}
 }
 

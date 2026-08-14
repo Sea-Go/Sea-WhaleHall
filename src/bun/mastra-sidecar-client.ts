@@ -53,7 +53,10 @@ export interface MastraSidecarClientOptions {
 	shutdownKillTimeoutMs?: number;
 	onHostCall(call: SidecarHostCall): Promise<unknown>;
 	onRunEvent(event: AgentRunEventFrame): void;
-	onInterrupted?(runIds: readonly string[], reason: string): void;
+	onInterrupted?(
+		runIds: readonly string[],
+		reason: string,
+	): void | Promise<void>;
 	onRestarted?(): void;
 	spawnProcess?: typeof spawn;
 }
@@ -89,6 +92,12 @@ export class MastraSidecarClient {
 	private restartAttempt = 0;
 	private writerTail = Promise.resolve();
 	private acceptTail = Promise.resolve();
+	private readonly acceptSettlements = new Set<Promise<void>>();
+	private readonly interruptionQueue: Array<{
+		runIds: readonly string[];
+		reason: string;
+	}> = [];
+	private interruptionDrain: Promise<void> | null = null;
 	private readonly shutdownProtocolTimeoutMs: number;
 	private readonly shutdownGraceTimeoutMs: number;
 	private readonly shutdownTerminateTimeoutMs: number;
@@ -167,18 +176,63 @@ export class MastraSidecarClient {
 		if (children.length === 0) {
 			this.startPromise = null;
 			this.resetTransportState();
+			await this.drainAcceptedFrames();
+			await this.drainInterruptions();
 			return;
 		}
 		const outcomes = await Promise.allSettled(
 			children.map((child) => this.stopChild(child, child === activeChild)),
 		);
-		if (outcomes.some((outcome) => outcome.status === "rejected")) {
+		const dependentOutcomes = await Promise.allSettled([
+			this.drainAcceptedFrames(),
+			this.drainInterruptions(),
+		]);
+		if (
+			outcomes.some((outcome) => outcome.status === "rejected") ||
+			dependentOutcomes.some((outcome) => outcome.status === "rejected")
+		) {
 			throw new MastraSidecarError(
 				"STOP_FAILED",
-				"本地 Agent Sidecar 在强制终止后仍未确认退出。",
+				"本地 Agent Sidecar 未能完成退出与中断状态持久化。",
 				false,
 			);
 		}
+	}
+
+	/** Joins every inbound frame dispatch accepted before the fixed point. */
+	async drainAcceptedFrames(): Promise<void> {
+		for (;;) {
+			const accepted = [...this.acceptSettlements];
+			if (accepted.length === 0) return;
+			await Promise.allSettled(accepted);
+		}
+	}
+
+	/** Joins every run-interruption callback accepted before the fixed point. */
+	drainInterruptions(): Promise<void> {
+		if (this.interruptionDrain !== null) return this.interruptionDrain;
+		const operation = (async () => {
+			for (;;) {
+				const interruption = this.interruptionQueue[0];
+				if (interruption === undefined) return;
+				// Retain the exact head until it succeeds. A transient repository/keychain
+				// failure therefore blocks this shutdown attempt but can be retried by the
+				// next stop instead of permanently poisoning process exit.
+				await this.options.onInterrupted?.(
+					interruption.runIds,
+					interruption.reason,
+				);
+				if (this.interruptionQueue[0] === interruption) {
+					this.interruptionQueue.shift();
+				}
+			}
+		})().finally(() => {
+			if (this.interruptionDrain === operation) {
+				this.interruptionDrain = null;
+			}
+		});
+		this.interruptionDrain = operation;
+		return operation;
 	}
 
 	private async stopChild(
@@ -394,12 +448,20 @@ export class MastraSidecarClient {
 		if (this.child !== child) return;
 		try {
 			const messages = this.parser.push(chunk);
-			this.acceptTail = this.acceptTail
+			const runEventsAcceptedBeforeShutdown = !this.shutdownRequested;
+			const operation = this.acceptTail
 				.then(async () => {
 					if (this.child !== child) return;
-					for (const message of messages) await this.accept(child, message);
+					for (const message of messages) {
+						await this.accept(child, message, runEventsAcceptedBeforeShutdown);
+					}
 				})
 				.catch((error) => this.failProtocol(child, error));
+			this.acceptTail = operation;
+			this.acceptSettlements.add(operation);
+			void operation
+				.finally(() => this.acceptSettlements.delete(operation))
+				.catch(() => undefined);
 		} catch (error) {
 			this.failProtocol(child, error);
 		}
@@ -408,6 +470,7 @@ export class MastraSidecarClient {
 	private async accept(
 		child: ChildProcessWithoutNullStreams,
 		message: unknown,
+		runEventsAcceptedBeforeShutdown: boolean,
 	): Promise<void> {
 		if (this.child !== child) return;
 		if (
@@ -436,6 +499,7 @@ export class MastraSidecarClient {
 					"Sidecar event shape 无效。",
 				);
 			}
+			if (this.shutdownRequested && !runEventsAcceptedBeforeShutdown) return;
 			this.options.onRunEvent(message);
 			if (message.terminalState) this.untrackRun(message.runId);
 			return;
@@ -500,6 +564,7 @@ export class MastraSidecarClient {
 					"Sidecar host call shape 无效。",
 				);
 			}
+			if (this.shutdownRequested) throw sidecarShutdownError();
 			const result = await this.options.onHostCall({
 				requestId,
 				method: message.method as SidecarHostMethod,
@@ -594,7 +659,8 @@ export class MastraSidecarClient {
 		this.activeRunIds.clear();
 		// The callback also owns relay cleanup, so it must run even when a crash
 		// happens before a run has been registered in activeRunIds.
-		this.options.onInterrupted?.(runIds, reason);
+		this.interruptionQueue.push({ runIds, reason });
+		void this.drainInterruptions().catch(() => undefined);
 		this.scheduleRestart();
 	}
 

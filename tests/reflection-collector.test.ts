@@ -562,6 +562,13 @@ describe("ReflectionCollector recovery, context, and idempotency", () => {
 			"event-1",
 			"event-2",
 		]);
+		expect(
+			await repository.acknowledgeWindowForAccount(
+				"account-a",
+				windows[0]!.windowId,
+			),
+		).toBe(true);
+		expect(await repository.listWindowsForAccount("account-a")).toEqual([]);
 	});
 
 	test("reflection/tool lifecycle input cannot trigger reflection", async () => {

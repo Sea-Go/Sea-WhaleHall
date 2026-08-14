@@ -93,6 +93,17 @@ export const STARTUP_GOAL_CHANGE_ENV = "WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
 
 const LOCAL_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 10_000;
 const LOCAL_POST_KILL_EXIT_TIMEOUT_MS = 2_000;
+const LOCAL_PROCESS_GROUP_POLL_MS = 10;
+const WINDOWS_TASKKILL_PATH = "C:\\Windows\\System32\\taskkill.exe";
+
+type OwnedProcessTree = {
+	forceKill(): Promise<void>;
+	isExited(): boolean;
+	/** Windows taskkill needs the still-owned leader; POSIX can inspect the PGID. */
+	leaderExitCompletesTree(exitCode: number): boolean;
+};
+
+const ownedProcessTrees = new WeakMap<ChildTransport, OwnedProcessTree>();
 
 type EnvironmentSource = Readonly<Record<string, string | undefined>>;
 
@@ -292,17 +303,25 @@ function spawnLocal(
 	binaryPath: string,
 	environment: Readonly<Record<string, string>> = {},
 ): ChildTransport {
-	return Bun.spawn({
+	const child = Bun.spawn({
 		cmd: [binaryPath],
 		env: environment,
+		detached: true,
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
 	}) as unknown as ChildTransport;
+	ownedProcessTrees.set(child, createOwnedProcessTree(child.pid));
+	return child;
 }
 
 export class LocalToolClient implements LocalToolProcess {
 	private child: ChildTransport | null = null;
+	private childCleanup: {
+		child: ChildTransport;
+		promise: Promise<void>;
+	} | null = null;
+	private readonly failedChildren = new WeakSet<ChildTransport>();
 	private readonly pending = new Map<string, PendingRequest>();
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
 	private readonly desktopEventListeners = new Set<
@@ -332,16 +351,19 @@ export class LocalToolClient implements LocalToolProcess {
 	) {}
 
 	get pid(): number | null {
-		return this.child?.pid ?? null;
+		const child = this.child;
+		return child !== null && !this.failedChildren.has(child) ? child.pid : null;
 	}
 
 	get isRunning(): boolean {
-		return this.child !== null;
+		const child = this.child;
+		return child !== null && !this.failedChildren.has(child);
 	}
 
 	async prepareStartupGoalChange(
 		change: LocalEventGoalChange | null,
 	): Promise<void> {
+		await this.settleFailedChildBeforeRestart();
 		if (this.child) {
 			throw new LocalClientError(
 				"INVALID_STATE",
@@ -386,6 +408,7 @@ export class LocalToolClient implements LocalToolProcess {
 	}
 
 	async start(): Promise<void> {
+		await this.settleFailedChildBeforeRestart();
 		if (this.child) return;
 		this.stopping = false;
 		const environment = createLocalToolProcessEnvironment(
@@ -792,15 +815,19 @@ export class LocalToolClient implements LocalToolProcess {
 			new LocalClientError("STOPPED", "whalehall-local was stopped."),
 		);
 		if (!child) return;
+		if (this.childCleanup?.child === child) {
+			await this.childCleanup.promise;
+			if (this.child === child) this.child = null;
+			return;
+		}
 		const outcome = await closeGracefully(
 			child,
 			this.options.shutdownSleep ?? ((durationMs) => Bun.sleep(durationMs)),
 		);
 		if (this.child === child) this.child = null;
 		if (outcome === "forced") {
-			throw new LocalClientError(
-				"STOP_FAILED",
-				"whalehall-local required forced termination after graceful shutdown timed out.",
+			console.warn(
+				"[whalehall-local] graceful tree shutdown was incomplete; forced process-tree exit was confirmed.",
 			);
 		}
 	}
@@ -839,6 +866,14 @@ export class LocalToolClient implements LocalToolProcess {
 		if (!child) {
 			return Promise.reject(
 				new LocalClientError("SPAWN_FAILED", "whalehall-local is not running."),
+			);
+		}
+		if (this.failedChildren.has(child)) {
+			return Promise.reject(
+				new LocalClientError(
+					"PROCESS_EXITED",
+					"whalehall-local is still completing failed process-tree cleanup.",
+				),
 			);
 		}
 		if (this.pending.has(id)) {
@@ -880,7 +915,7 @@ export class LocalToolClient implements LocalToolProcess {
 					`Failed writing to whalehall-local: ${errorMessage(error)}`,
 				);
 				reject(clientError);
-				this.failChild(child, clientError, true);
+				this.failChild(child, clientError);
 			}
 		});
 	}
@@ -930,7 +965,6 @@ export class LocalToolClient implements LocalToolProcess {
 					"PROTOCOL_ERROR",
 					`whalehall-local stdout protocol failed: ${errorMessage(error)}`,
 				),
-				true,
 			);
 		} finally {
 			reader.releaseLock();
@@ -989,37 +1023,90 @@ export class LocalToolClient implements LocalToolProcess {
 
 	private handleExit(child: ChildTransport, exitCode: number): void {
 		if (child !== this.child) return;
-		this.child = null;
-		if (this.stopping) return;
-		const error = new LocalClientError(
-			"PROCESS_EXITED",
-			`whalehall-local exited unexpectedly with code ${exitCode}.`,
-		);
-		this.rejectPending(error);
-		this.emitFailure(error);
+		if (this.stopping) {
+			if (this.stopPromise === null) {
+				this.beginFailedChildCleanup(child, exitCode);
+			}
+			return;
+		}
+		if (!this.failedChildren.has(child)) {
+			this.failedChildren.add(child);
+			const error = new LocalClientError(
+				"PROCESS_EXITED",
+				`whalehall-local exited unexpectedly with code ${exitCode}.`,
+			);
+			this.rejectPending(error);
+			this.beginFailedChildCleanup(child, exitCode);
+			this.emitFailure(error);
+			return;
+		}
+		this.beginFailedChildCleanup(child, exitCode);
 	}
 
 	private protocolFailure(message: string): LocalClientError {
 		const error = new LocalClientError("PROTOCOL_ERROR", message);
 		const child = this.child;
-		if (child) this.failChild(child, error, true);
+		if (child) this.failChild(child, error);
 		return error;
 	}
 
-	private failChild(
-		child: ChildTransport,
-		error: LocalClientError,
-		kill: boolean,
-	): void {
+	private failChild(child: ChildTransport, error: LocalClientError): void {
 		if (child !== this.child) return;
-		this.child = null;
+		this.failedChildren.add(child);
 		this.rejectPending(error);
+		this.beginFailedChildCleanup(child);
 		this.emitFailure(error);
-		if (kill) {
-			try {
-				child.kill();
-			} catch {}
+	}
+
+	private async settleFailedChildBeforeRestart(): Promise<void> {
+		const child = this.child;
+		if (child === null || !this.failedChildren.has(child)) return;
+		if (this.childCleanup?.child !== child) {
+			this.beginFailedChildCleanup(child);
 		}
+		const cleanup = this.childCleanup;
+		if (cleanup?.child !== child) {
+			throw new LocalClientError(
+				"STOP_FAILED",
+				"The failed whalehall-local process tree still has an unresolved owner.",
+			);
+		}
+		await cleanup.promise;
+		if (this.child === child) this.child = null;
+	}
+
+	private beginFailedChildCleanup(
+		child: ChildTransport,
+		leaderExitCode: number | null = null,
+	): void {
+		if (this.childCleanup?.child === child) return;
+		const operation = forceCloseFailedProcessTree(
+			child,
+			leaderExitCode,
+			this.options.shutdownSleep ?? ((durationMs) => Bun.sleep(durationMs)),
+		);
+		this.childCleanup = { child, promise: operation };
+		void operation.then(
+			() => {
+				if (this.child === child) this.child = null;
+				if (this.childCleanup?.promise === operation) {
+					this.childCleanup = null;
+				}
+			},
+			(error) => {
+				if (this.childCleanup?.promise === operation) {
+					this.childCleanup = null;
+				}
+				this.emitFailure(
+					new LocalClientError(
+						"STOP_FAILED",
+						`Unable to confirm failed whalehall-local process-tree cleanup: ${
+							error instanceof Error ? error.name : "UNKNOWN"
+						}`,
+					),
+				);
+			},
+		);
 	}
 
 	private rejectPending(error: LocalClientError): void {
@@ -1075,40 +1162,242 @@ async function closeGracefully(
 	child: ChildTransport,
 	shutdownSleep: (durationMs: number) => Promise<void>,
 ): Promise<"graceful" | "forced"> {
+	const ownedTree = ownedProcessTrees.get(child);
 	try {
 		void child.stdin.end();
 	} catch {}
-	const exited = await Promise.race([
-		child.exited.then(() => true),
-		shutdownSleep(LOCAL_GRACEFUL_SHUTDOWN_TIMEOUT_MS).then(() => false),
+	const leaderExitCode = await Promise.race([
+		child.exited,
+		shutdownSleep(LOCAL_GRACEFUL_SHUTDOWN_TIMEOUT_MS).then(() => null),
 	]);
-	if (exited) return "graceful";
+	const leaderExited = leaderExitCode !== null;
+	if (
+		leaderExited &&
+		(ownedTree === undefined ||
+			ownedTree.leaderExitCompletesTree(leaderExitCode) ||
+			ownedTree.isExited())
+	) {
+		return "graceful";
+	}
 	try {
-		child.kill();
+		if (ownedTree) await ownedTree.forceKill();
+		else child.kill("SIGKILL");
 	} catch (error) {
-		const exitedAfterKillFailure = await Promise.race([
-			child.exited.then(() => true),
-			shutdownSleep(LOCAL_POST_KILL_EXIT_TIMEOUT_MS).then(() => false),
-		]);
+		const exitedAfterKillFailure = await confirmForcedTreeExit(
+			child,
+			ownedTree,
+			leaderExitCode,
+			shutdownSleep,
+		);
 		if (exitedAfterKillFailure) return "forced";
 		throw new LocalClientError(
 			"STOP_FAILED",
-			`Unable to terminate whalehall-local after graceful shutdown timed out: ${
+			`Unable to terminate the whalehall-local process tree after graceful shutdown timed out: ${
 				error instanceof Error ? error.name : "UNKNOWN"
 			}`,
 		);
 	}
-	const exitedAfterKill = await Promise.race([
-		child.exited.then(() => true),
-		shutdownSleep(LOCAL_POST_KILL_EXIT_TIMEOUT_MS).then(() => false),
-	]);
+	const exitedAfterKill = await confirmForcedTreeExit(
+		child,
+		ownedTree,
+		leaderExitCode,
+		shutdownSleep,
+	);
 	if (!exitedAfterKill) {
 		throw new LocalClientError(
 			"STOP_FAILED",
-			"whalehall-local did not exit after forced termination.",
+			"The whalehall-local process tree did not exit after forced termination.",
 		);
 	}
 	return "forced";
+}
+
+async function forceCloseFailedProcessTree(
+	child: ChildTransport,
+	leaderExitCode: number | null,
+	shutdownSleep: (durationMs: number) => Promise<void>,
+): Promise<void> {
+	const ownedTree = ownedProcessTrees.get(child);
+	if (
+		leaderExitCode !== null &&
+		(ownedTree === undefined ||
+			ownedTree.leaderExitCompletesTree(leaderExitCode) ||
+			ownedTree.isExited())
+	) {
+		return;
+	}
+	try {
+		if (ownedTree) await ownedTree.forceKill();
+		else child.kill("SIGKILL");
+	} catch (error) {
+		if (
+			await confirmForcedTreeExit(
+				child,
+				ownedTree,
+				leaderExitCode,
+				shutdownSleep,
+			)
+		) {
+			return;
+		}
+		throw error;
+	}
+	if (
+		!(await confirmForcedTreeExit(
+			child,
+			ownedTree,
+			leaderExitCode,
+			shutdownSleep,
+		))
+	) {
+		throw new LocalClientError(
+			"STOP_FAILED",
+			"The failed whalehall-local process tree did not exit after forced termination.",
+		);
+	}
+}
+
+async function confirmForcedTreeExit(
+	child: ChildTransport,
+	ownedTree: OwnedProcessTree | undefined,
+	knownLeaderExitCode: number | null,
+	shutdownSleep: (durationMs: number) => Promise<void>,
+): Promise<boolean> {
+	const [leaderExitCode, treeExited] = await Promise.all([
+		knownLeaderExitCode !== null
+			? knownLeaderExitCode
+			: Promise.race([
+					child.exited,
+					shutdownSleep(LOCAL_POST_KILL_EXIT_TIMEOUT_MS).then(() => null),
+				]),
+		ownedTree
+			? waitForOwnedProcessTreeExit(ownedTree, LOCAL_POST_KILL_EXIT_TIMEOUT_MS)
+			: true,
+	]);
+	return (
+		leaderExitCode !== null &&
+		(treeExited ||
+			ownedTree === undefined ||
+			ownedTree.leaderExitCompletesTree(leaderExitCode))
+	);
+}
+
+function createOwnedProcessTree(processId: number): OwnedProcessTree {
+	if (!Number.isSafeInteger(processId) || processId <= 0) {
+		throw new Error("whalehall-local returned an invalid process identifier.");
+	}
+	return process.platform === "win32"
+		? createWindowsProcessTree(processId)
+		: createPosixProcessTree(processId);
+}
+
+function createPosixProcessTree(processGroupId: number): OwnedProcessTree {
+	return {
+		leaderExitCompletesTree: () => false,
+		async forceKill() {
+			try {
+				process.kill(-processGroupId, "SIGKILL");
+			} catch (error) {
+				if (!isNoSuchProcess(error)) throw error;
+			}
+		},
+		isExited() {
+			try {
+				process.kill(-processGroupId, 0);
+				return false;
+			} catch (error) {
+				if (isNoSuchProcess(error)) return true;
+				// Darwin can transiently report EPERM while killed group members
+				// are being reaped. It is not proof of absence, so keep polling.
+				if (isPermissionDenied(error)) return false;
+				throw error;
+			}
+		},
+	};
+}
+
+function createWindowsProcessTree(processId: number): OwnedProcessTree {
+	let taskkillConfirmed = false;
+	let forceKillPromise: Promise<void> | null = null;
+	return {
+		// The packaged Windows host installs its own KILL_ON_JOB_CLOSE Job before
+		// any business child can spawn. When the leader exits for any reason,
+		// Windows closes that process-owned handle and terminates every registered
+		// descendant. taskkill remains the live-leader fallback below.
+		leaderExitCompletesTree: () => true,
+		forceKill() {
+			if (forceKillPromise !== null) return forceKillPromise;
+			const operation = (async () => {
+				const taskkill = Bun.spawn({
+					cmd: [WINDOWS_TASKKILL_PATH, "/PID", String(processId), "/T", "/F"],
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "ignore",
+					windowsHide: true,
+				});
+				const exitCode = await Promise.race([
+					taskkill.exited,
+					Bun.sleep(LOCAL_POST_KILL_EXIT_TIMEOUT_MS).then(() => null),
+				]);
+				if (exitCode === null) {
+					try {
+						taskkill.kill("SIGKILL");
+					} finally {
+						// Never abandon the trusted termination helper itself. Even if
+						// its kill call fails, this exact shutdown flight retains ownership.
+						await taskkill.exited;
+					}
+					throw new Error("taskkill timed out.");
+				}
+				if (exitCode !== 0) {
+					throw new Error(`taskkill exited with code ${exitCode}.`);
+				}
+				taskkillConfirmed = true;
+			})();
+			forceKillPromise = operation;
+			void operation.catch(() => {
+				// A confirmed taskkill is an idempotent terminal proof. A failed
+				// helper attempt is not: retain the process owner and let a later
+				// shutdown/restart attempt launch a fresh exact helper.
+				if (forceKillPromise === operation) forceKillPromise = null;
+			});
+			return operation;
+		},
+		isExited() {
+			return taskkillConfirmed;
+		},
+	};
+}
+
+async function waitForOwnedProcessTreeExit(
+	ownedTree: OwnedProcessTree,
+	timeoutMs: number,
+): Promise<boolean> {
+	const deadlineAtMs = Date.now() + timeoutMs;
+	for (;;) {
+		if (ownedTree.isExited()) return true;
+		const remainingMs = deadlineAtMs - Date.now();
+		if (remainingMs <= 0) return false;
+		await Bun.sleep(Math.min(LOCAL_PROCESS_GROUP_POLL_MS, remainingMs));
+	}
+}
+
+function isNoSuchProcess(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		error.code === "ESRCH"
+	);
+}
+
+function isPermissionDenied(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		error.code === "EPERM"
+	);
 }
 
 export class JsonlProtocolError extends Error {

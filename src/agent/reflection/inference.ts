@@ -1,6 +1,6 @@
-import {
-	type OllamaJsonClient,
-	type OllamaJsonRequest,
+import type {
+	OllamaJsonClient,
+	OllamaJsonRequest,
 } from "../model/ollama-json-client";
 import {
 	REFLECTION_SCHEMA_VERSION,
@@ -78,7 +78,10 @@ export type ModernBertInferenceV1 = {
 };
 
 export interface ModernBertInferenceProvider {
-	infer(window: EventWindowV1): Promise<ModernBertInferenceV1>;
+	infer(
+		window: EventWindowV1,
+		signal?: AbortSignal,
+	): Promise<ModernBertInferenceV1>;
 }
 
 type FetchLike = (
@@ -154,7 +157,11 @@ export class ModernBertHttpClient implements ModernBertInferenceProvider {
 		this.fetchImpl = options.fetch ?? fetch;
 	}
 
-	async infer(window: EventWindowV1): Promise<ModernBertInferenceV1> {
+	async infer(
+		window: EventWindowV1,
+		signal?: AbortSignal,
+	): Promise<ModernBertInferenceV1> {
+		throwIfInferenceAborted(signal);
 		assertWindowGoalInvariant(window);
 		const hasGoal = window.goal !== null;
 		const request: ModernBertRequestV1 = {
@@ -176,8 +183,13 @@ export class ModernBertHttpClient implements ModernBertInferenceProvider {
 		}
 
 		const controller = new AbortController();
+		const onExternalAbort = () => controller.abort(signal?.reason);
+		if (signal !== undefined) {
+			signal.addEventListener("abort", onExternalAbort, { once: true });
+		}
 		const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 		try {
+			throwIfInferenceAborted(signal);
 			const response = await this.fetchImpl(this.endpoint, {
 				method: "POST",
 				headers,
@@ -224,6 +236,7 @@ export class ModernBertHttpClient implements ModernBertInferenceProvider {
 				{ windowId: window.windowId, inputHash: window.inputHash },
 			);
 		} catch (error) {
+			if (signal?.aborted) throw reflectionInferenceCancelledError();
 			if (controller.signal.aborted) {
 				throw new ModernBertInferenceError(
 					`ModernBERT request timed out after ${this.timeoutMs} ms.`,
@@ -233,6 +246,7 @@ export class ModernBertHttpClient implements ModernBertInferenceProvider {
 			throw error;
 		} finally {
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onExternalAbort);
 		}
 	}
 }
@@ -324,22 +338,28 @@ export class ReflectionInference {
 		);
 	}
 
-	async infer(window: EventWindowV1): Promise<ReflectionV1> {
+	async infer(
+		window: EventWindowV1,
+		signal?: AbortSignal,
+	): Promise<ReflectionV1> {
+		throwIfInferenceAborted(signal);
 		assertWindowGoalInvariant(window);
 		const hasGoal = window.goal !== null;
 		let primary: ModernBertInferenceV1 | null = null;
 		let primaryFailure: unknown = null;
 
 		try {
-			const candidate = await this.primary.infer(window);
+			const candidate = await this.primary.infer(window, signal);
 			primary = validateModernBertInference(
 				candidate,
 				hasGoal,
 				this.taxonomyVersion,
 			);
 		} catch (error) {
+			if (signal?.aborted) throw reflectionInferenceCancelledError();
 			primaryFailure = error;
 		}
+		throwIfInferenceAborted(signal);
 
 		if (primary) {
 			const metrics = this.metricsFor(primary, hasGoal);
@@ -348,7 +368,8 @@ export class ReflectionInference {
 			}
 
 			try {
-				const fallback = await this.inferWithQwen(window);
+				const fallback = await this.inferWithQwen(window, signal);
+				throwIfInferenceAborted(signal);
 				const adjudicated = adjudicatePrimary(primary, fallback, hasGoal);
 				return this.buildReflection(
 					window,
@@ -357,6 +378,7 @@ export class ReflectionInference {
 					`${primary.modelVersion}+fallback:${this.fallbackModelVersion}`,
 				);
 			} catch {
+				if (signal?.aborted) throw reflectionInferenceCancelledError();
 				// A valid primary abstention is still useful and remains safe to
 				// journal when optional local adjudication is unavailable.
 				return this.buildReflection(window, primary, metrics);
@@ -374,7 +396,8 @@ export class ReflectionInference {
 		}
 
 		try {
-			const fallback = await this.inferWithQwen(window);
+			const fallback = await this.inferWithQwen(window, signal);
+			throwIfInferenceAborted(signal);
 			const synthetic = await fallbackOnlyInference(
 				window,
 				fallback,
@@ -387,6 +410,7 @@ export class ReflectionInference {
 				{ ...this.metricsFor(synthetic, hasGoal), abstain: true },
 			);
 		} catch (fallbackFailure) {
+			if (signal?.aborted) throw reflectionInferenceCancelledError();
 			throw new ReflectionInferenceUnavailableError(
 				"ModernBERT inference and local Qwen fallback are unavailable.",
 				{
@@ -499,12 +523,15 @@ export class ReflectionInference {
 
 	private async inferWithQwen(
 		window: EventWindowV1,
+		signal?: AbortSignal,
 	): Promise<QwenFallbackLabel> {
+		throwIfInferenceAborted(signal);
 		if (!this.fallback) {
 			throw new Error("Local Qwen fallback is not configured.");
 		}
 		const hasGoal = window.goal !== null;
 		const request: OllamaJsonRequest<QwenFallbackLabel> = {
+			signal,
 			priority: "realtime",
 			think: false,
 			temperature: 0,
@@ -529,6 +556,17 @@ export class ReflectionInference {
 		};
 		return this.fallback.generateJson(request);
 	}
+}
+
+function reflectionInferenceCancelledError(): ReflectionInferenceUnavailableError {
+	return new ReflectionInferenceUnavailableError(
+		"Reflection inference was cancelled during shutdown.",
+		{ retryable: true },
+	);
+}
+
+function throwIfInferenceAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) throw reflectionInferenceCancelledError();
 }
 
 function failureMayRecover(error: unknown): boolean {

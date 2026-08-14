@@ -3,6 +3,60 @@ import { ModelRelayTransport } from "../src/bun/model-relay-transport";
 import type { RemoteAuthSessionManager } from "../src/bun/remote-auth-session";
 
 describe("ModelRelayTransport", () => {
+	test("closes ingress synchronously and drains every accepted remote stream", async () => {
+		let settleFetch!: () => void;
+		const fetchSettled = new Promise<void>((resolve) => {
+			settleFetch = resolve;
+		});
+		let upstreamAborted = false;
+		const transport = new ModelRelayTransport({
+			authorizedFetch: async (_path, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					const abort = () => {
+						upstreamAborted = true;
+						settleFetch();
+						reject(new DOMException("aborted", "AbortError"));
+					};
+					if (init.signal?.aborted) abort();
+					else init.signal?.addEventListener("abort", abort, { once: true });
+				}),
+		});
+		const opened = transport.open(
+			{
+				runId: "shutdown-owned-run",
+				body: {
+					model: "approved-model",
+					messages: [{ role: "user", content: "hello" }],
+				},
+			},
+			{ onResponse() {}, onChunk() {} },
+		);
+		const openedOutcome = opened.then(
+			() => null,
+			(error: unknown) => error,
+		);
+
+		const draining = transport.abortAllAndDrain();
+		await fetchSettled;
+		expect(upstreamAborted).toBe(true);
+		await expect(draining).resolves.toBeUndefined();
+		expect(await openedOutcome).toEqual(
+			expect.objectContaining({ code: "cancelled" }),
+		);
+		await expect(
+			transport.open(
+				{
+					runId: "late-run",
+					body: {
+						model: "approved-model",
+						messages: [{ role: "user", content: "late" }],
+					},
+				},
+				{ onResponse() {}, onChunk() {} },
+			),
+		).rejects.toEqual(expect.objectContaining({ code: "cancelled" }));
+	});
+
 	test("forwards the complete model body and preserves streaming byte order", async () => {
 		const bytes = new TextEncoder().encode(
 			`data: ${"x".repeat(70_000)}\n\ndata: [DONE]\n\n`,

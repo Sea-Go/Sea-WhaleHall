@@ -990,6 +990,95 @@ describe("DesktopReflectionService", () => {
 		});
 		await service.stop();
 	});
+
+	test("beginShutdown is idempotent, aborts the active pump, and prevents timer rearm", async () => {
+		const clock = new FakeClock(10_000);
+		const transport = new FakeTransport([
+			foregroundEvent(1, "Code"),
+			foregroundEvent(2, "Terminal"),
+		]);
+		const repository = new InMemoryReflectionRepository();
+		const inferenceStarted = deferred<AbortSignal>();
+		let inferenceCalls = 0;
+		let inferredWindowId: string | null = null;
+		const service = new DesktopReflectionService({
+			transport,
+			repository,
+			inference: {
+				infer: async (window, signal) => {
+					if (signal === undefined) throw new Error("missing shutdown signal");
+					inferenceCalls += 1;
+					inferredWindowId = window.windowId;
+					inferenceStarted.resolve(signal);
+					return new Promise<ReflectionV1>((_resolve, reject) => {
+						const abort = () => reject(signal.reason);
+						if (signal.aborted) {
+							abort();
+							return;
+						}
+						signal.addEventListener("abort", abort, { once: true });
+					});
+				},
+			},
+			identity: identity(),
+			clock,
+			semanticEventThreshold: 2,
+			jobPollMs: 60_000,
+			eventPollMs: 120_000,
+		});
+
+		await service.start();
+		expect((await service.getStatus()).pendingJobs).toBe(1);
+		expect(transport.listenerCount).toBe(1);
+		expect(clock.pendingTimerCount).toBeGreaterThan(0);
+		clock.advance(0);
+		const signal = await inferenceStarted.promise;
+
+		service.beginShutdown();
+		service.beginShutdown();
+		expect(signal.aborted).toBeTrue();
+		expect(transport.listenerCount).toBe(0);
+		const stopping = service.stop();
+		expect(service.stop()).toBe(stopping);
+		await stopping;
+
+		expect(clock.pendingTimerCount).toBe(0);
+		expect(inferenceCalls).toBe(1);
+		if (inferredWindowId === null) throw new Error("inference did not start");
+		expect(await repository.getJob(inferredWindowId)).toMatchObject({
+			state: "READY",
+			attempt: 0,
+			lastFailure: null,
+		});
+		clock.advance(120_000);
+		expect(clock.pendingTimerCount).toBe(0);
+		expect(inferenceCalls).toBe(1);
+	});
+
+	test("beginShutdown synchronously cancels a sparse collector deadline", async () => {
+		const clock = new FakeClock(10_000);
+		const service = new DesktopReflectionService({
+			transport: new FakeTransport([foregroundEvent(1, "Code")]),
+			repository: new InMemoryReflectionRepository(),
+			inference: { infer: async (window) => reflectionFor(window) },
+			identity: identity(),
+			clock,
+			semanticEventThreshold: 64,
+			jobPollMs: 60_000,
+			eventPollMs: 120_000,
+		});
+
+		await service.start();
+		expect(clock.pendingTimerCount).toBeGreaterThanOrEqual(3);
+
+		service.beginShutdown();
+		expect(clock.pendingTimerCount).toBe(0);
+		await expect(service.pullNow()).rejects.toThrow("shutting down");
+		await service.stop();
+
+		clock.advance(300_000);
+		expect(clock.pendingTimerCount).toBe(0);
+	});
 });
 
 class FakeTransport implements DesktopEventTransport {
@@ -1008,6 +1097,10 @@ class FakeTransport implements DesktopEventTransport {
 	private preparedStartupChange: LocalEventGoalChange | null | undefined;
 
 	constructor(private readonly events: DesktopEventV1[]) {}
+
+	get listenerCount(): number {
+		return this.listeners.size;
+	}
 
 	async prepareStartupGoalChange(
 		change: LocalEventGoalChange | null,
@@ -1195,6 +1288,10 @@ class FakeClock implements ReflectionClock {
 	>();
 
 	constructor(private value: number) {}
+
+	get pendingTimerCount(): number {
+		return this.timers.size;
+	}
 
 	nowMs(): number {
 		return this.value;

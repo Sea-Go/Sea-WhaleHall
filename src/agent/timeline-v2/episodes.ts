@@ -31,6 +31,7 @@ export interface TimelineEpisodeClassifier {
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
 		context?: TimelineEpisodeClassificationContext,
+		signal?: AbortSignal,
 	): Promise<EpisodeClassificationV2>;
 }
 
@@ -38,6 +39,7 @@ export interface EpisodeSemanticSimilarity {
 	compare(
 		previous: ActivityEpisodeV2,
 		currentFacts: readonly EvidenceFactV2[],
+		signal?: AbortSignal,
 	): Promise<number>;
 }
 
@@ -72,10 +74,13 @@ export class DeterministicEpisodeAssembler {
 		facts: readonly EvidenceFactV2[],
 		previousEpisode: ActivityEpisodeV2 | null,
 		contextOnlyFacts: readonly EvidenceFactV2[] = [],
+		signal?: AbortSignal,
 	): Promise<ActivityEpisodeV2[]> {
+		throwIfAborted(signal);
 		const segments = segmentFacts(facts);
 		const episodes: ActivityEpisodeV2[] = [];
 		for (let index = 0; index < segments.length; index += 1) {
+			throwIfAborted(signal);
 			const segment = segments[index];
 			if (!segment) continue;
 			const classificationFacts = segment.facts.filter(
@@ -94,7 +99,9 @@ export class DeterministicEpisodeAssembler {
 					eventCount: window.eventCount,
 					contextOnlyFacts,
 				},
+				signal,
 			);
+			throwIfAborted(signal);
 			// Relevance has no meaning without an active goal, even if a custom
 			// classifier violates the interface contract.
 			const classification: EpisodeClassificationV2 = {
@@ -138,6 +145,7 @@ export class DeterministicEpisodeAssembler {
 					anchor,
 					window.goalVersion,
 					startedAtMs,
+					signal,
 				));
 			const episodeId = canContinue
 				? previousEpisode.episodeId
@@ -218,7 +226,9 @@ export class DeterministicEpisodeAssembler {
 						hypothesisEligibleEpisodes,
 						facts,
 						window.goal,
+						signal,
 					);
+		throwIfAborted(signal);
 		for (const episode of episodes) {
 			const hypothesis = hypotheses.get(episode.episodeId);
 			if (episode.classification.abstain) {
@@ -240,7 +250,9 @@ export class DeterministicEpisodeAssembler {
 		anchor: EvidenceAnchorV2,
 		goalVersion: number | null,
 		startedAtMs: number,
+		signal?: AbortSignal,
 	): Promise<boolean> {
+		throwIfAborted(signal);
 		const gapMs = startedAtMs - previous.endedAtMs;
 		if (
 			(gapMs < 0 && startedAtMs < previous.startedAtMs) ||
@@ -251,7 +263,8 @@ export class DeterministicEpisodeAssembler {
 		}
 		if (sameAnchor(previous.anchor, anchor)) return true;
 		if (!this.similarity) return false;
-		const similarity = await this.similarity.compare(previous, facts);
+		const similarity = await this.similarity.compare(previous, facts, signal);
+		throwIfAborted(signal);
 		return (
 			Number.isFinite(similarity) &&
 			similarity >= EPISODE_CROSS_WINDOW_SIMILARITY
@@ -266,7 +279,9 @@ export class HeuristicTimelineEpisodeClassifier
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
 		_context?: TimelineEpisodeClassificationContext,
+		signal?: AbortSignal,
 	): Promise<EpisodeClassificationV2> {
+		throwIfAborted(signal);
 		const appCorpus = facts
 			.flatMap((fact) => [
 				fact.templateArgs.appName,
@@ -360,6 +375,13 @@ export class HeuristicTimelineEpisodeClassifier
 			modelVersion: "deterministic-cold-start.v2",
 		};
 	}
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (!signal?.aborted) return;
+	throw signal.reason instanceof Error
+		? signal.reason
+		: new DOMException("Timeline inference was cancelled.", "AbortError");
 }
 
 function segmentFacts(facts: readonly EvidenceFactV2[]): FactSegment[] {
