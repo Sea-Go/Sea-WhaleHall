@@ -41,7 +41,11 @@
 	width: 270px;
 	height: 270px;
 	border-radius: 50%;
-	background: radial-gradient(circle, var(--color-accent-glow), transparent 68%);
+	background: radial-gradient(
+		circle,
+		var(--color-accent-glow),
+		transparent 68%
+	);
 	pointer-events: none;
 }
 
@@ -75,8 +79,17 @@
 	border-bottom: 0;
 	border-radius: 190px 190px 0 0;
 	background:
-		linear-gradient(154deg, transparent 47%, var(--color-contour) 48% 49%, transparent 50%),
-		radial-gradient(circle at 50% 100%, var(--color-accent-soft), transparent 66%);
+		linear-gradient(
+			154deg,
+			transparent 47%,
+			var(--color-contour) 48% 49%,
+			transparent 50%
+		),
+		radial-gradient(
+			circle at 50% 100%,
+			var(--color-accent-soft),
+			transparent 66%
+		);
 	opacity: 0.72;
 }
 
@@ -86,11 +99,31 @@
 	width: 218px;
 	height: 230px;
 	background:
-		radial-gradient(circle at 18% 14%, var(--color-accent-strong) 0 1px, transparent 4px),
-		radial-gradient(circle at 68% 26%, var(--color-accent) 0 1px, transparent 5px),
-		radial-gradient(circle at 40% 49%, var(--color-accent-strong) 0 1px, transparent 4px),
-		radial-gradient(circle at 85% 64%, var(--color-accent) 0 1px, transparent 5px),
-		radial-gradient(ellipse at 54% 112%, var(--color-accent-soft), transparent 62%);
+		radial-gradient(
+			circle at 18% 14%,
+			var(--color-accent-strong) 0 1px,
+			transparent 4px
+		),
+		radial-gradient(
+			circle at 68% 26%,
+			var(--color-accent) 0 1px,
+			transparent 5px
+		),
+		radial-gradient(
+			circle at 40% 49%,
+			var(--color-accent-strong) 0 1px,
+			transparent 4px
+		),
+		radial-gradient(
+			circle at 85% 64%,
+			var(--color-accent) 0 1px,
+			transparent 5px
+		),
+		radial-gradient(
+			ellipse at 54% 112%,
+			var(--color-accent-soft),
+			transparent 62%
+		);
 	filter: drop-shadow(0 0 7px var(--color-accent-glow));
 	opacity: 0.78;
 }
@@ -103,14 +136,23 @@
 	border: 1px solid var(--color-contour);
 	border-radius: 62% 38% 52% 48%;
 	background:
-		linear-gradient(96deg, transparent 17%, var(--color-contour) 18% 19%, transparent 20%),
+		linear-gradient(
+			96deg,
+			transparent 17%,
+			var(--color-contour) 18% 19%,
+			transparent 20%
+		),
 		repeating-radial-gradient(
 			ellipse at 34% 50%,
 			transparent 0 9px,
 			var(--color-contour) 10px 11px,
 			transparent 12px 17px
 		),
-		radial-gradient(ellipse at 54% 45%, var(--color-accent-soft), transparent 68%);
+		radial-gradient(
+			ellipse at 54% 45%,
+			var(--color-accent-soft),
+			transparent 68%
+		);
 	box-shadow: 0 0 36px var(--color-accent-glow);
 	opacity: 0.66;
 	transform: rotate(-9deg);
@@ -282,6 +324,12 @@
 	min-width: 0;
 }
 
+.user-entry__status {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+}
+
 .user-entry__copy strong,
 .user-menu__header strong {
 	color: var(--color-text-primary);
@@ -343,6 +391,10 @@
 	font-size: var(--font-size-sm);
 	text-align: left;
 	cursor: pointer;
+}
+
+.user-menu button[role="menuitem"] .app-update-mark {
+	margin-left: auto;
 }
 
 .user-menu button[role="menuitem"]:hover,

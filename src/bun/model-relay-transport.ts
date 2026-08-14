@@ -61,6 +61,8 @@ export class ModelRelayError extends Error {
  * the local sidecar. The sidecar never receives the bearer token. */
 export class ModelRelayTransport {
 	private readonly active = new Map<string, AbortController>();
+	private readonly settlements = new Set<Promise<void>>();
+	private closed = false;
 	private readonly purpose: ModelRelayPurpose;
 	private readonly inflightRetryDelaysMs: readonly number[];
 	private readonly wait: (
@@ -84,6 +86,11 @@ export class ModelRelayTransport {
 
 	async open(request: ModelRelayRequest, sink: ModelRelaySink): Promise<void> {
 		assertRelayRequest(request);
+		if (this.closed) {
+			return Promise.reject(
+				new ModelRelayError("cancelled", "模型转发正在关闭。"),
+			);
+		}
 		if (this.active.has(request.runId)) {
 			throw new ModelRelayError(
 				"duplicate-run",
@@ -99,56 +106,63 @@ export class ModelRelayTransport {
 		}
 		const controller = new AbortController();
 		this.active.set(request.runId, controller);
-		try {
-			const response = await this.fetchWithInflightRecovery(
-				request,
-				body,
-				controller.signal,
-			);
-			await sink.onResponse({
-				status: response.status,
-				headers: safeResponseHeaders(response.headers),
-			});
-			if (!response.body) return;
-			const reader = response.body.getReader();
+		const operation = (async () => {
 			try {
-				while (true) {
-					const item = await reader.read();
-					if (item.done) break;
-					for (
-						let offset = 0;
-						offset < item.value.byteLength;
-						offset += MAX_STREAM_CHUNK_BYTES
-					) {
-						await sink.onChunk(
-							item.value.slice(offset, offset + MAX_STREAM_CHUNK_BYTES),
-						);
-					}
-				}
-			} finally {
-				reader.releaseLock();
-			}
-		} catch (error) {
-			if (controller.signal.aborted) {
-				throw new ModelRelayError("cancelled", "模型请求已取消。");
-			}
-			if (error instanceof ModelRelayError) throw error;
-			if (isServiceUnavailable(error)) {
-				throw new ModelRelayError(
-					"service-unavailable",
-					error instanceof Error
-						? error.message
-						: "当前账号没有可用的模型转发能力。",
+				const response = await this.fetchWithInflightRecovery(
+					request,
+					body,
+					controller.signal,
 				);
+				await sink.onResponse({
+					status: response.status,
+					headers: safeResponseHeaders(response.headers),
+				});
+				if (!response.body) return;
+				const reader = response.body.getReader();
+				try {
+					while (true) {
+						const item = await reader.read();
+						if (item.done) break;
+						for (
+							let offset = 0;
+							offset < item.value.byteLength;
+							offset += MAX_STREAM_CHUNK_BYTES
+						) {
+							await sink.onChunk(
+								item.value.slice(offset, offset + MAX_STREAM_CHUNK_BYTES),
+							);
+						}
+					}
+				} finally {
+					reader.releaseLock();
+				}
+			} catch (error) {
+				if (controller.signal.aborted) {
+					throw new ModelRelayError("cancelled", "模型请求已取消。");
+				}
+				if (error instanceof ModelRelayError) throw error;
+				if (isServiceUnavailable(error)) {
+					throw new ModelRelayError(
+						"service-unavailable",
+						error instanceof Error
+							? error.message
+							: "当前账号没有可用的模型转发能力。",
+					);
+				}
+				throw new ModelRelayError(
+					"remote-failure",
+					error instanceof Error ? error.message : "模型转发失败。",
+				);
+			} finally {
+				if (this.active.get(request.runId) === controller)
+					this.active.delete(request.runId);
 			}
-			throw new ModelRelayError(
-				"remote-failure",
-				error instanceof Error ? error.message : "模型转发失败。",
-			);
-		} finally {
-			if (this.active.get(request.runId) === controller)
-				this.active.delete(request.runId);
-		}
+		})();
+		this.settlements.add(operation);
+		void operation
+			.finally(() => this.settlements.delete(operation))
+			.catch(() => undefined);
+		return operation;
 	}
 
 	private async fetchWithInflightRecovery(
@@ -197,7 +211,23 @@ export class ModelRelayTransport {
 
 	abortAll(): void {
 		for (const controller of this.active.values()) controller.abort();
-		this.active.clear();
+	}
+
+	/** Permanently closes relay ingress before any asynchronous shutdown wait. */
+	beginShutdown(): void {
+		this.closed = true;
+		this.abortAll();
+	}
+
+	/** Cancels and joins every remote stream accepted before the fixed point. */
+	async abortAllAndDrain(): Promise<void> {
+		this.beginShutdown();
+		for (;;) {
+			this.abortAll();
+			const settlements = [...this.settlements];
+			if (settlements.length === 0) return;
+			await Promise.allSettled(settlements);
+		}
 	}
 }
 

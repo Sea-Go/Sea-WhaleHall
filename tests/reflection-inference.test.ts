@@ -212,6 +212,37 @@ describe("ModernBertHttpClient", () => {
 		});
 	});
 
+	test("binds an external shutdown signal to the active HTTP request", async () => {
+		const requestSignals: AbortSignal[] = [];
+		let requestStartedResolve!: () => void;
+		const requestStarted = new Promise<void>((resolve) => {
+			requestStartedResolve = resolve;
+		});
+		const client = new ModernBertHttpClient({
+			fetch: async (_input, init) => {
+				const requestSignal = init?.signal;
+				if (requestSignal !== undefined && requestSignal !== null) {
+					requestSignals.push(requestSignal);
+				}
+				requestStartedResolve();
+				return new Promise<Response>((_resolve, reject) => {
+					requestSignal?.addEventListener(
+						"abort",
+						() => reject(requestSignal.reason),
+						{ once: true },
+					);
+				});
+			},
+		});
+		const controller = new AbortController();
+		const inference = client.infer(windowFixture(), controller.signal);
+		await requestStarted;
+
+		controller.abort(new DOMException("shutdown", "AbortError"));
+		await expect(inference).rejects.toMatchObject({ retryable: true });
+		expect(requestSignals[0]?.aborted).toBeTrue();
+	});
+
 	test("rejects a valid-looking response correlated to another window", async () => {
 		const output = {
 			...primaryOutput(),

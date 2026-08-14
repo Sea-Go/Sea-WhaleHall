@@ -4,7 +4,10 @@ import type { LocalToolProcess } from "../src/agent/local-tool-client";
 import {
 	BackgroundAppLifecycle,
 	type BackgroundWindow,
+	CriticalShutdownError,
+	closeOwnerAfterDraining,
 	runBestEffortShutdown,
+	ShutdownWorkBarrier,
 } from "../src/bun/app-lifecycle";
 
 class TestWindow implements BackgroundWindow {
@@ -19,6 +22,82 @@ class TestWindow implements BackgroundWindow {
 		this.activateCount += 1;
 	}
 }
+
+test("shutdown work barrier rejects new work and drains accepted operations", async () => {
+	let release: (() => void) | undefined;
+	let started = 0;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const barrier = new ShutdownWorkBarrier();
+	const accepted = barrier.run(async () => {
+		started += 1;
+		await gate;
+		return "done";
+	});
+	await Promise.resolve();
+	barrier.close();
+	let rejectedRan = false;
+	await expect(
+		barrier.run(() => {
+			rejectedRan = true;
+		}),
+	).rejects.toThrow("shutdown");
+	let drained = false;
+	const drain = barrier.drain().then(() => {
+		drained = true;
+	});
+	await Promise.resolve();
+	expect(drained).toBeFalse();
+	expect(started).toBe(1);
+	expect(rejectedRan).toBeFalse();
+	release?.();
+	await expect(accepted).resolves.toBe("done");
+	await drain;
+	expect(drained).toBeTrue();
+});
+
+test("owner close drains work registered by the last producer", async () => {
+	let releaseProducer!: () => void;
+	let releaseRemote!: () => void;
+	const producerGate = new Promise<void>((resolve) => {
+		releaseProducer = resolve;
+	});
+	const remoteGate = new Promise<void>((resolve) => {
+		releaseRemote = resolve;
+	});
+	const remoteSettlements = new Set<Promise<void>>();
+	let producerStarted = false;
+	let ownerClosed = false;
+
+	const closing = closeOwnerAfterDraining(
+		async () => {
+			producerStarted = true;
+			await producerGate;
+			remoteSettlements.add(remoteGate);
+		},
+		async () => {
+			for (;;) {
+				const observed = [...remoteSettlements];
+				await Promise.allSettled(observed);
+				if (observed.length === remoteSettlements.size) return;
+			}
+		},
+		() => {
+			ownerClosed = true;
+		},
+	);
+
+	await Promise.resolve();
+	expect(producerStarted).toBeTrue();
+	releaseProducer();
+	await Promise.resolve();
+	await Promise.resolve();
+	expect(ownerClosed).toBeFalse();
+	releaseRemote();
+	await closing;
+	expect(ownerClosed).toBeTrue();
+});
 
 describe("background application lifecycle", () => {
 	test("closing the control window keeps the monitoring runtime alive", async () => {
@@ -194,6 +273,110 @@ describe("background application lifecycle", () => {
 		expect(exitCount).toBe(1);
 	});
 
+	test("prepares an updater-owned exit without quitting first", async () => {
+		const order: string[] = [];
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			onQuitRequested() {
+				order.push("latched");
+			},
+			shutdown: async () => {
+				order.push("shutdown");
+			},
+			exit: () => order.push("exit"),
+		});
+
+		await lifecycle.prepareForExternalExit();
+		expect(order).toEqual(["latched", "shutdown"]);
+		await expect(lifecycle.open()).rejects.toThrow(
+			"while WhaleHall is quitting",
+		);
+
+		const updaterQuit: { response?: { allow: boolean } } = {};
+		lifecycle.handleBeforeQuit(updaterQuit);
+		expect(updaterQuit.response).toBeUndefined();
+		expect(order).toEqual(["latched", "shutdown"]);
+	});
+
+	test("vetoes a last-window quit without racing the updater-owned exit", async () => {
+		let releaseShutdown: (() => void) | undefined;
+		let exitCount = 0;
+		const shutdownGate = new Promise<void>((resolve) => {
+			releaseShutdown = resolve;
+		});
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: () => shutdownGate,
+			exit: () => {
+				exitCount += 1;
+			},
+		});
+
+		const preparation = lifecycle.prepareForExternalExit();
+		const lastWindowQuit: { response?: { allow: boolean } } = {};
+		lifecycle.handleBeforeQuit(lastWindowQuit);
+		expect(lastWindowQuit.response).toEqual({ allow: false });
+		expect(exitCount).toBe(0);
+
+		releaseShutdown?.();
+		await preparation;
+		await Promise.resolve();
+		expect(exitCount).toBe(0);
+
+		const updaterOwnedQuit: { response?: { allow: boolean } } = {};
+		lifecycle.handleBeforeQuit(updaterOwnedQuit);
+		expect(updaterOwnedQuit.response).toBeUndefined();
+	});
+
+	test("an updater takes ownership from an already-running ordinary quit", async () => {
+		let releaseShutdown!: () => void;
+		const shutdownGate = new Promise<void>((resolve) => {
+			releaseShutdown = resolve;
+		});
+		let exitCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: () => shutdownGate,
+			exit: () => {
+				exitCount += 1;
+			},
+		});
+
+		const ordinaryQuit = lifecycle.quit();
+		await Promise.resolve();
+		const updaterPreparation = lifecycle.prepareForExternalExit();
+		releaseShutdown();
+		await Promise.all([ordinaryQuit, updaterPreparation]);
+		expect(exitCount).toBe(0);
+
+		const updaterOwnedQuit: { response?: { allow: boolean } } = {};
+		lifecycle.handleBeforeQuit(updaterOwnedQuit);
+		expect(updaterOwnedQuit.response).toBeUndefined();
+	});
+
+	test("does not authorize an updater-owned exit when shutdown fails", async () => {
+		let shouldFail = true;
+		let shutdownCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: async () => {
+				shutdownCount += 1;
+				if (shouldFail) throw new Error("database still closing");
+			},
+			exit: () => {},
+		});
+
+		await expect(lifecycle.prepareForExternalExit()).rejects.toThrow(
+			"database still closing",
+		);
+		const blockedQuit: { response?: { allow: boolean } } = {};
+		lifecycle.handleBeforeQuit(blockedQuit);
+		expect(blockedQuit.response).toEqual({ allow: false });
+		shouldFail = false;
+		await lifecycle.prepareForExternalExit();
+		expect(shutdownCount).toBe(2);
+	});
+
 	test("a failed shutdown is reported and a later quit retries before exit", async () => {
 		const errors: string[] = [];
 		let exitCount = 0;
@@ -228,6 +411,158 @@ describe("background application lifecycle", () => {
 		await lifecycle.quit();
 		expect(shutdownCount).toBe(2);
 		expect(exitCount).toBe(1);
+	});
+
+	test("ordinary quit retries once after the exact pending owners settle", async () => {
+		let releaseOwner!: () => void;
+		const ownerSettled = new Promise<void>((resolve) => {
+			releaseOwner = resolve;
+		});
+		let resolveExited!: () => void;
+		const exited = new Promise<void>((resolve) => {
+			resolveExited = resolve;
+		});
+		let shutdownCount = 0;
+		let exitCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: async () => {
+				shutdownCount += 1;
+				if (shutdownCount === 1) {
+					throw new CriticalShutdownError(["native-owner"]);
+				}
+			},
+			waitForShutdownRetry: () => ownerSettled,
+			exit: () => {
+				exitCount += 1;
+				resolveExited();
+			},
+		});
+
+		await lifecycle.quit();
+		expect(shutdownCount).toBe(1);
+		expect(exitCount).toBe(0);
+		releaseOwner();
+		await exited;
+		expect(shutdownCount).toBe(2);
+		expect(exitCount).toBe(1);
+	});
+
+	test("an already-settled owner waiter still starts a fresh attempt", async () => {
+		let shutdownCount = 0;
+		let exitCount = 0;
+		let resolveExited!: () => void;
+		const exited = new Promise<void>((resolve) => {
+			resolveExited = resolve;
+		});
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: async () => {
+				shutdownCount += 1;
+				if (shutdownCount === 1) throw new CriticalShutdownError(["owner"]);
+			},
+			waitForShutdownRetry: () => Promise.resolve(),
+			exit: () => {
+				exitCount += 1;
+				resolveExited();
+			},
+		});
+
+		await lifecycle.quit();
+		await exited;
+		expect(shutdownCount).toBe(2);
+		expect(exitCount).toBe(1);
+	});
+
+	test("an updater takes ownership from an in-flight automatic retry", async () => {
+		let releaseOwner!: () => void;
+		const ownerSettled = new Promise<void>((resolve) => {
+			releaseOwner = resolve;
+		});
+		let releaseRetry!: () => void;
+		const retryGate = new Promise<void>((resolve) => {
+			releaseRetry = resolve;
+		});
+		let retryStarted!: () => void;
+		const retryWasStarted = new Promise<void>((resolve) => {
+			retryStarted = resolve;
+		});
+		let shutdownCount = 0;
+		let exitCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: async () => {
+				shutdownCount += 1;
+				if (shutdownCount === 1) throw new CriticalShutdownError(["owner"]);
+				retryStarted();
+				await retryGate;
+			},
+			waitForShutdownRetry: () => ownerSettled,
+			exit: () => {
+				exitCount += 1;
+			},
+		});
+
+		await lifecycle.quit();
+		releaseOwner();
+		await retryWasStarted;
+		const updaterPreparation = lifecycle.prepareForExternalExit();
+		releaseRetry();
+		await updaterPreparation;
+		for (let index = 0; index < 4; index += 1) await Promise.resolve();
+		expect(shutdownCount).toBe(2);
+		expect(exitCount).toBe(0);
+	});
+
+	test("an automatic retry never loops after a second shutdown failure", async () => {
+		let shutdownCount = 0;
+		let waiterCount = 0;
+		let exitCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: async () => {
+				shutdownCount += 1;
+				throw new CriticalShutdownError(["owner"]);
+			},
+			waitForShutdownRetry: () => {
+				waiterCount += 1;
+				return Promise.resolve();
+			},
+			exit: () => {
+				exitCount += 1;
+			},
+		});
+
+		await lifecycle.quit();
+		for (let index = 0; index < 8; index += 1) await Promise.resolve();
+		expect(shutdownCount).toBe(2);
+		expect(waiterCount).toBe(1);
+		expect(exitCount).toBe(0);
+	});
+
+	test("updater preparation failures never schedule an ordinary exit retry", async () => {
+		let waiterCount = 0;
+		let exitCount = 0;
+		const lifecycle = new BackgroundAppLifecycle({
+			createWindow: async () => new TestWindow(),
+			shutdown: async () => {
+				throw new CriticalShutdownError(["owner"]);
+			},
+			waitForShutdownRetry: () => {
+				waiterCount += 1;
+				return Promise.resolve();
+			},
+			exit: () => {
+				exitCount += 1;
+			},
+		});
+
+		await expect(lifecycle.prepareForExternalExit()).rejects.toBeInstanceOf(
+			CriticalShutdownError,
+		);
+		for (let index = 0; index < 4; index += 1) await Promise.resolve();
+		expect(waiterCount).toBe(0);
+		expect(exitCount).toBe(0);
 	});
 
 	test("a failed synchronous quit latch is retried before shutdown", async () => {
@@ -399,6 +734,75 @@ describe("background application lifecycle", () => {
 			{ name: "consumes-deadline", outcome: "timed_out" },
 			{ name: "not-started-after-deadline", outcome: "timed_out" },
 		]);
+	});
+
+	test("accepts only an exact late completion proof for a timed-out critical step", async () => {
+		let release!: () => void;
+		const lateOwner = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let ownerCompleted = false;
+		const outcomes: Array<{ name: string; outcome: string }> = [];
+		const shutdown = runBestEffortShutdown(
+			[
+				{
+					name: "late-owner",
+					critical: true,
+					timeoutMs: 5,
+					run: async () => {
+						await lateOwner;
+						ownerCompleted = true;
+					},
+				},
+				{
+					name: "final-owner-barrier",
+					critical: true,
+					timeoutMs: 100,
+					run: async () => {
+						release();
+						await lateOwner;
+					},
+				},
+			],
+			() => {},
+			{
+				isCriticalFailureRecovered: (step) =>
+					step === "late-owner" && ownerCompleted,
+				onStepSettled: ({ name, outcome }) => outcomes.push({ name, outcome }),
+			},
+		);
+
+		await expect(shutdown).resolves.toBeUndefined();
+		expect(outcomes).toEqual([
+			{ name: "late-owner", outcome: "timed_out" },
+			{ name: "final-owner-barrier", outcome: "completed" },
+		]);
+	});
+
+	test("fails closed when a critical recovery predicate is false or throws", async () => {
+		const predicates = [
+			() => false,
+			() => {
+				throw new Error("broken proof");
+			},
+		];
+		for (const predicate of predicates) {
+			await expect(
+				runBestEffortShutdown(
+					[
+						{
+							name: "failed-owner",
+							critical: true,
+							run: async () => {
+								throw new Error("failed");
+							},
+						},
+					],
+					() => {},
+					{ isCriticalFailureRecovered: predicate },
+				),
+			).rejects.toMatchObject({ failedSteps: ["failed-owner"] });
+		}
 	});
 
 	test("reports sanitized duration for every outcome without trusting diagnostics", async () => {

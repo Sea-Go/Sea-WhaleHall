@@ -28,6 +28,11 @@ import { ConfirmationDialog } from "../../shared/ui/ConfirmationDialog";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { PageHeader } from "../../shared/ui/PageHeader";
 import {
+	AppUpdateAttentionMark,
+	type AppUpdateController,
+	UpdateStatusControl,
+} from "../app-update/public";
+import {
 	AuditExportControl,
 	type AuditExportService,
 } from "../audit-export/public";
@@ -37,6 +42,10 @@ import {
 	MonitoringExclusionsControl,
 	MonitoringPermissionsControl,
 } from "../monitoring/public";
+import {
+	ProactiveFeedbackPolicyControl,
+	type ProactiveFeedbackPolicyController,
+} from "../proactive-feedback/public";
 import type {
 	AgentPermissionsController,
 	AgentPermissionsState,
@@ -79,10 +88,13 @@ export interface SettingsPageProps {
 	monitoringController: MonitoringController;
 	auditExportService: AuditExportService;
 	agentPermissionsController?: AgentPermissionsController;
+	proactiveFeedbackPolicyController?: ProactiveFeedbackPolicyController;
+	appUpdateController?: AppUpdateController;
 	category: SettingsCategory;
 	onCategoryChange: (category: SettingsCategory) => void;
 	onLogout: () => void;
 	onPreferencesApplied: (snapshot: PreferencesSnapshot) => void;
+	onProactiveFeedbackCleared?: () => void;
 }
 
 export function SettingsPage({
@@ -91,10 +103,13 @@ export function SettingsPage({
 	monitoringController,
 	auditExportService,
 	agentPermissionsController,
+	proactiveFeedbackPolicyController,
+	appUpdateController,
 	category,
 	onCategoryChange,
 	onLogout,
 	onPreferencesApplied,
+	onProactiveFeedbackCleared,
 }: SettingsPageProps) {
 	const state = useSyncExternalStore(
 		controller.subscribe,
@@ -179,7 +194,14 @@ export function SettingsPage({
 							>
 								<Icon size={17} aria-hidden="true" />
 								<span>{SETTINGS_CATEGORY_LABELS[item]}</span>
-								{active ? <ChevronRight size={15} aria-hidden="true" /> : null}
+								<span className="settings-categories__status">
+									{item === "about" && appUpdateController ? (
+										<AppUpdateAttentionMark controller={appUpdateController} />
+									) : null}
+									{active ? (
+										<ChevronRight size={15} aria-hidden="true" />
+									) : null}
+								</span>
 							</button>
 						);
 					})}
@@ -226,6 +248,11 @@ export function SettingsPage({
 									}
 									onLogout={onLogout}
 									agentPermissionsController={agentPermissionsController}
+									proactiveFeedbackPolicyController={
+										proactiveFeedbackPolicyController
+									}
+									onProactiveFeedbackCleared={onProactiveFeedbackCleared}
+									appUpdateController={appUpdateController}
 								/>
 							</div>
 							<footer className="settings-savebar">
@@ -271,7 +298,7 @@ export function SettingsPage({
 			{restoreDialogOpen ? (
 				<ConfirmationDialog
 					title="恢复所有默认设置？"
-					description="外观、桌宠、通知、日历和隐私偏好都会恢复默认值。账号和已创建的计划、日程不会被删除。"
+					description="外观、桌宠、通知、日历和本地报告偏好都会恢复默认值。账号、主动反馈策略以及已创建的计划和日程不会改变。"
 					confirmLabel="恢复默认"
 					busy={saving && state.operation === "restore-defaults"}
 					onCancel={() => setRestoreDialogOpen(false)}
@@ -323,6 +350,9 @@ interface SettingsPanelProps {
 	category: SettingsCategory;
 	user: AuthUser;
 	agentPermissionsController?: AgentPermissionsController;
+	proactiveFeedbackPolicyController?: ProactiveFeedbackPolicyController;
+	appUpdateController?: AppUpdateController;
+	onProactiveFeedbackCleared?: () => void;
 	values: PreferenceValues;
 	disabled: boolean;
 	monitoringController: MonitoringController;
@@ -349,7 +379,7 @@ function SettingsPanel(props: SettingsPanelProps) {
 		case "privacy":
 			return <PrivacySettings {...props} />;
 		case "about":
-			return <AboutSettings />;
+			return <AboutSettings appUpdateController={props.appUpdateController} />;
 	}
 }
 
@@ -525,7 +555,7 @@ function PetSettings({ values, disabled, onUpdate }: SettingsPanelProps) {
 		<SettingsSection
 			eyebrow="桌宠"
 			title="陪伴与反馈"
-			description="桌宠只接收无敏感内容的表现事件，不读取登录凭据、计划标题或活动明细。"
+			description="桌宠会接收最终主动反馈文本和无内容的表现事件；原始活动事件、登录凭据与 token 不会发送到桌宠。"
 		>
 			<SettingRow
 				title="显示桌宠"
@@ -873,13 +903,15 @@ function PrivacySettings({
 	monitoringController,
 	auditExportService,
 	agentPermissionsController,
+	proactiveFeedbackPolicyController,
+	onProactiveFeedbackCleared,
 }: SettingsPanelProps) {
-	const section = values.privacy;
+	const browserInsights = values.privacy.browserInsights;
 	return (
 		<SettingsSection
 			eyebrow="数据与隐私"
-			title="本地数据边界"
-			description="通过唯一入口完成一次性监测设置；macOS 拆分的必需权限会集中显示，完成后不再重复请求。"
+			title="采集、主动反馈与本地数据"
+			description="系统监测权限决定本机可以采集什么；主动反馈策略独立决定这些活动证据是否发送到 DataCenter。"
 		>
 			<AuditExportControl service={auditExportService} />
 			<MonitoringPermissionsControl controller={monitoringController} />
@@ -888,84 +920,62 @@ function PrivacySettings({
 				controller={agentPermissionsController}
 				disabled={disabled}
 			/>
-			<SettingRow
-				title="使用活动汇总生成洞察"
-				description="只使用本地聚合时长，不把窗口内容发送到桌宠。"
-				control={
-					<SwitchControl
-						label="使用活动汇总生成洞察"
-						checked={section.activityInsights}
-						disabled={disabled}
-						onChange={(checked) =>
-							onUpdate("privacy", {
-								...section,
-								activityInsights: checked,
-							})
-						}
-					/>
-				}
+			<ProactiveFeedbackPolicyControl
+				controller={proactiveFeedbackPolicyController}
+				disabled={disabled}
+				onCleared={onProactiveFeedbackCleared}
 			/>
 			<SettingRow
 				title="使用浏览器分类汇总"
-				description="默认关闭；启用偏好不等于授予系统读取权限。"
+				description="独立的本地报告偏好，默认关闭；启用偏好不等于授予系统读取权限，也不替代主动反馈授权。"
 				control={
 					<SwitchControl
 						label="使用浏览器分类汇总"
-						checked={section.browserInsights}
+						checked={browserInsights}
 						disabled={disabled}
 						onChange={(checked) =>
 							onUpdate("privacy", {
-								...section,
+								...values.privacy,
 								browserInsights: checked,
 							})
 						}
 					/>
 				}
 			/>
-			<SettingRow
-				title="活动汇总保留周期"
-				description="用于未来的数据 adapter；原始记录清理由明确的本地工具单独确认。"
-				control={
-					<label className="settings-select">
-						<span className="sr-only">活动汇总保留周期</span>
-						<select
-							value={section.retentionDays}
-							disabled={disabled}
-							onChange={(event) => {
-								const value = Number(event.currentTarget.value);
-								const retentionDays = value === 7 || value === 90 ? value : 30;
-								onUpdate("privacy", { ...section, retentionDays });
-							}}
-						>
-							<option value={7}>7 天</option>
-							<option value={30}>30 天</option>
-							<option value={90}>90 天</option>
-						</select>
-					</label>
-				}
-			/>
 			<div className="settings-privacy-note">
 				<ShieldCheck size={16} aria-hidden="true" />
 				<span>
-					认证信息、完整网址、搜索词和输入内容不会进入设置存储或桌宠日志。
+					主动反馈策略由 Bun 按当前账号保存；旧的浏览器 localStorage
+					偏好不作为授权来源。
 				</span>
 			</div>
 		</SettingsSection>
 	);
 }
 
-function AboutSettings() {
+function AboutSettings({
+	appUpdateController,
+}: {
+	appUpdateController?: AppUpdateController;
+}) {
 	return (
 		<SettingsSection
 			eyebrow="关于"
 			title="WhaleHall"
 			description="A whale falls, and myriad creatures flourish."
 		>
-			<SettingRow
-				title="版本"
-				description="当前本地体验构建。"
-				control={<span className="settings-value">0.1.0</span>}
-			/>
+			{appUpdateController ? (
+				<UpdateStatusControl
+					controller={appUpdateController}
+					variant="settings"
+				/>
+			) : (
+				<SettingRow
+					title="版本"
+					description="更新服务尚未连接。"
+					control={<span className="settings-value">正在读取…</span>}
+				/>
+			)}
 			<SettingRow
 				title="运行边界"
 				description="React 客户端、Typed RPC、Bun 主进程和 Rust Local Tool Host 保持独立。"
@@ -975,7 +985,7 @@ function AboutSettings() {
 				<strong>把时间留给重要的事。</strong>
 				<p>
 					WhaleHall
-					帮助你制定计划、安排时间并诚实回顾投入。数据能力默认留在本机边界内。
+					帮助你制定计划、安排时间并诚实回顾投入。远端主动反馈是否启用及其数据范围会在隐私设置中明确显示。
 				</p>
 			</div>
 		</SettingsSection>

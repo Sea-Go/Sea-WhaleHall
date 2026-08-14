@@ -43,7 +43,7 @@ export interface ReflectionJobClock {
 }
 
 export interface ReflectionInferenceProvider {
-	infer(window: EventWindowV1): Promise<ReflectionV1>;
+	infer(window: EventWindowV1, signal?: AbortSignal): Promise<ReflectionV1>;
 }
 
 export interface ReflectionCommitter {
@@ -53,6 +53,11 @@ export interface ReflectionCommitter {
 export type ReflectionJobRunResult =
 	| { status: "idle" }
 	| { status: "committed"; windowId: string }
+	| {
+			status: "abandoned";
+			windowId: string;
+			phase: "inference" | "commit";
+		}
 	| {
 			status: "retry_scheduled";
 			windowId: string;
@@ -109,8 +114,9 @@ export class ReflectionJobRunner {
 		}
 	}
 
-	async runOnce(): Promise<ReflectionJobRunResult> {
+	async runOnce(signal?: AbortSignal): Promise<ReflectionJobRunResult> {
 		if (this.running) throw new Error("ReflectionJobRunner only supports concurrency 1.");
+		if (signal?.aborted) return { status: "idle" };
 		this.running = true;
 		try {
 			const nowMs = this.clock.nowMs();
@@ -122,9 +128,14 @@ export class ReflectionJobRunner {
 			let reflection = job.reflection;
 			if (job.state === "RUNNING") {
 				try {
-					reflection = await this.inference.infer(window);
+					throwIfAborted(signal);
+					reflection = await this.inference.infer(window, signal);
+					throwIfAborted(signal);
 					assertReflectionMatchesWindow(reflection, window);
 				} catch (error) {
+					if (signal?.aborted) {
+						return this.abandonClaim(job, "inference");
+					}
 					return this.handleFailure(job, "inference", error);
 				}
 				job = await this.repository.persistResult(
@@ -132,6 +143,9 @@ export class ReflectionJobRunner {
 					reflection,
 					this.clock.nowMs(),
 				);
+				if (signal?.aborted) {
+					return this.abandonClaim(job, "commit");
+				}
 				job = await this.repository.beginCommit(
 					window.windowId,
 					this.clock.nowMs(),
@@ -142,11 +156,17 @@ export class ReflectionJobRunner {
 			if (job.state !== "COMMITTING" || !reflection) {
 				throw new Error(`Claimed reflection job ${job.windowId} cannot be committed.`);
 			}
+			if (signal?.aborted) {
+				return this.abandonClaim(job, "commit");
+			}
 			try {
 				await this.committer.commit(window, reflection);
 				await this.repository.markCommitted(window.windowId, this.clock.nowMs());
 				return { status: "committed", windowId: window.windowId };
 			} catch (error) {
+				if (signal?.aborted) {
+					return this.abandonClaim(job, "commit");
+				}
 				return this.handleFailure(job, "commit", error);
 			}
 		} finally {
@@ -154,12 +174,16 @@ export class ReflectionJobRunner {
 		}
 	}
 
-	async runUntilIdle(maxJobs = 100): Promise<ReflectionJobRunResult[]> {
+	async runUntilIdle(
+		maxJobs = 100,
+		signal?: AbortSignal,
+	): Promise<ReflectionJobRunResult[]> {
 		const results: ReflectionJobRunResult[] = [];
 		for (let index = 0; index < maxJobs; index += 1) {
-			const result = await this.runOnce();
+			if (signal?.aborted) break;
+			const result = await this.runOnce(signal);
 			results.push(result);
-			if (result.status === "idle") break;
+			if (result.status === "idle" || signal?.aborted) break;
 		}
 		return results;
 	}
@@ -180,6 +204,14 @@ export class ReflectionJobRunner {
 			stats,
 			emitImmediateFeedback: mode === "accepting",
 		};
+	}
+
+	private async abandonClaim(
+		job: ReflectionJobV1,
+		phase: "inference" | "commit",
+	): Promise<ReflectionJobRunResult> {
+		await this.repository.abandonClaim(job.windowId, this.clock.nowMs());
+		return { status: "abandoned", windowId: job.windowId, phase };
 	}
 
 	private async handleFailure(
@@ -220,6 +252,14 @@ export class ReflectionJobRunner {
 			phase,
 		};
 	}
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) return;
+	throw new DOMException(
+		"Reflection inference was cancelled during shutdown.",
+		"AbortError",
+	);
 }
 
 function isExplicitlyNonRetryable(error: unknown): boolean {

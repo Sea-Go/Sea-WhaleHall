@@ -287,6 +287,74 @@ async function populate(
 }
 
 describe("Timeline v2 encrypted SQLite and audit", () => {
+	test("durably abandons an aged shutdown claim without spending its retry history", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "whalehall-timeline-v2-abandon-"));
+		temporaryDirectories.push(directory);
+		const path = join(directory, "timeline-v2.sqlite3");
+		const vault = new MemoryVault();
+		const clock = new Clock();
+		let repository = new SqliteTimelineV2Repository(
+			path,
+			vault,
+			clock.nowMs.bind(clock),
+		);
+		const collector = new TimelineV2Collector({
+			collectorId: "collector.timeline-v2.abandon",
+			deviceId: "device-1",
+			sessionId: "session-1",
+			repository,
+			hasher: new WebCryptoReflectionHasher(),
+			clock,
+			effectiveEventThreshold: 2,
+		});
+		await collector.recover();
+		await collector.ingest(
+			semantic(1, 100_000, "application.foregroundChanged"),
+		);
+		const window = await collector.ingest(
+			semantic(2, 100_010, "application.textValueChanged"),
+		);
+		const firstAttemptAtMs = clock.nowMs();
+		await repository.claimNextWindow(firstAttemptAtMs, 1_000);
+		await repository.recordWindowFailure(window!.windowId, {
+			nowMs: firstAttemptAtMs,
+			code: "PRIOR_TRANSIENT",
+			message: "historical failure",
+			nextAttemptAtMs: firstAttemptAtMs,
+			terminal: false,
+		});
+		clock.set(firstAttemptAtMs + 24 * 60 * 60 * 1_000 + 1);
+		expect(
+			await repository.claimNextWindow(clock.nowMs(), 1_000),
+		).toMatchObject({ state: "RUNNING", attempt: 2 });
+		await repository.abandonWindowClaim(window!.windowId, clock.nowMs());
+		repository.close();
+
+		repository = new SqliteTimelineV2Repository(
+			path,
+			vault,
+			clock.nowMs.bind(clock),
+		);
+		expect(await repository.getJob(window!.windowId)).toMatchObject({
+			state: "READY",
+			attempt: 1,
+			firstAttemptAtMs,
+			failureCode: "PRIOR_TRANSIENT",
+			failureMessage: "historical failure",
+			leaseExpiresAtMs: null,
+		});
+		expect(
+			await repository.claimNextWindow(clock.nowMs(), 1_000),
+		).toMatchObject({
+			state: "RUNNING",
+			attempt: 2,
+			firstAttemptAtMs,
+			failureCode: "PRIOR_TRANSIENT",
+			failureMessage: "historical failure",
+		});
+		repository.close();
+	});
+
 	test("keeps redacted raw lineage exportable when production-derived vault data is unavailable", async () => {
 		const event = semantic(
 			1,

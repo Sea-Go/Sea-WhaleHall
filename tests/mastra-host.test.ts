@@ -221,7 +221,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("runs activity analysis with Worker results only and never calls a local Tool", async () => {
+	test("uses the conversation Agent for proactive feedback without memory or local Tools", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -270,8 +270,54 @@ describe("Mastra Node sidecar", () => {
 			),
 		).toBeFalse();
 		const modelInput = JSON.stringify(host.modelBodies[0]?.messages);
+		expect(modelInput).toContain("WhaleHall 桌面助手");
+		expect(modelInput).toContain("以 WhaleHall 对话助手一致的人格");
 		expect(modelInput).toContain("Worker-produced evidence");
 		expect(modelInput).not.toContain("raw_event");
+		expect(host.modelBodies[0]?.tools).toBeUndefined();
+		await harness.shutdown();
+	}, 30_000);
+
+	test("classifies an activity Tool response as deterministic invalid output", async () => {
+		const host = new FakeHost({ activityToolViolation: true });
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("activity.start", {
+			runId: "activity-run-tool-violation",
+			activityJobId: "activity-job-tool-violation",
+			consumedScore: 1,
+			analyses: [
+				{
+					request_id: "worker-request-tool-violation",
+					score: 1,
+					score_reason: "goal-relevant activity",
+					events: [
+						{
+							source_event_ids: ["sealed-window-tool-violation"],
+							activity: "development",
+							goal_relevance: "direct",
+							confidence: 0.9,
+							reason_codes: ["worker"],
+							evidence: ["Worker summary only"],
+							started_at_ms: 1,
+							ended_at_ms: 2,
+						},
+					],
+				},
+			],
+		});
+		const terminal = await harness.waitForRunTerminal(
+			"activity-run-tool-violation",
+		);
+		expect(terminal.event).toMatchObject({
+			kind: "run.failed",
+			error: {
+				code: "ACTIVITY_OUTPUT_INVALID",
+				retryable: false,
+			},
+		});
 		await harness.shutdown();
 	}, 30_000);
 
@@ -317,6 +363,32 @@ describe("Mastra Node sidecar", () => {
 		expect(reflectionBody?.response_format).toBeDefined();
 		expect(reflectionBody?.stream).not.toBe(true);
 		expect(host.workflowSnapshotCalls).toEqual([]);
+
+		await harness.shutdown();
+	}, 30_000);
+
+	test("classifies a semantic reflection schema violation as invalid output", async () => {
+		const host = new FakeHost({ reflectionSensorOnlyAction: true });
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+
+		const response = await harness.request("reflection.analyze", {
+			invocationId: "activity-reflection-invalid-output",
+			requestId: "activity-window-invalid-output",
+			signalSegmentIds: ["segment-1"],
+			candidateActivities: ["development"],
+			userPrompt:
+				'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"synthetic observation"}]\nACTIVITY_CONTEXT_JSON={}',
+		});
+		expect(response).toMatchObject({
+			ok: false,
+			error: {
+				code: "ACTIVITY_OUTPUT_INVALID",
+				retryable: false,
+			},
+		});
 
 		await harness.shutdown();
 	}, 30_000);
@@ -541,9 +613,9 @@ describe("Mastra Node sidecar", () => {
 				message: { content: "我来处理。日程已经按你的要求创建。" },
 			},
 		});
-		expect(host.modelOrigins.every((value) => value === "tool-run-origin")).toBe(
-			true,
-		);
+		expect(
+			host.modelOrigins.every((value) => value === "tool-run-origin"),
+		).toBe(true);
 		expect(host.calls).toContain("tool/call");
 		expect(
 			host.workflowSnapshotCalls.some(
@@ -1013,6 +1085,8 @@ class FakeHost {
 	constructor(
 		private readonly options: {
 			holdModelOpen?: boolean;
+			activityToolViolation?: boolean;
+			reflectionSensorOnlyAction?: boolean;
 			toolApprovalScenario?: boolean;
 			readToolScenario?: boolean;
 			planningConflictScenario?: boolean;
@@ -1278,7 +1352,9 @@ class FakeHost {
 			const content = JSON.stringify({
 				events: [
 					{
-						action: "推测：正在进行编程",
+						action: this.options.reflectionSensorOnlyAction
+							? "推测：应用状态更改"
+							: "推测：正在进行编程",
 						activity: "development",
 						goal_relevance: "direct",
 						confidence: 0.7,
@@ -1325,6 +1401,22 @@ class FakeHost {
 			}),
 		);
 		if (this.options.holdModelOpen) return;
+		if (
+			this.options.activityToolViolation &&
+			params.runId === "activity-run-tool-violation"
+		) {
+			await this.streamRelay(
+				request,
+				params,
+				openAiToolCallSse(
+					"forbidden-activity-tool-call",
+					"calendar_create_event",
+					{},
+				),
+				send,
+			);
+			return;
+		}
 
 		const structured = body.response_format !== undefined;
 		if (

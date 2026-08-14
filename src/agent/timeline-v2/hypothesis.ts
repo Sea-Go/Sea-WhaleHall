@@ -38,6 +38,7 @@ export interface TimelineHypothesisGenerator {
 		episodes: readonly ActivityEpisodeV2[],
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
+		signal?: AbortSignal,
 	): Promise<Map<string, EpisodeHypothesisV2>>;
 }
 
@@ -62,7 +63,9 @@ export class QwenCitedHypothesisGenerator
 		episodes: readonly ActivityEpisodeV2[],
 		facts: readonly EvidenceFactV2[],
 		goal: ActiveGoalContextV1 | null,
+		signal?: AbortSignal,
 	): Promise<Map<string, EpisodeHypothesisV2>> {
+		throwIfAborted(signal);
 		if (episodes.length === 0) return new Map();
 		const generated = deterministicHypotheses(episodes, facts);
 		const eligibleEpisodes = episodes.filter(
@@ -87,10 +90,12 @@ export class QwenCitedHypothesisGenerator
 		}
 		const selectedPacks = packs.slice(0, this.maxPacks);
 		for (const pack of selectedPacks) {
+			throwIfAborted(signal);
 			try {
 				const response = await this.client.generateJson(
-					hypothesisRequest(pack),
+					hypothesisRequest(pack, { signal }),
 				);
+				throwIfAborted(signal);
 				if (!validateResponse(response, pack)) {
 					throw new OllamaSchemaError(
 						"Ollama JSON did not match the requested schema.",
@@ -99,6 +104,7 @@ export class QwenCitedHypothesisGenerator
 				}
 				applyQwenResponse(generated, pack, response);
 			} catch (error) {
+				if (signal?.aborted) throwAbortReason(signal);
 				addDiagnostic(
 					generated,
 					pack.episodes,
@@ -148,13 +154,14 @@ export type QwenHypothesisPack = {
 
 function hypothesisRequest(
 	pack: QwenHypothesisPack,
-	options: { timeoutMs?: number } = {},
+	options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): OllamaJsonRequest<QwenHypothesisResponse> {
 	return {
 		priority: "realtime",
 		think: false,
 		temperature: 0,
 		timeoutMs: options.timeoutMs ?? QWEN_HYPOTHESIS_TIMEOUT_MS,
+		signal: options.signal,
 		maxOutputTokens: QWEN_HYPOTHESIS_MAX_OUTPUT_TOKENS,
 		schema: responseSchema(pack.episodeAliases),
 		validate: (value): value is QwenHypothesisResponse =>
@@ -263,8 +270,9 @@ function timelineDiagnostic(
  */
 export async function probeQwenHypothesisReadiness(
 	client: Pick<OllamaJsonClient, "generateJson">,
-	options: { timeoutMs?: number } = {},
+	options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<void> {
+	throwIfAborted(options.signal);
 	const fact: EvidenceFactV2 = {
 		schemaVersion: "evidence-fact.v2",
 		factId: "probe-fact",
@@ -319,8 +327,10 @@ export async function probeQwenHypothesisReadiness(
 		hypothesisRequest(pack, {
 			timeoutMs:
 				options.timeoutMs ?? QWEN_HYPOTHESIS_PROBE_TIMEOUT_MS,
+			signal: options.signal,
 		}),
 	);
+	throwIfAborted(options.signal);
 	if (!validateResponse(response, pack)) {
 		throw new OllamaSchemaError(
 			"Ollama JSON did not match the requested schema.",
@@ -502,9 +512,21 @@ export class DeterministicTimelineHypothesisGenerator
 		episodes: readonly ActivityEpisodeV2[],
 		facts: readonly EvidenceFactV2[],
 		_goal: ActiveGoalContextV1 | null,
+		signal?: AbortSignal,
 	): Promise<Map<string, EpisodeHypothesisV2>> {
+		throwIfAborted(signal);
 		return deterministicHypotheses(episodes, facts);
 	}
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throwAbortReason(signal);
+}
+
+function throwAbortReason(signal: AbortSignal): never {
+	throw signal.reason instanceof Error
+		? signal.reason
+		: new DOMException("Timeline inference was cancelled.", "AbortError");
 }
 
 function deterministicHypotheses(

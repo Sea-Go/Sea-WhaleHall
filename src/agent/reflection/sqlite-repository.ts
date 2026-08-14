@@ -279,6 +279,39 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 		return rows.map((row) => parseJson<EventWindowV1>(row.window_json));
 	}
 
+	async acknowledgeWindowForAccount(
+		accountId: string,
+		windowId: string,
+	): Promise<boolean> {
+		const owner = normalizeCloudOwnerAccountId(accountId);
+		if (owner === null) return false;
+		const current = this.database
+			.query(
+				"SELECT owner_account_id FROM reflection_window_cloud_owners WHERE window_id = ?",
+			)
+			.get(windowId) as { owner_account_id: string } | null;
+		if (current === null) return true;
+		if (current.owner_account_id !== owner) return false;
+		return (
+			this.database
+				.query(
+					`DELETE FROM reflection_window_cloud_owners
+				 WHERE owner_account_id = ? AND window_id = ?`,
+				)
+				.run(owner, windowId).changes === 1
+		);
+	}
+
+	async clearWindowsForAccount(accountId: string): Promise<number> {
+		const owner = normalizeCloudOwnerAccountId(accountId);
+		if (owner === null) return 0;
+		return this.database
+			.query(
+				"DELETE FROM reflection_window_cloud_owners WHERE owner_account_id = ?",
+			)
+			.run(owner).changes;
+	}
+
 	async getJob(windowId: string): Promise<ReflectionJobV1 | null> {
 		const row = this.jobRow(windowId);
 		return row ? jobFromRow(row) : null;
@@ -424,6 +457,38 @@ export class SqliteReflectionRepository implements ReflectionRepository {
 				state: "COMMITTING",
 				updatedAtMs: nowMs,
 				leaseExpiresAtMs: nowMs + leaseDurationMs,
+			};
+			this.updateJob(next);
+			return next;
+		});
+		return structuredClone(transaction.immediate());
+	}
+
+	async abandonClaim(
+		windowId: string,
+		nowMs: number,
+	): Promise<ReflectionJobV1> {
+		const transaction = this.database.transaction(() => {
+			const current = this.requireJob(windowId);
+			if (
+				current.state !== "RUNNING" &&
+				current.state !== "RESULT_PERSISTED" &&
+				current.state !== "COMMITTING"
+			) {
+				throw new InvalidReflectionJobTransitionError(
+					current.state,
+					"abandon claim for",
+				);
+			}
+			const priorAttempt = Math.max(0, current.attempt - 1);
+			const next: ReflectionJobV1 = {
+				...current,
+				state: current.reflection ? "RESULT_PERSISTED" : "READY",
+				attempt: priorAttempt,
+				firstAttemptAtMs: priorAttempt === 0 ? null : current.firstAttemptAtMs,
+				updatedAtMs: nowMs,
+				nextAttemptAtMs: current.reflection ? null : nowMs,
+				leaseExpiresAtMs: null,
 			};
 			this.updateJob(next);
 			return next;

@@ -146,9 +146,9 @@ function createRunner(options: {
 		repository: options.repository,
 		clock: options.clock,
 		inference: {
-			async infer(window) {
+			async infer(window, signal) {
 				if (options.inference) inferenceCalls += 1;
-				return inference.infer(window);
+				return inference.infer(window, signal);
 			},
 		},
 		committer: {
@@ -226,6 +226,127 @@ describe("ReflectionJobRunner durable state flow", () => {
 });
 
 describe("ReflectionJobRunner retries and terminal failure", () => {
+	test("shutdown abort releases the active inference claim and stops claiming", async () => {
+		const repository = new InMemoryReflectionRepository();
+		const clock = new ManualClock();
+		const first = await enqueueWindow(repository, clock, 1);
+		const second = await enqueueWindow(repository, clock, 2);
+		let startedResolve!: () => void;
+		const started = new Promise<void>((resolve) => {
+			startedResolve = resolve;
+		});
+		let receivedSignal: AbortSignal | undefined;
+		let activeWindowId: string | null = null;
+		const harness = createRunner({
+			repository,
+			clock,
+			inference: {
+				infer: async (window, signal) => {
+					activeWindowId = window.windowId;
+					receivedSignal = signal;
+					startedResolve();
+					return new Promise<ReflectionV1>((_resolve, reject) => {
+						const abort = () => reject(signal?.reason);
+						if (signal?.aborted) {
+							abort();
+							return;
+						}
+						signal?.addEventListener("abort", abort, { once: true });
+					});
+				},
+			},
+		});
+		const controller = new AbortController();
+		const running = harness.runner.runUntilIdle(100, controller.signal);
+		await started;
+
+		controller.abort(new DOMException("shutdown", "AbortError"));
+		if (activeWindowId === null) throw new Error("inference did not start");
+		const waitingWindowId =
+			activeWindowId === first.windowId ? second.windowId : first.windowId;
+		expect(await running).toEqual([
+			{
+				status: "abandoned",
+				windowId: activeWindowId,
+				phase: "inference",
+			},
+		]);
+		expect(receivedSignal).toBe(controller.signal);
+		expect(await repository.getJob(activeWindowId)).toMatchObject({
+			state: "READY",
+			attempt: 0,
+			firstAttemptAtMs: null,
+			lastFailure: null,
+		});
+		expect(await repository.getJob(waitingWindowId)).toMatchObject({
+			state: "READY",
+			attempt: 0,
+		});
+	});
+
+	test("shutdown abort never terminals an aged job and a restart can reclaim it", async () => {
+		const repository = new InMemoryReflectionRepository();
+		const clock = new ManualClock();
+		const window = await enqueueWindow(repository, clock);
+		const initial = createRunner({
+			repository,
+			clock,
+			inference: {
+				infer: async () => Promise.reject(new Error("model offline")),
+			},
+		});
+		expect((await initial.runner.runOnce()).status).toBe("retry_scheduled");
+		const prior = await repository.getJob(window.windowId);
+		expect(prior).toMatchObject({
+			state: "RETRY_WAIT",
+			attempt: 1,
+			firstAttemptAtMs: 0,
+			lastFailure: { message: "model offline" },
+		});
+
+		clock.advance(24 * 60 * 60 * 1000 + 1);
+		let startedResolve!: () => void;
+		const started = new Promise<void>((resolve) => {
+			startedResolve = resolve;
+		});
+		const interrupted = createRunner({
+			repository,
+			clock,
+			inference: {
+				infer: async (_candidate, signal) => {
+					startedResolve();
+					return new Promise<ReflectionV1>((_resolve, reject) => {
+						const abort = () => reject(signal?.reason);
+						if (signal?.aborted) return abort();
+						signal?.addEventListener("abort", abort, { once: true });
+					});
+				},
+			},
+		});
+		const controller = new AbortController();
+		const running = interrupted.runner.runOnce(controller.signal);
+		await started;
+		controller.abort(new DOMException("shutdown", "AbortError"));
+		expect(await running).toMatchObject({
+			status: "abandoned",
+			windowId: window.windowId,
+		});
+		expect(await repository.getJob(window.windowId)).toMatchObject({
+			state: "READY",
+			attempt: prior?.attempt,
+			firstAttemptAtMs: prior?.firstAttemptAtMs,
+			lastFailure: prior?.lastFailure,
+			terminalCursorReleasedAtMs: null,
+		});
+
+		const restarted = createRunner({ repository, clock });
+		expect((await restarted.runner.runOnce()).status).toBe("committed");
+		expect(await repository.getJob(window.windowId)).toMatchObject({
+			state: "COMMITTED",
+			attempt: 2,
+		});
+	});
+
 	test("inference failure waits 5 seconds before retrying", async () => {
 		const repository = new InMemoryReflectionRepository();
 		const clock = new ManualClock();

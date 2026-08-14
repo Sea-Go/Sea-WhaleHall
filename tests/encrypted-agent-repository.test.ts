@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { completeLegacyActivityPolicyCutover } from "../src/bun/activity-window-policy-cutover";
 import { AgentToolPolicy, digestArguments } from "../src/bun/agent-tool-policy";
 import {
 	CredentialHelperError,
@@ -20,6 +21,8 @@ import {
 	AgentPermissionRevisionConflictError,
 	CalendarRevisionConflictError,
 	EncryptedAgentRepository,
+	ProactiveFeedbackPolicyDisabledError,
+	ProactiveFeedbackPolicyRevisionConflictError,
 } from "../src/bun/encrypted-agent-repository";
 import { planningDraftDigest } from "../src/bun/planning-authority-digest";
 import type { CalendarEvent } from "../src/shared/calendar";
@@ -963,6 +966,937 @@ describe("EncryptedAgentRepository", () => {
 		expect(keys.createCalls).toBe(createsBeforeMissingKey);
 		missingKey.close();
 	});
+
+	test("stores an account-scoped proactive policy with an exact revision CAS", async () => {
+		const { repository } = createRepository(new MemoryKeyStore(), () => 10_000);
+		await expect(
+			repository.getProactiveFeedbackPolicy("account-a"),
+		).resolves.toEqual({
+			policy: { enabled: true, retention: 30 },
+			revision: 0,
+			updatedAtMs: null,
+		});
+		await expect(
+			repository.setProactiveFeedbackPolicy(
+				"account-a",
+				{ enabled: true, retention: 90 },
+				0,
+			),
+		).resolves.toEqual({
+			policy: { enabled: true, retention: 90 },
+			revision: 1,
+			updatedAtMs: 10_000,
+		});
+		await expect(
+			repository.setProactiveFeedbackPolicy(
+				"account-a",
+				{ enabled: false, retention: 90 },
+				0,
+			),
+		).rejects.toBeInstanceOf(ProactiveFeedbackPolicyRevisionConflictError);
+		await expect(
+			repository.getProactiveFeedbackPolicy("account-b"),
+		).resolves.toEqual(
+			expect.objectContaining({
+				policy: { enabled: true, retention: 30 },
+				revision: 0,
+			}),
+		);
+		repository.close();
+	});
+
+	test("persists a clear journal across restart and gates new proactive archives until completion", async () => {
+		const keys = new MemoryKeyStore();
+		const { path, repository } = createRepository(keys, () => 10_000);
+		await repository.ensureAccount("account-a");
+		const analysis = activityAnalysisFixture("stream-clear-journal");
+		const archive = {
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "window-clear-journal",
+			windowStartedAtMs: 1_000,
+			windowEndedAtMs: 2_000,
+			analysis,
+			archivedAtMs: 3_000,
+			consumedAtMs: null,
+			consumedRunId: null,
+		};
+		await repository.archiveProactiveFeedbackEventStream(archive);
+		await expect(
+			repository.isProactiveFeedbackClearPending("account-a"),
+		).resolves.toBe(false);
+		await repository.beginProactiveFeedbackClear("account-a");
+		await repository.beginProactiveFeedbackClear("account-a");
+		await expect(
+			repository.isProactiveFeedbackClearPending("account-a"),
+		).resolves.toBe(true);
+		expect(() =>
+			repository.assertProactiveFeedbackAcceptingWork("account-a"),
+		).toThrow(ProactiveFeedbackPolicyDisabledError);
+		await expect(
+			repository.archiveProactiveFeedbackEventStream(archive),
+		).rejects.toBeInstanceOf(ProactiveFeedbackPolicyDisabledError);
+		await expect(
+			repository.archiveProactiveFeedbackEventStream({
+				...archive,
+				id: "stream-clear-journal-new",
+				analysis: {
+					...analysis,
+					request_id: "stream-clear-journal-new",
+				},
+			}),
+		).rejects.toBeInstanceOf(ProactiveFeedbackPolicyDisabledError);
+		await expect(
+			repository.clearPendingProactiveFeedbackData("account-a"),
+		).rejects.toBeInstanceOf(ProactiveFeedbackPolicyDisabledError);
+		const feedback = {
+			id: "feedback-clear-journal",
+			generatedAtMs: 10_000,
+			message: "这条活动运行不得在清除标记后重新写入。",
+		};
+		await expect(
+			repository.putRun(
+				completedActivityRun(
+					"account-a",
+					"run-clear-journal",
+					"job-clear-journal",
+					analysis,
+					feedback,
+				),
+			),
+		).rejects.toBeInstanceOf(ProactiveFeedbackPolicyDisabledError);
+		repository.close();
+
+		const recovered = new EncryptedAgentRepository({
+			databasePath: path,
+			installationId: "install-1",
+			keyStore: keys,
+			now: () => 20_000,
+		});
+		await expect(
+			recovered.isProactiveFeedbackClearPending("account-a"),
+		).resolves.toBe(true);
+		await recovered.clearProactiveFeedbackData("account-a");
+		await expect(
+			recovered.isProactiveFeedbackClearPending("account-a"),
+		).resolves.toBe(true);
+		await recovered.completeProactiveFeedbackClear("account-a");
+		await recovered.completeProactiveFeedbackClear("account-a");
+		await expect(
+			recovered.isProactiveFeedbackClearPending("account-a"),
+		).resolves.toBe(false);
+		expect(recovered.assertProactiveFeedbackAcceptingWork("account-a")).toBe(1);
+		await expect(
+			recovered.archiveProactiveFeedbackEventStream(archive),
+		).resolves.toEqual(archive);
+		recovered.close();
+	});
+
+	test("rejects an activity write that spans an entire completed clear epoch", async () => {
+		const { repository } = createRepository(new MemoryKeyStore(), () => 30_000);
+		const analysis = activityAnalysisFixture("stream-clear-epoch-aba");
+		const feedback = {
+			id: "feedback-clear-epoch-aba",
+			generatedAtMs: 30_000,
+			message: "旧清除世代的异步写入不得复活。",
+		};
+		const staleRun = {
+			...completedActivityRun(
+				"account-a",
+				"run-clear-epoch-aba",
+				"job-clear-epoch-aba",
+				analysis,
+				feedback,
+			),
+			status: "running" as const,
+			output: { kind: "activity-analysis", result: null },
+			completedAtMs: null,
+		};
+		const prepareStarted = deferred();
+		const releasePrepare = deferred();
+		type MutablePreparation = {
+			prepareRun(record: typeof staleRun): Promise<unknown>;
+		};
+		const mutable = repository as unknown as MutablePreparation;
+		const originalPrepare = mutable.prepareRun.bind(repository);
+		mutable.prepareRun = async (record) => {
+			prepareStarted.resolve();
+			await releasePrepare.promise;
+			return originalPrepare(record);
+		};
+		const lateWrite = repository.putRun(staleRun);
+		await prepareStarted.promise;
+		await repository.beginProactiveFeedbackClear("account-a");
+		await repository.clearProactiveFeedbackData("account-a");
+		await repository.completeProactiveFeedbackClear("account-a");
+		releasePrepare.resolve();
+		await expect(lateWrite).rejects.toBeInstanceOf(
+			ProactiveFeedbackPolicyDisabledError,
+		);
+		await expect(
+			repository.getRun("account-a", staleRun.id),
+		).resolves.toBeNull();
+
+		const freshEpoch =
+			repository.assertProactiveFeedbackAcceptingWork("account-a");
+		await expect(
+			repository.putRun({
+				...staleRun,
+				id: "run-clear-epoch-fresh",
+				input: {
+					...(staleRun.input as Record<string, unknown>),
+					clearEpoch: freshEpoch,
+				},
+			}),
+		).resolves.toEqual(
+			expect.objectContaining({ id: "run-clear-epoch-fresh" }),
+		);
+		repository.close();
+	});
+
+	test("persists an incomplete pending reset across restart until all stores confirm cleanup", async () => {
+		const keys = new MemoryKeyStore();
+		const { path, repository } = createRepository(keys, () => 25_000);
+		await repository.ensureAccount("account-a");
+		await repository.beginProactiveFeedbackPendingReset("account-a");
+		await repository.beginProactiveFeedbackPendingReset("account-a");
+		await expect(
+			repository.isProactiveFeedbackPendingReset("account-a"),
+		).resolves.toBeTrue();
+		expect(() =>
+			repository.assertProactiveFeedbackAcceptingWork("account-a"),
+		).toThrow(ProactiveFeedbackPolicyDisabledError);
+		repository.close();
+
+		const recovered = new EncryptedAgentRepository({
+			databasePath: path,
+			installationId: "install-1",
+			keyStore: keys,
+			now: () => 26_000,
+		});
+		await expect(
+			recovered.isProactiveFeedbackPendingReset("account-a"),
+		).resolves.toBeTrue();
+		await recovered.clearPendingProactiveFeedbackData("account-a");
+		await recovered.completeProactiveFeedbackPendingReset("account-a");
+		await expect(
+			recovered.isProactiveFeedbackPendingReset("account-a"),
+		).resolves.toBeFalse();
+		expect(recovered.assertProactiveFeedbackAcceptingWork("account-a")).toBe(1);
+		recovered.close();
+	});
+
+	test("wraps the legacy Worker cutover in the real durable reset journal", async () => {
+		const { repository } = createRepository(new MemoryKeyStore(), () => 27_000);
+		await repository.ensureAccount("account-a");
+		let legacyState: "pending" | "complete" = "pending";
+		const readLegacyState = (): "pending" | "complete" => legacyState;
+		let sourceClears = 0;
+		await completeLegacyActivityPolicyCutover(
+			{
+				getLegacyPolicyCutoverStatus: () => ({ state: legacyState }),
+				clearLegacyPolicyCutoverWorkerData: () => undefined,
+				markLegacyPolicyCutoverComplete: () => {
+					legacyState = "complete";
+					return true;
+				},
+			},
+			{
+				clearWindowsForAccount: async () => {
+					sourceClears += 1;
+				},
+			},
+			repository,
+			"account-a",
+		);
+		expect(readLegacyState()).toBe("complete");
+		expect(sourceClears).toBe(1);
+		await expect(
+			repository.isProactiveFeedbackPendingReset("account-a"),
+		).resolves.toBeFalse();
+		expect(repository.assertProactiveFeedbackAcceptingWork("account-a")).toBe(
+			1,
+		);
+		repository.close();
+	});
+
+	test("atomically promotes a pending reset into the stronger full-clear journal", async () => {
+		const { repository } = createRepository(new MemoryKeyStore(), () => 28_000);
+		await repository.ensureAccount("account-a");
+		await repository.beginProactiveFeedbackPendingReset("account-a");
+		await repository.beginProactiveFeedbackClear("account-a");
+		await repository.beginProactiveFeedbackClear("account-a");
+		await expect(
+			repository.isProactiveFeedbackPendingReset("account-a"),
+		).resolves.toBeFalse();
+		await expect(
+			repository.isProactiveFeedbackClearPending("account-a"),
+		).resolves.toBeTrue();
+		await repository.clearProactiveFeedbackData("account-a");
+		await repository.completeProactiveFeedbackClear("account-a");
+		expect(repository.assertProactiveFeedbackAcceptingWork("account-a")).toBe(
+			1,
+		);
+		repository.close();
+	});
+
+	test("upgrades schema v6 with the durable pending-reset journal", async () => {
+		const keys = new MemoryKeyStore();
+		const { path, repository } = createRepository(keys, () => 29_000);
+		await repository.ensureAccount("account-a");
+		repository.close();
+
+		const legacy = new Database(path, { strict: true });
+		legacy
+			.query(
+				"UPDATE encrypted_agent_schema SET version = 6 WHERE singleton = 1",
+			)
+			.run();
+		legacy.exec("DROP TABLE proactive_feedback_pending_reset_journal;");
+		legacy.close();
+
+		const upgraded = new EncryptedAgentRepository({
+			databasePath: path,
+			installationId: "install-1",
+			keyStore: keys,
+			now: () => 30_000,
+		});
+		await upgraded.beginProactiveFeedbackPendingReset("account-a");
+		await expect(
+			upgraded.isProactiveFeedbackPendingReset("account-a"),
+		).resolves.toBeTrue();
+		upgraded.close();
+
+		const verified = new Database(path, { readonly: true, strict: true });
+		expect(
+			verified
+				.query("SELECT version FROM encrypted_agent_schema WHERE singleton = 1")
+				.get(),
+		).toEqual({ version: 7 });
+		verified.close();
+	});
+
+	test("rotates the work epoch before an ordinary pending reset can be re-enabled", async () => {
+		const { repository } = createRepository(new MemoryKeyStore(), () => 40_000);
+		const analysis = activityAnalysisFixture("stream-pending-reset-aba");
+		const feedback = {
+			id: "feedback-pending-reset-aba",
+			generatedAtMs: 40_000,
+			message: "普通关闭前开始的异步写入不得在重新启用后复活。",
+		};
+		const staleRun = {
+			...completedActivityRun(
+				"account-a",
+				"run-pending-reset-aba",
+				"job-pending-reset-aba",
+				analysis,
+				feedback,
+			),
+			status: "running" as const,
+			output: { kind: "activity-analysis", result: null },
+			completedAtMs: null,
+		};
+		const prepareStarted = deferred();
+		const releasePrepare = deferred();
+		type MutablePreparation = {
+			prepareRun(record: typeof staleRun): Promise<unknown>;
+		};
+		const mutable = repository as unknown as MutablePreparation;
+		const originalPrepare = mutable.prepareRun.bind(repository);
+		mutable.prepareRun = async (record) => {
+			prepareStarted.resolve();
+			await releasePrepare.promise;
+			return originalPrepare(record);
+		};
+
+		const lateWrite = repository.putRun(staleRun);
+		await prepareStarted.promise;
+		await repository.setProactiveFeedbackPolicy(
+			"account-a",
+			{ enabled: false, retention: 30 },
+			0,
+		);
+		await repository.beginProactiveFeedbackPendingReset("account-a");
+		await repository.clearPendingProactiveFeedbackData("account-a");
+		await repository.completeProactiveFeedbackPendingReset("account-a");
+		await repository.setProactiveFeedbackPolicy(
+			"account-a",
+			{ enabled: true, retention: 30 },
+			1,
+		);
+		releasePrepare.resolve();
+		await expect(lateWrite).rejects.toBeInstanceOf(
+			ProactiveFeedbackPolicyDisabledError,
+		);
+		await expect(
+			repository.getRun("account-a", staleRun.id),
+		).resolves.toBeNull();
+
+		const freshEpoch =
+			repository.assertProactiveFeedbackAcceptingWork("account-a");
+		expect(freshEpoch).toBe(1);
+		await expect(
+			repository.putRun({
+				...staleRun,
+				id: "run-pending-reset-fresh",
+				input: {
+					...(staleRun.input as Record<string, unknown>),
+					clearEpoch: freshEpoch,
+				},
+			}),
+		).resolves.toEqual(
+			expect.objectContaining({ id: "run-pending-reset-fresh" }),
+		);
+		repository.close();
+	});
+
+	test("rejects an archive read that spans an ordinary pending reset", async () => {
+		const { repository } = createRepository(new MemoryKeyStore(), () => 50_000);
+		await repository.ensureAccount("account-a");
+		const analysis = activityAnalysisFixture("stream-archive-reset-aba");
+		const archive = {
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "window-archive-reset-aba",
+			windowStartedAtMs: 1_000,
+			windowEndedAtMs: 2_000,
+			analysis,
+			archivedAtMs: 3_000,
+			consumedAtMs: null,
+			consumedRunId: null,
+		};
+		const readStarted = deferred();
+		const releaseRead = deferred();
+		const originalGet =
+			repository.getProactiveFeedbackEventStream.bind(repository);
+		repository.getProactiveFeedbackEventStream = async (
+			accountId,
+			streamId,
+		) => {
+			if (streamId === archive.id) {
+				readStarted.resolve();
+				await releaseRead.promise;
+			}
+			return originalGet(accountId, streamId);
+		};
+
+		const lateArchive = repository.archiveProactiveFeedbackEventStream(archive);
+		await readStarted.promise;
+		await repository.setProactiveFeedbackPolicy(
+			"account-a",
+			{ enabled: false, retention: 30 },
+			0,
+		);
+		await repository.beginProactiveFeedbackPendingReset("account-a");
+		await repository.clearPendingProactiveFeedbackData("account-a");
+		await repository.completeProactiveFeedbackPendingReset("account-a");
+		await repository.setProactiveFeedbackPolicy(
+			"account-a",
+			{ enabled: true, retention: 30 },
+			1,
+		);
+		releaseRead.resolve();
+		await expect(lateArchive).rejects.toBeInstanceOf(
+			ProactiveFeedbackPolicyDisabledError,
+		);
+		await expect(originalGet("account-a", archive.id)).resolves.toBeNull();
+		repository.close();
+	});
+
+	test("replays the archive-before-receipt crash gap by immutable identity", async () => {
+		const keys = new MemoryKeyStore();
+		const { path, repository } = createRepository(keys, () => 10_000);
+		const analysis = activityAnalysisFixture("stream-crash-gap");
+		const first = {
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "window-crash-gap",
+			windowStartedAtMs: 1_000,
+			windowEndedAtMs: 2_000,
+			analysis,
+			archivedAtMs: 3_000,
+			consumedAtMs: null,
+			consumedRunId: null,
+		};
+		await expect(
+			repository.archiveProactiveFeedbackEventStream(first),
+		).resolves.toEqual(first);
+		repository.close();
+
+		const recovered = new EncryptedAgentRepository({
+			databasePath: path,
+			installationId: "install-1",
+			keyStore: keys,
+			now: () => 20_000,
+		});
+		await expect(
+			recovered.archiveProactiveFeedbackEventStream({
+				...first,
+				archivedAtMs: 20_000,
+			}),
+		).resolves.toEqual(first);
+		await expect(
+			recovered.archiveProactiveFeedbackEventStream({
+				...first,
+				analysis: { ...analysis, score_reason: "不同语义" },
+				archivedAtMs: 20_000,
+			}),
+		).rejects.toEqual(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+		recovered.close();
+	});
+
+	test("atomically finalizes run, history, and streams while policy remains enabled", async () => {
+		let now = 100_000;
+		const { repository } = createRepository(new MemoryKeyStore(), () => now);
+		const analysis = activityAnalysisFixture("stream-finalize");
+		await repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "window-finalize",
+			windowStartedAtMs: 1_000,
+			windowEndedAtMs: 2_000,
+			analysis,
+			archivedAtMs: 1,
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		const feedback = {
+			id: "proactive-feedback-run-finalize",
+			generatedAtMs: now,
+			message: "主题：专注开发。分数已达到反馈阈值；可以谨慎核对下一步。",
+		};
+		const run = completedActivityRun(
+			"account-a",
+			"run-finalize",
+			"job-finalize",
+			analysis,
+			feedback,
+		);
+		await expect(
+			repository.completeProactiveFeedbackRun({
+				run,
+				sourceStreamIds: [analysis.request_id],
+				feedback,
+			}),
+		).resolves.toEqual(feedback);
+		await expect(
+			repository.verifyCompletedProactiveFeedbackRun({
+				accountId: "account-a",
+				runId: run.id,
+				jobId: "job-finalize",
+				originatingRequestId: `request-${run.id}`,
+				consumedScore: analysis.score,
+				analyses: [analysis],
+			}),
+		).resolves.toBeTrue();
+		await expect(
+			repository.verifyCompletedProactiveFeedbackRun({
+				accountId: "account-a",
+				runId: run.id,
+				jobId: "job-finalize",
+				originatingRequestId: "different-semantic-request",
+				consumedScore: analysis.score,
+				analyses: [analysis],
+			}),
+		).resolves.toBeFalse();
+		await expect(
+			repository.verifyCompletedProactiveFeedbackRun({
+				accountId: "account-a",
+				runId: run.id,
+				jobId: "job-finalize",
+				originatingRequestId: `request-${run.id}`,
+				consumedScore: analysis.score,
+				analyses: [
+					{
+						...analysis,
+						score_reason: "同一来源 ID 下的不同正文",
+					},
+				],
+			}),
+		).resolves.toBeFalse();
+		await expect(
+			repository.listProactiveFeedback("account-a"),
+		).resolves.toEqual({
+			items: [feedback],
+			nextCursor: null,
+		});
+		await expect(
+			repository.listProactiveFeedback("account-b"),
+		).resolves.toEqual({
+			items: [],
+			nextCursor: null,
+		});
+		await expect(
+			repository.deleteActivityAnalysisRuns("account-a", [run.id]),
+		).resolves.toBe(0);
+		await expect(repository.getRun("account-a", run.id)).resolves.toEqual(run);
+		const changedFeedback = {
+			...feedback,
+			message: "同一 ID 下的不同正文不得静默成功。",
+		};
+		await expect(
+			repository.completeProactiveFeedbackRun({
+				run: completedActivityRun(
+					"account-a",
+					run.id,
+					"job-finalize",
+					analysis,
+					changedFeedback,
+				),
+				sourceStreamIds: [analysis.request_id],
+				feedback: changedFeedback,
+			}),
+		).rejects.toEqual(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+
+		// Retention is anchored at consumption/completion, never the old archive time.
+		now += 29 * 24 * 60 * 60 * 1_000;
+		await expect(
+			repository.cleanupProactiveFeedback("account-a", now),
+		).resolves.toEqual({
+			deletedEventStreamCount: 0,
+			deletedHistoryCount: 0,
+		});
+		now += 2 * 24 * 60 * 60 * 1_000;
+		await expect(
+			repository.cleanupProactiveFeedback("account-a", now, [run.id, run.id]),
+		).resolves.toEqual({
+			deletedEventStreamCount: 0,
+			deletedHistoryCount: 0,
+		});
+		await expect(
+			repository.verifyCompletedProactiveFeedbackRun({
+				accountId: "account-a",
+				runId: run.id,
+				jobId: "job-finalize",
+				originatingRequestId: `request-${run.id}`,
+				consumedScore: analysis.score,
+				analyses: [analysis],
+			}),
+		).resolves.toBeTrue();
+		await expect(
+			repository.cleanupProactiveFeedback("account-a", now),
+		).resolves.toEqual({
+			deletedEventStreamCount: 1,
+			deletedHistoryCount: 1,
+		});
+		repository.close();
+	});
+
+	test("paginates more than twenty feedback rows generated in the same millisecond", async () => {
+		const generatedAtMs = 200_000;
+		const { repository } = createRepository(
+			new MemoryKeyStore(),
+			() => generatedAtMs,
+		);
+		for (let index = 0; index < 21; index += 1) {
+			const suffix = index.toString().padStart(2, "0");
+			const analysis = activityAnalysisFixture(`stream-page-${suffix}`);
+			await repository.archiveProactiveFeedbackEventStream({
+				accountId: "account-a",
+				id: analysis.request_id,
+				sourceWindowId: `window-page-${suffix}`,
+				windowStartedAtMs: 1_000,
+				windowEndedAtMs: 2_000,
+				analysis,
+				archivedAtMs: generatedAtMs - 1,
+				consumedAtMs: null,
+				consumedRunId: null,
+			});
+			const feedback = {
+				id: `feedback-page-${suffix}`,
+				generatedAtMs,
+				message: `主动反馈 ${suffix}`,
+			};
+			const run = completedActivityRun(
+				"account-a",
+				`run-page-${suffix}`,
+				`job-page-${suffix}`,
+				analysis,
+				feedback,
+			);
+			await repository.completeProactiveFeedbackRun({
+				run,
+				sourceStreamIds: [analysis.request_id],
+				feedback,
+			});
+		}
+
+		const first = await repository.listProactiveFeedback("account-a", {
+			limit: 20,
+		});
+		expect(first.items).toHaveLength(20);
+		expect(first.nextCursor).toEqual(
+			expect.objectContaining({ generatedAtMs }),
+		);
+		const second = await repository.listProactiveFeedback("account-a", {
+			limit: 20,
+			cursor: first.nextCursor!,
+		});
+		expect(second.items).toHaveLength(1);
+		expect(second.nextCursor).toBeNull();
+		const ids = [...first.items, ...second.items].map((item) => item.id);
+		expect(new Set(ids).size).toBe(21);
+		expect(ids).toEqual([...ids].sort().reverse());
+		repository.close();
+	});
+
+	test("sweeps only old history-free activity run orphans under forever retention", async () => {
+		const dayMs = 24 * 60 * 60 * 1_000;
+		let now = 3 * dayMs;
+		const { path, repository } = createRepository(
+			new MemoryKeyStore(),
+			() => now,
+		);
+		await repository.setProactiveFeedbackPolicy(
+			"account-a",
+			{ enabled: true, retention: "forever" },
+			0,
+		);
+		const analysis = activityAnalysisFixture("stream-orphan-history");
+		const activityRun = (suffix: string, updatedAtMs: number) => {
+			const jobId = `activity_analysis_${suffix}`;
+			return {
+				accountId: "account-a",
+				id: `activity-run-${jobId}-1-${suffix}`,
+				conversationId: null,
+				workflowId: jobId,
+				status: "failed" as const,
+				input: {
+					kind: "activity-analysis",
+					jobId,
+					requestId: `activity-request-${suffix}`,
+					consumedScore: analysis.score,
+					analyses: [structuredClone(analysis)],
+				},
+				output: null,
+				error: { code: "MODEL_RELAY_UNAVAILABLE" },
+				createdAtMs: Math.max(0, updatedAtMs - 1),
+				updatedAtMs,
+				completedAtMs: updatedAtMs,
+			};
+		};
+		const direct = activityRun("direct-delete", 1_000);
+		const orphan = activityRun("orphan", 1_001);
+		const protectedRun = activityRun("protected", 1_002);
+		const recent = activityRun("recent", now - 1_000);
+		const decoy = {
+			...activityRun("planning-decoy", 1_003),
+			input: { kind: "task-planning" },
+		};
+		const corruptNoncandidate = {
+			...activityRun("corrupt-noncandidate", 1_004),
+			// These near-prefixes matched the old SQL LIKE underscores. GLOB keeps
+			// this unrelated corrupt row outside the decrypt candidate set.
+			id: "activity-run-activityXanalysis_corrupt-1-noncandidate",
+			workflowId: "activityXanalysis_corrupt",
+			input: { kind: "task-planning" },
+		};
+		for (const run of [
+			direct,
+			orphan,
+			protectedRun,
+			recent,
+			decoy,
+			corruptNoncandidate,
+		]) {
+			await repository.putRun(run);
+		}
+
+		await repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "window-orphan-history",
+			windowStartedAtMs: 100,
+			windowEndedAtMs: 200,
+			analysis,
+			archivedAtMs: 300,
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		const historyRunId = "activity-run-activity_analysis_history-1-history";
+		const historyFeedback = {
+			id: `proactive-feedback-${historyRunId}`,
+			generatedAtMs: 1_000,
+			message: "已完成且有历史引用的主动反馈不得作为孤儿删除。",
+		};
+		const historyRun = completedActivityRun(
+			"account-a",
+			historyRunId,
+			"activity_analysis_history",
+			analysis,
+			historyFeedback,
+		);
+		await repository.completeProactiveFeedbackRun({
+			run: historyRun,
+			sourceStreamIds: [analysis.request_id],
+			feedback: historyFeedback,
+		});
+
+		const corrupt = new Database(path, { strict: true });
+		corrupt
+			.query(
+				`UPDATE agent_runs SET input_ciphertext = ?
+				 WHERE account_id = ? AND run_id = ?`,
+			)
+			.run(Uint8Array.of(0, 1, 2, 3), "account-a", corruptNoncandidate.id);
+		corrupt.close();
+
+		await expect(
+			repository.deleteActivityAnalysisRuns("account-a", [direct.id, decoy.id]),
+		).resolves.toBe(1);
+		await expect(repository.getRun("account-a", direct.id)).resolves.toBeNull();
+		await expect(repository.getRun("account-a", decoy.id)).resolves.toEqual(
+			decoy,
+		);
+		await expect(
+			repository.deleteActivityAnalysisRuns("account-a", [historyRun.id]),
+		).resolves.toBe(0);
+
+		await expect(
+			repository.cleanupProactiveFeedback("account-a", now, [protectedRun.id]),
+		).resolves.toEqual({
+			deletedEventStreamCount: 0,
+			deletedHistoryCount: 0,
+		});
+		await expect(repository.getRun("account-a", orphan.id)).resolves.toBeNull();
+		await expect(
+			repository.getRun("account-a", protectedRun.id),
+		).resolves.toEqual(protectedRun);
+		await expect(repository.getRun("account-a", recent.id)).resolves.toEqual(
+			recent,
+		);
+		await expect(repository.getRun("account-a", decoy.id)).resolves.toEqual(
+			decoy,
+		);
+		await expect(
+			repository.getRun("account-a", historyRun.id),
+		).resolves.toEqual(historyRun);
+
+		const inspect = new Database(path, { strict: true });
+		const corruptRow = inspect
+			.query(
+				"SELECT COUNT(*) AS count FROM agent_runs WHERE account_id = ? AND run_id = ?",
+			)
+			.get("account-a", corruptNoncandidate.id) as { count: number };
+		inspect.close();
+		expect(corruptRow.count).toBe(1);
+
+		now += dayMs + 1;
+		await expect(
+			repository.cleanupProactiveFeedback("account-a", now),
+		).resolves.toEqual({
+			deletedEventStreamCount: 0,
+			deletedHistoryCount: 0,
+		});
+		await expect(
+			repository.getRun("account-a", protectedRun.id),
+		).resolves.toBeNull();
+		await expect(repository.getRun("account-a", recent.id)).resolves.toBeNull();
+		await expect(repository.getRun("account-a", decoy.id)).resolves.toEqual(
+			decoy,
+		);
+		await expect(
+			repository.getRun("account-a", historyRun.id),
+		).resolves.toEqual(historyRun);
+		await expect(
+			repository.listProactiveFeedback("account-a"),
+		).resolves.toEqual({
+			items: [historyFeedback],
+			nextCursor: null,
+		});
+		repository.close();
+	});
+
+	test("fails closed when policy is disabled between archive and finalize", async () => {
+		const { repository } = createRepository(
+			new MemoryKeyStore(),
+			() => 100_000,
+		);
+		const analysis = activityAnalysisFixture("stream-policy-race");
+		await repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "window-policy-race",
+			windowStartedAtMs: 1_000,
+			windowEndedAtMs: 2_000,
+			analysis,
+			archivedAtMs: 3_000,
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		const feedback = {
+			id: "feedback-policy-race",
+			generatedAtMs: 100_000,
+			message: "策略关闭后不得产生这条历史。",
+		};
+		const runningActivity = {
+			...completedActivityRun(
+				"account-a",
+				"run-policy-race",
+				"job-policy-race",
+				analysis,
+				feedback,
+			),
+			status: "running" as const,
+			output: { kind: "activity-analysis", result: null },
+			completedAtMs: null,
+		};
+		await repository.putRun(runningActivity);
+		const planningRun = {
+			...runningActivity,
+			id: "planning-run-preserved",
+			workflowId: "planning-workflow",
+			input: { kind: "task-planning" },
+			output: { kind: "task-planning" },
+		};
+		await repository.putRun(planningRun);
+		await repository.setProactiveFeedbackPolicy(
+			"account-a",
+			{ enabled: false, retention: 30 },
+			0,
+		);
+		await expect(
+			repository.completeProactiveFeedbackRun({
+				run: completedActivityRun(
+					"account-a",
+					"run-policy-race",
+					"job-policy-race",
+					analysis,
+					feedback,
+				),
+				sourceStreamIds: [analysis.request_id],
+				feedback,
+			}),
+		).rejects.toBeInstanceOf(ProactiveFeedbackPolicyDisabledError);
+		await expect(
+			repository.listProactiveFeedback("account-a"),
+		).resolves.toEqual({
+			items: [],
+			nextCursor: null,
+		});
+		await expect(
+			repository.getProactiveFeedbackEventStream(
+				"account-a",
+				analysis.request_id,
+			),
+		).resolves.toEqual(expect.objectContaining({ consumedAtMs: null }));
+		await repository.beginProactiveFeedbackPendingReset("account-a");
+		await expect(
+			repository.clearPendingProactiveFeedbackData("account-a"),
+		).resolves.toEqual({
+			clearedAtMs: 100_000,
+			deletedEventStreamCount: 1,
+			deletedRunCount: 1,
+		});
+		await repository.completeProactiveFeedbackPendingReset("account-a");
+		await expect(
+			repository.getRun("account-a", runningActivity.id),
+		).resolves.toBeNull();
+		await expect(
+			repository.getRun("account-a", planningRun.id),
+		).resolves.toEqual(planningRun);
+		repository.close();
+	});
 });
 
 class MemoryKeyStore implements CredentialKeyStore {
@@ -1003,6 +1937,14 @@ function referenceKey(reference: CredentialKeyReference): string {
 	return `${reference.installationId}:${reference.accountId}:v${reference.keyVersion}`;
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((settle) => {
+		resolve = settle;
+	});
+	return { promise, resolve };
+}
+
 function createRepository(
 	keyStore: CredentialKeyStore,
 	now?: () => number,
@@ -1018,6 +1960,59 @@ function createRepository(
 			keyStore,
 			now,
 		}),
+	};
+}
+
+function activityAnalysisFixture(requestId: string) {
+	return {
+		request_id: requestId,
+		events: [
+			{
+				time: "00:00:01-00:00:02",
+				action: "确定：正在进行开发",
+				source_event_ids: ["window-source"],
+				activity: "development",
+				goal_relevance: "direct",
+				confidence: 0.9,
+				reason_codes: ["editor_activity"],
+				evidence: ["编辑器活动"],
+				started_at_ms: 1_000,
+				ended_at_ms: 2_000,
+			},
+		],
+		score: 1,
+		score_reason: "与当前目标直接相关",
+	};
+}
+
+function completedActivityRun(
+	accountId: string,
+	runId: string,
+	jobId: string,
+	analysis: ReturnType<typeof activityAnalysisFixture>,
+	feedback: { id: string; generatedAtMs: number; message: string },
+) {
+	return {
+		accountId,
+		id: runId,
+		conversationId: null,
+		workflowId: jobId,
+		status: "completed" as const,
+		input: {
+			kind: "activity-analysis",
+			jobId,
+			requestId: `request-${runId}`,
+			consumedScore: analysis.score,
+			analyses: [structuredClone(analysis)],
+		},
+		output: {
+			kind: "activity-analysis",
+			result: feedback.message,
+		},
+		error: null,
+		createdAtMs: feedback.generatedAtMs - 1,
+		updatedAtMs: feedback.generatedAtMs,
+		completedAtMs: feedback.generatedAtMs,
 	};
 }
 

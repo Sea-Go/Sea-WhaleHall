@@ -2,6 +2,7 @@ import type { LocalVaultKeyStatus } from "../agent/local-protocol";
 
 export type ManagedTimelineRuntime = {
 	start(): Promise<void>;
+	beginShutdown?(): void;
 	close(): Promise<void>;
 };
 
@@ -105,9 +106,7 @@ export class TimelineRuntimeLifecycle<
 
 	close(): Promise<void> {
 		if (this.closePromise !== null) return this.closePromise;
-		this.closed = true;
-		this.retryEnabled = false;
-		this.cancelScheduledRetry();
+		this.beginShutdown();
 		this.closePromise = (async () => {
 			await this.startPromise?.catch(() => undefined);
 			const runtime = this.runtime;
@@ -117,17 +116,28 @@ export class TimelineRuntimeLifecycle<
 		return this.closePromise;
 	}
 
+	/** Synchronously seals candidate/retry ingress without closing the owner. */
+	beginShutdown(): void {
+		this.runtime?.beginShutdown?.();
+		if (this.closed) return;
+		this.closed = true;
+		this.retryEnabled = false;
+		this.cancelScheduledRetry();
+	}
+
 	private async startCandidate(): Promise<Runtime> {
 		let candidate: Runtime | null = null;
 		try {
 			candidate = await this.options.createRuntime();
 			if (this.closed) {
+				candidate.beginShutdown?.();
 				await candidate.close();
 				candidate = null;
 				throw new Error("Timeline runtime lifecycle is closed.");
 			}
 			await candidate.start();
 			if (this.closed) {
+				candidate.beginShutdown?.();
 				await candidate.close();
 				candidate = null;
 				throw new Error("Timeline runtime lifecycle is closed.");

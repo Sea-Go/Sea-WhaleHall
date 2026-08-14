@@ -1,0 +1,200 @@
+.app-update-banner {
+	position: fixed;
+	top: var(--space-4);
+	left: 50%;
+	z-index: var(--z-toast);
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: center;
+	gap: var(--space-3);
+	width: min(720px, calc(100vw - var(--space-8)));
+	min-width: 0;
+	padding: var(--space-3) var(--space-4);
+	border: 1px solid var(--color-accent-border);
+	border-radius: var(--radius-lg);
+	color: var(--color-text-primary);
+	background: var(--color-surface-overlay);
+	box-shadow: var(--shadow-popover);
+	transform: translateX(-50%);
+}
+
+.app-update-banner--mandatory {
+	border-color: var(--color-border-hover);
+}
+
+.app-update-banner__icon,
+.app-update-settings__icon {
+	display: grid;
+	place-items: center;
+	width: 34px;
+	height: 34px;
+	border-radius: var(--radius-md);
+	color: var(--color-accent-strong);
+	background: var(--color-accent-soft);
+}
+
+.app-update-banner__copy {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+}
+
+.app-update-banner__copy strong {
+	font-size: var(--font-size-sm);
+	font-weight: var(--font-weight-semibold);
+}
+
+.app-update-banner__copy > span {
+	overflow: hidden;
+	color: var(--color-text-secondary);
+	font-size: var(--font-size-xs);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.app-update-banner__actions {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+}
+
+.app-update-progress {
+	width: 100%;
+	height: 4px;
+	margin-top: var(--space-2);
+	overflow: hidden;
+	border-radius: var(--radius-full);
+	background: var(--color-border-muted);
+}
+
+.app-update-progress > span {
+	display: block;
+	height: 100%;
+	border-radius: inherit;
+	background: var(--color-accent);
+	transition: width var(--motion-normal) var(--ease-standard);
+}
+
+.app-update-settings {
+	display: grid;
+	gap: var(--space-5);
+	margin-top: var(--space-5);
+	padding: var(--space-5);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-lg);
+	background: var(--color-surface-muted);
+}
+
+.app-update-settings__heading {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: center;
+	gap: var(--space-3);
+}
+
+.app-update-settings__heading > div {
+	min-width: 0;
+}
+
+.app-update-settings__heading strong,
+.app-update-settings__notes strong {
+	color: var(--color-text-primary);
+	font-size: var(--font-size-sm);
+	font-weight: var(--font-weight-semibold);
+}
+
+.app-update-settings__heading p,
+.app-update-settings__notes p {
+	margin: var(--space-1) 0 0;
+	color: var(--color-text-secondary);
+	font-size: var(--font-size-xs);
+	line-height: var(--line-height-body);
+}
+
+.app-update-settings__versions {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: var(--space-3);
+	margin: 0;
+}
+
+.app-update-settings__versions > div {
+	display: grid;
+	gap: var(--space-1);
+	padding: var(--space-3);
+	border: 1px solid var(--color-border-muted);
+	border-radius: var(--radius-md);
+	background: var(--color-surface);
+}
+
+.app-update-settings__versions dt {
+	color: var(--color-text-subtle);
+	font-size: var(--font-size-xs);
+}
+
+.app-update-settings__versions dd {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	margin: 0;
+	color: var(--color-text-primary);
+	font-size: var(--font-size-sm);
+	font-weight: var(--font-weight-medium);
+}
+
+.app-update-settings__mandatory,
+.app-update-mark {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	color: var(--color-warning);
+	font-size: 11px;
+	font-weight: var(--font-weight-semibold);
+}
+
+.app-update-settings__progress {
+	display: grid;
+	gap: var(--space-2);
+}
+
+.app-update-settings__progress > span {
+	color: var(--color-text-subtle);
+	font-size: var(--font-size-xs);
+	text-align: right;
+}
+
+.app-update-settings__notes {
+	padding-top: var(--space-4);
+	border-top: 1px solid var(--color-border-muted);
+}
+
+.app-update-settings__notes p {
+	max-height: 180px;
+	overflow: auto;
+	white-space: pre-wrap;
+}
+
+.app-update-mark__dot {
+	width: 7px;
+	height: 7px;
+	border-radius: var(--radius-full);
+	background: var(--color-warning);
+	box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+@media (max-height: 760px) {
+	.app-update-banner {
+		top: var(--space-2);
+	}
+
+	.app-update-settings {
+		gap: var(--space-3);
+		padding: var(--space-4);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.app-update-progress > span {
+		transition: none;
+	}
+}

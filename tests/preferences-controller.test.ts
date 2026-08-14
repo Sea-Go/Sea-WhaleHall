@@ -7,7 +7,9 @@ import { PreferencesController } from "../src/views/client/features/settings/Pre
 import type { PreferencesService } from "../src/views/client/features/settings/preferences-service";
 import { MockPreferencesService } from "../src/views/client/infrastructure/settings/MockPreferencesService";
 
-function compactAppearance(values: PreferenceValues): PreferenceValues["appearance"] {
+function compactAppearance(
+	values: PreferenceValues,
+): PreferenceValues["appearance"] {
 	return {
 		...values.appearance,
 		density: "compact",
@@ -130,8 +132,9 @@ describe("PreferencesController", () => {
 	});
 
 	test("deduplicates repeated saves while persistent storage is pending", async () => {
-		let resolveSave: (value: Awaited<ReturnType<PreferencesService["save"]>>) => void =
-			() => {};
+		let resolveSave: (
+			value: Awaited<ReturnType<PreferencesService["save"]>>,
+		) => void = () => {};
 		const defaults = createDefaultPreferences();
 		const service: PreferencesService = {
 			async load() {
@@ -241,6 +244,7 @@ describe("PreferencesController", () => {
 				calendar: defaults.calendar,
 				privacy: {
 					...defaults.privacy,
+					activityInsights: false,
 					retentionDays: 90,
 				},
 			},
@@ -271,7 +275,7 @@ describe("PreferencesController", () => {
 			density: "compact",
 			reduceMotion: true,
 		});
-		expect(state.snapshot.values.privacy.retentionDays).toBe(90);
+		expect(state.snapshot.values.privacy).toEqual({ browserInsights: false });
 	});
 
 	test("migrates the retired ocean theme to observatory", async () => {

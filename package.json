@@ -13,6 +13,7 @@
 		"build:views": "vite build && bun run scripts/stage-view-assets.ts",
 		"build:native": "bun run scripts/build-native.ts",
 		"build:canary": "electrobun build --env=canary",
+		"build:stable": "electrobun build --env=stable",
 		"setup:macos-signing": "bun run scripts/setup-macos-signing.ts",
 		"start:model-relay": "node build/model-relay/main.js",
 		"typecheck": "tsc --noEmit",
@@ -38,6 +39,9 @@
 		"rrule": "2.8.1",
 		"temporal-polyfill": "1.0.2",
 		"zod": "4.4.3"
+	},
+	"patchedDependencies": {
+		"electrobun@1.18.1": "patches/electrobun@1.18.1.patch"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.6",

@@ -1,42 +1,61 @@
 import { Electroview } from "electrobun/view";
+import type { AppUpdateSnapshot } from "../../shared/app-update";
+import type { AuthCredentials } from "../../shared/auth";
 import type {
-	ClientRPC,
 	ActiveGoalContextV1,
 	AgentRunEventEnvelope,
 	CalendarMutation,
 	CancelAgentRunRequest,
+	ClientRPC,
 	CommitPlanningDraftRequest,
 	DecideAgentToolApprovalRequest,
 	GetAgentRunSnapshotRequest,
+	ListProactiveFeedbackRequest,
 	ListRestorableAgentRunsRequest,
 	LocalMonitoringConfigure,
 	LocalRuntimeStatus,
 	MonitoringPermissionSettingsTarget,
 	PetPresentationEvent,
 	PrivateTrainingWindowExportRequest,
+	ProactiveFeedbackAvailable,
 	SavePlanningDraftRequest,
 	SetAgentReadPermissionsRequest,
+	SetProactiveFeedbackPolicyRequest,
 	StartConversationTurnRequest,
 	StartTaskPlanningRunRequest,
 	SubmitPlanningClarificationRequest,
 } from "../../shared/contracts";
-import type { AuthCredentials } from "../../shared/auth";
 
 type StatusListener = (status: LocalRuntimeStatus) => void;
 type VisibilityListener = (visible: boolean) => void;
 type AgentRunEventListener = (event: AgentRunEventEnvelope) => void;
 type AuthSessionExpiredListener = () => void;
+type ProactiveFeedbackAvailableListener = (
+	event: ProactiveFeedbackAvailable,
+) => void;
+type AppUpdateStatusListener = (snapshot: AppUpdateSnapshot) => void;
 
 const statusListeners = new Set<StatusListener>();
 const visibilityListeners = new Set<VisibilityListener>();
 const agentRunEventListeners = new Set<AgentRunEventListener>();
 const authSessionExpiredListeners = new Set<AuthSessionExpiredListener>();
+const proactiveFeedbackAvailableListeners =
+	new Set<ProactiveFeedbackAvailableListener>();
+const appUpdateStatusListeners = new Set<AppUpdateStatusListener>();
 
 const rpc = Electroview.defineRPC<ClientRPC>({
 	maxRequestTime: 35_000,
 	handlers: {
 		requests: {},
 		messages: {
+			appUpdateStatusChanged: (snapshot) => {
+				for (const listener of appUpdateStatusListeners) listener(snapshot);
+			},
+			proactiveFeedbackAvailable: (event) => {
+				for (const listener of proactiveFeedbackAvailableListeners) {
+					listener(event);
+				}
+			},
 			agentRunEvent: (event) => {
 				for (const listener of agentRunEventListeners) listener(event);
 			},
@@ -56,6 +75,16 @@ const rpc = Electroview.defineRPC<ClientRPC>({
 new Electroview({ rpc });
 
 export const clientApi = {
+	getAppUpdateStatus: () => rpc.request.getAppUpdateStatus({}),
+	checkForAppUpdate: () => rpc.request.checkForAppUpdate({}),
+	downloadAppUpdate: () => rpc.request.downloadAppUpdate({}),
+	installAppUpdateAndRestart: () => rpc.request.installAppUpdateAndRestart({}),
+	getProactiveFeedbackPolicy: () => rpc.request.getProactiveFeedbackPolicy({}),
+	setProactiveFeedbackPolicy: (input: SetProactiveFeedbackPolicyRequest) =>
+		rpc.request.setProactiveFeedbackPolicy(input),
+	listProactiveFeedback: (input: ListProactiveFeedbackRequest = {}) =>
+		rpc.request.listProactiveFeedback(input),
+	clearProactiveFeedbackData: () => rpc.request.clearProactiveFeedbackData({}),
 	getAgentReadPermissions: () => rpc.request.getAgentReadPermissions({}),
 	setAgentReadPermissions: (input: SetAgentReadPermissionsRequest) =>
 		rpc.request.setAgentReadPermissions(input),
@@ -78,8 +107,7 @@ export const clientApi = {
 	resumeMonitoring: () => rpc.request.resumeMonitoring({}),
 	refreshMonitoringPermissions: () =>
 		rpc.request.refreshMonitoringPermissions({}),
-	setupMonitoringPermissions: () =>
-		rpc.request.setupMonitoringPermissions({}),
+	setupMonitoringPermissions: () => rpc.request.setupMonitoringPermissions({}),
 	openMonitoringPermissionSettings: (
 		permission: MonitoringPermissionSettingsTarget,
 	) => rpc.request.openMonitoringPermissionSettings({ permission }),
@@ -89,9 +117,8 @@ export const clientApi = {
 		fromMs: number;
 		includeDecryptedContent: boolean;
 	}) => rpc.request.exportFiveMinuteAuditToFile(options),
-	exportPrivateTrainingWindows: (
-		request: PrivateTrainingWindowExportRequest,
-	) => rpc.request.exportPrivateTrainingWindows(request),
+	exportPrivateTrainingWindows: (request: PrivateTrainingWindowExportRequest) =>
+		rpc.request.exportPrivateTrainingWindows(request),
 	getPrivateTrainingWindowExportStatus: () =>
 		rpc.request.getPrivateTrainingWindowExportStatus({}),
 	startFiveMinuteAuditCapture: () =>
@@ -140,5 +167,15 @@ export const clientApi = {
 	onAuthSessionExpired(listener: AuthSessionExpiredListener): () => void {
 		authSessionExpiredListeners.add(listener);
 		return () => authSessionExpiredListeners.delete(listener);
+	},
+	onProactiveFeedbackAvailable(
+		listener: ProactiveFeedbackAvailableListener,
+	): () => void {
+		proactiveFeedbackAvailableListeners.add(listener);
+		return () => proactiveFeedbackAvailableListeners.delete(listener);
+	},
+	onAppUpdateStatus(listener: AppUpdateStatusListener): () => void {
+		appUpdateStatusListeners.add(listener);
+		return () => appUpdateStatusListeners.delete(listener);
 	},
 };

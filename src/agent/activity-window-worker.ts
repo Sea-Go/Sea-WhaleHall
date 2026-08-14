@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import {
@@ -15,8 +16,10 @@ import {
 	ACTIVITY_EVENT_WORKER_RESPONSE_SCHEMA_VERSION,
 	type ActivityEventAnalyzer,
 	ActivityEventWorkerClientError,
+	type ActivityEventWorkerRequest,
 	type ActivityEventWorkerResponse,
 	type ActivityScoreStatus,
+	validateActivityEventWorkerResponse,
 } from "./activity-event-worker";
 import type { EventWindowV1 } from "./reflection/types";
 
@@ -28,6 +31,7 @@ const MAXIMUM_ACTIVITY_ANALYSIS_JOB_ID_LENGTH = 160;
 const MAXIMUM_ACCOUNT_ID_LENGTH = 256;
 const MAXIMUM_RUN_ID_LENGTH = 256;
 const SCORE_EPSILON = 1e-9;
+const MAXIMUM_ACTIVITY_WINDOW_SEMANTIC_ATTEMPTS = 3;
 const DEFAULT_RETRY_DELAYS_MS = [
 	1_000, 5_000, 15_000, 60_000, 300_000,
 ] as const;
@@ -37,6 +41,23 @@ type ActivityWindowStateRow = {
 	trigger_pending: number;
 	baseline_initialized: number;
 	owner_account_id: string | null;
+};
+
+export type ActivityWindowLegacyPolicyCutoverStatus = {
+	state: "pending" | "complete";
+	accountId: string | null;
+};
+
+export type ActivityWindowLegacyPolicyCutoverClearResult = {
+	outboxCount: number;
+	receiptCount: number;
+	jobCount: number;
+};
+
+type ActivityWindowLegacyPolicyCutoverRow = {
+	state: "pending" | "complete";
+	account_id: string | null;
+	updated_at_ms: number;
 };
 
 type ActivityWindowReceiptRow = {
@@ -58,7 +79,12 @@ type ActivityAnalysisJobRow = {
 	status: ActivityAnalysisJobState;
 	analyses_json: string;
 	consumed_score: number;
+	/** Completed invalid-output attempts for the current durable job. */
 	attempt: number;
+	/** Consecutive transient deferrals for the current semantic attempt. */
+	transport_attempt: number;
+	originating_request_id: string | null;
+	terminal_failure: number;
 	next_attempt_at_ms: number;
 	created_at_ms: number;
 	updated_at_ms: number;
@@ -68,6 +94,8 @@ type ActivityAnalysisJobRow = {
 type ActivityWindowOutboxRow = {
 	window_id: string;
 	request_id: string;
+	semantic_request_json: string | null;
+	semantic_attempt: number;
 	window_json: string;
 	owner_account_id: string | null;
 	owner_session_id: string | null;
@@ -82,6 +110,8 @@ type ActivityWindowOutboxRow = {
 type QueuedActivityWindow = {
 	window: EventWindowV1;
 	requestId: string;
+	request: ActivityEventWorkerRequest;
+	semanticAttempt: number;
 	owner: AuthSessionIdentity;
 	attempt: number;
 	nextAttemptAtMs: number;
@@ -102,7 +132,12 @@ export type ActivityAnalysisJob = {
 	state: ActivityAnalysisJobState;
 	analyses: readonly ActivityAnalysisWorkerResult[];
 	consumedScore: number;
+	/** Completed invalid-output attempts; three semantic attempts are allowed. */
 	attempt: number;
+	/** Consecutive transient deferrals used only for durable transport backoff. */
+	transportAttempt: number;
+	originatingRequestId: string;
+	terminalFailure: boolean;
 	nextAttemptAtMs: number;
 	createdAtMs: number;
 	updatedAtMs: number;
@@ -113,6 +148,7 @@ export type ActivityAnalysisJobNext =
 	| { kind: "none" }
 	| { kind: "not_due"; nextAttemptAtMs: number }
 	| { kind: "account_mismatch" }
+	| { kind: "running"; job: ActivityAnalysisJob }
 	| { kind: "ready"; job: ActivityAnalysisJob };
 
 export interface ActivityWindowSource {
@@ -146,6 +182,25 @@ export type AcceptedActivityWindowAnalysis = {
 	status: ActivityScoreStatus;
 };
 
+export type ArchiveActivityWindowAnalysis = {
+	owner: AuthSessionIdentity;
+	sourceWindow: EventWindowV1;
+	requestId: string;
+	analysis: ActivityAnalysisWorkerResult;
+	archivedAtMs: number;
+};
+
+export type AcknowledgeActivityWindowSource = {
+	owner: AuthSessionIdentity;
+	sourceWindowId: string;
+	requestId: string;
+};
+
+export type ArchivedActivityWindowRecovery =
+	| { kind: "pending"; analysis: ActivityAnalysisWorkerResult }
+	| { kind: "consumed" }
+	| { kind: "invalid" };
+
 export type ActivityWindowDeliveryServiceOptions = {
 	source: ActivityWindowSource;
 	analyzer: ActivityEventAnalyzer;
@@ -155,6 +210,23 @@ export type ActivityWindowDeliveryServiceOptions = {
 	nowMs?: () => number;
 	onAcceptedAnalysis?: (
 		result: AcceptedActivityWindowAnalysis,
+	) => void | Promise<void>;
+	/** Must durably archive the normalized response before the receipt ledger advances. */
+	archiveAnalysisBeforeReceipt?: (
+		result: ArchiveActivityWindowAnalysis,
+	) => void | Promise<void>;
+	/** Restores an archive committed before a crash that preceded Worker receipt. */
+	recoverArchivedAnalysis?: (input: {
+		owner: AuthSessionIdentity;
+		sourceWindow: EventWindowV1;
+		requestId: string;
+	}) =>
+		| ArchivedActivityWindowRecovery
+		| null
+		| Promise<ArchivedActivityWindowRecovery | null>;
+	/** Releases the Reflection cloud owner only after the Worker receipt commits. */
+	acknowledgeSourceAfterReceipt?: (
+		result: AcknowledgeActivityWindowSource,
 	) => void | Promise<void>;
 	onAgentTriggerRequired?: (
 		status: ActivityScoreStatus,
@@ -180,6 +252,12 @@ export class ActivityWindowDeliveryStore {
 		hardenPath(directory, 0o700);
 		this.database = new Database(databasePath, { create: true, strict: true });
 		this.database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+		const legacyLedgerExisted = [
+			"activity_window_worker_state",
+			"activity_window_worker_outbox",
+			"activity_window_worker_receipts",
+			"activity_window_worker_agent_jobs",
+		].some((table) => this.tableExists(table));
 		this.database.exec(`
 			CREATE TABLE IF NOT EXISTS activity_window_worker_state (
 				id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -201,6 +279,8 @@ export class ActivityWindowDeliveryStore {
 			CREATE TABLE IF NOT EXISTS activity_window_worker_outbox (
 				window_id TEXT PRIMARY KEY,
 				request_id TEXT NOT NULL UNIQUE,
+				semantic_request_json TEXT,
+				semantic_attempt INTEGER NOT NULL DEFAULT 0 CHECK (semantic_attempt >= 0),
 				window_json TEXT NOT NULL,
 				owner_account_id TEXT,
 				owner_session_id TEXT,
@@ -221,6 +301,9 @@ export class ActivityWindowDeliveryStore {
 				analyses_json TEXT NOT NULL,
 				consumed_score REAL NOT NULL CHECK (consumed_score >= 0),
 				attempt INTEGER NOT NULL CHECK (attempt >= 0),
+				transport_attempt INTEGER NOT NULL DEFAULT 0 CHECK (transport_attempt >= 0),
+				originating_request_id TEXT,
+				terminal_failure INTEGER NOT NULL DEFAULT 0 CHECK (terminal_failure IN (0, 1)),
 				next_attempt_at_ms INTEGER NOT NULL,
 				created_at_ms INTEGER NOT NULL,
 				updated_at_ms INTEGER NOT NULL,
@@ -235,9 +318,17 @@ export class ActivityWindowDeliveryStore {
 				PRIMARY KEY (job_id, request_id),
 				UNIQUE (request_id)
 			);
+			CREATE TABLE IF NOT EXISTS activity_window_worker_policy_cutover (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				state TEXT NOT NULL CHECK (state IN ('pending', 'complete')),
+				account_id TEXT,
+				updated_at_ms INTEGER NOT NULL
+			);
 		`);
 		this.ensureStateOwnerColumn();
 		this.ensureOutboxOwnerColumns();
+		this.ensureOutboxSemanticColumns();
+		this.ensureAgentJobRecoveryColumns();
 		this.database
 			.query(
 				`INSERT OR IGNORE INTO activity_window_worker_state
@@ -245,6 +336,13 @@ export class ActivityWindowDeliveryStore {
 				 VALUES (1, 0, 0, 0, ?)`,
 			)
 			.run(Date.now());
+		this.database
+			.query(
+				`INSERT OR IGNORE INTO activity_window_worker_policy_cutover
+				 (id, state, account_id, updated_at_ms)
+				 VALUES (1, ?, NULL, ?)`,
+			)
+			.run(legacyLedgerExisted ? "pending" : "complete", Date.now());
 		hardenPath(databasePath, 0o600);
 		hardenPath(`${databasePath}-wal`, 0o600);
 		hardenPath(`${databasePath}-shm`, 0o600);
@@ -252,6 +350,120 @@ export class ActivityWindowDeliveryStore {
 
 	close(): void {
 		this.database.close();
+	}
+
+	getLegacyPolicyCutoverStatus(
+		accountId: string,
+	): ActivityWindowLegacyPolicyCutoverStatus {
+		const account = boundedString(
+			accountId,
+			"accountId",
+			MAXIMUM_ACCOUNT_ID_LENGTH,
+		);
+		const row = this.legacyPolicyCutoverRow();
+		this.assertLegacyPolicyCutoverAccount(account, row);
+		return { state: row.state, accountId: row.account_id };
+	}
+
+	/**
+	 * First phase of the upgrade cutover. It removes every pre-policy Worker
+	 * copy while keeping the marker pending so Reflection handoff cleanup can be
+	 * retried before the caller commits the final phase.
+	 */
+	clearLegacyPolicyCutoverWorkerData(
+		accountId: string,
+		updatedAtMs = Date.now(),
+	): ActivityWindowLegacyPolicyCutoverClearResult {
+		const account = boundedString(
+			accountId,
+			"accountId",
+			MAXIMUM_ACCOUNT_ID_LENGTH,
+		);
+		const updatedAt = nonNegativeSafeInteger(updatedAtMs, "updatedAtMs");
+		const clear = this.database.transaction(() => {
+			const marker = this.legacyPolicyCutoverRow();
+			this.assertLegacyPolicyCutoverAccount(account, marker);
+			if (marker.state === "complete") {
+				return { outboxCount: 0, receiptCount: 0, jobCount: 0 };
+			}
+			this.database
+				.query("DELETE FROM activity_window_worker_agent_job_receipts")
+				.run();
+			const jobCount = this.database
+				.query("DELETE FROM activity_window_worker_agent_jobs")
+				.run().changes;
+			const receiptCount = this.database
+				.query("DELETE FROM activity_window_worker_receipts")
+				.run().changes;
+			const outboxCount = this.database
+				.query("DELETE FROM activity_window_worker_outbox")
+				.run().changes;
+			this.database
+				.query(
+					`UPDATE activity_window_worker_state
+					 SET owner_account_id = COALESCE(owner_account_id, ?),
+					     accumulated_score = 0, trigger_pending = 0, updated_at_ms = ?
+					 WHERE id = 1`,
+				)
+				.run(account, updatedAt);
+			this.database
+				.query(
+					`UPDATE activity_window_worker_policy_cutover
+					 SET account_id = COALESCE(account_id, ?), updated_at_ms = ?
+					 WHERE id = 1 AND state = 'pending'`,
+				)
+				.run(account, updatedAt);
+			return { outboxCount, receiptCount, jobCount };
+		});
+		return clear.immediate();
+	}
+
+	/** Final phase, called only after the account's Reflection handoffs clear. */
+	markLegacyPolicyCutoverComplete(
+		accountId: string,
+		updatedAtMs = Date.now(),
+	): boolean {
+		const account = boundedString(
+			accountId,
+			"accountId",
+			MAXIMUM_ACCOUNT_ID_LENGTH,
+		);
+		const updatedAt = nonNegativeSafeInteger(updatedAtMs, "updatedAtMs");
+		const complete = this.database.transaction(() => {
+			const marker = this.legacyPolicyCutoverRow();
+			this.assertLegacyPolicyCutoverAccount(account, marker);
+			if (marker.state === "complete") return false;
+			const pending = this.database
+				.query(
+					`SELECT
+					   (SELECT COUNT(*) FROM activity_window_worker_outbox) +
+					   (SELECT COUNT(*) FROM activity_window_worker_receipts) +
+					   (SELECT COUNT(*) FROM activity_window_worker_agent_jobs) +
+					   (SELECT COUNT(*) FROM activity_window_worker_agent_job_receipts)
+					 AS count`,
+				)
+				.get() as { count: number };
+			const state = this.stateRow();
+			if (
+				pending.count !== 0 ||
+				state.accumulated_score !== 0 ||
+				state.trigger_pending !== 0
+			) {
+				throw new Error(
+					"Activity legacy policy cutover still has Worker pending data.",
+				);
+			}
+			const result = this.database
+				.query(
+					`UPDATE activity_window_worker_policy_cutover
+					 SET state = 'complete', account_id = COALESCE(account_id, ?),
+					     updated_at_ms = ?
+					 WHERE id = 1 AND state = 'pending'`,
+				)
+				.run(account, updatedAt);
+			return result.changes === 1;
+		});
+		return complete.immediate();
 	}
 
 	/**
@@ -264,6 +476,7 @@ export class ActivityWindowDeliveryStore {
 	): boolean {
 		const normalized = uniqueWindows(windows);
 		const normalizedOwner = validateSessionIdentity(owner);
+		this.assertLegacyPolicyCutoverComplete(normalizedOwner.accountId);
 		const transaction = this.database.transaction(() => {
 			const state = this.stateRow();
 			if (state.baseline_initialized === 1) {
@@ -307,6 +520,12 @@ export class ActivityWindowDeliveryStore {
 		const id = boundedString(requestId, "requestId", MAXIMUM_REQUEST_ID_LENGTH);
 		const queuedAt = nonNegativeSafeInteger(queuedAtMs, "queuedAtMs");
 		const serialized = serializeWindow(normalized);
+		const semanticRequest = activityWindowSemanticRequest(normalized, id);
+		const serializedSemanticRequest = serializeSemanticRequest(
+			semanticRequest,
+			normalized,
+			id,
+		);
 		const normalizedOwner = validateSessionIdentity(owner);
 		const transaction = this.database.transaction(() => {
 			const state = this.stateRow();
@@ -321,7 +540,9 @@ export class ActivityWindowDeliveryStore {
 			if (this.isBaselineWindow(normalized.windowId)) return false;
 			const receipt = this.receiptByWindowId(normalized.windowId);
 			if (receipt !== null) {
-				if (receipt.request_id !== id) {
+				if (
+					!isActivityWindowSemanticRequestId(normalized, receipt.request_id)
+				) {
 					throw new Error("Activity window request id collision.");
 				}
 				return false;
@@ -329,25 +550,43 @@ export class ActivityWindowDeliveryStore {
 			const existing = this.outboxByWindowId(normalized.windowId);
 			if (existing !== null) {
 				if (
-					existing.request_id !== id ||
 					existing.window_json !== serialized ||
-					existing.owner_account_id !== normalizedOwner.accountId
+					existing.owner_account_id !== normalizedOwner.accountId ||
+					!isActivityWindowSemanticRequestId(normalized, existing.request_id)
 				) {
 					throw new Error("Activity window outbox collision.");
+				}
+				const semanticAttempt = activityWindowSemanticAttempt(
+					existing.semantic_attempt,
+				);
+				if (
+					activityWindowRequestId(normalized, semanticAttempt) !==
+					existing.request_id
+				) {
+					throw new Error("Activity window outbox semantic identity mismatch.");
+				}
+				if (existing.semantic_request_json !== null) {
+					parseStoredSemanticRequest(
+						existing.semantic_request_json,
+						normalized,
+						existing.request_id,
+					);
 				}
 				return false;
 			}
 			this.database
 				.query(
 					`INSERT INTO activity_window_worker_outbox
-					 (window_id, request_id, window_json, owner_account_id,
+					 (window_id, request_id, semantic_request_json, semantic_attempt,
+					  window_json, owner_account_id,
 					  owner_session_id, owner_generation, queued_at_ms, attempt,
 					  next_attempt_at_ms, terminal, last_error)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, NULL)`,
+					 VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, 0, ?, 0, NULL)`,
 				)
 				.run(
 					normalized.windowId,
 					id,
+					serializedSemanticRequest,
 					serialized,
 					normalizedOwner.accountId,
 					normalizedOwner.sessionId,
@@ -374,7 +613,8 @@ export class ActivityWindowDeliveryStore {
 		}
 		const row = this.database
 			.query(
-				`SELECT window_id, request_id, window_json, owner_account_id,
+				`SELECT window_id, request_id, semantic_request_json, semantic_attempt,
+				 window_json, owner_account_id,
 				 owner_session_id, owner_generation, queued_at_ms, attempt,
 				 next_attempt_at_ms, terminal, last_error
 				 FROM activity_window_worker_outbox
@@ -384,14 +624,30 @@ export class ActivityWindowDeliveryStore {
 			)
 			.get(normalizedOwner.accountId) as ActivityWindowOutboxRow | null;
 		if (row === null) return { kind: "none" };
-		if (row.next_attempt_at_ms > now) {
+		const applied = this.receiptByWindowId(row.window_id);
+		if (applied !== null && applied.request_id !== row.request_id) {
+			throw new Error("Activity window acknowledgement identity mismatch.");
+		}
+		if (applied === null && row.next_attempt_at_ms > now) {
 			return { kind: "not_due", nextAttemptAtMs: row.next_attempt_at_ms };
 		}
+		const window = parseStoredWindow(row.window_json, row.window_id);
+		const semanticAttempt = activityWindowSemanticAttempt(row.semantic_attempt);
+		const request =
+			row.semantic_request_json === null
+				? this.materializeLegacySemanticRequest(window, row.request_id)
+				: parseStoredSemanticRequest(
+						row.semantic_request_json,
+						window,
+						row.request_id,
+					);
 		return {
 			kind: "ready",
 			queued: {
-				window: parseStoredWindow(row.window_json, row.window_id),
+				window,
 				requestId: row.request_id,
+				request,
+				semanticAttempt,
 				owner: normalizedOwner,
 				attempt: row.attempt,
 				nextAttemptAtMs: row.next_attempt_at_ms,
@@ -414,6 +670,106 @@ export class ActivityWindowDeliveryStore {
 			throw new Error("Unknown activity window outbox record.");
 	}
 
+	advanceSemanticAttempt(
+		windowId: string,
+		currentRequestId: string,
+		nextAttemptAtMs: number,
+		errorCode: string,
+		next: { requestId: string; request: ActivityEventWorkerRequest } | null,
+	): { terminal: boolean; semanticAttempt: number } {
+		const id = boundedString(windowId, "windowId", MAXIMUM_WINDOW_ID_LENGTH);
+		const currentRequest = boundedString(
+			currentRequestId,
+			"currentRequestId",
+			MAXIMUM_REQUEST_ID_LENGTH,
+		);
+		const nextAttemptAt = nonNegativeSafeInteger(
+			nextAttemptAtMs,
+			"nextAttemptAtMs",
+		);
+		const error = boundedString(errorCode, "errorCode", 80);
+		const transaction = this.database.transaction(() => {
+			const row = this.outboxByWindowId(id);
+			if (
+				row === null ||
+				row.terminal !== 0 ||
+				row.request_id !== currentRequest
+			) {
+				throw new Error("Activity window semantic attempt identity mismatch.");
+			}
+			const currentSemanticAttempt = activityWindowSemanticAttempt(
+				row.semantic_attempt,
+			);
+			const nextSemanticAttempt = currentSemanticAttempt + 1;
+			if (nextSemanticAttempt >= MAXIMUM_ACTIVITY_WINDOW_SEMANTIC_ATTEMPTS) {
+				if (next !== null) {
+					throw new Error(
+						"Terminal semantic attempt cannot carry a new request.",
+					);
+				}
+				const result = this.database
+					.query(
+						`UPDATE activity_window_worker_outbox
+						 SET attempt = attempt + 1, terminal = 1, last_error = ?
+						 WHERE window_id = ? AND request_id = ? AND semantic_attempt = ?
+						   AND terminal = 0`,
+					)
+					.run(error, id, currentRequest, currentSemanticAttempt);
+				if (result.changes !== 1) {
+					throw new Error(
+						"Activity window semantic attempt changed concurrently.",
+					);
+				}
+				return {
+					terminal: true,
+					semanticAttempt: currentSemanticAttempt,
+				};
+			}
+			if (next === null) {
+				throw new Error("A retryable semantic attempt requires a new request.");
+			}
+			const nextRequestId = boundedString(
+				next.requestId,
+				"nextRequestId",
+				MAXIMUM_REQUEST_ID_LENGTH,
+			);
+			if (nextRequestId === currentRequest) {
+				throw new Error("A semantic retry must use a new request id.");
+			}
+			const window = parseStoredWindow(row.window_json, row.window_id);
+			const serializedRequest = serializeSemanticRequest(
+				next.request,
+				window,
+				nextRequestId,
+			);
+			const result = this.database
+				.query(
+					`UPDATE activity_window_worker_outbox
+					 SET request_id = ?, semantic_request_json = ?, semantic_attempt = ?,
+					     attempt = attempt + 1, next_attempt_at_ms = ?, last_error = ?
+					 WHERE window_id = ? AND request_id = ? AND semantic_attempt = ?
+					   AND terminal = 0`,
+				)
+				.run(
+					nextRequestId,
+					serializedRequest,
+					nextSemanticAttempt,
+					nextAttemptAt,
+					error,
+					id,
+					currentRequest,
+					currentSemanticAttempt,
+				);
+			if (result.changes !== 1) {
+				throw new Error(
+					"Activity window semantic attempt changed concurrently.",
+				);
+			}
+			return { terminal: false, semanticAttempt: nextSemanticAttempt };
+		});
+		return transaction.immediate();
+	}
+
 	markTerminal(windowId: string, errorCode: string): void {
 		const id = boundedString(windowId, "windowId", MAXIMUM_WINDOW_ID_LENGTH);
 		const error = boundedString(errorCode, "errorCode", 80);
@@ -433,6 +789,7 @@ export class ActivityWindowDeliveryStore {
 		response: ActivityEventWorkerResponse,
 		scoreThreshold: number,
 		receivedAtMs: number,
+		retainOutboxForSourceAcknowledgement = false,
 	): {
 		accepted: boolean;
 		response: ActivityEventWorkerResponse;
@@ -443,6 +800,9 @@ export class ActivityWindowDeliveryStore {
 		const normalized = validateResponse(response, response.request_id);
 		const threshold = validScoreThreshold(scoreThreshold);
 		const receivedAt = nonNegativeSafeInteger(receivedAtMs, "receivedAtMs");
+		if (typeof retainOutboxForSourceAcknowledgement !== "boolean") {
+			throw new Error("Activity window acknowledgement mode is invalid.");
+		}
 		const transaction = this.database.transaction(() => {
 			const outbox = this.outboxByWindowId(id);
 			if (outbox === null || outbox.request_id !== normalized.request_id) {
@@ -457,7 +817,7 @@ export class ActivityWindowDeliveryStore {
 				if (existing.source_window_id !== id) {
 					throw new Error("Activity window request id collision.");
 				}
-				this.deleteOutbox(id);
+				if (!retainOutboxForSourceAcknowledgement) this.deleteOutbox(id);
 				return {
 					accepted: false,
 					response: parseStoredResponse(
@@ -495,7 +855,7 @@ export class ActivityWindowDeliveryStore {
 				receivedAt,
 			);
 			const nextState = this.stateRow();
-			this.deleteOutbox(id);
+			if (!retainOutboxForSourceAcknowledgement) this.deleteOutbox(id);
 			return {
 				accepted: true,
 				response: structuredClone(normalized),
@@ -509,6 +869,66 @@ export class ActivityWindowDeliveryStore {
 			};
 		});
 		return transaction.immediate();
+	}
+
+	getAppliedAnalysis(
+		windowId: string,
+		requestId: string,
+	): ActivityEventWorkerResponse | null {
+		const id = boundedString(windowId, "windowId", MAXIMUM_WINDOW_ID_LENGTH);
+		const request = boundedString(
+			requestId,
+			"requestId",
+			MAXIMUM_REQUEST_ID_LENGTH,
+		);
+		const receipt = this.receiptByWindowId(id);
+		if (!receipt) return null;
+		if (receipt.request_id !== request) {
+			throw new Error("Activity window request id collision.");
+		}
+		return parseStoredResponse(receipt.response_json, request);
+	}
+
+	acknowledgeAppliedWindow(windowId: string, requestId: string): void {
+		const id = boundedString(windowId, "windowId", MAXIMUM_WINDOW_ID_LENGTH);
+		const request = boundedString(
+			requestId,
+			"requestId",
+			MAXIMUM_REQUEST_ID_LENGTH,
+		);
+		const transaction = this.database.transaction(() => {
+			const receipt = this.receiptByWindowId(id);
+			if (!receipt || receipt.request_id !== request) {
+				throw new Error(
+					"Activity window receipt is missing during acknowledgement.",
+				);
+			}
+			const outbox = this.outboxByWindowId(id);
+			if (!outbox) return;
+			if (outbox.request_id !== request) {
+				throw new Error("Activity window acknowledgement identity mismatch.");
+			}
+			this.deleteOutbox(id);
+		});
+		transaction.immediate();
+	}
+
+	acknowledgeConsumedWindow(windowId: string, requestId: string): void {
+		const id = boundedString(windowId, "windowId", MAXIMUM_WINDOW_ID_LENGTH);
+		const request = boundedString(
+			requestId,
+			"requestId",
+			MAXIMUM_REQUEST_ID_LENGTH,
+		);
+		const outbox = this.outboxByWindowId(id);
+		if (!outbox) return;
+		if (outbox.request_id !== request) {
+			throw new Error("Consumed activity window identity mismatch.");
+		}
+		if (this.receiptByWindowId(id) !== null) {
+			throw new Error("Consumed activity window still has a Worker receipt.");
+		}
+		this.deleteOutbox(id);
 	}
 
 	getStatus(scoreThreshold: number): ActivityScoreStatus & {
@@ -542,18 +962,13 @@ export class ActivityWindowDeliveryStore {
 		scoreThreshold: number,
 		nowMs = Date.now(),
 	): boolean {
+		this.assertLegacyPolicyCutoverComplete();
 		const threshold = validScoreThreshold(scoreThreshold);
 		const now = nonNegativeSafeInteger(nowMs, "nowMs");
 		const transaction = this.database.transaction(() => {
-			this.database
-				.query(
-					`UPDATE activity_window_worker_agent_jobs
-					 SET status = 'retry_wait', run_id = NULL, attempt = attempt + 1,
-					     next_attempt_at_ms = ?,
-					     updated_at_ms = ?, last_error = COALESCE(last_error, 'interrupted')
-					 WHERE status = 'running'`,
-				)
-				.run(now, now);
+			// A running row retains its exact run/request identity. The dispatcher
+			// first reconciles it against the encrypted completed run and only then
+			// decides whether any provider call is necessary.
 			return this.materializeActivityAnalysisJob(threshold, now);
 		});
 		return transaction.immediate();
@@ -570,10 +985,14 @@ export class ActivityWindowDeliveryStore {
 			"accountId",
 			MAXIMUM_ACCOUNT_ID_LENGTH,
 		);
+		this.assertLegacyPolicyCutoverComplete();
 		if (this.stateRow().owner_account_id !== account) {
 			return { kind: "account_mismatch" };
 		}
 		const now = nonNegativeSafeInteger(nowMs, "nowMs");
+		if (this.hasPendingSourceAcknowledgement(account)) {
+			return { kind: "none" };
+		}
 		const row = this.activeActivityAnalysisJob();
 		if (row === null) return { kind: "none" };
 		if (row.account_id !== null && row.account_id !== account) {
@@ -582,8 +1001,39 @@ export class ActivityWindowDeliveryStore {
 		if (row.status === "retry_wait" && row.next_attempt_at_ms > now) {
 			return { kind: "not_due", nextAttemptAtMs: row.next_attempt_at_ms };
 		}
-		if (row.status === "running") return { kind: "none" };
+		if (row.status === "running") {
+			return { kind: "running", job: activityAnalysisJobFromRow(row) };
+		}
 		return { kind: "ready", job: activityAnalysisJobFromRow(row) };
+	}
+
+	/**
+	 * Returns completed Agent run identities whose Worker phase-two consumption
+	 * is still pending. Retention must preserve their encrypted completion proof
+	 * until completeActivityAnalysisJob durably removes the running job.
+	 */
+	phaseTwoPendingRunIds(accountId: string): readonly string[] {
+		const account = boundedString(
+			accountId,
+			"accountId",
+			MAXIMUM_ACCOUNT_ID_LENGTH,
+		);
+		const cutover = this.legacyPolicyCutoverRow();
+		this.assertLegacyPolicyCutoverAccount(account, cutover);
+		if (cutover.state === "pending") return [];
+		const ledgerOwner = this.stateRow().owner_account_id;
+		if (ledgerOwner !== null && ledgerOwner !== account) {
+			throw new Error("Activity window ledger belongs to another account.");
+		}
+		return (
+			this.database
+				.query(
+					`SELECT run_id FROM activity_window_worker_agent_jobs
+					 WHERE account_id = ? AND status = 'running' AND run_id IS NOT NULL
+					 ORDER BY run_id`,
+				)
+				.all(account) as Array<{ run_id: string }>
+		).map((row) => boundedString(row.run_id, "runId", MAXIMUM_RUN_ID_LENGTH));
 	}
 
 	claimActivityAnalysisJob(
@@ -602,6 +1052,7 @@ export class ActivityWindowDeliveryStore {
 			"accountId",
 			MAXIMUM_ACCOUNT_ID_LENGTH,
 		);
+		this.assertLegacyPolicyCutoverComplete(account);
 		if (this.stateRow().owner_account_id !== account) {
 			throw new Error("Activity analysis job belongs to another account.");
 		}
@@ -621,10 +1072,17 @@ export class ActivityWindowDeliveryStore {
 				.query(
 					`UPDATE activity_window_worker_agent_jobs
 					 SET account_id = COALESCE(account_id, ?), run_id = ?, status = 'running',
+					     originating_request_id = COALESCE(originating_request_id, ?),
 					     updated_at_ms = ?, last_error = NULL
 					 WHERE job_id = ?`,
 				)
-				.run(account, run, claimedAt, id);
+				.run(
+					account,
+					run,
+					`activity-request-${id}-${row.attempt + 1}`,
+					claimedAt,
+					id,
+				);
 			const claimed = this.activityAnalysisJobById(id);
 			if (claimed === null)
 				throw new Error("Activity analysis job is missing.");
@@ -672,6 +1130,12 @@ export class ActivityWindowDeliveryStore {
 				throw new Error("Activity analysis job score ledger is corrupt.");
 			}
 			const normalizedRemaining = remaining <= SCORE_EPSILON ? 0 : remaining;
+			const receiptRows = this.database
+				.query(
+					`SELECT request_id FROM activity_window_worker_agent_job_receipts
+					 WHERE job_id = ?`,
+				)
+				.all(id) as Array<{ request_id: string }>;
 			this.database
 				.query(
 					`UPDATE activity_window_worker_agent_jobs
@@ -686,6 +1150,18 @@ export class ActivityWindowDeliveryStore {
 					 WHERE id = 1`,
 				)
 				.run(normalizedRemaining, completedAt);
+			this.database
+				.query(
+					"DELETE FROM activity_window_worker_agent_job_receipts WHERE job_id = ?",
+				)
+				.run(id);
+			const deleteReceipt = this.database.query(
+				"DELETE FROM activity_window_worker_receipts WHERE request_id = ?",
+			);
+			for (const receipt of receiptRows) deleteReceipt.run(receipt.request_id);
+			this.database
+				.query("DELETE FROM activity_window_worker_agent_jobs WHERE job_id = ?")
+				.run(id);
 			this.materializeActivityAnalysisJob(threshold, completedAt);
 		});
 		transaction.immediate();
@@ -698,6 +1174,7 @@ export class ActivityWindowDeliveryStore {
 		nextAttemptAtMs: number,
 		errorCode: string,
 		updatedAtMs = Date.now(),
+		advanceSemanticAttempt = true,
 	): void {
 		const id = boundedString(
 			jobId,
@@ -716,22 +1193,157 @@ export class ActivityWindowDeliveryStore {
 		const next = nonNegativeSafeInteger(nextAttemptAtMs, "nextAttemptAtMs");
 		const updatedAt = nonNegativeSafeInteger(updatedAtMs, "updatedAtMs");
 		const error = boundedString(errorCode, "errorCode", 80);
+		if (typeof advanceSemanticAttempt !== "boolean") {
+			throw new Error("Activity analysis retry mode is invalid.");
+		}
 		const result = this.database
 			.query(
 				`UPDATE activity_window_worker_agent_jobs
-				 SET status = 'retry_wait', run_id = NULL, attempt = attempt + 1,
+				 SET status = 'retry_wait', run_id = NULL,
+				     attempt = attempt + CASE WHEN ? THEN 1 ELSE 0 END,
+				     transport_attempt = CASE WHEN ? THEN 0 ELSE transport_attempt + 1 END,
+				     originating_request_id = CASE WHEN ? THEN NULL ELSE originating_request_id END,
 				     next_attempt_at_ms = ?, updated_at_ms = ?, last_error = ?
 				 WHERE job_id = ? AND status = 'running' AND account_id = ? AND run_id = ?`,
 			)
-			.run(next, updatedAt, error, id, account, run);
+			.run(
+				advanceSemanticAttempt ? 1 : 0,
+				advanceSemanticAttempt ? 1 : 0,
+				advanceSemanticAttempt ? 1 : 0,
+				next,
+				updatedAt,
+				error,
+				id,
+				account,
+				run,
+			);
 		if (result.changes !== 1)
 			throw new Error("Activity analysis job cannot be deferred.");
+	}
+
+	markActivityAnalysisJobTerminalFailure(
+		jobId: string,
+		accountId: string,
+		runId: string | null,
+		errorCode: string,
+		updatedAtMs = Date.now(),
+	): void {
+		const id = boundedString(
+			jobId,
+			"jobId",
+			MAXIMUM_ACTIVITY_ANALYSIS_JOB_ID_LENGTH,
+		);
+		const account = boundedString(
+			accountId,
+			"accountId",
+			MAXIMUM_ACCOUNT_ID_LENGTH,
+		);
+		const run =
+			runId === null
+				? null
+				: boundedString(runId, "runId", MAXIMUM_RUN_ID_LENGTH);
+		const error = boundedString(errorCode, "errorCode", 80);
+		const updatedAt = nonNegativeSafeInteger(updatedAtMs, "updatedAtMs");
+		const result = this.database
+			.query(
+				`UPDATE activity_window_worker_agent_jobs
+				 SET status = 'retry_wait', terminal_failure = 1,
+				     updated_at_ms = ?, last_error = ?
+				 WHERE job_id = ? AND status = 'running' AND account_id = ? AND run_id IS ?`,
+			)
+			.run(updatedAt, error, id, account, run);
+		if (result.changes !== 1) {
+			throw new Error("Activity analysis job cannot be failed terminally.");
+		}
+	}
+
+	clearPendingActivityAnalysisData(
+		accountId: string,
+		updatedAtMs = Date.now(),
+	): { outboxCount: number; receiptCount: number; jobCount: number } {
+		const account = boundedString(
+			accountId,
+			"accountId",
+			MAXIMUM_ACCOUNT_ID_LENGTH,
+		);
+		const updatedAt = nonNegativeSafeInteger(updatedAtMs, "updatedAtMs");
+		const cutover = this.legacyPolicyCutoverRow();
+		this.assertLegacyPolicyCutoverAccount(account, cutover);
+		if (cutover.state === "pending") {
+			// Pre-policy rows have no trustworthy owner and can contain raw window
+			// JSON. Disable/clear must erase every such copy while intentionally
+			// leaving the cutover marker pending until Reflection handoffs also clear.
+			return this.clearLegacyPolicyCutoverWorkerData(account, updatedAt);
+		}
+		const ledgerOwner = this.stateRow().owner_account_id;
+		if (ledgerOwner !== null && ledgerOwner !== account) {
+			throw new Error("Activity window ledger belongs to another account.");
+		}
+		if (ledgerOwner === null) {
+			const foreign = this.database
+				.query(
+					`SELECT 1 AS present FROM activity_window_worker_outbox
+					 WHERE owner_account_id IS NOT NULL AND owner_account_id != ?
+					 UNION ALL
+					 SELECT 1 AS present FROM activity_window_worker_agent_jobs
+					 WHERE account_id IS NOT NULL AND account_id != ?
+					 LIMIT 1`,
+				)
+				.get(account, account);
+			if (foreign !== null) {
+				throw new Error("Activity window ledger contains another account.");
+			}
+		}
+		const clear = this.database.transaction(() => {
+			const outboxCount = this.database
+				.query(
+					"DELETE FROM activity_window_worker_outbox WHERE owner_account_id = ?",
+				)
+				.run(account).changes;
+			const activeJobs = this.database
+				.query(
+					`SELECT job_id FROM activity_window_worker_agent_jobs
+					 WHERE account_id = ? AND status != 'completed'`,
+				)
+				.all(account) as Array<{ job_id: string }>;
+			const deleteAssignments = this.database.query(
+				"DELETE FROM activity_window_worker_agent_job_receipts WHERE job_id = ?",
+			);
+			for (const job of activeJobs) deleteAssignments.run(job.job_id);
+			let jobCount = 0;
+			const deleteJob = this.database.query(
+				"DELETE FROM activity_window_worker_agent_jobs WHERE job_id = ?",
+			);
+			for (const job of activeJobs)
+				jobCount += deleteJob.run(job.job_id).changes;
+			const receiptCount = this.database
+				.query("DELETE FROM activity_window_worker_receipts")
+				.run().changes;
+			this.database
+				.query(
+					`UPDATE activity_window_worker_state
+					 SET accumulated_score = 0, trigger_pending = 0, updated_at_ms = ?
+					 WHERE id = 1`,
+				)
+				.run(updatedAt);
+			return { outboxCount, receiptCount, jobCount };
+		});
+		return clear.immediate();
 	}
 
 	private materializeActivityAnalysisJob(
 		scoreThreshold: number,
 		nowMs: number,
 	): boolean {
+		if (this.hasTerminalActivityAnalysisFailure()) {
+			this.database
+				.query(
+					`UPDATE activity_window_worker_state
+					 SET trigger_pending = 1, updated_at_ms = ? WHERE id = 1`,
+				)
+				.run(nowMs);
+			return false;
+		}
 		const active = this.activeActivityAnalysisJob();
 		if (active !== null) {
 			this.database
@@ -743,7 +1355,10 @@ export class ActivityWindowDeliveryStore {
 			return false;
 		}
 		const state = this.stateRow();
-		if (state.accumulated_score < scoreThreshold) {
+		// Scores are persisted as SQLite REAL values. Treat a sum within the same
+		// epsilon used by phase-two subtraction as having reached the mathematical
+		// threshold (for example ten durable 0.1 receipts).
+		if (state.accumulated_score + SCORE_EPSILON < scoreThreshold) {
 			this.database
 				.query(
 					`UPDATE activity_window_worker_state
@@ -807,14 +1422,16 @@ export class ActivityWindowDeliveryStore {
 			.query(
 				`INSERT INTO activity_window_worker_agent_jobs
 				 (job_id, account_id, run_id, status, analyses_json, consumed_score,
-				  attempt, next_attempt_at_ms, created_at_ms, updated_at_ms, last_error)
-				 VALUES (?, ?, NULL, 'pending', ?, ?, 0, ?, ?, ?, NULL)`,
+				  attempt, transport_attempt, originating_request_id, terminal_failure,
+				  next_attempt_at_ms, created_at_ms, updated_at_ms, last_error)
+				 VALUES (?, ?, NULL, 'pending', ?, ?, 0, 0, ?, 0, ?, ?, ?, NULL)`,
 			)
 			.run(
 				jobId,
 				this.requireLedgerAccount(),
 				serialized,
 				consumedScore,
+				`activity-request-${jobId}-1`,
 				nowMs,
 				nowMs,
 				nowMs,
@@ -838,13 +1455,25 @@ export class ActivityWindowDeliveryStore {
 		return this.database
 			.query(
 				`SELECT job_id, account_id, run_id, status, analyses_json, consumed_score,
-				        attempt, next_attempt_at_ms, created_at_ms, updated_at_ms, last_error
+				        attempt, transport_attempt, originating_request_id, terminal_failure,
+				        next_attempt_at_ms, created_at_ms, updated_at_ms, last_error
 				 FROM activity_window_worker_agent_jobs
-				 WHERE status IN ('pending', 'running', 'retry_wait')
+				 WHERE status IN ('pending', 'running', 'retry_wait') AND terminal_failure = 0
 				 ORDER BY created_at_ms, job_id
 				 LIMIT 1`,
 			)
 			.get() as ActivityAnalysisJobRow | null;
+	}
+
+	private hasTerminalActivityAnalysisFailure(): boolean {
+		return (
+			this.database
+				.query(
+					`SELECT 1 AS present FROM activity_window_worker_agent_jobs
+					 WHERE terminal_failure = 1 LIMIT 1`,
+				)
+				.get() !== null
+		);
 	}
 
 	private activityAnalysisJobById(
@@ -853,7 +1482,8 @@ export class ActivityWindowDeliveryStore {
 		return this.database
 			.query(
 				`SELECT job_id, account_id, run_id, status, analyses_json, consumed_score,
-				        attempt, next_attempt_at_ms, created_at_ms, updated_at_ms, last_error
+				        attempt, transport_attempt, originating_request_id, terminal_failure,
+				        next_attempt_at_ms, created_at_ms, updated_at_ms, last_error
 				 FROM activity_window_worker_agent_jobs WHERE job_id = ?`,
 			)
 			.get(jobId) as ActivityAnalysisJobRow | null;
@@ -877,6 +1507,73 @@ export class ActivityWindowDeliveryStore {
 			throw new Error("Activity window score state is corrupt.");
 		}
 		return row;
+	}
+
+	private legacyPolicyCutoverRow(): ActivityWindowLegacyPolicyCutoverRow {
+		const row = this.database
+			.query(
+				`SELECT state, account_id, updated_at_ms
+				 FROM activity_window_worker_policy_cutover WHERE id = 1`,
+			)
+			.get() as ActivityWindowLegacyPolicyCutoverRow | null;
+		if (
+			row === null ||
+			(row.state !== "pending" && row.state !== "complete") ||
+			!Number.isSafeInteger(row.updated_at_ms) ||
+			row.updated_at_ms < 0
+		) {
+			throw new Error("Activity legacy policy cutover state is corrupt.");
+		}
+		return row;
+	}
+
+	private assertLegacyPolicyCutoverAccount(
+		accountId: string,
+		marker: ActivityWindowLegacyPolicyCutoverRow,
+	): void {
+		if (marker.account_id !== null && marker.account_id !== accountId) {
+			throw new Error(
+				"Activity legacy policy cutover belongs to another account.",
+			);
+		}
+		const stateOwner = this.stateRow().owner_account_id;
+		if (stateOwner !== null && stateOwner !== accountId) {
+			throw new Error("Activity window ledger belongs to another account.");
+		}
+		const foreignOwner = this.database
+			.query(
+				`SELECT 1 AS present FROM activity_window_worker_outbox
+				 WHERE owner_account_id IS NOT NULL AND owner_account_id != ?
+				 UNION ALL
+				 SELECT 1 AS present FROM activity_window_worker_agent_jobs
+				 WHERE account_id IS NOT NULL AND account_id != ?
+				 LIMIT 1`,
+			)
+			.get(accountId, accountId);
+		if (foreignOwner !== null) {
+			throw new Error("Activity window ledger contains another account.");
+		}
+	}
+
+	private assertLegacyPolicyCutoverComplete(accountId?: string): void {
+		const marker = this.legacyPolicyCutoverRow();
+		if (accountId !== undefined) {
+			this.assertLegacyPolicyCutoverAccount(accountId, marker);
+		}
+		if (marker.state !== "complete") {
+			throw new Error("Activity legacy policy cutover is pending.");
+		}
+	}
+
+	private tableExists(table: string): boolean {
+		return (
+			this.database
+				.query(
+					`SELECT 1 AS present FROM sqlite_master
+					 WHERE type = 'table' AND name = ?`,
+				)
+				.get(table) !== null
+		);
 	}
 
 	private requireLedgerAccount(): string {
@@ -910,12 +1607,33 @@ export class ActivityWindowDeliveryStore {
 	private outboxByWindowId(windowId: string): ActivityWindowOutboxRow | null {
 		return this.database
 			.query(
-				`SELECT window_id, request_id, window_json, owner_account_id,
+				`SELECT window_id, request_id, semantic_request_json, semantic_attempt,
+				 window_json, owner_account_id,
 				 owner_session_id, owner_generation, queued_at_ms, attempt,
 				 next_attempt_at_ms, terminal, last_error
 				 FROM activity_window_worker_outbox WHERE window_id = ?`,
 			)
 			.get(windowId) as ActivityWindowOutboxRow | null;
+	}
+
+	private materializeLegacySemanticRequest(
+		window: EventWindowV1,
+		requestId: string,
+	): ActivityEventWorkerRequest {
+		const request = activityWindowSemanticRequest(window, requestId);
+		const serialized = serializeSemanticRequest(request, window, requestId);
+		const result = this.database
+			.query(
+				`UPDATE activity_window_worker_outbox
+				 SET semantic_request_json = ?
+				 WHERE window_id = ? AND request_id = ?
+				   AND semantic_request_json IS NULL AND terminal = 0`,
+			)
+			.run(serialized, window.windowId, requestId);
+		if (result.changes !== 1) {
+			throw new Error("Activity window semantic request changed concurrently.");
+		}
+		return request;
 	}
 
 	private ensureOutboxOwnerColumns(): void {
@@ -938,6 +1656,23 @@ export class ActivityWindowDeliveryStore {
 		// auto-claimed by a later login.
 	}
 
+	private ensureOutboxSemanticColumns(): void {
+		const columns = this.database
+			.query("PRAGMA table_info(activity_window_worker_outbox)")
+			.all() as Array<{ name: string }>;
+		const names = new Set(columns.map((column) => column.name));
+		if (!names.has("semantic_request_json")) {
+			this.database.exec(
+				"ALTER TABLE activity_window_worker_outbox ADD COLUMN semantic_request_json TEXT",
+			);
+		}
+		if (!names.has("semantic_attempt")) {
+			this.database.exec(
+				"ALTER TABLE activity_window_worker_outbox ADD COLUMN semantic_attempt INTEGER NOT NULL DEFAULT 0 CHECK (semantic_attempt >= 0)",
+			);
+		}
+	}
+
 	private ensureStateOwnerColumn(): void {
 		const columns = this.database
 			.query("PRAGMA table_info(activity_window_worker_state)")
@@ -945,6 +1680,28 @@ export class ActivityWindowDeliveryStore {
 		if (!columns.some((column) => column.name === "owner_account_id")) {
 			this.database.exec(
 				"ALTER TABLE activity_window_worker_state ADD COLUMN owner_account_id TEXT",
+			);
+		}
+	}
+
+	private ensureAgentJobRecoveryColumns(): void {
+		const columns = this.database
+			.query("PRAGMA table_info(activity_window_worker_agent_jobs)")
+			.all() as Array<{ name: string }>;
+		const names = new Set(columns.map((column) => column.name));
+		if (!names.has("originating_request_id")) {
+			this.database.exec(
+				"ALTER TABLE activity_window_worker_agent_jobs ADD COLUMN originating_request_id TEXT",
+			);
+		}
+		if (!names.has("transport_attempt")) {
+			this.database.exec(
+				"ALTER TABLE activity_window_worker_agent_jobs ADD COLUMN transport_attempt INTEGER NOT NULL DEFAULT 0 CHECK (transport_attempt >= 0)",
+			);
+		}
+		if (!names.has("terminal_failure")) {
+			this.database.exec(
+				"ALTER TABLE activity_window_worker_agent_jobs ADD COLUMN terminal_failure INTEGER NOT NULL DEFAULT 0 CHECK (terminal_failure IN (0, 1))",
 			);
 		}
 	}
@@ -964,6 +1721,22 @@ export class ActivityWindowDeliveryStore {
 			.query("SELECT COUNT(*) AS count FROM activity_window_worker_receipts")
 			.get() as { count: number };
 		return row.count;
+	}
+
+	private hasPendingSourceAcknowledgement(accountId: string): boolean {
+		return (
+			this.database
+				.query(
+					`SELECT 1 AS present
+					 FROM activity_window_worker_outbox AS o
+					 JOIN activity_window_worker_receipts AS r
+					   ON r.source_window_id = o.window_id
+					  AND r.request_id = o.request_id
+					 WHERE o.owner_account_id = ?
+					 LIMIT 1`,
+				)
+				.get(accountId) !== null
+		);
 	}
 
 	private deleteOutbox(windowId: string): void {
@@ -1004,6 +1777,15 @@ export class ActivityWindowDeliveryService {
 	private readonly onAcceptedAnalysis: (
 		result: AcceptedActivityWindowAnalysis,
 	) => void | Promise<void>;
+	private readonly archiveAnalysisBeforeReceipt: (
+		result: ArchiveActivityWindowAnalysis,
+	) => void | Promise<void>;
+	private readonly acknowledgeSourceAfterReceipt: (
+		result: AcknowledgeActivityWindowSource,
+	) => void | Promise<void>;
+	private readonly recoverArchivedAnalysis: NonNullable<
+		ActivityWindowDeliveryServiceOptions["recoverArchivedAnalysis"]
+	>;
 	private readonly onAgentTriggerRequired: (
 		status: ActivityScoreStatus,
 	) => void | Promise<void>;
@@ -1032,6 +1814,12 @@ export class ActivityWindowDeliveryService {
 		);
 		this.nowMs = options.nowMs ?? Date.now;
 		this.onAcceptedAnalysis = options.onAcceptedAnalysis ?? (() => {});
+		this.archiveAnalysisBeforeReceipt =
+			options.archiveAnalysisBeforeReceipt ?? (() => {});
+		this.acknowledgeSourceAfterReceipt =
+			options.acknowledgeSourceAfterReceipt ?? (() => {});
+		this.recoverArchivedAnalysis =
+			options.recoverArchivedAnalysis ?? (() => null);
 		this.onAgentTriggerRequired = options.onAgentTriggerRequired ?? (() => {});
 		this.onError = options.onError ?? (() => {});
 		this.currentSession = options.currentSession ?? (() => null);
@@ -1144,7 +1932,7 @@ export class ActivityWindowDeliveryService {
 		window: EventWindowV1,
 		owner: AuthSessionIdentity,
 	): Promise<void> {
-		const requestId = await activityWindowRequestId(window);
+		const requestId = await activityWindowRequestId(window, 0);
 		this.store.enqueue(window, requestId, this.nowMs(), owner);
 	}
 
@@ -1177,24 +1965,112 @@ export class ActivityWindowDeliveryService {
 				this.armRetry(next.nextAttemptAtMs);
 				return;
 			}
-			await this.deliver(next.queued);
+			const shouldContinue = await this.deliver(next.queued);
+			if (!shouldContinue) return;
 		}
 	}
 
-	private async deliver(queued: QueuedActivityWindow): Promise<void> {
+	private async deliver(queued: QueuedActivityWindow): Promise<boolean> {
 		try {
-			if (!this.isCurrentSession(queued.owner)) return;
-			const response = await this.analyzer.analyze({
-				schema_version: ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION,
-				request_id: queued.requestId,
-				raw_event: structuredClone(queued.window),
-				context: responseContextFor(queued.window, queued.requestId),
-			});
-			if (!this.isCurrentSession(queued.owner)) return;
-			const normalizedResponse = normalizeResponseReferences(
-				response,
-				queued.window,
+			if (!this.isCurrentSession(queued.owner)) return false;
+			const recoveredResponse = this.store.getAppliedAnalysis(
+				queued.window.windowId,
+				queued.requestId,
 			);
+			if (recoveredResponse !== null) {
+				await this.acknowledgeSourceAfterReceipt({
+					owner: structuredClone(queued.owner),
+					sourceWindowId: queued.window.windowId,
+					requestId: queued.requestId,
+				});
+				if (!this.isCurrentSession(queued.owner)) return false;
+				this.store.acknowledgeAppliedWindow(
+					queued.window.windowId,
+					queued.requestId,
+				);
+				this.lastError = null;
+				const status = this.store.getStatus(this.scoreThreshold);
+				if (status.agentTriggerPending) {
+					await this.invokeSafely(() => this.onAgentTriggerRequired(status));
+				}
+				return true;
+			}
+			const recoveredArchive = await this.recoverArchivedAnalysis({
+				owner: structuredClone(queued.owner),
+				sourceWindow: structuredClone(queued.window),
+				requestId: queued.requestId,
+			});
+			if (recoveredArchive?.kind === "invalid") {
+				throw new ActivityWindowArchiveIdentityError();
+			}
+			if (recoveredArchive?.kind === "consumed") {
+				await this.acknowledgeSourceAfterReceipt({
+					owner: structuredClone(queued.owner),
+					sourceWindowId: queued.window.windowId,
+					requestId: queued.requestId,
+				});
+				if (!this.isCurrentSession(queued.owner)) return false;
+				this.store.acknowledgeConsumedWindow(
+					queued.window.windowId,
+					queued.requestId,
+				);
+				this.lastError = null;
+				return true;
+			}
+			const recoveredAnalysis =
+				recoveredArchive?.kind === "pending" ? recoveredArchive.analysis : null;
+			// Recovery may await encrypted storage. Re-check the exact lifecycle
+			// owner before the first-stage analyzer can issue a remote model call.
+			if (!this.isCurrentSession(queued.owner)) return false;
+			if (
+				recoveredAnalysis !== null &&
+				(!isActivityAnalysisWorkerResult(recoveredAnalysis) ||
+					recoveredAnalysis.request_id !== queued.requestId)
+			) {
+				throw new ActivityWindowArchiveIdentityError();
+			}
+			let response: ActivityEventWorkerResponse;
+			if (recoveredAnalysis !== null) {
+				try {
+					response = workerResponseFromResult(recoveredAnalysis);
+				} catch {
+					throw new ActivityWindowArchiveIdentityError();
+				}
+			} else {
+				try {
+					response = validateActivityEventWorkerResponse(
+						await this.analyzer.analyze(structuredClone(queued.request)),
+						queued.requestId,
+					);
+				} catch (error) {
+					if (isRawSemanticOutputFailure(error)) {
+						throw new ActivityWindowSemanticOutputError(error);
+					}
+					throw error;
+				}
+			}
+			if (!this.isCurrentSession(queued.owner)) return false;
+			let normalizedResponse: ReturnType<typeof normalizeResponseReferences>;
+			try {
+				normalizedResponse = normalizeResponseReferences(
+					response,
+					queued.window,
+				);
+			} catch (error) {
+				if (recoveredAnalysis !== null) {
+					throw new ActivityWindowArchiveIdentityError();
+				}
+				if (isRawSemanticOutputFailure(error)) {
+					throw new ActivityWindowSemanticOutputError(error);
+				}
+				throw error;
+			}
+			if (
+				recoveredAnalysis !== null &&
+				normalizedResponse.replacedSourceIds > 0
+			) {
+				throw new ActivityWindowArchiveIdentityError();
+			}
 			if (normalizedResponse.replacedSourceIds > 0) {
 				this.report(
 					new ActivityWindowDeliveryAttemptError(
@@ -1204,14 +2080,36 @@ export class ActivityWindowDeliveryService {
 					),
 				);
 			}
+			const archivedAtMs = this.nowMs();
+			if (recoveredAnalysis === null) {
+				await this.archiveAnalysisBeforeReceipt({
+					owner: structuredClone(queued.owner),
+					sourceWindow: structuredClone(queued.window),
+					requestId: queued.requestId,
+					analysis: workerResultFromResponse(normalizedResponse.response),
+					archivedAtMs,
+				});
+			}
+			if (!this.isCurrentSession(queued.owner)) return false;
 			const applied = this.store.apply(
 				queued.window.windowId,
 				normalizedResponse.response,
 				this.scoreThreshold,
-				this.nowMs(),
+				archivedAtMs,
+				true,
+			);
+			await this.acknowledgeSourceAfterReceipt({
+				owner: structuredClone(queued.owner),
+				sourceWindowId: queued.window.windowId,
+				requestId: queued.requestId,
+			});
+			if (!this.isCurrentSession(queued.owner)) return false;
+			this.store.acknowledgeAppliedWindow(
+				queued.window.windowId,
+				queued.requestId,
 			);
 			this.lastError = null;
-			if (!applied.accepted) return;
+			if (!applied.accepted) return true;
 			await this.invokeSafely(() =>
 				this.onAcceptedAnalysis({
 					sourceWindowId: queued.window.windowId,
@@ -1224,6 +2122,7 @@ export class ActivityWindowDeliveryService {
 					this.onAgentTriggerRequired(applied.status),
 				);
 			}
+			return true;
 		} catch (error) {
 			const wrapped = new ActivityWindowDeliveryAttemptError(
 				error,
@@ -1236,10 +2135,44 @@ export class ActivityWindowDeliveryService {
 				? `${code}:${diagnostic.validationStage}`
 				: code;
 			this.lastError = code;
+			if (error instanceof ActivityWindowSemanticOutputError) {
+				const delayIndex = Math.min(
+					queued.attempt,
+					this.retryDelaysMs.length - 1,
+				);
+				const delayMs = this.retryDelaysMs[delayIndex] ?? 300_000;
+				const nextAttemptAtMs = this.nowMs() + delayMs;
+				const nextSemanticAttempt = queued.semanticAttempt + 1;
+				const terminal =
+					nextSemanticAttempt >= MAXIMUM_ACTIVITY_WINDOW_SEMANTIC_ATTEMPTS;
+				const nextRequestId = terminal
+					? null
+					: await activityWindowRequestId(queued.window, nextSemanticAttempt);
+				const outcome = this.store.advanceSemanticAttempt(
+					queued.window.windowId,
+					queued.requestId,
+					nextAttemptAtMs,
+					storedError,
+					nextRequestId === null
+						? null
+						: {
+								requestId: nextRequestId,
+								request: activityWindowSemanticRequest(
+									queued.window,
+									nextRequestId,
+								),
+							},
+				);
+				this.report(wrapped);
+				if (outcome.terminal) return true;
+				this.state = "retry_wait";
+				this.armRetry(nextAttemptAtMs);
+				return false;
+			}
 			if (isPermanentlyUndeliverable(error)) {
 				this.store.markTerminal(queued.window.windowId, storedError);
 				this.report(wrapped);
-				return;
+				return true;
 			}
 			const delayIndex = Math.min(
 				queued.attempt,
@@ -1251,6 +2184,7 @@ export class ActivityWindowDeliveryService {
 			this.state = "retry_wait";
 			this.report(wrapped);
 			this.armRetry(nextAttemptAtMs);
+			return false;
 		}
 	}
 
@@ -1327,6 +2261,20 @@ class ActivityWindowResponseValidationError extends Error {
 	}
 }
 
+class ActivityWindowArchiveIdentityError extends Error {
+	constructor() {
+		super("Activity window archive does not match its semantic request.");
+		this.name = "ActivityWindowArchiveIdentityError";
+	}
+}
+
+class ActivityWindowSemanticOutputError extends Error {
+	constructor(readonly underlying: unknown) {
+		super("Activity window model output failed deterministic validation.");
+		this.name = "ActivityWindowSemanticOutputError";
+	}
+}
+
 export function activityWindowWorkerDiagnostic(error: unknown): {
 	code: ActivityWindowDeliveryStatus["lastError"] extends infer T
 		? Exclude<T, null>
@@ -1347,10 +2295,26 @@ export function activityWindowWorkerDiagnostic(error: unknown): {
 		error instanceof ActivityWindowDeliveryAttemptError
 			? error.eventCount
 			: null;
-	const underlying =
+	const attemptUnderlying =
 		error instanceof ActivityWindowDeliveryAttemptError
 			? error.underlying
 			: error;
+	const underlying =
+		attemptUnderlying instanceof ActivityWindowSemanticOutputError
+			? attemptUnderlying.underlying
+			: attemptUnderlying;
+	if (underlying instanceof ActivityWindowArchiveIdentityError) {
+		return {
+			code: "invalid_response",
+			retryable: false,
+			httpStatus: null,
+			requestBytes: null,
+			responseServer: null,
+			triggerReason,
+			eventCount,
+			validationStage: null,
+		};
+	}
 	if (underlying instanceof ActivityWindowResponseValidationError) {
 		return {
 			code: "invalid_response",
@@ -1387,22 +2351,54 @@ export function activityWindowWorkerDiagnostic(error: unknown): {
 	};
 }
 
-async function activityWindowRequestId(window: EventWindowV1): Promise<string> {
-	const encoded = new TextEncoder().encode(
-		`${ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION}:${window.windowId}`,
-	);
-	const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
-	const hex = Array.from(digest, (value) =>
-		value.toString(16).padStart(2, "0"),
-	).join("");
+function activityWindowRequestId(
+	window: EventWindowV1,
+	semanticAttempt = 0,
+): string {
+	const attempt = activityWindowSemanticAttempt(semanticAttempt);
+	const semanticIdentity =
+		attempt === 0
+			? `${ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION}:${window.windowId}`
+			: `${ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION}:${window.windowId}:${attempt}`;
+	const hex = createHash("sha256")
+		.update(semanticIdentity, "utf8")
+		.digest("hex");
 	return `activity_window_${hex}`;
+}
+
+function isActivityWindowSemanticRequestId(
+	window: EventWindowV1,
+	requestId: string,
+): boolean {
+	for (
+		let attempt = 0;
+		attempt < MAXIMUM_ACTIVITY_WINDOW_SEMANTIC_ATTEMPTS;
+		attempt += 1
+	) {
+		if (activityWindowRequestId(window, attempt) === requestId) return true;
+	}
+	return false;
+}
+
+function activityWindowSemanticRequest(
+	window: EventWindowV1,
+	requestId: string,
+): ActivityEventWorkerRequest {
+	return {
+		schema_version: ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION,
+		request_id: requestId,
+		raw_event: structuredClone(window),
+		context: responseContextFor(window, requestId),
+	};
 }
 
 function responseContextFor(
 	window: EventWindowV1,
 	requestId: string,
+	timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
 ): Record<string, unknown> {
 	return {
+		goal: window.goal === null ? null : structuredClone(window.goal),
 		response_contract: {
 			response_schema_version: ACTIVITY_EVENT_WORKER_RESPONSE_SCHEMA_VERSION,
 			request_id: requestId,
@@ -1418,7 +2414,7 @@ function responseContextFor(
 			window_ended_at_ms: window.endedAtMs,
 			// The client owns human-readable review time. It is included in the
 			// local prompt/context, never delegated to the remote relay.
-			time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+			time_zone: timeZone,
 		},
 	};
 }
@@ -1512,6 +2508,84 @@ function serializeWindow(window: EventWindowV1): string {
 	}
 }
 
+function activityWindowSemanticAttempt(value: number): number {
+	if (
+		!Number.isSafeInteger(value) ||
+		value < 0 ||
+		value >= MAXIMUM_ACTIVITY_WINDOW_SEMANTIC_ATTEMPTS
+	) {
+		throw new Error("Activity window semantic attempt is corrupt.");
+	}
+	return value;
+}
+
+function validateSemanticRequest(
+	value: unknown,
+	window: EventWindowV1,
+	requestId: string,
+): ActivityEventWorkerRequest {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, [
+			"schema_version",
+			"request_id",
+			"raw_event",
+			"context",
+		]) ||
+		value.schema_version !== ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION ||
+		value.request_id !== requestId ||
+		!isRecord(value.raw_event) ||
+		!isRecord(value.context)
+	) {
+		throw new Error("Activity window semantic request is invalid.");
+	}
+	const rawWindow = validateWindow(value.raw_event as EventWindowV1);
+	if (serializeWindow(rawWindow) !== serializeWindow(window)) {
+		throw new Error("Activity window semantic request raw event mismatch.");
+	}
+	const responseContract = value.context.response_contract;
+	if (
+		!isRecord(responseContract) ||
+		!isBoundedString(responseContract.time_zone, 256)
+	) {
+		throw new Error("Activity window semantic request context is invalid.");
+	}
+	const expectedContext = responseContextFor(
+		window,
+		requestId,
+		responseContract.time_zone,
+	);
+	if (JSON.stringify(value.context) !== JSON.stringify(expectedContext)) {
+		throw new Error("Activity window semantic request context mismatch.");
+	}
+	return {
+		schema_version: ACTIVITY_EVENT_WORKER_REQUEST_SCHEMA_VERSION,
+		request_id: requestId,
+		raw_event: structuredClone(rawWindow),
+		context: structuredClone(value.context),
+	};
+}
+
+function serializeSemanticRequest(
+	request: ActivityEventWorkerRequest,
+	window: EventWindowV1,
+	requestId: string,
+): string {
+	return JSON.stringify(validateSemanticRequest(request, window, requestId));
+}
+
+function parseStoredSemanticRequest(
+	value: string,
+	window: EventWindowV1,
+	requestId: string,
+): ActivityEventWorkerRequest {
+	try {
+		return validateSemanticRequest(JSON.parse(value), window, requestId);
+	} catch {
+		throw new Error("Activity window semantic request is corrupt.");
+	}
+}
+
 function parseStoredWindow(value: string, windowId: string): EventWindowV1 {
 	try {
 		const parsed = JSON.parse(value) as EventWindowV1;
@@ -1582,6 +2656,21 @@ function workerResultFromResponse(
 	};
 }
 
+function workerResponseFromResult(
+	result: ActivityAnalysisWorkerResult,
+): ActivityEventWorkerResponse {
+	return validateResponse(
+		{
+			schema_version: ACTIVITY_EVENT_WORKER_RESPONSE_SCHEMA_VERSION,
+			request_id: result.request_id,
+			events: structuredClone(result.events),
+			score: result.score,
+			score_reason: result.score_reason,
+		},
+		result.request_id,
+	);
+}
+
 function activityAnalysisJobFromRow(
 	row: ActivityAnalysisJobRow,
 ): ActivityAnalysisJob {
@@ -1594,6 +2683,8 @@ function activityAnalysisJobFromRow(
 		row.consumed_score < 0 ||
 		!Number.isSafeInteger(row.attempt) ||
 		row.attempt < 0 ||
+		!Number.isSafeInteger(row.transport_attempt) ||
+		row.transport_attempt < 0 ||
 		!Number.isSafeInteger(row.next_attempt_at_ms) ||
 		row.next_attempt_at_ms < 0 ||
 		!Number.isSafeInteger(row.created_at_ms) ||
@@ -1604,6 +2695,12 @@ function activityAnalysisJobFromRow(
 			!isBoundedString(row.account_id, MAXIMUM_ACCOUNT_ID_LENGTH)) ||
 		(row.run_id !== null &&
 			!isBoundedString(row.run_id, MAXIMUM_RUN_ID_LENGTH)) ||
+		(row.originating_request_id !== null &&
+			!isBoundedString(
+				row.originating_request_id,
+				MAXIMUM_REQUEST_ID_LENGTH,
+			)) ||
+		(row.terminal_failure !== 0 && row.terminal_failure !== 1) ||
 		(row.last_error !== null && !isBoundedString(row.last_error, 80))
 	) {
 		throw new Error("Activity analysis job is corrupt.");
@@ -1645,6 +2742,11 @@ function activityAnalysisJobFromRow(
 		analyses,
 		consumedScore: row.consumed_score,
 		attempt: row.attempt,
+		transportAttempt: row.transport_attempt,
+		originatingRequestId:
+			row.originating_request_id ??
+			`activity-request-${row.job_id}-${row.attempt + 1}`,
+		terminalFailure: row.terminal_failure === 1,
 		nextAttemptAtMs: row.next_attempt_at_ms,
 		createdAtMs: row.created_at_ms,
 		updatedAtMs: row.updated_at_ms,
@@ -1666,7 +2768,18 @@ function statusFromRow(
 }
 
 function isPermanentlyUndeliverable(error: unknown): boolean {
-	return error instanceof ActivityEventWorkerClientError && !error.retryable;
+	return (
+		error instanceof ActivityWindowArchiveIdentityError ||
+		(error instanceof ActivityEventWorkerClientError && !error.retryable)
+	);
+}
+
+function isRawSemanticOutputFailure(error: unknown): boolean {
+	return (
+		error instanceof ActivityWindowResponseValidationError ||
+		(error instanceof ActivityEventWorkerClientError &&
+			error.code === "invalid_response")
+	);
 }
 
 function validScoreThreshold(value: number): number {

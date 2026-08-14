@@ -81,6 +81,41 @@ describe("RemoteAuthSessionManager", () => {
 		);
 	});
 
+	test("preserves initial restore behavior when there is no live session", async () => {
+		const credentials = new MemoryCredentials();
+		credentials.values.set(
+			"auth.refresh-token.current",
+			"refresh-token-persisted-0123456789",
+		);
+		const cleared: Array<string | null> = [];
+		const activated: string[] = [];
+		let refreshBody: unknown = null;
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionClear: async (accountId) => {
+				cleared.push(accountId);
+			},
+			onSessionActivated: async (identity) => {
+				activated.push(identity.sessionId);
+			},
+			fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+				refreshBody = init?.body ? JSON.parse(String(init.body)) : null;
+				return Response.json(sessionPayload("restored"));
+			}) as unknown as typeof fetch,
+		});
+
+		await expect(manager.restoreSession()).resolves.toMatchObject({
+			id: "session-restored",
+		});
+		expect(refreshBody).toEqual({
+			refreshToken: "refresh-token-persisted-0123456789",
+		});
+		expect(cleared).toEqual([]);
+		expect(activated).toEqual(["session-restored"]);
+		expect(manager.accountId).toBe("account-1");
+	});
+
 	test("coalesces concurrent refresh operations", async () => {
 		const credentials = new MemoryCredentials();
 		let refreshCalls = 0;
@@ -169,6 +204,33 @@ describe("RemoteAuthSessionManager", () => {
 		expect(cleared).toEqual(["account-1"]);
 		expect(manager.getSession()).toBeNull();
 		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+	});
+
+	test("does not emit an expiry event when an initial post-activation callback fails", async () => {
+		const credentials = new MemoryCredentials();
+		const lifecycle: string[] = [];
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onSessionActivated: async () => {
+				throw new Error("injected initial session-ready failure");
+			},
+			onBeforeSessionClear: async (accountId) => {
+				lifecycle.push(`clear:${String(accountId)}`);
+			},
+			onSessionExpired: () => lifecycle.push("expired"),
+			fetch: (async () =>
+				Response.json(
+					sessionPayload("failed-ready"),
+				)) as unknown as typeof fetch,
+		});
+
+		await expect(
+			manager.signIn({ email: "test@example.com", password: "password" }),
+		).rejects.toThrow("injected initial session-ready failure");
+		expect(manager.getSession()).toBeNull();
+		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(lifecycle).toEqual(["clear:account-1"]);
 	});
 
 	test("adds the personal relay key only to authenticated model requests and binds identity generations", async () => {
@@ -280,6 +342,88 @@ describe("RemoteAuthSessionManager", () => {
 
 		expect(response.ok).toBeTrue();
 		expect(modelPurposes).toEqual(["activity", "activity"]);
+	});
+
+	test("runs the post-activation callback after an authorized request refresh", async () => {
+		const credentials = new MemoryCredentials();
+		const activated: string[] = [];
+		let modelCalls = 0;
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onSessionActivated: async (identity) => {
+				activated.push(identity.sessionId);
+			},
+			fetch: (async (input: RequestInfo | URL) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/v1/auth/sessions") {
+					return Response.json(sessionPayload("active"));
+				}
+				if (path === "/v1/auth/sessions/refresh") {
+					return Response.json(sessionPayload("rotated"));
+				}
+				modelCalls += 1;
+				return modelCalls === 1
+					? new Response(null, { status: 401 })
+					: Response.json({ id: "completed" });
+			}) as unknown as typeof fetch,
+		});
+		await manager.signIn({ email: "test@example.com", password: "password" });
+
+		await expect(
+			manager.authorizedFetch(
+				"/v1/chat/completions",
+				{ method: "POST" },
+				"activity",
+			),
+		).resolves.toMatchObject({ ok: true });
+		expect(activated).toEqual(["session-active", "session-rotated"]);
+		expect(manager.getSession()?.id).toBe("session-rotated");
+		expect(modelCalls).toBe(2);
+	});
+
+	test("revokes a refreshed session when its post-activation callback fails", async () => {
+		const credentials = new MemoryCredentials();
+		const lifecycle: string[] = [];
+		let modelCalls = 0;
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionClear: async (accountId) => {
+				lifecycle.push(`clear:${String(accountId)}`);
+			},
+			onSessionExpired: () => lifecycle.push("expired"),
+			onSessionActivated: async (identity) => {
+				if (identity.sessionId === "session-rotated") {
+					throw new Error("injected session-ready failure");
+				}
+			},
+			fetch: (async (input: RequestInfo | URL) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/v1/auth/sessions") {
+					return Response.json(sessionPayload("active"));
+				}
+				if (path === "/v1/auth/sessions/refresh") {
+					return Response.json(sessionPayload("rotated"));
+				}
+				modelCalls += 1;
+				return new Response(null, { status: 401 });
+			}) as unknown as typeof fetch,
+		});
+		await manager.signIn({ email: "test@example.com", password: "password" });
+
+		await expect(
+			manager.authorizedFetch(
+				"/v1/chat/completions",
+				{ method: "POST" },
+				"activity",
+			),
+		).rejects.toThrow("injected session-ready failure");
+		expect(manager.getSession()).toBeNull();
+		expect(manager.captureCurrentSession()).toBeNull();
+		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(lifecycle).toEqual(["clear:account-1", "expired"]);
+		expect(modelCalls).toBe(1);
 	});
 
 	test("does not resurrect a refresh token when logout races a credential write", async () => {
@@ -512,6 +656,193 @@ describe("RemoteAuthSessionManager", () => {
 		);
 	});
 
+	test("clears the live owner before a replacement sign-in waits on the network", async () => {
+		const credentials = new MemoryCredentials();
+		const barriers: string[] = [];
+		let releaseReplacement!: () => void;
+		let markReplacementStarted!: () => void;
+		const replacementStarted = new Promise<void>((resolve) => {
+			markReplacementStarted = resolve;
+		});
+		const replacementReleased = new Promise<void>((resolve) => {
+			releaseReplacement = resolve;
+		});
+		let signIns = 0;
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionClear: async (accountId) => {
+				barriers.push(`clear:${String(accountId)}`);
+			},
+			onBeforeSessionActivate: async (next) => {
+				barriers.push(`activate:${next.accountId}`);
+			},
+			fetch: (async () => {
+				signIns += 1;
+				if (signIns === 1) {
+					return Response.json(sessionPayload("account-a", "account-a"));
+				}
+				markReplacementStarted();
+				await replacementReleased;
+				return new Response(null, { status: 401 });
+			}) as unknown as typeof fetch,
+		});
+
+		await manager.signIn({ email: "a@example.com", password: "password" });
+		const replacement = manager.signIn({
+			email: "b@example.com",
+			password: "wrong-password",
+		});
+		await replacementStarted;
+
+		expect(manager.captureCurrentSession()).toBeNull();
+		expect(manager.getSession()).toBeNull();
+		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(barriers).toEqual(["activate:account-a", "clear:account-a"]);
+
+		releaseReplacement();
+		await expect(replacement).rejects.toMatchObject({
+			kind: "invalid-credentials",
+		});
+		expect(manager.captureCurrentSession()).toBeNull();
+		expect(barriers).toEqual(["activate:account-a", "clear:account-a"]);
+	});
+
+	test("clears a live owner when restore finds no refresh token", async () => {
+		const credentials = new MemoryCredentials();
+		const barriers: string[] = [];
+		let refreshCalls = 0;
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionClear: async (accountId) => {
+				barriers.push(`clear:${String(accountId)}`);
+			},
+			fetch: (async (input: RequestInfo | URL) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/v1/auth/sessions") {
+					return Response.json(sessionPayload("account-a", "account-a"));
+				}
+				refreshCalls += 1;
+				return Response.json(sessionPayload("restored", "account-a"));
+			}) as unknown as typeof fetch,
+		});
+
+		await manager.signIn({ email: "a@example.com", password: "password" });
+		credentials.values.delete("auth.refresh-token.current");
+		await expect(manager.restoreSession()).resolves.toBeNull();
+
+		expect(manager.getSession()).toBeNull();
+		expect(manager.captureCurrentSession()).toBeNull();
+		expect(barriers).toEqual(["clear:account-a"]);
+		expect(refreshCalls).toBe(0);
+	});
+
+	test("clears a live owner before restore waits on a failing network", async () => {
+		const credentials = new MemoryCredentials();
+		const barriers: string[] = [];
+		let releaseRefresh!: () => void;
+		let markRefreshStarted!: () => void;
+		const refreshStarted = new Promise<void>((resolve) => {
+			markRefreshStarted = resolve;
+		});
+		const refreshReleased = new Promise<void>((resolve) => {
+			releaseRefresh = resolve;
+		});
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionClear: async (accountId) => {
+				barriers.push(`clear:${String(accountId)}`);
+			},
+			fetch: (async (input: RequestInfo | URL) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/v1/auth/sessions") {
+					return Response.json(sessionPayload("account-a", "account-a"));
+				}
+				markRefreshStarted();
+				await refreshReleased;
+				throw new Error("injected network failure");
+			}) as unknown as typeof fetch,
+		});
+
+		await manager.signIn({ email: "a@example.com", password: "password" });
+		const restoring = manager.restoreSession();
+		await refreshStarted;
+
+		expect(manager.getSession()).toBeNull();
+		expect(manager.captureCurrentSession()).toBeNull();
+		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(barriers).toEqual(["clear:account-a"]);
+
+		releaseRefresh();
+		await expect(restoring).rejects.toMatchObject({ kind: "offline" });
+		expect(manager.getSession()).toBeNull();
+		expect(barriers).toEqual(["clear:account-a"]);
+	});
+
+	test("does not let an overlapping restore clear or replace a newer sign-in", async () => {
+		const credentials = new MemoryCredentials();
+		const events: string[] = [];
+		let releaseRestore!: () => void;
+		let markRestoreStarted!: () => void;
+		const restoreStarted = new Promise<void>((resolve) => {
+			markRestoreStarted = resolve;
+		});
+		const restoreReleased = new Promise<void>((resolve) => {
+			releaseRestore = resolve;
+		});
+		let signInCalls = 0;
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			onBeforeSessionClear: async (accountId) => {
+				events.push(`clear:${String(accountId)}`);
+			},
+			onSessionActivated: async (identity) => {
+				events.push(`ready:${identity.accountId}:${identity.sessionId}`);
+			},
+			fetch: (async (input: RequestInfo | URL) => {
+				const path = new URL(String(input)).pathname;
+				if (path === "/v1/auth/sessions") {
+					signInCalls += 1;
+					return Response.json(
+						signInCalls === 1
+							? sessionPayload("account-a", "account-a")
+							: sessionPayload("account-b", "account-b"),
+					);
+				}
+				markRestoreStarted();
+				await restoreReleased;
+				return Response.json(
+					sessionPayload("stale-account-a-restore", "account-a"),
+				);
+			}) as unknown as typeof fetch,
+		});
+
+		await manager.signIn({ email: "a@example.com", password: "password" });
+		const staleRestore = manager.restoreSession().then(
+			() => null,
+			(error: unknown) => error,
+		);
+		await restoreStarted;
+		await manager.signIn({ email: "b@example.com", password: "password" });
+		expect(manager.accountId).toBe("account-b");
+
+		releaseRestore();
+		expect(await staleRestore).toMatchObject({ kind: "expired" });
+		expect(manager.accountId).toBe("account-b");
+		expect(manager.getSession()?.id).toBe("session-account-b");
+		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+			"refresh-token-account-b-0123456789",
+		);
+		expect(events).toEqual([
+			"ready:account-a:session-account-a",
+			"clear:account-a",
+			"ready:account-b:session-account-b",
+		]);
+	});
+
 	test("closes local state before best-effort remote revoke", async () => {
 		const credentials = new MemoryCredentials();
 		const order: string[] = [];
@@ -536,6 +867,38 @@ describe("RemoteAuthSessionManager", () => {
 		expect(manager.getSession()).toBeNull();
 		expect(credentials.values.has("auth.refresh-token.current")).toBe(false);
 		expect(order[0]).toBe("barrier");
+	});
+
+	test("drains an accepted best-effort remote revoke before process exit", async () => {
+		const credentials = new MemoryCredentials();
+		let releaseRevoke!: () => void;
+		const revokeReleased = new Promise<void>((resolve) => {
+			releaseRevoke = resolve;
+		});
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			agentKey: personalRelayKey,
+			fetch: (async (input: RequestInfo | URL) => {
+				if (String(input).endsWith("/v1/auth/sessions")) {
+					return Response.json(sessionPayload("active"));
+				}
+				await revokeReleased;
+				return new Response(null, { status: 204 });
+			}) as unknown as typeof fetch,
+		});
+		await manager.signIn({ email: "test@example.com", password: "password" });
+		await manager.signOut();
+		manager.beginShutdown();
+		let drained = false;
+		const drain = manager.drain().then(() => {
+			drained = true;
+		});
+		await Bun.sleep(1);
+		expect(drained).toBe(false);
+
+		releaseRevoke();
+		await drain;
+		expect(drained).toBe(true);
 	});
 
 	test("fails closed, cancels account work, and notifies the renderer when refresh expires", async () => {

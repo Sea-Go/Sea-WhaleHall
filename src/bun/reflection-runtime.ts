@@ -24,8 +24,29 @@ export type WhaleHallReflectionRuntime = {
 	service: DesktopReflectionService;
 	repository: SqliteReflectionRepository;
 	teacherVerified: boolean;
+	beginShutdown(): void;
 	close(): Promise<void>;
 };
+
+export type StopNativeAgentWithReflectionOptions = {
+	drainProducers(): Promise<void>;
+	stopNativeAgent(): Promise<void>;
+	closeReflection(): Promise<void>;
+};
+
+/**
+ * Joins accepted producers first, then starts native stop before Reflection
+ * close. Local stop synchronously rejects pending RPCs that Reflection may be
+ * awaiting, so the two owner drains cannot form a shutdown cycle.
+ */
+export async function stopNativeAgentWithReflection(
+	options: StopNativeAgentWithReflectionOptions,
+): Promise<void> {
+	await options.drainProducers();
+	const nativeStop = options.stopNativeAgent();
+	const reflectionClose = options.closeReflection();
+	await Promise.all([nativeStop, reflectionClose]);
+}
 
 export type CreateWhaleHallReflectionRuntimeOptions = {
 	agent: AgentRuntime;
@@ -128,19 +149,38 @@ export async function createWhaleHallReflectionRuntime(
 				: [],
 			onError,
 		});
-		return {
+		return createOwnedWhaleHallReflectionRuntime({
 			service,
 			repository,
 			teacherVerified,
-			async close() {
-				await service.stop();
-				repository.close();
-			},
-		};
+		});
 	} catch (error) {
 		repository.close();
 		throw error;
 	}
+}
+
+export function createOwnedWhaleHallReflectionRuntime(options: {
+	service: DesktopReflectionService;
+	repository: SqliteReflectionRepository;
+	teacherVerified: boolean;
+}): WhaleHallReflectionRuntime {
+	let closePromise: Promise<void> | null = null;
+	return {
+		...options,
+		beginShutdown() {
+			options.service.beginShutdown();
+		},
+		close() {
+			options.service.beginShutdown();
+			if (closePromise !== null) return closePromise;
+			closePromise = (async () => {
+				await options.service.stop();
+				options.repository.close();
+			})();
+			return closePromise;
+		},
+	};
 }
 
 export async function setRuntimeGoal(

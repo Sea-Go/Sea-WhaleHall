@@ -115,6 +115,7 @@ export class ReflectionCollector {
 	private timer: ReflectionTimerHandle | null = null;
 	private operationTail: Promise<void> = Promise.resolve();
 	private deadlinesDeferred = false;
+	private disposed = false;
 
 	constructor(options: ReflectionCollectorOptions) {
 		this.repository = options.repository;
@@ -318,6 +319,7 @@ export class ReflectionCollector {
 	}
 
 	dispose(): void {
+		this.disposed = true;
 		this.deadlinesDeferred = false;
 		this.cancelTimer();
 	}
@@ -703,6 +705,7 @@ export class ReflectionCollector {
 
 	private armDeadline(deadlineAtMs: number): void {
 		this.cancelTimer();
+		if (this.disposed) return;
 		const delayMs = Math.max(0, deadlineAtMs - this.clock.nowMs());
 		this.timer = this.clock.setTimer(() => {
 			this.timer = null;

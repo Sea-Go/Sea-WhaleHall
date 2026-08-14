@@ -1,20 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import {
-	lstat,
-	mkdir,
-	open,
-	rename,
-	unlink,
-} from "node:fs/promises";
+import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type {
-	FiveMinuteAuditCaptureFailureCode,
-	FiveMinuteAuditCaptureStatus,
-	FiveMinuteAuditCaptureState,
-} from "../shared/contracts";
 import type { TimelineCursorAuthority } from "../agent/timeline-v2/repository";
 import type { SemanticEventV2 } from "../agent/timeline-v2/types";
+import type {
+	FiveMinuteAuditCaptureFailureCode,
+	FiveMinuteAuditCaptureState,
+	FiveMinuteAuditCaptureStatus,
+} from "../shared/contracts";
 
 export const AUDIT_CAPTURE_DURATION_MS = 5 * 60 * 1_000;
 export const AUDIT_CAPTURE_BUCKET_MS = 5_000;
@@ -37,9 +31,7 @@ const CAPTURE_KEYS = [
 	"settleAttemptedAtMs",
 	"failureCode",
 ] as const;
-const LEGACY_CAPTURE_KEYS = CAPTURE_KEYS.filter(
-	(key) => key !== "failureCode",
-);
+const LEGACY_CAPTURE_KEYS = CAPTURE_KEYS.filter((key) => key !== "failureCode");
 
 export type PersistedAuditCaptureState = {
 	captureId: string;
@@ -76,7 +68,7 @@ export type AuditCaptureSettlementResult =
 			failureCode:
 				| "timeline_job_terminal_failure"
 				| "timeline_result_inconsistent";
-		};
+	  };
 
 export type FiveMinuteAuditCaptureDependencies = {
 	store: AuditCaptureStore;
@@ -92,8 +84,7 @@ export type FiveMinuteAuditCaptureDependencies = {
 
 const SYSTEM_SCHEDULER: AuditCaptureScheduler = {
 	setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-	clearTimer: (handle) =>
-		clearTimeout(handle as ReturnType<typeof setTimeout>),
+	clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
 /**
@@ -117,6 +108,7 @@ export class FiveMinuteAuditCaptureCoordinator {
 	private available = true;
 	private disposed = false;
 	private settlingCaptureId: string | null = null;
+	private readonly settlements = new Set<Promise<void>>();
 
 	constructor(dependencies: FiveMinuteAuditCaptureDependencies) {
 		this.store = dependencies.store;
@@ -227,6 +219,22 @@ export class FiveMinuteAuditCaptureCoordinator {
 		this.clearScheduledTimer();
 	}
 
+	async shutdown(): Promise<void> {
+		this.dispose();
+		for (;;) {
+			const tail = this.operationTail;
+			const settlements = [...this.settlements];
+			await Promise.allSettled([tail, ...settlements]);
+			if (
+				this.operationTail === tail &&
+				settlements.length === this.settlements.size &&
+				settlements.every((operation) => this.settlements.has(operation))
+			) {
+				return;
+			}
+		}
+	}
+
 	private async restoreSchedule(): Promise<void> {
 		const current = this.capture;
 		if (!current || !isActive(current.state)) return;
@@ -252,16 +260,10 @@ export class FiveMinuteAuditCaptureCoordinator {
 			this.scheduleSettlement(settling);
 			return;
 		}
-		queueMicrotask(() => {
-			void this.beginSettlement(settling.captureId).catch((error) =>
-				this.onError(error),
-			);
-		});
+		queueMicrotask(() => this.launchSettlement(settling.captureId));
 	}
 
-	private scheduleCollectionEnd(
-		capture: PersistedAuditCaptureState,
-	): void {
+	private scheduleCollectionEnd(capture: PersistedAuditCaptureState): void {
 		this.clearScheduledTimer();
 		const delayMs = Math.max(0, capture.toMs - validNow(this.nowMs()));
 		this.timer = this.scheduler.setTimer(() => {
@@ -304,9 +306,7 @@ export class FiveMinuteAuditCaptureCoordinator {
 			}
 		});
 		if (shouldSettleNow) {
-			void this.beginSettlement(captureId).catch((error) =>
-				this.onError(error),
-			);
+			this.launchSettlement(captureId);
 		}
 	}
 
@@ -318,41 +318,50 @@ export class FiveMinuteAuditCaptureCoordinator {
 		);
 		this.timer = this.scheduler.setTimer(() => {
 			this.timer = null;
-			void this.beginSettlement(capture.captureId).catch((error) =>
-				this.onError(error),
-			);
+			this.launchSettlement(capture.captureId);
 		}, delayMs);
 	}
 
-	private async beginSettlement(captureId: string): Promise<void> {
-		const range = await this.enqueue(async (): Promise<{
-			fromMs: number;
-			toMs: number;
-		} | null> => {
-			if (this.disposed || this.settlingCaptureId !== null) return null;
-			const current = this.capture;
-			if (
-				!current ||
-				current.captureId !== captureId ||
-				current.state !== "settling"
-			) {
-				return null;
-			}
-			const nowMs = validNow(this.nowMs());
-			if (nowMs < current.settleNotBeforeMs) {
-				this.scheduleSettlement(current);
-				return null;
-			}
-			const attempted: PersistedAuditCaptureState = {
-				...current,
-				updatedAtMs: nowMs,
-				settleAttemptedAtMs: nowMs,
-			};
-			await this.store.save(attempted);
-			this.capture = attempted;
-			this.settlingCaptureId = captureId;
-			return { fromMs: attempted.fromMs, toMs: attempted.toMs };
+	private launchSettlement(captureId: string): void {
+		if (this.disposed) return;
+		const operation = this.beginSettlement(captureId).catch((error) => {
+			this.onError(error);
 		});
+		this.settlements.add(operation);
+		void operation.finally(() => this.settlements.delete(operation));
+	}
+
+	private async beginSettlement(captureId: string): Promise<void> {
+		const range = await this.enqueue(
+			async (): Promise<{
+				fromMs: number;
+				toMs: number;
+			} | null> => {
+				if (this.disposed || this.settlingCaptureId !== null) return null;
+				const current = this.capture;
+				if (
+					!current ||
+					current.captureId !== captureId ||
+					current.state !== "settling"
+				) {
+					return null;
+				}
+				const nowMs = validNow(this.nowMs());
+				if (nowMs < current.settleNotBeforeMs) {
+					this.scheduleSettlement(current);
+					return null;
+				}
+				const attempted: PersistedAuditCaptureState = {
+					...current,
+					updatedAtMs: nowMs,
+					settleAttemptedAtMs: nowMs,
+				};
+				await this.store.save(attempted);
+				this.capture = attempted;
+				this.settlingCaptureId = captureId;
+				return { fromMs: attempted.fromMs, toMs: attempted.toMs };
+			},
+		);
 		if (range === null) return;
 
 		let result: AuditCaptureSettlementResult = { state: "pending" };
@@ -480,19 +489,13 @@ export class FileAuditCaptureStore implements AuditCaptureStore {
 		validateCapture(capture);
 		const directory = dirname(this.path);
 		await mkdir(directory, { recursive: true, mode: 0o700 });
-		const temporaryPath = join(
-			directory,
-			`.audit-capture-${randomUUID()}.tmp`,
-		);
+		const temporaryPath = join(directory, `.audit-capture-${randomUUID()}.tmp`);
 		let temporaryCreated = false;
 		try {
 			const noFollow = constants.O_NOFOLLOW ?? 0;
 			const handle = await open(
 				temporaryPath,
-				constants.O_CREAT |
-					constants.O_EXCL |
-					constants.O_WRONLY |
-					noFollow,
+				constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow,
 				0o600,
 			);
 			temporaryCreated = true;
@@ -564,10 +567,7 @@ export function lastEffectiveAuditCursor(
 		) {
 			continue;
 		}
-		if (
-			latest === null ||
-			compareSemanticCursors(event.cursor, latest) > 0
-		) {
+		if (latest === null || compareSemanticCursors(event.cursor, latest) > 0) {
 			latest = event.cursor;
 		}
 	}
@@ -669,10 +669,7 @@ function parseDocument(text: string): PersistedCaptureDocument {
 	) {
 		throw new Error("Audit capture state has an unsupported schema.");
 	}
-	if (
-		Object.keys(parsed).length !== 2 ||
-		!("capture" in parsed)
-	) {
+	if (Object.keys(parsed).length !== 2 || !("capture" in parsed)) {
 		throw new Error("Audit capture state has unexpected fields.");
 	}
 	if (parsed.capture === null) {
@@ -732,8 +729,7 @@ function validateCapture(
 		(value.settleAttemptedAtMs !== null &&
 			value.settleAttemptedAtMs > value.updatedAtMs) ||
 		!isCaptureFailureCodeOrNull(value.failureCode) ||
-		(value.state === "collecting" &&
-			value.settleAttemptedAtMs !== null) ||
+		(value.state === "collecting" && value.settleAttemptedAtMs !== null) ||
 		((value.state === "ready" || value.state === "failed") &&
 			value.settleAttemptedAtMs === null) ||
 		(value.state === "failed" && value.failureCode === null) ||
@@ -762,8 +758,7 @@ function validateLegacyCapture(
 		value.createdAtMs > value.fromMs ||
 		value.updatedAtMs < value.createdAtMs ||
 		!isSafeTime(value.settleNotBeforeMs) ||
-		value.settleNotBeforeMs !==
-			value.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS ||
+		value.settleNotBeforeMs !== value.toMs + AUDIT_CAPTURE_SETTLE_DELAY_MS ||
 		!(
 			value.settleAttemptedAtMs === null ||
 			isSafeTime(value.settleAttemptedAtMs)
@@ -771,8 +766,7 @@ function validateLegacyCapture(
 		(value.settleAttemptedAtMs !== null &&
 			(value.settleAttemptedAtMs < value.settleNotBeforeMs ||
 				value.settleAttemptedAtMs > value.updatedAtMs)) ||
-		(value.state === "collecting" &&
-			value.settleAttemptedAtMs !== null) ||
+		(value.state === "collecting" && value.settleAttemptedAtMs !== null) ||
 		((value.state === "ready" || value.state === "failed") &&
 			value.settleAttemptedAtMs === null)
 	) {

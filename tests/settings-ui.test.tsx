@@ -1,22 +1,26 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { applyAppearancePreferences } from "../src/views/client/app/appearance";
-import { ConfirmationDialog } from "../src/views/client/shared/ui/ConfirmationDialog";
-import {
-	SETTINGS_CATEGORY_IDS,
-	type SettingsCategory,
-} from "../src/views/client/features/settings/domain";
-import { AgentPermissionsController } from "../src/views/client/features/settings/AgentPermissionsController";
-import { PreferencesController } from "../src/views/client/features/settings/PreferencesController";
-import { SettingsPage } from "../src/views/client/features/settings/SettingsPage";
-import { MockAgentPermissionsService } from "../src/views/client/infrastructure/settings/MockAgentPermissionsService";
-import { MockPreferencesService } from "../src/views/client/infrastructure/settings/MockPreferencesService";
+import { AppUpdateController } from "../src/views/client/features/app-update/public";
+import type { AuditExportService } from "../src/views/client/features/audit-export/public";
 import {
 	MonitoringController,
 	type MonitoringService,
 	type MonitoringSnapshot,
 } from "../src/views/client/features/monitoring/public";
-import type { AuditExportService } from "../src/views/client/features/audit-export/public";
+import { ProactiveFeedbackPolicyController } from "../src/views/client/features/proactive-feedback/public";
+import { AgentPermissionsController } from "../src/views/client/features/settings/AgentPermissionsController";
+import {
+	SETTINGS_CATEGORY_IDS,
+	type SettingsCategory,
+} from "../src/views/client/features/settings/domain";
+import { PreferencesController } from "../src/views/client/features/settings/PreferencesController";
+import { SettingsPage } from "../src/views/client/features/settings/SettingsPage";
+import { ElectrobunAppUpdateService } from "../src/views/client/infrastructure/app-update/ElectrobunAppUpdateService";
+import { InMemoryProactiveFeedbackService } from "../src/views/client/infrastructure/proactive-feedback/InMemoryProactiveFeedbackService";
+import { MockAgentPermissionsService } from "../src/views/client/infrastructure/settings/MockAgentPermissionsService";
+import { MockPreferencesService } from "../src/views/client/infrastructure/settings/MockPreferencesService";
+import { ConfirmationDialog } from "../src/views/client/shared/ui/ConfirmationDialog";
 
 const auditExportService: AuditExportService = {
 	async exportFiveMinutes() {
@@ -62,9 +66,21 @@ async function setup() {
 	const agentPermissionsController = new AgentPermissionsController(
 		new MockAgentPermissionsService({ latencyMs: 0 }),
 	);
+	const proactiveFeedbackPolicyController =
+		new ProactiveFeedbackPolicyController(
+			new InMemoryProactiveFeedbackService(),
+		);
+	const appUpdateController = new AppUpdateController(
+		new ElectrobunAppUpdateService({
+			runtimeAvailable: () => false,
+			fallbackCurrentVersion: "0.1.0",
+		}),
+	);
 	await controller.load();
+	await appUpdateController.load();
 	const monitoringController = await createMonitoringController();
 	await agentPermissionsController.load();
+	await proactiveFeedbackPolicyController.load();
 	const render = (category: SettingsCategory) =>
 		renderToStaticMarkup(
 			<SettingsPage
@@ -73,13 +89,20 @@ async function setup() {
 				monitoringController={monitoringController}
 				auditExportService={auditExportService}
 				agentPermissionsController={agentPermissionsController}
+				proactiveFeedbackPolicyController={proactiveFeedbackPolicyController}
+				appUpdateController={appUpdateController}
 				category={category}
 				onCategoryChange={() => {}}
 				onLogout={() => {}}
 				onPreferencesApplied={() => {}}
 			/>,
 		);
-	return { agentPermissionsController, controller, render };
+	return {
+		agentPermissionsController,
+		controller,
+		proactiveFeedbackPolicyController,
+		render,
+	};
 }
 
 async function createMonitoringController(): Promise<MonitoringController> {
@@ -97,8 +120,18 @@ async function createMonitoringController(): Promise<MonitoringController> {
 		permissions: [
 			{ id: "accessibility", state: "granted", required: true, detail: null },
 			{ id: "screenRecording", state: "granted", required: true, detail: null },
-			{ id: "inputMonitoring", state: "granted", required: false, detail: null },
-			{ id: "browserAutomation", state: "granted", required: false, detail: null },
+			{
+				id: "inputMonitoring",
+				state: "granted",
+				required: false,
+				detail: null,
+			},
+			{
+				id: "browserAutomation",
+				state: "granted",
+				required: false,
+				detail: null,
+			},
 		],
 		contentVault: {
 			availability: "available",
@@ -183,16 +216,15 @@ describe("settings UI", () => {
 				"减少动态效果",
 				'role="switch"',
 			],
-			pet: ["显示桌宠", "跟随工作状态反馈", "不读取登录凭据"],
+			pet: ["显示桌宠", "跟随工作状态反馈", "登录凭据与 token"],
 			notifications: ["允许通知", "计划开始提醒", "每周回顾提醒"],
 			calendar: ["默认视图", "显示周末", "每周从周一开始"],
 			privacy: [
-				"本地数据边界",
+				"采集、主动反馈与本地数据",
 				"五分钟审计包",
 				"开始采满五分钟",
 				"导出过去五分钟",
 				"包含可解密的文本内容",
-				"一次性监测设置",
 				"本机监测已设置",
 				"2/2 项完成",
 				"键鼠活动量由辅助功能授权覆盖",
@@ -208,8 +240,13 @@ describe("settings UI", () => {
 				"当前未授权",
 				"完整规划窗口内的日历",
 				"远端只负责转发模型请求与回答",
+				"启用主动反馈",
+				"当前系统权限允许采集的活动信息",
+				"DataCenter",
+				"永久",
+				"清除本机主动反馈数据",
 				"使用浏览器分类汇总",
-				"保留周期",
+				"localStorage 偏好不作为授权来源",
 			],
 			about: ["A whale falls", "0.1.0", "本地优先"],
 		} as const;

@@ -1,0 +1,36 @@
+diff --git a/dist/main.js b/dist/main.js
+index be057ba..f9a1a65 100644
+--- a/dist/main.js
++++ b/dist/main.js
+@@ -154,10 +154,28 @@ async function main() {
+   } else {
+     console.log(`[LAUNCHER] Loading app code from flat files`);
+     appEntrypointPath = join(appFolderPath, "bun", "index.js");
+   }
+-  process.on("SIGINT", () => {});
+-  process.on("SIGTERM", () => {});
+-  new Worker(appEntrypointPath, {});
++  let whaleHallAppWorker = null;
++  let pendingWhaleHallLifecycleSignal = null;
++  const forwardWhaleHallLifecycleSignal = (signal) => {
++    if (whaleHallAppWorker === null) {
++      pendingWhaleHallLifecycleSignal ??= signal;
++      return;
++    }
++    whaleHallAppWorker.postMessage({
++      type: "com.seago.whalehall.lifecycle.signal",
++      version: 1,
++      signal
++    });
++  };
++  process.on("SIGINT", () => forwardWhaleHallLifecycleSignal("SIGINT"));
++  process.on("SIGTERM", () => forwardWhaleHallLifecycleSignal("SIGTERM"));
++  whaleHallAppWorker = new Worker(appEntrypointPath, {});
++  if (pendingWhaleHallLifecycleSignal !== null) {
++    const pendingSignal = pendingWhaleHallLifecycleSignal;
++    pendingWhaleHallLifecycleSignal = null;
++    forwardWhaleHallLifecycleSignal(pendingSignal);
++  }
+   lib.symbols.startEventLoop(ptr(new Uint8Array(Buffer.from(identifier + "\x00", "utf8"))), ptr(new Uint8Array(Buffer.from(name + "\x00", "utf8"))), ptr(new Uint8Array(Buffer.from(channel + "\x00", "utf8"))));
+   lib.symbols.forceExit(0);
+ }

@@ -25,7 +25,10 @@ export type NativePrivateTrainingExportDialogs = {
 };
 
 export type PrivateTrainingWindowExportCoordinatorDependencies = {
-	getExporter(): Pick<PrivateTrainingWindowExporter, "exportToNewDirectory"> | null;
+	getExporter(): Pick<
+		PrivateTrainingWindowExporter,
+		"exportToNewDirectory"
+	> | null;
 	listCommittedWindowIds(options: {
 		endedAtOrAfterMs: number | null;
 		availableAtMs: number;
@@ -51,6 +54,8 @@ export class PrivateTrainingWindowExportCoordinator {
 	private readonly createId: () => string;
 	private readonly schedule: (run: () => void) => void;
 	private status: PrivateTrainingWindowExportStatus = idleStatus();
+	private activeRun: Promise<void> | null = null;
+	private closed = false;
 
 	constructor(
 		private readonly dependencies: PrivateTrainingWindowExportCoordinatorDependencies,
@@ -64,6 +69,7 @@ export class PrivateTrainingWindowExportCoordinator {
 	start(
 		request: PrivateTrainingWindowExportRequest,
 	): PrivateTrainingWindowExportStatus {
+		if (this.closed) return this.getStatus();
 		if (ACTIVE_STATES.has(this.status.state)) return this.getStatus();
 		if (!validScope(request?.scope)) {
 			this.status = this.nextStatus({
@@ -87,8 +93,19 @@ export class PrivateTrainingWindowExportCoordinator {
 			basename: null,
 			failureCode: null,
 		});
+		let operation: Promise<void>;
 		try {
-			this.schedule(() => void this.run(jobId, request.scope));
+			operation = new Promise<void>((resolve, reject) => {
+				this.schedule(
+					() => void this.run(jobId, request.scope).then(resolve, reject),
+				);
+			});
+			this.activeRun = operation;
+			void operation
+				.catch(() => undefined)
+				.finally(() => {
+					if (this.activeRun === operation) this.activeRun = null;
+				});
 		} catch {
 			this.fail(jobId, "export_failed");
 		}
@@ -97,6 +114,11 @@ export class PrivateTrainingWindowExportCoordinator {
 
 	getStatus(): PrivateTrainingWindowExportStatus {
 		return structuredClone(this.status);
+	}
+
+	async shutdown(): Promise<void> {
+		this.closed = true;
+		await this.activeRun?.catch(() => undefined);
 	}
 
 	private async run(
@@ -110,20 +132,17 @@ export class PrivateTrainingWindowExportCoordinator {
 		}
 		try {
 			const startedAtMs = this.checkedNowMs();
-			const candidateWindowIds =
-				await this.dependencies.listCommittedWindowIds({
+			const candidateWindowIds = await this.dependencies.listCommittedWindowIds(
+				{
 					endedAtOrAfterMs:
 						scope === "last_24_hours"
 							? Math.max(0, startedAtMs - RECENT_EXPORT_DURATION_MS)
 							: null,
 					availableAtMs: startedAtMs,
-					order:
-						scope === "latest_committed"
-							? "newest_first"
-							: "oldest_first",
-					limit:
-						scope === "latest_committed" ? 1 : MAX_EXPORT_WINDOWS + 1,
-				});
+					order: scope === "latest_committed" ? "newest_first" : "oldest_first",
+					limit: scope === "latest_committed" ? 1 : MAX_EXPORT_WINDOWS + 1,
+				},
+			);
 			if (!this.isCurrent(jobId)) return;
 			if (candidateWindowIds.length === 0) {
 				this.fail(jobId, "no_committed_windows");
@@ -237,9 +256,7 @@ export class PrivateTrainingWindowExportCoordinator {
 
 	private fail(
 		jobId: string,
-		failureCode: NonNullable<
-			PrivateTrainingWindowExportStatus["failureCode"]
-		>,
+		failureCode: NonNullable<PrivateTrainingWindowExportStatus["failureCode"]>,
 	): void {
 		this.update(jobId, {
 			state: "failed",

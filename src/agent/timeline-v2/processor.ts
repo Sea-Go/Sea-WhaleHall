@@ -48,12 +48,18 @@ export class TimelineV2Processor {
 		this.formatTime = options.formatTime ?? localTime;
 	}
 
-	async process(window: TimelineWindowV2): Promise<PersistTimelineResult> {
+	async process(
+		window: TimelineWindowV2,
+		signal?: AbortSignal,
+	): Promise<PersistTimelineResult> {
+		throwIfTimelineAborted(signal);
 		const facts = await this.evidence.render(window.events);
+		throwIfTimelineAborted(signal);
 		const contextOnlyFacts =
 			window.contextOnly.length > 0
 				? await this.evidence.render(window.contextOnly)
 				: [];
+		throwIfTimelineAborted(signal);
 		// Cursor order is authoritative, while occurredAtMs can move backwards
 		// for delayed AX/OCR observations. Inspect the latest immutable episode
 		// even when its end timestamp is newer than this window's first fact so
@@ -63,30 +69,37 @@ export class TimelineV2Processor {
 			window.sessionId,
 			Number.MAX_SAFE_INTEGER,
 		);
+		throwIfTimelineAborted(signal);
 		const episodes = await this.episodes.assemble(
 			window,
 			facts,
 			previousEpisode,
 			contextOnlyFacts,
+			signal,
 		);
+		throwIfTimelineAborted(signal);
 		const correctedResult = await correctionTarget(
 			this.repository,
 			window,
 			previousEpisode,
+			signal,
 		);
 		const summaryFacts = await factsForSummary(
 			this.repository,
 			window,
 			facts,
 			episodes,
+			signal,
 		);
 		const summary = await this.buildSummary(
 			window,
 			summaryFacts,
 			episodes,
 			correctedResult?.summary ?? null,
+			signal,
 		);
-		const agentInput = await this.buildAgentInput(window, summary);
+		const agentInput = await this.buildAgentInput(window, summary, signal);
+		throwIfTimelineAborted(signal);
 		return {
 			windowId: window.windowId,
 			facts,
@@ -101,7 +114,9 @@ export class TimelineV2Processor {
 		facts: readonly EvidenceFactV2[],
 		episodes: readonly ActivityEpisodeV2[],
 		corrected: TimelineSummaryV2 | null,
+		signal?: AbortSignal,
 	): Promise<TimelineSummaryV2> {
+		throwIfTimelineAborted(signal);
 		const factById = new Map(facts.map((fact) => [fact.factId, fact]));
 		const segments: TimelineSegmentV2[] = episodes.map((episode) => ({
 			episodeId: episode.episodeId,
@@ -135,6 +150,7 @@ export class TimelineV2Processor {
 				correctsTimelineId: corrected?.timelineId ?? null,
 			}),
 		)}`;
+		throwIfTimelineAborted(signal);
 		const coverage = mergeCoverage(
 			facts.map((fact) => fact.coverage),
 		);
@@ -183,7 +199,9 @@ export class TimelineV2Processor {
 	private async buildAgentInput(
 		window: TimelineWindowV2,
 		summary: TimelineSummaryV2,
+		signal?: AbortSignal,
 	): Promise<AgentInputV1> {
+		throwIfTimelineAborted(signal);
 		const payloadWithoutHash = {
 			schemaVersion: AGENT_INPUT_SCHEMA_VERSION,
 			timelineId: summary.timelineId,
@@ -205,6 +223,7 @@ export class TimelineV2Processor {
 		const payloadHash = await this.hasher.sha256(
 			canonicalJson(payloadWithoutHash),
 		);
+		throwIfTimelineAborted(signal);
 		const agentInputId = `agent_input_${await this.hasher.sha256(
 			canonicalJson({
 				deviceId: window.deviceId,
@@ -217,6 +236,7 @@ export class TimelineV2Processor {
 				projectorVersion: summary.projectorVersion,
 			}),
 		)}`;
+		throwIfTimelineAborted(signal);
 		return {
 			...payloadWithoutHash,
 			agentInputId,
@@ -252,13 +272,25 @@ export class TimelineV2JobRunner {
 				Math.floor(Math.random() * maximumExclusive));
 	}
 
-	async runNext(): Promise<"idle" | "completed" | "retry" | "terminal"> {
+	async runNext(
+		signal?: AbortSignal,
+	): Promise<"idle" | "completed" | "retry" | "terminal" | "abandoned"> {
+		if (signal?.aborted) return "idle";
 		const nowMs = this.clock.nowMs();
 		const job = await this.repository.claimNextWindow(
 			nowMs,
 			this.leaseDurationMs,
 		);
 		if (!job) return "idle";
+		if (signal?.aborted) {
+			if (job.state === "RUNNING") {
+				await this.repository.abandonWindowClaim(
+					job.windowId,
+					this.clock.nowMs(),
+				);
+			}
+			return "abandoned";
+		}
 		if (
 			job.state === "RESULT_PERSISTED" ||
 			job.state === "COMMITTING"
@@ -275,6 +307,13 @@ export class TimelineV2JobRunner {
 			);
 		}
 		const window = await this.repository.getWindow(job.windowId);
+		if (signal?.aborted) {
+			await this.repository.abandonWindowClaim(
+				job.windowId,
+				this.clock.nowMs(),
+			);
+			return "abandoned";
+		}
 		if (!window) {
 			await this.repository.recordWindowFailure(job.windowId, {
 				nowMs,
@@ -286,7 +325,14 @@ export class TimelineV2JobRunner {
 			return "terminal";
 		}
 		try {
-			const result = await this.processor.process(window);
+			const result = await this.processor.process(window, signal);
+			if (signal?.aborted) {
+				await this.repository.abandonWindowClaim(
+					job.windowId,
+					this.clock.nowMs(),
+				);
+				return "abandoned";
+			}
 			await this.repository.completeWindow(
 				result,
 				this.clock.nowMs(),
@@ -303,8 +349,18 @@ export class TimelineV2JobRunner {
 				// Result persistence is the point of no return. Never overwrite
 				// it with RETRY_WAIT or rerun inference; the next pump only
 				// finalizes the commit state.
-				if (durable.state !== "COMMITTED") throw error;
-				return "completed";
+				if (durable.state === "COMMITTED") return "completed";
+				if (signal?.aborted) return "abandoned";
+				throw error;
+			}
+			if (signal?.aborted) {
+				if (durable?.state === "RUNNING") {
+					await this.repository.abandonWindowClaim(
+						job.windowId,
+						failedAtMs,
+					);
+				}
+				return "abandoned";
 			}
 			const firstAttemptAtMs = job.firstAttemptAtMs ?? failedAtMs;
 			const terminal =
@@ -323,13 +379,15 @@ export class TimelineV2JobRunner {
 		}
 	}
 
-	async runUntilIdle(maxJobs = 100): Promise<number> {
+	async runUntilIdle(maxJobs = 100, signal?: AbortSignal): Promise<number> {
 		if (!Number.isInteger(maxJobs) || maxJobs < 1 || maxJobs > 10_000) {
 			throw new Error("maxJobs must be between 1 and 10000.");
 		}
 		let processed = 0;
-		for (; processed < maxJobs; processed += 1) {
-			if ((await this.runNext()) === "idle") break;
+		while (processed < maxJobs) {
+			const result = await this.runNext(signal);
+			if (result === "idle" || result === "abandoned") break;
+			processed += 1;
 		}
 		return processed;
 	}
@@ -340,7 +398,9 @@ async function factsForSummary(
 	window: TimelineWindowV2,
 	currentFacts: readonly EvidenceFactV2[],
 	episodes: readonly ActivityEpisodeV2[],
+	signal?: AbortSignal,
 ): Promise<EvidenceFactV2[]> {
+	throwIfTimelineAborted(signal);
 	const required = new Set(
 		episodes.flatMap((episode) => [
 			...episode.evidenceFactIds,
@@ -354,8 +414,10 @@ async function factsForSummary(
 		episodes.flatMap((episode) => episode.sourceWindowIds),
 	).filter((windowId) => windowId !== window.windowId);
 	for (const windowId of historicalWindowIds) {
+		throwIfTimelineAborted(signal);
 		if ([...required].every((factId) => byId.has(factId))) break;
 		const result = await repository.getTimelineResult(windowId);
+		throwIfTimelineAborted(signal);
 		for (const fact of result?.facts ?? []) {
 			if (required.has(fact.factId) && !byId.has(fact.factId)) {
 				byId.set(fact.factId, fact);
@@ -412,7 +474,9 @@ async function correctionTarget(
 	repository: TimelineV2Repository,
 	window: TimelineWindowV2,
 	previousEpisode: ActivityEpisodeV2 | null,
+	signal?: AbortSignal,
 ): Promise<PersistTimelineResult | null> {
+	throwIfTimelineAborted(signal);
 	if (
 		!previousEpisode ||
 		!window.events.some(
@@ -425,9 +489,17 @@ async function correctionTarget(
 		return null;
 	}
 	const previousWindowId = previousEpisode.sourceWindowIds.at(-1);
-	return previousWindowId
-		? repository.getTimelineResult(previousWindowId)
-		: null;
+	if (!previousWindowId) return null;
+	const result = await repository.getTimelineResult(previousWindowId);
+	throwIfTimelineAborted(signal);
+	return result;
+}
+
+function throwIfTimelineAborted(signal?: AbortSignal): void {
+	if (!signal?.aborted) return;
+	throw signal.reason instanceof Error
+		? signal.reason
+		: new DOMException("Timeline inference was cancelled.", "AbortError");
 }
 
 function explicitlyLate(event: TimelineWindowV2["events"][number]): boolean {

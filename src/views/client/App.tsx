@@ -1,29 +1,40 @@
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Temporal } from "temporal-polyfill";
+import packageMetadata from "../../../package.json";
 import { AppShell } from "./app/AppShell";
 import { applyAppearancePreferences } from "./app/appearance";
+import { subscribePetVisibilityPreference } from "./app/pet-visibility-preference";
+import {
+	AppUpdateController,
+	UpdateStatusControl,
+} from "./features/app-update/public";
 import { AuthGate, type AuthSession } from "./features/auth/public";
 import { CalendarController } from "./features/calendar/public";
-import { ConversationController } from "./features/conversation/public";
 import { MonitoringController } from "./features/monitoring/public";
 import { PlanningController } from "./features/planning/public";
+import {
+	ProactiveFeedbackHistoryController,
+	ProactiveFeedbackPolicyController,
+} from "./features/proactive-feedback/public";
 import { ReportController } from "./features/reports/public";
 import {
 	AgentPermissionsController,
 	PreferencesController,
 } from "./features/settings/public";
 import { beginAccountTransition } from "./goal-sync";
+import { ElectrobunAppUpdateService } from "./infrastructure/app-update/ElectrobunAppUpdateService";
 import { ElectrobunAuditExportService } from "./infrastructure/audit-export/ElectrobunAuditExportService";
 import { ElectrobunAuthService } from "./infrastructure/auth/ElectrobunAuthService";
 import { MockAuthService } from "./infrastructure/auth/MockAuthService";
 import { ElectrobunCalendarService } from "./infrastructure/calendar/ElectrobunCalendarService";
 import { MockCalendarService } from "./infrastructure/calendar/MockCalendarService";
-import { ElectrobunConversationService } from "./infrastructure/conversation/ElectrobunConversationService";
 import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
 import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
 import { AgentPlanningGenerationService } from "./infrastructure/planning/AgentPlanningGenerationService";
 import { CalendarPlanningGateway } from "./infrastructure/planning/CalendarPlanningGateway";
 import { ElectrobunPlanningAuthorityGateway } from "./infrastructure/planning/ElectrobunPlanningAuthorityGateway";
+import { ElectrobunProactiveFeedbackService } from "./infrastructure/proactive-feedback/ElectrobunProactiveFeedbackService";
+import { InMemoryProactiveFeedbackService } from "./infrastructure/proactive-feedback/InMemoryProactiveFeedbackService";
 import { MockReportService } from "./infrastructure/reports/MockReportService";
 import { ElectrobunAgentPermissionsService } from "./infrastructure/settings/ElectrobunAgentPermissionsService";
 import { MockAgentPermissionsService } from "./infrastructure/settings/MockAgentPermissionsService";
@@ -52,6 +63,11 @@ const monitoringController = new MonitoringController(
 	new ElectrobunMonitoringService(),
 );
 const auditExportService = new ElectrobunAuditExportService();
+const appUpdateController = new AppUpdateController(
+	new ElectrobunAppUpdateService({
+		fallbackCurrentVersion: packageMetadata.version,
+	}),
+);
 
 export function App() {
 	const enableQaControls =
@@ -68,25 +84,40 @@ export function App() {
 		const unsubscribe = preferencesController.subscribe(
 			syncAppearanceFromPreferences,
 		);
+		const unsubscribePetVisibility = subscribePetVisibilityPreference(
+			preferencesController,
+			petBridge,
+		);
 		syncAppearanceFromPreferences();
 		if (preferencesController.getSnapshot().status === "idle") {
 			void preferencesController.load();
 		}
-		return unsubscribe;
+		return () => {
+			unsubscribe();
+			unsubscribePetVisibility();
+		};
+	}, []);
+
+	useEffect(() => {
+		appUpdateController.start();
+		return () => appUpdateController.stop();
 	}, []);
 
 	return (
-		<AuthGate
-			service={authService}
-			renderAuthenticated={({ session, logout }) => (
-				<AuthenticatedApp
-					key={session.user.id}
-					session={session}
-					enableQaControls={enableQaControls}
-					onLogout={logout}
-				/>
-			)}
-		/>
+		<>
+			<AuthGate
+				service={authService}
+				renderAuthenticated={({ session, logout }) => (
+					<AuthenticatedApp
+						key={session.user.id}
+						session={session}
+						enableQaControls={enableQaControls}
+						onLogout={logout}
+					/>
+				)}
+			/>
+			<UpdateStatusControl controller={appUpdateController} />
+		</>
 	);
 }
 
@@ -126,9 +157,20 @@ function AuthenticatedApp({
 			),
 		[planningAuthorityGateway, planningCalendarGateway],
 	);
-	const conversationController = useMemo(
-		() => new ConversationController(new ElectrobunConversationService()),
+	const proactiveFeedbackService = useMemo(
+		() =>
+			desktopRuntime
+				? new ElectrobunProactiveFeedbackService()
+				: new InMemoryProactiveFeedbackService(),
 		[],
+	);
+	const proactiveFeedbackHistoryController = useMemo(
+		() => new ProactiveFeedbackHistoryController(proactiveFeedbackService),
+		[proactiveFeedbackService],
+	);
+	const proactiveFeedbackPolicyController = useMemo(
+		() => new ProactiveFeedbackPolicyController(proactiveFeedbackService),
+		[proactiveFeedbackService],
 	);
 
 	useEffect(() => {
@@ -144,16 +186,10 @@ function AuthenticatedApp({
 			),
 		[],
 	);
-	const conversationState = useSyncExternalStore(
-		conversationController.subscribe,
-		conversationController.getSnapshot,
-		conversationController.getServerSnapshot,
+	useEffect(
+		() => () => proactiveFeedbackHistoryController.dispose(),
+		[proactiveFeedbackHistoryController],
 	);
-
-	useEffect(() => {
-		void conversationController.load();
-		return () => conversationController.dispose();
-	}, [conversationController]);
 
 	useEffect(() => {
 		void planningController.restore();
@@ -184,19 +220,9 @@ function AuthenticatedApp({
 			petBridge={petBridge}
 			monitoringController={monitoringController}
 			auditExportService={auditExportService}
-			conversationState={conversationState}
-			conversationActions={{
-				onCreateConversation: () =>
-					void conversationController.createConversation(),
-				onSendMessage: (draft) =>
-					void conversationController.sendMessage(draft),
-				onRetry: () => void conversationController.retry(),
-				onStopRun: () => void conversationController.stopRun(),
-				onApproveTool: () => void conversationController.approveTool(),
-				onDeclineTool: () => void conversationController.declineTool(),
-				onRestoreRun: (runId) =>
-					void conversationController.resumeInterruptedRun(runId),
-			}}
+			proactiveFeedbackHistoryController={proactiveFeedbackHistoryController}
+			proactiveFeedbackPolicyController={proactiveFeedbackPolicyController}
+			appUpdateController={appUpdateController}
 			enableQaControls={enableQaControls}
 		/>
 	);
