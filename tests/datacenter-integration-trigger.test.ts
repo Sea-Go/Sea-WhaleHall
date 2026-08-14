@@ -18,6 +18,7 @@ const scriptPath = join(
 	"trigger-datacenter-integration.sh",
 );
 const temporaryDirectories: string[] = [];
+const shellTestTimeoutMs = 15_000;
 
 afterEach(() => {
 	for (const directory of temporaryDirectories.splice(0)) {
@@ -26,69 +27,106 @@ afterEach(() => {
 });
 
 describe("DataCenter integration trigger status polling", () => {
-	test("recovers after one temporary status read timeout", async () => {
-		const result = await runTrigger("timeout-once");
+	test(
+		"recovers after one temporary status read timeout",
+		async () => {
+			const result = await runTrigger("timeout-once");
 
-		expect(result.exitCode).toBe(0);
-		expect(result.statusRequests).toEqual(["1:30", "2:30"]);
-		expect(result.sleeps).toEqual(["2"]);
-		expect(result.stderr).toContain("retry 1/3 in 2 seconds");
-		expect(result.stdout).toContain(
-			"DataCenter integration pipeline succeeded",
-		);
-	});
+			expect(result.exitCode).toBe(0);
+			expect(result.statusRequests).toEqual(["1:30", "2:30"]);
+			expect(result.sleeps).toEqual(["2"]);
+			expect(result.stderr).toContain("retry 1/3 in 2 seconds");
+			expect(result.stdout).toContain(
+				"DataCenter integration pipeline succeeded",
+			);
+		},
+		shellTestTimeoutMs,
+	);
 
-	test("backs off and recovers after multiple temporary status read timeouts", async () => {
-		const result = await runTrigger("timeout-twice");
+	test(
+		"backs off and recovers after multiple temporary status read timeouts",
+		async () => {
+			const result = await runTrigger("timeout-twice");
 
-		expect(result.exitCode).toBe(0);
-		expect(result.statusRequests).toEqual(["1:30", "2:30", "3:30"]);
-		expect(result.sleeps).toEqual(["2", "4"]);
-		expect(result.stderr).toContain("retry 2/3 in 4 seconds");
-	});
+			expect(result.exitCode).toBe(0);
+			expect(result.statusRequests).toEqual(["1:30", "2:30", "3:30"]);
+			expect(result.sleeps).toEqual(["2", "4"]);
+			expect(result.stderr).toContain("retry 2/3 in 4 seconds");
+		},
+		shellTestTimeoutMs,
+	);
 
-	test("stops after the bounded number of consecutive timeout retries", async () => {
-		const result = await runTrigger("always-timeout");
+	test(
+		"stops after the bounded number of consecutive transient retries",
+		async () => {
+			const result = await runTrigger("always-timeout");
 
-		expect(result.exitCode).toBe(1);
-		expect(result.statusRequests).toEqual(["1:30", "2:30", "3:30", "4:30"]);
-		expect(result.sleeps).toEqual(["2", "4", "8"]);
-		expect(result.stderr).toContain("after 3 timeout retries");
-	});
+			expect(result.exitCode).toBe(1);
+			expect(result.statusRequests).toEqual(["1:30", "2:30", "3:30", "4:30"]);
+			expect(result.sleeps).toEqual(["2", "4", "8"]);
+			expect(result.stderr).toContain("after 3 transient retries");
+		},
+		shellTestTimeoutMs,
+	);
 
-	test("does not retry beyond the shared pipeline deadline", async () => {
-		const result = await runTrigger("delayed-timeout", {
-			DATACENTER_PIPELINE_DEADLINE_SECONDS: "5",
-		});
+	test(
+		"recovers from a transient GitLab gateway response",
+		async () => {
+			const result = await runTrigger("gateway-error-once");
 
-		expect(result.exitCode).toBe(1);
-		expect(result.statusRequests).toHaveLength(1);
-		const requestTimeout = Number(result.statusRequests[0]?.split(":")[1]);
-		expect(requestTimeout).toBeGreaterThan(0);
-		expect(requestTimeout).toBeLessThanOrEqual(5);
-		expect(result.sleeps).toEqual([]);
-		expect(result.stderr).toContain(
-			"Timed out after 5 seconds waiting for DataCenter integration pipeline",
-		);
-	}, 10_000);
+			expect(result.exitCode).toBe(0);
+			expect(result.statusRequests).toEqual(["1:30", "2:30"]);
+			expect(result.sleeps).toEqual(["2"]);
+			expect(result.stderr).toContain("returned transient HTTP 502");
+		},
+		shellTestTimeoutMs,
+	);
 
-	test("fails non-timeout curl errors without retrying", async () => {
-		const result = await runTrigger("http-error");
+	test(
+		"does not retry beyond the shared pipeline deadline",
+		async () => {
+			const result = await runTrigger("delayed-timeout", {
+				DATACENTER_PIPELINE_DEADLINE_SECONDS: "5",
+			});
 
-		expect(result.exitCode).toBe(1);
-		expect(result.statusRequests).toEqual(["1:30"]);
-		expect(result.sleeps).toEqual([]);
-		expect(result.stderr).toContain("curl exit 22");
-	});
+			expect(result.exitCode).toBe(1);
+			expect(result.statusRequests).toHaveLength(1);
+			const requestTimeout = Number(result.statusRequests[0]?.split(":")[1]);
+			expect(requestTimeout).toBeGreaterThan(0);
+			expect(requestTimeout).toBeLessThanOrEqual(5);
+			expect(result.sleeps).toEqual([]);
+			expect(result.stderr).toContain(
+				"Timed out after 5 seconds waiting for DataCenter integration pipeline",
+			);
+		},
+		shellTestTimeoutMs,
+	);
 
-	test("fails invalid status JSON without retrying", async () => {
-		const result = await runTrigger("invalid-json");
+	test(
+		"fails non-transient HTTP errors without retrying",
+		async () => {
+			const result = await runTrigger("http-error");
 
-		expect(result.exitCode).toBe(1);
-		expect(result.statusRequests).toEqual(["1:30"]);
-		expect(result.sleeps).toEqual([]);
-		expect(result.stderr).toContain("returned invalid status JSON");
-	});
+			expect(result.exitCode).toBe(1);
+			expect(result.statusRequests).toEqual(["1:30"]);
+			expect(result.sleeps).toEqual([]);
+			expect(result.stderr).toContain("curl exit 22");
+		},
+		shellTestTimeoutMs,
+	);
+
+	test(
+		"fails invalid status JSON without retrying",
+		async () => {
+			const result = await runTrigger("invalid-json");
+
+			expect(result.exitCode).toBe(1);
+			expect(result.statusRequests).toEqual(["1:30"]);
+			expect(result.sleeps).toEqual([]);
+			expect(result.stderr).toContain("returned invalid status JSON");
+		},
+		shellTestTimeoutMs,
+	);
 });
 
 async function runTrigger(
@@ -170,13 +208,16 @@ set -euo pipefail
 output_path=""
 max_time=""
 request_method="GET"
+write_out=""
 while (($# > 0)); do
 	case "$1" in
-		--output|--max-time|--connect-timeout|--header|--form-string)
+		--output|--max-time|--connect-timeout|--header|--form-string|--write-out)
 			if [[ "$1" == "--output" ]]; then
 				output_path="$2"
 			elif [[ "$1" == "--max-time" ]]; then
 				max_time="$2"
+			elif [[ "$1" == "--write-out" ]]; then
+				write_out="$2"
 			fi
 			shift 2
 			;;
@@ -220,7 +261,14 @@ case "$FAKE_CURL_SCENARIO" in
 		/bin/sleep "$max_time"
 		exit 28
 		;;
+	gateway-error-once)
+		if ((request_count == 1)); then
+			if [[ "$write_out" == "%{http_code}" ]]; then printf '%s' '502'; fi
+			exit 22
+		fi
+		;;
 	http-error)
+		if [[ "$write_out" == "%{http_code}" ]]; then printf '%s' '401'; fi
 		exit 22
 		;;
 	invalid-json)
@@ -234,6 +282,7 @@ case "$FAKE_CURL_SCENARIO" in
 esac
 
 printf '%s' '{"status":"success"}' >"$output_path"
+if [[ "$write_out" == "%{http_code}" ]]; then printf '%s' '200'; fi
 `;
 
 const fakeSleepScript = `#!/usr/bin/env bash

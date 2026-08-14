@@ -7,8 +7,8 @@ readonly whalehall_repository_url="https://github.com/Sea-Go/Sea-WhaleHall.git"
 readonly pipeline_deadline_ceiling_seconds=3600
 readonly pipeline_deadline_seconds="${DATACENTER_PIPELINE_DEADLINE_SECONDS:-$pipeline_deadline_ceiling_seconds}"
 readonly poll_interval_seconds=15
-readonly status_timeout_retry_limit=3
-readonly status_timeout_retry_backoff_seconds=2
+readonly status_read_retry_limit=3
+readonly status_read_retry_backoff_seconds=2
 
 # Keep the complete trigger-and-wait operation below the workflow's 65-minute
 # timeout, including bounded API requests and cleanup.
@@ -68,41 +68,53 @@ echo "Triggered DataCenter pipeline $pipeline_id for WhaleHall $WHALEHALL_CANDID
 echo "DataCenter pipeline: $pipeline_url"
 
 status_url="$datacenter_gitlab_origin/api/v4/projects/$DATACENTER_GITLAB_PROJECT_ID/pipelines/$pipeline_id"
-consecutive_status_timeouts=0
+consecutive_status_read_failures=0
 while ((SECONDS < pipeline_deadline_seconds)); do
 	remaining_seconds=$((pipeline_deadline_seconds - SECONDS))
 	request_timeout_seconds=30
 	if ((remaining_seconds < request_timeout_seconds)); then
 		request_timeout_seconds=$remaining_seconds
 	fi
-	if curl --fail-with-body --silent --show-error \
+	status_http_code=""
+	if status_http_code=$(curl --fail-with-body --silent --show-error \
 		--connect-timeout 10 --max-time "$request_timeout_seconds" \
 		--header "PRIVATE-TOKEN: $DATACENTER_GITLAB_API_TOKEN" \
+		--write-out "%{http_code}" \
 		--output "$work_dir/pipeline.json" \
-		"$status_url"; then
-		consecutive_status_timeouts=0
+		"$status_url"); then
+		consecutive_status_read_failures=0
 	else
 		curl_status=$?
 		if ((SECONDS >= pipeline_deadline_seconds)); then
 			break
 		fi
-		if ((curl_status != 28)); then
+		status_failure_kind=""
+		if ((curl_status == 28)); then
+			status_failure_kind="timed out"
+		elif ((curl_status == 22)); then
+			case "$status_http_code" in
+				502|503|504)
+					status_failure_kind="returned transient HTTP $status_http_code"
+					;;
+			esac
+		fi
+		if [[ -z "$status_failure_kind" ]]; then
 			echo "Failed to read DataCenter integration pipeline status (curl exit $curl_status): $pipeline_url" >&2
 			exit 1
 		fi
 
-		consecutive_status_timeouts=$((consecutive_status_timeouts + 1))
-		if ((consecutive_status_timeouts > status_timeout_retry_limit)); then
-			echo "Failed to read DataCenter integration pipeline status after $status_timeout_retry_limit timeout retries: $pipeline_url" >&2
+		consecutive_status_read_failures=$((consecutive_status_read_failures + 1))
+		if ((consecutive_status_read_failures > status_read_retry_limit)); then
+			echo "Failed to read DataCenter integration pipeline status after $status_read_retry_limit transient retries: $pipeline_url" >&2
 			exit 1
 		fi
 
 		remaining_seconds=$((pipeline_deadline_seconds - SECONDS))
-		retry_sleep_seconds=$((status_timeout_retry_backoff_seconds << (consecutive_status_timeouts - 1)))
+		retry_sleep_seconds=$((status_read_retry_backoff_seconds << (consecutive_status_read_failures - 1)))
 		if ((remaining_seconds < retry_sleep_seconds)); then
 			retry_sleep_seconds=$remaining_seconds
 		fi
-		echo "DataCenter integration pipeline status read timed out; retry $consecutive_status_timeouts/$status_timeout_retry_limit in $retry_sleep_seconds seconds: $pipeline_url" >&2
+		echo "DataCenter integration pipeline status read $status_failure_kind; retry $consecutive_status_read_failures/$status_read_retry_limit in $retry_sleep_seconds seconds: $pipeline_url" >&2
 		if ((retry_sleep_seconds > 0)); then
 			sleep "$retry_sleep_seconds"
 		fi
