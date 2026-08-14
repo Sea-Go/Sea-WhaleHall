@@ -2,6 +2,7 @@ mod activity;
 pub mod events;
 pub mod legacy_migration;
 pub mod observations;
+pub mod planning;
 pub mod sensors;
 mod tools;
 #[cfg(target_os = "macos")]
