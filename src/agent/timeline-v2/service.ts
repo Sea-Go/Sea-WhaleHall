@@ -202,6 +202,9 @@ export class TimelineV2Service {
 		if (this.startPromise !== null) return this.startPromise;
 		const startPromise = this.startInternal();
 		this.startPromise = startPromise;
+		void startPromise.catch(() => {
+			if (this.startPromise === startPromise) this.startPromise = null;
+		});
 		return startPromise;
 	}
 
