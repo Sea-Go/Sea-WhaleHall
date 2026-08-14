@@ -1,4 +1,14 @@
 import { Temporal } from "temporal-polyfill";
+import type {
+	AgentRunEventEnvelope,
+	AgentRunRpcResult,
+	AgentRunSnapshot,
+} from "../../../../shared/agent-runs";
+import type {
+	TaskPlanningAnswer,
+	TaskPlanningInput,
+	TaskPlanningSession,
+} from "../../../../shared/task-planning";
 import {
 	detectPlanningConflicts,
 	type GeneratedPlanDraft,
@@ -13,16 +23,6 @@ import type {
 	PlanningGenerationService,
 	RestorablePlanningGeneration,
 } from "../../features/planning/planning-service";
-import type {
-	AgentRunEventEnvelope,
-	AgentRunRpcResult,
-	AgentRunSnapshot,
-} from "../../../../shared/agent-runs";
-import type {
-	TaskPlanningAnswer,
-	TaskPlanningInput,
-	TaskPlanningSession,
-} from "../../../../shared/task-planning";
 
 interface ActivePlanningRun {
 	runId: string;
@@ -32,21 +32,28 @@ interface ActivePlanningRun {
 type ClientApi = typeof import("../../rpc")["clientApi"];
 
 /** Maps the local Mastra run into the existing review/confirmation flow. */
-export class AgentPlanningGenerationService implements PlanningGenerationService {
+export class AgentPlanningGenerationService
+	implements PlanningGenerationService
+{
 	private readonly sessions = new Map<string, ActivePlanningRun>();
 	private active: ActivePlanningRun | null = null;
 
 	async findRestorable(): Promise<RestorablePlanningGeneration | null> {
 		const { clientApi } = await import("../../rpc");
-		const listed = unwrap(await clientApi.listRestorableAgentRuns({
-			kind: "task-planning",
-		}));
+		const listed = unwrap(
+			await clientApi.listRestorableAgentRuns({
+				kind: "task-planning",
+			}),
+		);
 		const latest = [...listed.runs].sort(
 			(left, right) => right.updatedAtMs - left.updatedAtMs,
 		)[0];
 		if (!latest) return null;
-		const snapshot = unwrap(await clientApi.getAgentRunSnapshot({ runId: latest.runId }));
-		if (snapshot.kind !== "task-planning") throw new Error("可恢复运行不是规划类型。");
+		const snapshot = unwrap(
+			await clientApi.getAgentRunSnapshot({ runId: latest.runId }),
+		);
+		if (snapshot.kind !== "task-planning")
+			throw new Error("可恢复运行不是规划类型。");
 		return { runId: snapshot.runId, input: fromAgentInput(snapshot.input) };
 	}
 
@@ -56,8 +63,11 @@ export class AgentPlanningGenerationService implements PlanningGenerationService
 		context: PlanningGenerationContext,
 	): Promise<PlanningGenerationResult> {
 		const { clientApi } = await import("../../rpc");
-		const snapshot = unwrap(await clientApi.getAgentRunSnapshot({ runId: run.runId }));
-		if (snapshot.kind !== "task-planning") throw new Error("可恢复运行不是规划类型。");
+		const snapshot = unwrap(
+			await clientApi.getAgentRunSnapshot({ runId: run.runId }),
+		);
+		if (snapshot.kind !== "task-planning")
+			throw new Error("可恢复运行不是规划类型。");
 		this.active = { runId: snapshot.runId, revision: snapshot.revision };
 		if (snapshot.session) {
 			this.active = null;
@@ -74,7 +84,12 @@ export class AgentPlanningGenerationService implements PlanningGenerationService
 			}
 			return {
 				kind: "draft",
-				draft: toGeneratedDraft(snapshot.session, run.input, availability, context),
+				draft: toGeneratedDraft(
+					snapshot.session,
+					run.input,
+					availability,
+					context,
+				),
 			};
 		}
 		if (snapshot.status === "interrupted") {
@@ -104,9 +119,16 @@ export class AgentPlanningGenerationService implements PlanningGenerationService
 					runId: snapshot.runId,
 					revision: waiter.revision(),
 				});
-				return { kind: "clarification", sessionId: session.id, questions: session.questions };
+				return {
+					kind: "clarification",
+					sessionId: session.id,
+					questions: session.questions,
+				};
 			}
-			return { kind: "draft", draft: toGeneratedDraft(session, run.input, availability, context) };
+			return {
+				kind: "draft",
+				draft: toGeneratedDraft(session, run.input, availability, context),
+			};
 		} catch (error) {
 			waiter.dispose();
 			this.active = null;
@@ -139,10 +161,17 @@ export class AgentPlanningGenerationService implements PlanningGenerationService
 					runId: accepted.runId,
 					revision: waiter.revision(),
 				});
-				return { kind: "clarification", sessionId: session.id, questions: session.questions };
+				return {
+					kind: "clarification",
+					sessionId: session.id,
+					questions: session.questions,
+				};
 			}
 			context.onStatus("ready");
-			return { kind: "draft", draft: toGeneratedDraft(session, input, availability, context) };
+			return {
+				kind: "draft",
+				draft: toGeneratedDraft(session, input, availability, context),
+			};
 		} catch (error) {
 			waiter.dispose();
 			this.active = null;
@@ -159,28 +188,46 @@ export class AgentPlanningGenerationService implements PlanningGenerationService
 	): Promise<PlanningGenerationResult> {
 		this.notifyStart(context);
 		const active = this.sessions.get(sessionId);
-		if (!active) throw new Error("找不到可恢复的本地澄清会话，请重新生成计划。");
+		if (!active)
+			throw new Error("找不到可恢复的本地澄清会话，请重新生成计划。");
 		const { clientApi } = await import("../../rpc");
 		const requestId = crypto.randomUUID();
-		const waiter = createPlanningWaiter(clientApi, requestId, context, active.runId);
+		const waiter = createPlanningWaiter(
+			clientApi,
+			requestId,
+			context,
+			active.runId,
+		);
 		this.active = active;
 		try {
-			const accepted = unwrap(await clientApi.submitPlanningClarification({
-				requestId,
-				runId: active.runId,
-				expectedRevision: active.revision,
-				answers,
-			}));
+			const accepted = unwrap(
+				await clientApi.submitPlanningClarification({
+					requestId,
+					runId: active.runId,
+					expectedRevision: active.revision,
+					answers,
+				}),
+			);
 			active.revision = accepted.revision;
 			const session = await waiter.result;
 			this.active = null;
 			if (session.status === "clarifying") {
-				this.sessions.set(session.id, { runId: active.runId, revision: waiter.revision() });
-				return { kind: "clarification", sessionId: session.id, questions: session.questions };
+				this.sessions.set(session.id, {
+					runId: active.runId,
+					revision: waiter.revision(),
+				});
+				return {
+					kind: "clarification",
+					sessionId: session.id,
+					questions: session.questions,
+				};
 			}
 			this.sessions.delete(sessionId);
 			context.onStatus("ready");
-			return { kind: "draft", draft: toGeneratedDraft(session, input, availability, context) };
+			return {
+				kind: "draft",
+				draft: toGeneratedDraft(session, input, availability, context),
+			};
 		} catch (error) {
 			waiter.dispose();
 			this.active = null;
@@ -253,7 +300,11 @@ function createPlanningWaiter(
 		bindRun(value) {
 			runId = value;
 			void clientApi.getAgentRunSnapshot({ runId: value }).then((snapshot) => {
-				if (snapshot.kind !== "success" || snapshot.data.kind !== "task-planning") return;
+				if (
+					snapshot.kind !== "success" ||
+					snapshot.data.kind !== "task-planning"
+				)
+					return;
 				latestRevision = Math.max(latestRevision, snapshot.data.revision);
 				acceptPlanningSnapshot(snapshot.data, context, finish, fail);
 			});
@@ -276,14 +327,22 @@ function acceptPlanningEvent(
 ): void {
 	const event = envelope.event;
 	if (event.type === "run.started") context.onStatus("checking-calendar");
-	if (event.type === "run.progress") context.onStatus(event.phase === "finalizing" ? "arranging" : "split-phases");
+	if (event.type === "run.progress")
+		context.onStatus(
+			event.phase === "finalizing" ? "arranging" : "split-phases",
+		);
 	if (event.type === "planning.clarification.requested") {
-		finish({ id: event.sessionId, status: "clarifying", questions: event.questions });
+		finish({
+			id: event.sessionId,
+			status: "clarifying",
+			questions: event.questions,
+		});
 	}
 	if (event.type === "planning.draft.ready") finish(event.session);
 	if (event.type === "planning.completed") finish(event.session);
 	if (event.type === "run.failed") fail(new Error(event.failure.message));
-	if (event.type === "run.cancelled") fail(new Error(event.message ?? "已取消计划生成。"));
+	if (event.type === "run.cancelled")
+		fail(new Error(event.message ?? "已取消计划生成。"));
 	if (event.type === "run.interrupted") fail(new Error(event.message));
 }
 
@@ -294,7 +353,8 @@ function acceptPlanningSnapshot(
 	fail: (error: Error) => void,
 ): void {
 	if (snapshot.session) finish(snapshot.session);
-	else if (snapshot.status === "failed") fail(new Error(snapshot.failure?.message ?? "计划生成失败。"));
+	else if (snapshot.status === "failed")
+		fail(new Error(snapshot.failure?.message ?? "计划生成失败。"));
 	else if (snapshot.status === "cancelled") fail(new Error("已取消计划生成。"));
 	else if (snapshot.status === "running") context.onStatus("checking-calendar");
 }
@@ -306,6 +366,9 @@ function unwrap<T>(result: AgentRunRpcResult<T>): T {
 
 function toAgentInput(input: PlanInput, timeZone: string): TaskPlanningInput {
 	if (!input.type) throw new Error("生成计划前必须选择计划类型。");
+	if (input.type === "fuzzy") {
+		throw new Error("模糊计划只能通过本地动态计划运行时生成。");
+	}
 	return {
 		goal: input.goal,
 		planType: input.type,
@@ -370,30 +433,46 @@ function toGeneratedDraft(
 		priority: input.priority,
 		weeklyCapacityHours: input.weeklyCapacityHours,
 		calendarRevision: agentDraft.calendarRevision,
-		totalEstimatedMinutes: agentDraft.tasks.reduce((total, task) => total + task.estimatedMinutes, 0),
+		totalEstimatedMinutes: agentDraft.tasks.reduce(
+			(total, task) => total + task.estimatedMinutes,
+			0,
+		),
 		phases,
 		milestones: agentDraft.milestones.map((milestone) => ({
 			id: milestone.id,
 			phaseId: milestone.phaseId,
 			title: milestone.title,
-			targetDate: validDate(milestone.targetDate) ? milestone.targetDate : input.deadline,
+			targetDate: validDate(milestone.targetDate)
+				? milestone.targetDate
+				: input.deadline,
 		})),
 		tasks: agentDraft.tasks.map((task) => ({
 			id: task.id,
-			phaseId: phaseByMilestone.get(task.milestoneId) ?? phases[0]?.id ?? `${planId}-phase-unassigned`,
+			phaseId:
+				phaseByMilestone.get(task.milestoneId) ??
+				phases[0]?.id ??
+				`${planId}-phase-unassigned`,
 			milestoneId: task.milestoneId,
 			title: task.title,
 			estimatedMinutes: Math.max(15, task.estimatedMinutes),
 		})),
 		scheduleWindow: {
 			startDate: context.today,
-			endDateExclusive: Temporal.PlainDate.from(input.deadline).add({ days: 1 }).toString(),
+			endDateExclusive: Temporal.PlainDate.from(input.deadline)
+				.add({ days: 1 })
+				.toString(),
 		},
 		generationRun: {
 			id: `agent-${session.id}`,
 			startedAt: Temporal.Now.instant().toString(),
 			completedAt: Temporal.Now.instant().toString(),
-			statuses: ["understood", "split-phases", "checking-calendar", "arranging", "ready"],
+			statuses: [
+				"understood",
+				"split-phases",
+				"checking-calendar",
+				"arranging",
+				"ready",
+			],
 			revision: context.revision,
 		},
 	};
@@ -426,11 +505,12 @@ function toGeneratedDraft(
 		proposals,
 		busyWindows,
 		conflicts,
-		suggestions: conflicts.length > 0
-			? ["草案保留了冲突，请调整后再确认写入。"]
-			: agentDraft.unscheduledTaskIds.length > 0
-				? ["部分任务因容量限制未安排，可调整约束后重新生成。"]
-				: [],
+		suggestions:
+			conflicts.length > 0
+				? ["草案保留了冲突，请调整后再确认写入。"]
+				: agentDraft.unscheduledTaskIds.length > 0
+					? ["部分任务因容量限制未安排，可调整约束后重新生成。"]
+					: [],
 	};
 }
 

@@ -41,12 +41,15 @@ reflection Agent 也不注册到 durable Mastra 实例。原始窗口 prompt 与
 
 ## 现有受审计例外
 
-以下是历史的、本地模型锁或工件校验链的一部分，不读取 `config.yaml` 的 `reflection` /
-`agent` 配置，也不是新增模型入口：
+以下是经明确审计的本地模型锁或工件校验链，不读取 `config.yaml` 的 `reflection` /
+`agent` 配置，也不构成可配置模型入口：
 
 - ModernBERT 的校准分类器；
 - Reflection 的 lock-pinned Qwen 分类裁决 fallback；
-- Timeline v2 的 lock-pinned Qwen 带引用 hypothesis helper。
+- Timeline v2 的 lock-pinned Qwen 带引用 hypothesis helper；
+- Dynamic PlanningRuntime 的 lock-pinned Qwen 结构化分析器。它只能使用
+  `WHALEHALL_TEACHER_MODEL_LOCK`，必须在构造客户端前通过
+  `verifyOllamaModelLock`，并且只暴露窄化的 `PlanningModelPort` 合同。
 
 这些位置以 `@whalehall-model-boundary-exception` 标注，并受源代码测试列出。它们不能
 接受新的可配置地址、不能被新功能复用为通用模型 transport；若要迁移，必须单独保留其

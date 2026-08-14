@@ -1,3 +1,4 @@
+import { Temporal } from "temporal-polyfill";
 import type {
 	CalendarConflict,
 	CalendarEvent,
@@ -15,16 +16,12 @@ import type {
 	PlanningAvailabilityRequest,
 	PlanningCalendarGateway,
 } from "../../features/planning/planning-service";
-import { Temporal } from "temporal-polyfill";
 
 function eventToBusyWindow(
 	event: CalendarEvent,
 	displayTimeZone: string,
 ): PlanningBusyWindow | null {
-	if (
-		event.state !== "committed" ||
-		event.kind === "break"
-	) {
+	if (event.state !== "committed" || event.kind === "break") {
 		return null;
 	}
 	const timed = event.schedule.allDay
@@ -103,8 +100,7 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 					.toPlainDate()
 					.toString();
 				return (
-					startDate >= request.startDate &&
-					startDate < request.endDateExclusive
+					startDate >= request.startDate && startDate < request.endDateExclusive
 				);
 			});
 	}
@@ -129,6 +125,9 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 				recurrence: null,
 				occurrenceId: null,
 				sourcePlanId: plan.id,
+				sourceTaskId: proposal.taskId,
+				scheduleOrigin: "model",
+				userLocked: false,
 				editable: true,
 				version: 0,
 			};
@@ -160,7 +159,6 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 						"写入未完成，所有草案都保留在计划中。",
 				};
 			}
-			this.expectedRevision = result.calendarRevision ?? this.expectedRevision;
 			return {
 				ok: true,
 				kind: "success",

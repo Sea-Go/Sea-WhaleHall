@@ -45,6 +45,23 @@ import type { ActiveGoalContextV1 } from "./goal-context";
 import type { PetActionId } from "./pet-actions";
 import type { PetPresentationEvent } from "./pet-presentation";
 import type {
+	ConfirmPlanningObservationCommand,
+	ConfirmPlanRevisionCommand,
+	CreatePlanDraftCommand,
+	PlanningCalendarBatchResultProjection,
+	PlanningCalendarEventProjection,
+	PlanningCalendarMutationProjection,
+	PlanningCalendarMutationResultProjection,
+	PlanningChangeProjection,
+	PlanningNotificationProjection,
+	PlanningPlanProjection,
+	PlanningPlanSummaryProjection,
+	PlanningWriteCommand,
+	SendPlanMessageCommand,
+	SetPlanningTaskStatusCommand,
+	UndoPlanningAdjustmentCommand,
+} from "./planning";
+import type {
 	CommitPlanningDraftRequest,
 	PlanningAuthorityRpcResult,
 	PlanningAuthoritySnapshot,
@@ -86,9 +103,12 @@ export type {
 	CancelAgentRunRequest,
 	ClearProactiveFeedbackResult,
 	CommitPlanningDraftRequest,
+	ConfirmPlanningObservationCommand,
+	ConfirmPlanRevisionCommand,
 	ConversationRpcResult,
 	ConversationRpcSendResult,
 	ConversationRpcThread,
+	CreatePlanDraftCommand,
 	DecideAgentToolApprovalRequest,
 	GetAgentRunSnapshotRequest,
 	ListProactiveFeedbackRequest,
@@ -103,13 +123,24 @@ export type {
 	PetPresentationEvent,
 	PlanningAuthorityRpcResult,
 	PlanningAuthoritySnapshot,
+	PlanningCalendarBatchResultProjection,
+	PlanningCalendarEventProjection,
+	PlanningCalendarMutationProjection,
+	PlanningCalendarMutationResultProjection,
+	PlanningChangeProjection,
 	PlanningCommitResult,
+	PlanningNotificationProjection,
+	PlanningPlanProjection,
+	PlanningPlanSummaryProjection,
+	PlanningWriteCommand,
 	ProactiveFeedbackAvailable,
 	ProactiveFeedbackPage,
 	ProactiveFeedbackPolicySnapshot,
 	ProactiveFeedbackRpcResult,
 	SavePlanningDraftRequest,
+	SendPlanMessageCommand,
 	SetAgentReadPermissionsRequest,
+	SetPlanningTaskStatusCommand,
 	SetProactiveFeedbackPolicyRequest,
 	StartConversationTurnRequest,
 	StartTaskPlanningRunRequest,
@@ -118,6 +149,7 @@ export type {
 	TaskPlanningInput,
 	TaskPlanningRpcResult,
 	TaskPlanningSession,
+	UndoPlanningAdjustmentCommand,
 };
 
 export type PetMood = "idle" | "happy" | "busy" | "error";
@@ -261,6 +293,76 @@ export type MonitoringPermissionSettingsTarget =
 export type ClientRPC = {
 	bun: RPCSchema<{
 		requests: {
+			listPlans: {
+				params: Record<string, never>;
+				response: { plans: PlanningPlanSummaryProjection[] };
+			};
+			getPlan: {
+				params: { planId: string };
+				response: { plan: PlanningPlanProjection };
+			};
+			createPlanDraft: {
+				params: CreatePlanDraftCommand;
+				response: { planId: string };
+			};
+			sendPlanMessage: {
+				params: SendPlanMessageCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			confirmPlanRevision: {
+				params: ConfirmPlanRevisionCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			setPlanningTaskStatus: {
+				params: SetPlanningTaskStatusCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			confirmPlanningObservation: {
+				params: ConfirmPlanningObservationCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			pausePlan: {
+				params: PlanningWriteCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			resumePlan: {
+				params: PlanningWriteCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			completePlan: {
+				params: PlanningWriteCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			archivePlan: {
+				params: PlanningWriteCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			undoPlanAdjustment: {
+				params: UndoPlanningAdjustmentCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			retryPendingPlanAnalysis: {
+				params: PlanningWriteCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			loadPlanningCalendar: {
+				params: Record<string, never>;
+				response: {
+					events: PlanningCalendarEventProjection[];
+					timeZone: string;
+				};
+			};
+			mutatePlanningCalendar: {
+				params: PlanningCalendarMutationProjection;
+				response: PlanningCalendarMutationResultProjection;
+			};
+			mutatePlanningCalendarBatch: {
+				params: {
+					batchId: string;
+					mutations: PlanningCalendarMutationProjection[];
+				};
+				response: PlanningCalendarBatchResultProjection;
+			};
 			getAppUpdateStatus: {
 				params: Record<string, never>;
 				response: AppUpdateSnapshot;
@@ -468,6 +570,8 @@ export type ClientRPC = {
 			authSessionExpired: Record<string, never>;
 			localStatusChanged: LocalRuntimeStatus;
 			petVisibilityChanged: { visible: boolean };
+			planChanged: PlanningChangeProjection;
+			calendarChanged: { version: number };
 		};
 	}>;
 };

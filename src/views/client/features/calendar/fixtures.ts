@@ -50,6 +50,9 @@ function timed(
 		recurrence: null,
 		occurrenceId: null,
 		sourcePlanId: `plan-${id}`,
+		sourceTaskId: `task-${id}`,
+		scheduleOrigin: "model",
+		userLocked: false,
 		editable: true,
 		version: 1,
 		...overrides,
@@ -79,7 +82,12 @@ const breakEvent = timed(
 	"散步与恢复",
 	"2026-07-29T08:15:00Z",
 	"2026-07-29T08:45:00Z",
-	{ kind: "break", sourcePlanId: null },
+	{
+		kind: "break",
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+	},
 );
 const allDay: CalendarEvent = {
 	id: "launch-day",
@@ -94,6 +102,9 @@ const allDay: CalendarEvent = {
 	recurrence: null,
 	occurrenceId: null,
 	sourcePlanId: "plan-launch",
+	sourceTaskId: "task-launch",
+	scheduleOrigin: "model",
+	userLocked: false,
 	editable: true,
 	version: 1,
 };
@@ -102,14 +113,25 @@ const manual = timed(
 	"已占用 · 家庭时间",
 	"2026-07-29T10:00:00Z",
 	"2026-07-29T11:00:00Z",
-	{ kind: "manual-block", sourcePlanId: null },
+	{
+		kind: "manual-block",
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+	},
 );
 const external = timed(
 	"external-team",
 	"产品周会 · 外部日历",
 	"2026-07-31T02:00:00Z",
 	"2026-07-31T03:00:00Z",
-	{ kind: "external", editable: false, sourcePlanId: null },
+	{
+		kind: "external",
+		editable: false,
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+	},
 );
 const proposed = timed(
 	"proposed-reading",
@@ -133,7 +155,16 @@ const recurring = timed(
 	},
 );
 
-const normal = [focus, proposed, design, breakEvent, writing, allDay, manual, external];
+const normal = [
+	focus,
+	proposed,
+	design,
+	breakEvent,
+	writing,
+	allDay,
+	manual,
+	external,
+];
 
 export function calendarScenarioEvents(
 	scenario: CalendarScenarioId,
@@ -146,26 +177,76 @@ export function calendarScenarioEvents(
 		case "dense":
 			return [
 				...normal,
-				timed("dense-1", "需求梳理", "2026-07-27T01:00:00Z", "2026-07-27T02:00:00Z"),
-				timed("dense-2", "专注开发", "2026-07-27T02:15:00Z", "2026-07-27T05:00:00Z"),
-				timed("dense-3", "午间记录", "2026-07-28T04:00:00Z", "2026-07-28T04:30:00Z"),
-				timed("dense-4", "研究访谈", "2026-07-28T06:00:00Z", "2026-07-28T08:00:00Z"),
-				timed("dense-5", "指标复核", "2026-07-30T06:00:00Z", "2026-07-30T06:45:00Z"),
-				timed("dense-6", "发布准备", "2026-07-31T06:30:00Z", "2026-07-31T09:00:00Z"),
+				timed(
+					"dense-1",
+					"需求梳理",
+					"2026-07-27T01:00:00Z",
+					"2026-07-27T02:00:00Z",
+				),
+				timed(
+					"dense-2",
+					"专注开发",
+					"2026-07-27T02:15:00Z",
+					"2026-07-27T05:00:00Z",
+				),
+				timed(
+					"dense-3",
+					"午间记录",
+					"2026-07-28T04:00:00Z",
+					"2026-07-28T04:30:00Z",
+				),
+				timed(
+					"dense-4",
+					"研究访谈",
+					"2026-07-28T06:00:00Z",
+					"2026-07-28T08:00:00Z",
+				),
+				timed(
+					"dense-5",
+					"指标复核",
+					"2026-07-30T06:00:00Z",
+					"2026-07-30T06:45:00Z",
+				),
+				timed(
+					"dense-6",
+					"发布准备",
+					"2026-07-31T06:30:00Z",
+					"2026-07-31T09:00:00Z",
+				),
 			].map((event) => structuredClone(event));
 		case "overlap":
 			return [
 				design,
-				timed("overlap-a", "设计走查", "2026-07-29T06:30:00Z", "2026-07-29T08:00:00Z"),
-				timed("overlap-b", "技术同步", "2026-07-29T07:00:00Z", "2026-07-29T07:45:00Z"),
+				timed(
+					"overlap-a",
+					"设计走查",
+					"2026-07-29T06:30:00Z",
+					"2026-07-29T08:00:00Z",
+				),
+				timed(
+					"overlap-b",
+					"技术同步",
+					"2026-07-29T07:00:00Z",
+					"2026-07-29T07:45:00Z",
+				),
 			].map((event) => structuredClone(event));
 		case "short":
 			return [
-				timed("short-event", "快速确认", "2026-07-29T03:00:00Z", "2026-07-29T03:15:00Z"),
+				timed(
+					"short-event",
+					"快速确认",
+					"2026-07-29T03:00:00Z",
+					"2026-07-29T03:15:00Z",
+				),
 			].map((event) => structuredClone(event));
 		case "long":
 			return [
-				timed("long-event", "深度工作 · 完成日历核心", "2026-07-29T01:00:00Z", "2026-07-29T06:00:00Z"),
+				timed(
+					"long-event",
+					"深度工作 · 完成日历核心",
+					"2026-07-29T01:00:00Z",
+					"2026-07-29T06:00:00Z",
+				),
 			].map((event) => structuredClone(event));
 		case "all-day":
 			return [allDay].map((event) => structuredClone(event));
@@ -186,9 +267,15 @@ export function calendarScenarioEvents(
 						timeZone,
 					},
 				},
-				timed("conflicting-event", "冲突：准备提案", "2026-07-29T06:15:00Z", "2026-07-29T06:45:00Z", {
-					state: "proposed",
-				}),
+				timed(
+					"conflicting-event",
+					"冲突：准备提案",
+					"2026-07-29T06:15:00Z",
+					"2026-07-29T06:45:00Z",
+					{
+						state: "proposed",
+					},
+				),
 			].map((event) => structuredClone(event));
 		case "recurrence":
 			return [recurring].map((event) => structuredClone(event));

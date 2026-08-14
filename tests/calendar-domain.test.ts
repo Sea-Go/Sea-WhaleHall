@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+	isExplicitRendererPlanUnlock,
+	shouldForceRendererPlanLock,
+} from "../src/bun/calendar-mutation-policy";
+import {
 	addMinutes,
 	instantToLocalParts,
 	resolveLocalDateTime,
@@ -7,10 +11,11 @@ import {
 import {
 	assertValidCalendarEvent,
 	CalendarDomainError,
+	type CalendarEvent,
+	canUserUnlockPlanEvent,
 	createOccurrenceOverride,
 	detectCalendarConflict,
 	eventsOverlap,
-	type CalendarEvent,
 	withOccurrenceException,
 } from "../src/views/client/features/calendar/domain";
 import {
@@ -37,6 +42,9 @@ function timedEvent(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
 		recurrence: null,
 		occurrenceId: null,
 		sourcePlanId: "plan-a",
+		sourceTaskId: "task-a",
+		scheduleOrigin: "model",
+		userLocked: false,
 		editable: true,
 		version: 1,
 		...overrides,
@@ -44,6 +52,53 @@ function timedEvent(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
 }
 
 describe("calendar domain invariants", () => {
+	test("only a user-locked model plan event can opt back into rescheduling", () => {
+		const locked = timedEvent({ userLocked: true });
+		expect(canUserUnlockPlanEvent(locked)).toBe(true);
+		expect(canUserUnlockPlanEvent({ ...locked, userLocked: false })).toBe(
+			false,
+		);
+		expect(canUserUnlockPlanEvent({ ...locked, scheduleOrigin: "user" })).toBe(
+			false,
+		);
+		expect(canUserUnlockPlanEvent({ ...locked, editable: false })).toBe(false);
+	});
+
+	test("Bun accepts only an unlock-only renderer mutation without re-locking", () => {
+		const before = {
+			...timedEvent({ userLocked: true, version: 4 }),
+			recurrence: null,
+		};
+		const unlock = {
+			mutationId: "unlock-1",
+			kind: "update" as const,
+			eventId: before.id,
+			expectedVersion: 4,
+			before,
+			after: { ...before, userLocked: false, version: 5 },
+			recurrenceScope: null,
+		};
+		expect(isExplicitRendererPlanUnlock(unlock)).toBe(true);
+		expect(shouldForceRendererPlanLock(unlock)).toBe(false);
+		expect(
+			isExplicitRendererPlanUnlock({
+				...unlock,
+				after: { ...unlock.after, version: 4 },
+			}),
+		).toBe(false);
+		expect(
+			isExplicitRendererPlanUnlock({
+				...unlock,
+				after: { ...unlock.after, title: "同时偷偷修改" },
+			}),
+		).toBe(false);
+		expect(
+			shouldForceRendererPlanLock({
+				...unlock,
+				after: { ...unlock.after, title: "用户编辑" },
+			}),
+		).toBe(true);
+	});
 	test("accepts valid timed and all-day schedules with exclusive end", () => {
 		expect(() => assertValidCalendarEvent(timedEvent())).not.toThrow();
 		expect(() =>
@@ -76,6 +131,34 @@ describe("calendar domain invariants", () => {
 				timedEvent({ kind: "external", editable: true }),
 			),
 		).toThrow("外部日历默认必须保持只读");
+	});
+
+	test("validates task ownership and automation lock metadata", () => {
+		expect(() =>
+			assertValidCalendarEvent(
+				timedEvent({
+					sourcePlanId: null,
+					sourceTaskId: null,
+					scheduleOrigin: null,
+				}),
+			),
+		).toThrow("来源");
+		expect(() =>
+			assertValidCalendarEvent(
+				timedEvent({ sourcePlanId: null, sourceTaskId: "orphan-task" }),
+			),
+		).toThrow("来源");
+		expect(() =>
+			assertValidCalendarEvent(
+				timedEvent({
+					kind: "manual-block",
+					sourcePlanId: null,
+					sourceTaskId: null,
+					scheduleOrigin: null,
+					userLocked: true,
+				}),
+			),
+		).toThrow("锁定");
 	});
 
 	test("detects manual and external hard conflicts and plan warnings", () => {
@@ -129,16 +212,12 @@ describe("calendar domain invariants", () => {
 			updated.recurrence?.exceptionDates,
 		);
 
-		const override = createOccurrenceOverride(
-			series,
-			exceptionStart,
-			{
-				allDay: false,
-				start: "2026-07-29T13:00:00Z",
-				end: "2026-07-29T13:30:00Z",
-				timeZone: CALENDAR_TIME_ZONE,
-			},
-		);
+		const override = createOccurrenceOverride(series, exceptionStart, {
+			allDay: false,
+			start: "2026-07-29T13:00:00Z",
+			end: "2026-07-29T13:30:00Z",
+			timeZone: CALENDAR_TIME_ZONE,
+		});
 		expect(override.occurrence.occurrenceId).toContain(
 			series.recurrence?.seriesId ?? "",
 		);
@@ -158,11 +237,7 @@ describe("calendar time abstraction", () => {
 	});
 
 	test("distinguishes a DST gap from a repeated local hour", () => {
-		const gap = resolveLocalDateTime(
-			"2026-03-08",
-			"02:30",
-			"America/New_York",
-		);
+		const gap = resolveLocalDateTime("2026-03-08", "02:30", "America/New_York");
 		const repeated = resolveLocalDateTime(
 			"2026-11-01",
 			"01:30",
@@ -181,7 +256,9 @@ describe("FullCalendar adapter boundary", () => {
 		const event = timedEvent({ state: "proposed" });
 		const input = calendarEventToFullCalendarInput(event, true);
 		expect(input.id).toBe(event.id);
-		expect(input.start).toBe(event.schedule.allDay ? undefined : event.schedule.start);
+		expect(input.start).toBe(
+			event.schedule.allDay ? undefined : event.schedule.start,
+		);
 		expect(input.className).toContain("whale-event--proposed");
 		expect(input.className).toContain("whale-event--pending");
 		expect(input.editable).toBe(false);

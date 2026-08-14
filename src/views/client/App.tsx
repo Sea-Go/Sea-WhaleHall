@@ -30,9 +30,7 @@ import { ElectrobunCalendarService } from "./infrastructure/calendar/ElectrobunC
 import { MockCalendarService } from "./infrastructure/calendar/MockCalendarService";
 import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
 import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
-import { AgentPlanningGenerationService } from "./infrastructure/planning/AgentPlanningGenerationService";
-import { CalendarPlanningGateway } from "./infrastructure/planning/CalendarPlanningGateway";
-import { ElectrobunPlanningAuthorityGateway } from "./infrastructure/planning/ElectrobunPlanningAuthorityGateway";
+import { ElectrobunPlanningService } from "./infrastructure/planning/ElectrobunPlanningService";
 import { ElectrobunProactiveFeedbackService } from "./infrastructure/proactive-feedback/ElectrobunProactiveFeedbackService";
 import { InMemoryProactiveFeedbackService } from "./infrastructure/proactive-feedback/InMemoryProactiveFeedbackService";
 import { MockReportService } from "./infrastructure/reports/MockReportService";
@@ -136,27 +134,9 @@ function AuthenticatedApp({
 		() => new CalendarController(calendarService),
 		[],
 	);
-	const planningCalendarGateway = useMemo(
-		() => new CalendarPlanningGateway(calendarService),
-		[],
-	);
-	const planningAuthorityGateway = useMemo(
-		() =>
-			desktopRuntime ? new ElectrobunPlanningAuthorityGateway() : undefined,
-		[],
-	);
 	const planningController = useMemo(
-		() =>
-			new PlanningController(
-				new AgentPlanningGenerationService(),
-				planningCalendarGateway,
-				currentDate,
-				() => planningTimeZone,
-				undefined,
-				undefined,
-				planningAuthorityGateway,
-			),
-		[planningAuthorityGateway, planningCalendarGateway],
+		() => new PlanningController(new ElectrobunPlanningService()),
+		[],
 	);
 	const proactiveFeedbackService = useMemo(
 		() =>
@@ -193,10 +173,9 @@ function AuthenticatedApp({
 	useStrictModeSafeDispose(proactiveFeedbackPolicyController, (controller) =>
 		controller.dispose(),
 	);
-
-	useEffect(() => {
-		void planningController.restore();
-	}, [planningController]);
+	useStrictModeSafeDispose(planningController, (controller) =>
+		controller.dispose(),
+	);
 
 	const handleLogout = () => {
 		if (logoutPendingRef.current) return;
@@ -206,7 +185,7 @@ function AuthenticatedApp({
 			clearLocalAccountState: () => {
 				proactiveFeedbackPolicyController.dispose();
 				calendarController.clearAccountData();
-				planningController.clearActiveGoalContext();
+				planningController.dispose();
 			},
 		});
 	};

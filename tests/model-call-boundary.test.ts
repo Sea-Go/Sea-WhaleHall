@@ -39,6 +39,7 @@ describe("desktop model-call boundary", () => {
 		);
 		expect(directOllamaConstructors).toEqual([
 			"src/agent/timeline-v2/runtime.ts",
+			"src/bun/planning-runtime.ts",
 			"src/bun/reflection-runtime.ts",
 		]);
 		for (const path of directOllamaConstructors) {
@@ -49,6 +50,22 @@ describe("desktop model-call boundary", () => {
 		expect(sources.get("src/agent/reflection/inference.ts")).toContain(
 			"@whalehall-model-boundary-exception verified-classifier",
 		);
+
+		const planningRuntime = sources.get("src/bun/planning-runtime.ts") ?? "";
+		const verifiedPlanningModel = planningRuntime.slice(
+			planningRuntime.indexOf("class VerifiedQwenPlanningModel"),
+		);
+		expect(verifiedPlanningModel).toContain(
+			"@whalehall-model-boundary-exception planning-local-model-lock",
+		);
+		const lockVerification = verifiedPlanningModel.indexOf(
+			"await verifyOllamaModelLock(WHALEHALL_TEACHER_MODEL_LOCK)",
+		);
+		const clientConstruction = verifiedPlanningModel.indexOf(
+			"new OllamaJsonClient(",
+		);
+		expect(lockVerification).toBeGreaterThanOrEqual(0);
+		expect(clientConstruction).toBeGreaterThan(lockVerification);
 	});
 
 	test("keeps the legacy model origin isolated from the authenticated desktop path", async () => {

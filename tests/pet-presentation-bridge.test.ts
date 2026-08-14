@@ -5,11 +5,13 @@ import type {
 	PetPresentationBridge,
 	PetPresentationEvent,
 } from "../src/views/client/features/pet-bridge/public";
+import type { PlanView } from "../src/views/client/features/planning/domain";
 import { PlanningController } from "../src/views/client/features/planning/PlanningController";
-import { MockCalendarService } from "../src/views/client/infrastructure/calendar/MockCalendarService";
+import {
+	type PlanningService,
+	PlanningServiceError,
+} from "../src/views/client/features/planning/planning-service";
 import { ElectrobunPetPresentationBridge } from "../src/views/client/infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
-import { CalendarPlanningGateway } from "../src/views/client/infrastructure/planning/CalendarPlanningGateway";
-import { MockPlanningGenerationService } from "../src/views/client/infrastructure/planning/MockPlanningGenerationService";
 
 describe("ElectrobunPetPresentationBridge", () => {
 	test("delivers typed presentation and visibility calls through its transport", async () => {
@@ -96,28 +98,27 @@ describe("ElectrobunPetPresentationBridge", () => {
 });
 
 describe("PlanningPetCoordinator", () => {
-	test("maps planning generation transitions without coupling the controller to RPC", async () => {
+	test("maps conversational analysis transitions without coupling the controller to RPC", async () => {
 		const events: PetPresentationEvent[] = [];
 		const bridge = recordingBridge(events);
-		const generator = new MockPlanningGenerationService({ latencyMs: 0 });
-		const controller = planningController(generator);
+		const controller = new PlanningController(new PetPlanningService());
+		await controller.initialize();
 		const coordinator = new PlanningPetCoordinator(controller, bridge);
 		coordinator.start();
-		fillPlanningInput(controller);
-		await controller.generate();
+		controller.updateCreateInput({ goal: "完成个人作品集" });
+		await controller.createPlanDraft();
 		coordinator.stop();
 
 		expect(events).toEqual([
 			{ kind: "plan-generation-started" },
 			{ kind: "plan-generation-succeeded" },
 		]);
-		expect(controller.getSnapshot().status).toBe("review");
+		expect(controller.getSnapshot().status).toBe("draft");
 	});
 
 	test("maps failure and never lets a rejected presentation block planning", async () => {
-		const generator = new MockPlanningGenerationService({ latencyMs: 0 });
-		generator.failNextGeneration();
-		const controller = planningController(generator);
+		const controller = new PlanningController(new PetPlanningService(true));
+		await controller.initialize();
 		const attempted: PetPresentationEvent[] = [];
 		const bridge: PetPresentationBridge = {
 			async present(event) {
@@ -128,15 +129,15 @@ describe("PlanningPetCoordinator", () => {
 		};
 		const coordinator = new PlanningPetCoordinator(controller, bridge);
 		coordinator.start();
-		fillPlanningInput(controller);
-		await controller.generate();
+		controller.updateCreateInput({ goal: "完成个人作品集" });
+		await controller.createPlanDraft();
 		coordinator.stop();
 
 		expect(attempted).toEqual([
 			{ kind: "plan-generation-started" },
 			{ kind: "plan-generation-failed" },
 		]);
-		expect(controller.getSnapshot().status).toBe("generation-error");
+		expect(controller.getSnapshot().status).toBe("model-unavailable");
 	});
 });
 
@@ -151,28 +152,75 @@ function recordingBridge(
 	};
 }
 
-function planningController(
-	generator: MockPlanningGenerationService,
-): PlanningController {
-	const calendar = new MockCalendarService({ latencyMs: 0 });
-	return new PlanningController(
-		generator,
-		new CalendarPlanningGateway(calendar),
-		() => "2026-07-29",
-		() => "Asia/Shanghai",
-		() => "pet-plan",
-	);
-}
-
-function fillPlanningInput(controller: PlanningController): void {
-	controller.start();
-	controller.updateInput({ goal: "完成个人作品集并准备求职材料" });
-	controller.next();
-	controller.updateInput({ type: "short-term" });
-	controller.next();
-	controller.updateInput({
-		deadline: "2026-08-05",
-		weeklyCapacityHours: 6,
-		preferredDayPart: "evening",
-	});
+class PetPlanningService implements PlanningService {
+	private plan: PlanView | null = null;
+	constructor(private readonly fail = false) {}
+	subscribe() {
+		return () => {};
+	}
+	async listPlans() {
+		return this.plan
+			? [
+					{
+						id: this.plan.id,
+						title: this.plan.title,
+						goal: this.plan.goal,
+						status: this.plan.status,
+						type: this.plan.type,
+						version: this.plan.version,
+						estimatedCompletionDate: null,
+						confidence: null,
+						updatedAt: this.plan.updatedAt,
+					},
+				]
+			: [];
+	}
+	async getPlan() {
+		if (!this.plan) throw new Error("missing plan");
+		return this.plan;
+	}
+	async createPlanDraft(
+		request: Parameters<PlanningService["createPlanDraft"]>[0],
+	) {
+		if (this.fail) {
+			throw new PlanningServiceError("model-unavailable", "model offline");
+		}
+		this.plan = {
+			id: "pet-plan",
+			title: request.input.goal,
+			goal: request.input.goal,
+			status: "draft",
+			type: null,
+			version: 1,
+			timeZone: "Asia/Shanghai",
+			startToday: request.input.startToday,
+			effectiveDate: null,
+			estimate: null,
+			revision: null,
+			messages: [],
+			tasks: [],
+			monitoring: {
+				authorized: false,
+				enabled: false,
+				mode: "manual-only",
+				coverage: "unavailable",
+				message: "仅使用手动进度",
+			},
+			pendingObservations: [],
+			adjustments: [],
+			notifications: [],
+			updatedAt: "2026-08-13T00:00:00Z",
+		};
+		return { planId: this.plan.id };
+	}
+	async sendPlanMessage() {}
+	async confirmPlanRevision() {}
+	async setTaskStatus() {}
+	async confirmObservationAttribution() {}
+	async pausePlan() {}
+	async resumePlan() {}
+	async completePlan() {}
+	async archivePlan() {}
+	async undoPlanAdjustment() {}
+	async retryPendingAnalysis() {}
 }
