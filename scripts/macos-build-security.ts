@@ -313,6 +313,11 @@ export function verifyMacWrapper({
 	);
 }
 
+/**
+ * Prepares the macOS application wrapper using the configured build environment and signing plan.
+ *
+ * @param environment - Environment variables that define the wrapper path, build settings, and signing configuration.
+ */
 export function prepareMacWrapperFromEnvironment(
 	environment: NodeJS.ProcessEnv = process.env,
 ): void {
@@ -371,10 +376,7 @@ export function prepareMacWrapperFromEnvironment(
 }
 
 /**
- * Electrobun 1.18 skips both its macOS codesign pass and the postWrap hook for
- * dev bundles, but still runs postPackage. Sign the completed dev bundle there
- * so its resource seal covers version.json, build.json, views, and native
- * children. Non-dev builds keep their existing postWrap/Developer ID flow.
+ * Signs a completed macOS development application bundle.
  */
 export function prepareDevelopmentMacWrapperFromEnvironment(
 	environment: NodeJS.ProcessEnv = process.env,
@@ -679,6 +681,14 @@ function assertArchiveTreeContainsNoLinks(root: string): void {
 	}
 }
 
+/**
+ * Verifies the macOS application wrapper and, for packaged builds, its update archive.
+ *
+ * Development builds verify only the runnable application bundle; packaged builds also
+ * require a valid update archive and apply signing-specific archive checks.
+ *
+ * @param environment - Environment variables that define the build and signing configuration
+ */
 export function verifyMacWrapperFromEnvironment(
 	environment: NodeJS.ProcessEnv = process.env,
 ): void {

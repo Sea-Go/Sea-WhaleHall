@@ -24,6 +24,11 @@ import {
 	verifyMacWrapperFromEnvironment,
 } from "./macos-build-security";
 
+/**
+ * Finalizes and verifies a stable x64 Windows installer.
+ *
+ * @param environment - Environment variables that identify the build and artifact configuration
+ */
 export function finalizeStableWindowsInstaller(
 	environment: NodeJS.ProcessEnv = process.env,
 ): void {
@@ -271,6 +276,15 @@ if (import.meta.main) {
 	finalizeStableWindowsInstaller();
 }
 
+/**
+ * Verifies signal-forwarding behavior in the packaged Electrobun runtime archive.
+ *
+ * Development builds and unsupported operating systems are skipped; supported macOS and
+ * Windows targets are validated before the packaged runtime archive is checked.
+ *
+ * @param environment - Environment variables that identify the build and artifact locations.
+ * @throws Error If the target, required configuration, packaged archive, or zstd helper is invalid or missing, or verification fails.
+ */
 export function verifyPackagedElectrobunSignalForwarding(
 	environment: NodeJS.ProcessEnv = process.env,
 ): void {
