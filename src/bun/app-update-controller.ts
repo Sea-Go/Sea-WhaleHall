@@ -1,3 +1,4 @@
+import { dlopen, FFIType } from "bun:ffi";
 import { type SpawnOptions, spawn } from "node:child_process";
 import {
 	createHash,
@@ -20,7 +21,7 @@ import {
 	stat,
 	writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, win32 } from "node:path";
 import {
 	APP_UPDATE_SNAPSHOT_SCHEMA_VERSION,
 	type AppUpdateArchitecture,
@@ -54,8 +55,7 @@ const UPDATE_STAGING_TIMEOUT_MS = 5 * 60 * 1000;
 const WINDOWS_INSTALLER_SPAWN_TIMEOUT_MS = 10_000;
 const WINDOWS_INSTALLER_READY_TIMEOUT_MS = 10_000;
 const WINDOWS_INSTALLER_CLOSE_TIMEOUT_MS = 5_000;
-const WINDOWS_POWERSHELL_PATH =
-	"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+const WINDOWS_SYSTEM_DIRECTORY_BUFFER_LENGTH = 32_768;
 
 export type AppUpdaterLocalInfo = {
 	version: string;
@@ -1127,7 +1127,10 @@ async function extractWindowsTarArchive(
 async function spawnWindowsUpdateInstaller(
 	plan: WindowsUpdateInstallerPlan,
 ): Promise<WindowsUpdateInstallerHandle> {
-	const launch = windowsUpdateInstallerLaunch(plan);
+	const launch = windowsUpdateInstallerLaunch(
+		plan,
+		getWindowsSystemDirectory(),
+	);
 	await access(launch.command, fsConstants.X_OK);
 	return new Promise<WindowsUpdateInstallerHandle>((resolve, reject) => {
 		const child = spawn(launch.command, launch.arguments, launch.options);
@@ -1197,17 +1200,52 @@ async function spawnWindowsUpdateInstaller(
 	});
 }
 
+/**
+ * Resolves the trusted native Windows system directory without consulting the
+ * launch environment. kernel32.dll is a Windows KnownDLL, so an injected
+ * SystemRoot/WINDIR value cannot redirect this lookup or the PowerShell launch.
+ */
+export function getWindowsSystemDirectory(): string {
+	if (process.platform !== "win32") {
+		throw new Error("The Windows system directory is unavailable.");
+	}
+	const library = dlopen("kernel32.dll", {
+		GetSystemDirectoryW: {
+			args: [FFIType.ptr, FFIType.u32],
+			returns: FFIType.u32,
+		},
+	});
+	try {
+		const buffer = new Uint16Array(WINDOWS_SYSTEM_DIRECTORY_BUFFER_LENGTH);
+		const length = library.symbols.GetSystemDirectoryW(buffer, buffer.length);
+		if (length === 0 || length >= buffer.length) {
+			throw new Error("Windows did not return a bounded system directory.");
+		}
+		const systemDirectory = Buffer.from(
+			buffer.buffer,
+			buffer.byteOffset,
+			length * Uint16Array.BYTES_PER_ELEMENT,
+		).toString("utf16le");
+		return trustedWindowsSystemDirectory(systemDirectory);
+	} finally {
+		library.close();
+	}
+}
+
 export function windowsUpdateInstallerLaunch(
 	plan: WindowsUpdateInstallerPlan,
+	systemDirectory: string,
 ): WindowsUpdateInstallerLaunch {
 	const paths = windowsUpdateInstallerPaths(plan);
+	const trustedSystemDirectoryPath =
+		trustedWindowsSystemDirectory(systemDirectory);
 	return {
-		// The executable path is deliberately code-owned. Environment-derived
-		// SystemRoot/WINDIR values would let an injected launch environment choose
-		// which program receives the verified installer plan. A non-standard
-		// Windows directory therefore fails closed instead of widening this trust
-		// boundary.
-		command: WINDOWS_POWERSHELL_PATH,
+		command: win32.join(
+			trustedSystemDirectoryPath,
+			"WindowsPowerShell",
+			"v1.0",
+			"powershell.exe",
+		),
 		arguments: [
 			"-NoLogo",
 			"-NoProfile",
@@ -1229,6 +1267,20 @@ export function windowsUpdateInstallerLaunch(
 			shell: false,
 		},
 	};
+}
+
+function trustedWindowsSystemDirectory(systemDirectory: string): string {
+	if (systemDirectory.includes("\0") || !win32.isAbsolute(systemDirectory)) {
+		throw new Error("The Windows system directory is invalid.");
+	}
+	const normalized = win32.normalize(systemDirectory);
+	if (
+		!/^[A-Za-z]:\\$/.test(win32.parse(normalized).root) ||
+		win32.basename(normalized).toLowerCase() !== "system32"
+	) {
+		throw new Error("The Windows system directory is invalid.");
+	}
+	return normalized;
 }
 
 type WindowsUpdateInstallerPaths = {

@@ -200,6 +200,40 @@ describe("MastraSidecarClient shutdown", () => {
 		expect(hostCalls).toEqual(["accepted-before-shutdown"]);
 	});
 
+	test("drains a pre-latch terminal event before cancelling the remaining runs", async () => {
+		let releaseAccepted!: () => void;
+		const acceptedGate = new Promise<void>((resolve) => {
+			releaseAccepted = resolve;
+		});
+		const hostCalls: string[] = [];
+		const harness = createHarness(["succeed"], {}, undefined, async (call) => {
+			hostCalls.push(call.requestId);
+			await acceptedGate;
+			return {};
+		});
+		await harness.client.start();
+		harness.client.trackRun("completed-before-shutdown");
+		harness.client.trackRun("arrived-after-shutdown");
+		harness.children[0]?.emitHostRequest("blocking-host-call");
+		await waitFor(() => hostCalls.length === 1);
+		harness.children[0]?.emitRunCompleted("completed-before-shutdown");
+
+		harness.client.beginShutdown();
+		harness.children[0]?.emitRunCompleted("arrived-after-shutdown");
+		let drained = false;
+		const draining = harness.client.drainAcceptedFrames().then(() => {
+			drained = true;
+		});
+		await Promise.resolve();
+		expect(drained).toBeFalse();
+
+		releaseAccepted();
+		await draining;
+		expect(harness.runEvents).toEqual(["completed-before-shutdown"]);
+		await harness.client.stop();
+		expect(harness.interruptions).toEqual([["arrived-after-shutdown"]]);
+	});
+
 	test("validates every shutdown budget when the client is constructed", () => {
 		for (const option of [
 			"shutdownProtocolTimeoutMs",
@@ -367,10 +401,12 @@ function createHarness(
 	client: MastraSidecarClient;
 	children: FakeSidecarChild[];
 	interruptions: string[][];
+	runEvents: string[];
 	restarts: { count: number };
 } {
 	const children: FakeSidecarChild[] = [];
 	const interruptions: string[][] = [];
+	const runEvents: string[] = [];
 	const restarts = { count: 0 };
 	const spawnProcess = (() => {
 		const child = new FakeSidecarChild(behaviors[children.length] ?? "succeed");
@@ -391,7 +427,7 @@ function createHarness(
 			},
 		},
 		onHostCall: hostCallHandler,
-		onRunEvent: () => {},
+		onRunEvent: (event) => runEvents.push(event.runId),
 		onInterrupted: async (runIds, reason) => {
 			interruptions.push([...runIds]);
 			await interruptionHandler(runIds, reason);
@@ -406,6 +442,7 @@ function createHarness(
 		client: new MastraSidecarClient(options),
 		children,
 		interruptions,
+		runEvents,
 		restarts,
 	};
 }
@@ -464,6 +501,22 @@ class FakeSidecarChild extends EventEmitter {
 				requestId,
 				method: "tool/call",
 				params: {},
+			} as ProtocolMessage),
+		);
+	}
+
+	emitRunCompleted(runId: string): void {
+		this.stdout.write(
+			encodeContentLengthFrame({
+				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				type: "event",
+				requestId: `request-${runId}`,
+				runId,
+				sequence: 1,
+				version: 1,
+				emittedAtMs: 1,
+				terminalState: "completed",
+				event: { kind: "run.completed", result: { answer: "ok" } },
 			} as ProtocolMessage),
 		);
 	}

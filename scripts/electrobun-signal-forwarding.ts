@@ -230,31 +230,29 @@ function canonicalSignalSource(source: string): {
 	}
 	const hasCrLf = source.includes("\r\n");
 	if (hasCrLf && withoutCrLf.includes("\n")) {
+		const canonical = source.replaceAll("\r\n", "\n");
+		const vendorCount = countExact(
+			canonical,
+			ELECTROBUN_VENDOR_SIGNAL_SENTINEL,
+		);
+		const legacyCount = countExact(
+			canonical,
+			ELECTROBUN_WHALEHALL_LEGACY_SIGNAL_FORWARDING,
+		);
 		const patchedCount = countExact(
-			source,
+			canonical,
 			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
 		);
-		const outsidePatchedBlock = source.replace(
-			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
-			"",
-		);
-		const outsideWithoutCrLf = outsidePatchedBlock.replaceAll("\r\n", "");
-		if (
-			patchedCount !== 1 ||
-			outsideWithoutCrLf.includes("\n") ||
-			outsideWithoutCrLf.includes("\r")
-		) {
+		if (vendorCount !== 0 || legacyCount !== 0 || patchedCount !== 1) {
 			throw new Error("Electrobun runtime main contains mixed line endings.");
 		}
-		// Bun's Windows patchedDependencies implementation preserves CRLF in the
-		// vendor file while writing the one tracked patch hunk with LF. Accept only
-		// that byte-exact mixed form; arbitrary mixed input remains fail-closed.
-		const uniformCrLf = source.replace(
-			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
-			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING.replaceAll("\n", "\r\n"),
-		);
+		// Bun's Windows patchedDependencies implementation can preserve CRLF for
+		// untouched lines while rendering any line in the applied hunk with LF.
+		// Line endings are semantically inert, so accept an already-patched mixed
+		// file only after its canonical form proves the exact forwarder is present.
+		// Never rewrite that file: the package manager remains its byte owner.
 		return {
-			canonical: uniformCrLf.replaceAll("\r\n", "\n"),
+			canonical,
 			lineEnding: "\r\n",
 		};
 	}

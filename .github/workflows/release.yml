@@ -78,6 +78,8 @@ jobs:
       - name: Validate version, floor, notes, and prior Stable release
         id: release
         run: |
+          set -euo pipefail
+
           release_notes_file="$RUNNER_TEMP/release-notes.md"
           printf '%s' "$RELEASE_NOTES" > "$release_notes_file"
 
@@ -596,6 +598,8 @@ jobs:
 
       - name: Upload every asset to a draft, re-download, and publish
         run: |
+          set -euo pipefail
+
           tag="v$RELEASE_VERSION"
           assert_stable_baseline() {
             current_previous_tag=$(

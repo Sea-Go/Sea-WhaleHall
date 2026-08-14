@@ -200,7 +200,7 @@ export class MastraSidecarClient {
 	}
 
 	/** Joins every inbound frame dispatch accepted before the fixed point. */
-	private async drainAcceptedFrames(): Promise<void> {
+	async drainAcceptedFrames(): Promise<void> {
 		for (;;) {
 			const accepted = [...this.acceptSettlements];
 			if (accepted.length === 0) return;
@@ -448,10 +448,13 @@ export class MastraSidecarClient {
 		if (this.child !== child) return;
 		try {
 			const messages = this.parser.push(chunk);
+			const runEventsAcceptedBeforeShutdown = !this.shutdownRequested;
 			const operation = this.acceptTail
 				.then(async () => {
 					if (this.child !== child) return;
-					for (const message of messages) await this.accept(child, message);
+					for (const message of messages) {
+						await this.accept(child, message, runEventsAcceptedBeforeShutdown);
+					}
 				})
 				.catch((error) => this.failProtocol(child, error));
 			this.acceptTail = operation;
@@ -467,6 +470,7 @@ export class MastraSidecarClient {
 	private async accept(
 		child: ChildProcessWithoutNullStreams,
 		message: unknown,
+		runEventsAcceptedBeforeShutdown: boolean,
 	): Promise<void> {
 		if (this.child !== child) return;
 		if (
@@ -495,7 +499,7 @@ export class MastraSidecarClient {
 					"Sidecar event shape 无效。",
 				);
 			}
-			if (this.shutdownRequested) return;
+			if (this.shutdownRequested && !runEventsAcceptedBeforeShutdown) return;
 			this.options.onRunEvent(message);
 			if (message.terminalState) this.untrackRun(message.runId);
 			return;

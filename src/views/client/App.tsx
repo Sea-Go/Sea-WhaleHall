@@ -39,6 +39,7 @@ import { MockReportService } from "./infrastructure/reports/MockReportService";
 import { ElectrobunAgentPermissionsService } from "./infrastructure/settings/ElectrobunAgentPermissionsService";
 import { MockAgentPermissionsService } from "./infrastructure/settings/MockAgentPermissionsService";
 import { MockPreferencesService } from "./infrastructure/settings/MockPreferencesService";
+import { useStrictModeSafeDispose } from "./use-strict-mode-safe-dispose";
 
 const desktopRuntime = hasElectrobunRuntime();
 const authService = desktopRuntime
@@ -186,9 +187,11 @@ function AuthenticatedApp({
 			),
 		[],
 	);
-	useEffect(
-		() => () => proactiveFeedbackHistoryController.dispose(),
-		[proactiveFeedbackHistoryController],
+	useStrictModeSafeDispose(proactiveFeedbackHistoryController, (controller) =>
+		controller.dispose(),
+	);
+	useStrictModeSafeDispose(proactiveFeedbackPolicyController, (controller) =>
+		controller.dispose(),
 	);
 
 	useEffect(() => {
@@ -201,6 +204,7 @@ function AuthenticatedApp({
 		beginAccountTransition({
 			transition: onLogout,
 			clearLocalAccountState: () => {
+				proactiveFeedbackPolicyController.dispose();
 				calendarController.clearAccountData();
 				planningController.clearActiveGoalContext();
 			},

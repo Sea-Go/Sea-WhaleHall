@@ -66,8 +66,12 @@ describe("Electrobun lifecycle signal forwarding", () => {
 		});
 	});
 
-	test("accepts only the exact Windows patchedDependencies mixed runtime", () => {
-		const windowsPatched = `before\r\n${ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING}\r\nafter`;
+	test("accepts Windows patchedDependencies hunk line endings only after exact canonical proof", () => {
+		const mixedForwarder = ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING.replace(
+			"\n",
+			"\r\n",
+		);
+		const windowsPatched = `before\r\n${mixedForwarder}\nafter`;
 		expect(rewriteElectrobunSignalForwarding(windowsPatched)).toEqual({
 			source: windowsPatched,
 			changed: false,
@@ -76,7 +80,12 @@ describe("Electrobun lifecycle signal forwarding", () => {
 
 		expect(() =>
 			rewriteElectrobunSignalForwarding(
-				`before\r\n${ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING}\nafter`,
+				`before\r\n${ELECTROBUN_VENDOR_SIGNAL_SENTINEL}\nafter`,
+			),
+		).toThrow("mixed line endings");
+		expect(() =>
+			rewriteElectrobunSignalForwarding(
+				`before\r\n${mixedForwarder.replace("SIGTERM", "SIGQUIT")}\nafter`,
 			),
 		).toThrow("mixed line endings");
 	});

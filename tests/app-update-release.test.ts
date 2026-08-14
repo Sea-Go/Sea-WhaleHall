@@ -56,6 +56,13 @@ describe("Stable application update release", () => {
 		expect(workflow.match(/assert_stable_baseline/gu)).toHaveLength(3);
 		expect(workflow).toContain("--previous-manifest-signature");
 		expect(workflow).toContain("--previous-version");
+		expect(workflow.match(/set -euo pipefail/gu)).toHaveLength(2);
+		expect(workflow).toContain(
+			"Validate version, floor, notes, and prior Stable release\n        id: release\n        run: |\n          set -euo pipefail",
+		);
+		expect(workflow).toContain(
+			"Upload every asset to a draft, re-download, and publish\n        run: |\n          set -euo pipefail",
+		);
 	});
 
 	test("requires monotonic release versions and minimum supported floors", () => {

@@ -417,6 +417,12 @@ export class ProactiveFeedbackRuntime {
 			}
 			const enabling = !before.policy.enabled && request.policy.enabled;
 			const disabling = before.policy.enabled && !request.policy.enabled;
+			if (enabling && !resetRepaired) await this.prepareEnable(identity);
+			// This is the write linearization gate: every asynchronous read, repair,
+			// and enable preparation has completed, and no await may separate these
+			// exact-session checks from invoking the repository write.
+			this.assertSession(identity);
+			this.assertActivationCandidate(identity);
 			if (disabling) {
 				// Revoke presentation synchronously before yielding to the policy write.
 				// A completion already committed in SQLite but awaiting its callback must
@@ -424,7 +430,6 @@ export class ProactiveFeedbackRuntime {
 				this.presentationOwner = null;
 				this.presentationNotBeforeMs = Number.POSITIVE_INFINITY;
 			}
-			if (enabling && !resetRepaired) await this.prepareEnable(identity);
 			let saved: ProactiveFeedbackPolicySnapshot;
 			try {
 				saved = await this.repository.setProactiveFeedbackPolicy(
