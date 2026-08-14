@@ -129,6 +129,9 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 				recurrence: null,
 				occurrenceId: null,
 				sourcePlanId: plan.id,
+				sourceTaskId: proposal.taskId,
+				scheduleOrigin: "model",
+				userLocked: false,
 				editable: true,
 				version: 0,
 			};
@@ -160,7 +163,6 @@ export class CalendarPlanningGateway implements PlanningCalendarGateway {
 						"写入未完成，所有草案都保留在计划中。",
 				};
 			}
-			this.expectedRevision = result.calendarRevision ?? this.expectedRevision;
 			return {
 				ok: true,
 				kind: "success",

@@ -4,6 +4,7 @@ import packageMetadata from "../../../package.json";
 import { AppShell } from "./app/AppShell";
 import { applyAppearancePreferences } from "./app/appearance";
 import { subscribePetVisibilityPreference } from "./app/pet-visibility-preference";
+import { qaControlsEnabled } from "./app/qa-mode";
 import {
 	AppUpdateController,
 	UpdateStatusControl,
@@ -30,9 +31,7 @@ import { ElectrobunCalendarService } from "./infrastructure/calendar/ElectrobunC
 import { MockCalendarService } from "./infrastructure/calendar/MockCalendarService";
 import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
 import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
-import { AgentPlanningGenerationService } from "./infrastructure/planning/AgentPlanningGenerationService";
-import { CalendarPlanningGateway } from "./infrastructure/planning/CalendarPlanningGateway";
-import { ElectrobunPlanningAuthorityGateway } from "./infrastructure/planning/ElectrobunPlanningAuthorityGateway";
+import { ElectrobunPlanningService } from "./infrastructure/planning/ElectrobunPlanningService";
 import { ElectrobunProactiveFeedbackService } from "./infrastructure/proactive-feedback/ElectrobunProactiveFeedbackService";
 import { InMemoryProactiveFeedbackService } from "./infrastructure/proactive-feedback/InMemoryProactiveFeedbackService";
 import { MockReportService } from "./infrastructure/reports/MockReportService";
@@ -72,7 +71,7 @@ const appUpdateController = new AppUpdateController(
 export function App() {
 	const enableQaControls =
 		typeof window !== "undefined" &&
-		new URLSearchParams(window.location.search).get("qa") === "1";
+		qaControlsEnabled(window.location);
 
 	useEffect(() => {
 		function syncAppearanceFromPreferences() {
@@ -135,27 +134,9 @@ function AuthenticatedApp({
 		() => new CalendarController(calendarService),
 		[],
 	);
-	const planningCalendarGateway = useMemo(
-		() => new CalendarPlanningGateway(calendarService),
-		[],
-	);
-	const planningAuthorityGateway = useMemo(
-		() =>
-			desktopRuntime ? new ElectrobunPlanningAuthorityGateway() : undefined,
-		[],
-	);
 	const planningController = useMemo(
-		() =>
-			new PlanningController(
-				new AgentPlanningGenerationService(),
-				planningCalendarGateway,
-				currentDate,
-				() => planningTimeZone,
-				undefined,
-				undefined,
-				planningAuthorityGateway,
-			),
-		[planningAuthorityGateway, planningCalendarGateway],
+		() => new PlanningController(new ElectrobunPlanningService()),
+		[],
 	);
 	const proactiveFeedbackService = useMemo(
 		() =>
@@ -191,10 +172,6 @@ function AuthenticatedApp({
 		[proactiveFeedbackHistoryController],
 	);
 
-	useEffect(() => {
-		void planningController.restore();
-	}, [planningController]);
-
 	const handleLogout = () => {
 		if (logoutPendingRef.current) return;
 		logoutPendingRef.current = true;
@@ -202,7 +179,7 @@ function AuthenticatedApp({
 			transition: onLogout,
 			clearLocalAccountState: () => {
 				calendarController.clearAccountData();
-				planningController.clearActiveGoalContext();
+				planningController.dispose();
 			},
 		});
 	};

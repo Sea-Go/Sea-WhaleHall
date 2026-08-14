@@ -16,6 +16,8 @@ export interface CalendarLoadResult {
 }
 
 export interface CalendarService {
+	/** Optional authoritative invalidation stream (for local/native persistence). */
+	subscribe?(listener: () => void): () => void;
 	load(scenario?: CalendarScenarioId): Promise<CalendarLoadResult>;
 	mutate(mutation: CalendarMutation): Promise<CalendarMutationResult>;
 	mutateBatch(

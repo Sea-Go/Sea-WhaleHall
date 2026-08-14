@@ -1,5 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { buildObserverApp } from "../../../scripts/build-native";
@@ -61,10 +61,82 @@ class FrameReader {
 }
 
 let runningChild: ReturnType<typeof Bun.spawn> | undefined;
+let policyTemporaryDirectory: string | undefined;
+let policyExecutable: string | undefined;
+let observerExecutable: string | undefined;
+
+// Swift compilation is a build prerequisite, not part of the Observer's
+// runtime response budget. Under the full Bun suite the compiler shares CPU
+// with other native fixtures, so keeping it inside either 20-second protocol
+// test made a healthy helper look unresponsive. Keep the build bounded here;
+// the frame reader and runtime test retain their independent, tighter bounds.
+beforeAll(
+	() => {
+		if (process.platform !== "darwin") return;
+
+		policyTemporaryDirectory = mkdtempSync(
+			resolve(tmpdir(), "whalehall-observer-policy-"),
+		);
+		const sourceDirectory = resolve(import.meta.dir, "../Sources");
+		const sources = readdirSync(sourceDirectory)
+			.filter((name) => name.endsWith(".swift") && name !== "Main.swift")
+			.sort()
+			.map((name) => resolve(sourceDirectory, name));
+		policyExecutable = resolve(
+			policyTemporaryDirectory,
+			"accessibility-policy-tests",
+		);
+		const architecture = process.arch === "arm64" ? "arm64" : "x86_64";
+		const compile = Bun.spawnSync([
+			"xcrun",
+			"swiftc",
+			"-swift-version",
+			"6",
+			"-parse-as-library",
+			"-target",
+			`${architecture}-apple-macos14.0`,
+			"-framework",
+			"AppKit",
+			"-framework",
+			"ApplicationServices",
+			"-framework",
+			"CoreGraphics",
+			"-framework",
+			"ScreenCaptureKit",
+			"-framework",
+			"Vision",
+			...sources,
+			resolve(import.meta.dir, "AccessibilityMonitorPolicyTests.swift"),
+			"-o",
+			policyExecutable,
+		]);
+		expect(new TextDecoder().decode(compile.stderr)).toBe("");
+		expect(compile.exitCode).toBe(0);
+
+		const targetArchitecture = process.arch === "arm64" ? "arm64" : "x64";
+		const bundle = buildObserverApp(targetArchitecture);
+		observerExecutable = resolve(
+			bundle,
+			"Contents/MacOS/whalehall-observer",
+		);
+	},
+	60_000,
+);
 
 afterEach(() => {
 	runningChild?.kill();
 	runningChild = undefined;
+});
+
+afterAll(() => {
+	runningChild?.kill();
+	runningChild = undefined;
+	if (policyTemporaryDirectory) {
+		rmSync(policyTemporaryDirectory, { force: true, recursive: true });
+	}
+	policyTemporaryDirectory = undefined;
+	policyExecutable = undefined;
+	observerExecutable = undefined;
 });
 
 const macOSTest = process.platform === "darwin" ? test : test.skip;
@@ -281,62 +353,18 @@ test("keeps display polling cached and prompt APIs explicit", () => {
 macOSTest(
 	"keeps AX flush, privacy, and visible-editable policies deterministic",
 	() => {
-		const temporaryDirectory = mkdtempSync(
-			resolve(tmpdir(), "whalehall-observer-policy-"),
-		);
-		try {
-			const sourceDirectory = resolve(import.meta.dir, "../Sources");
-			const sources = readdirSync(sourceDirectory)
-				.filter((name) => name.endsWith(".swift") && name !== "Main.swift")
-				.sort()
-				.map((name) => resolve(sourceDirectory, name));
-			const executable = resolve(
-				temporaryDirectory,
-				"accessibility-policy-tests",
-			);
-			const architecture = process.arch === "arm64" ? "arm64" : "x86_64";
-			const compile = Bun.spawnSync([
-				"xcrun",
-				"swiftc",
-				"-swift-version",
-				"6",
-				"-parse-as-library",
-				"-target",
-				`${architecture}-apple-macos14.0`,
-				"-framework",
-				"AppKit",
-				"-framework",
-				"ApplicationServices",
-				"-framework",
-				"CoreGraphics",
-				"-framework",
-				"ScreenCaptureKit",
-				"-framework",
-				"Vision",
-				...sources,
-				resolve(import.meta.dir, "AccessibilityMonitorPolicyTests.swift"),
-				"-o",
-				executable,
-			]);
-			expect(new TextDecoder().decode(compile.stderr)).toBe("");
-			expect(compile.exitCode).toBe(0);
-			const run = Bun.spawnSync([executable]);
-			expect(new TextDecoder().decode(run.stderr)).toBe("");
-			expect(run.exitCode).toBe(0);
-		} finally {
-			rmSync(temporaryDirectory, { force: true, recursive: true });
-		}
+		expect(policyExecutable).toBeString();
+		const run = Bun.spawnSync([policyExecutable as string]);
+		expect(new TextDecoder().decode(run.stderr)).toBe("");
+		expect(run.exitCode).toBe(0);
 	},
-	20_000,
 );
 
 macOSTest(
 	"builds the bundled helper and exchanges privacy-safe JSONL frames",
 	async () => {
-		const architecture = process.arch === "arm64" ? "arm64" : "x64";
-		const bundle = buildObserverApp(architecture);
-		const executable = resolve(bundle, "Contents/MacOS/whalehall-observer");
-		const child = Bun.spawn([executable], {
+		expect(observerExecutable).toBeString();
+		const child = Bun.spawn([observerExecutable as string], {
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",

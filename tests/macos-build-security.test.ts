@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
 	chmodSync,
 	copyFileSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -21,6 +22,7 @@ import {
 	MACOS_USAGE_DESCRIPTIONS,
 	assertRequiredMacNativeComponents,
 	normalizeDesignatedRequirement,
+	prepareDevelopmentMacWrapperFromEnvironment,
 	prepareMacWrapper,
 	shouldMaterializeMacUpdateArchive,
 	validateLocalWrapperArchiveEntryTypes,
@@ -597,6 +599,55 @@ describe("Observer entitlement validation", () => {
 });
 
 describe.skipIf(process.platform !== "darwin")("macOS wrapper security", () => {
+	test("resource-seals the completed Electrobun dev bundle during postPackage", () => {
+		const buildDirectory = mkdtempSync(join(tmpdir(), "whalehall-dev-wrapper-"));
+		temporaryDirectories.push(buildDirectory);
+		const bundlePath = join(buildDirectory, "WhaleHall-dev.app");
+		const contents = join(bundlePath, "Contents");
+		const executableDirectory = join(contents, "MacOS");
+		const resourcesDirectory = join(contents, "Resources");
+		mkdirSync(executableDirectory, { recursive: true });
+		mkdirSync(resourcesDirectory, { recursive: true });
+		copyFileSync("/usr/bin/true", join(executableDirectory, "launcher"));
+		chmodSync(join(executableDirectory, "launcher"), 0o755);
+		writeFileSync(join(resourcesDirectory, "build.json"), "{}\n");
+		writeFileSync(
+			join(contents, "Info.plist"),
+			`<?xml version="1.0" encoding="UTF-8"?>\n`
+				+ `<plist version="1.0"><dict>\n`
+				+ `<key>CFBundleExecutable</key><string>launcher</string>\n`
+				+ `<key>CFBundleIdentifier</key><string>com.seago.whalehall</string>\n`
+				+ `<key>CFBundlePackageType</key><string>APPL</string>\n`
+				+ `</dict></plist>\n`,
+		);
+
+		prepareDevelopmentMacWrapperFromEnvironment({
+			ELECTROBUN_OS: "macos",
+			ELECTROBUN_BUILD_ENV: "dev",
+			ELECTROBUN_BUILD_DIR: buildDirectory,
+			ELECTROBUN_APP_NAME: "WhaleHall-dev",
+			ELECTROBUN_APP_IDENTIFIER: "com.seago.whalehall",
+		});
+
+		expect(
+			existsSync(join(contents, "_CodeSignature", "CodeResources")),
+		).toBe(true);
+		const verification = Bun.spawnSync(
+			["/usr/bin/codesign", "--verify", "--deep", "--strict", bundlePath],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		expect(verification.exitCode).toBe(0);
+	});
+
+	test("does not move non-dev channels into the development signing path", () => {
+		expect(
+			prepareDevelopmentMacWrapperFromEnvironment({
+				ELECTROBUN_OS: "macos",
+				ELECTROBUN_BUILD_ENV: "stable",
+			}),
+		).toBeUndefined();
+	});
+
 	test("binds the canonical identity, permission descriptions, and automation entitlement", () => {
 		const buildDirectory = mkdtempSync(join(tmpdir(), "whalehall-wrapper-"));
 		temporaryDirectories.push(buildDirectory);

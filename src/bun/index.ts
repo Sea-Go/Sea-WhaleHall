@@ -131,12 +131,23 @@ import {
 	resumeTimelineRuntimeForAvailableVault,
 	TimelineRuntimeLifecycle,
 } from "./timeline-runtime-lifecycle";
+import type {
+	PlanningCalendarEventProjection,
+	PlanningCalendarMutationProjection,
+} from "../shared/planning";
+import { shouldForceRendererPlanLock } from "./calendar-mutation-policy";
+import {
+	developmentQaWindowSize,
+	isDevelopmentQaMode,
+} from "./development-qa-auth";
+import { WhaleHallPlanningRuntime } from "./planning-runtime";
 
 const HMR_ORIGIN = "http://127.0.0.1:5173";
 const runtimeChannel = parseNativeRuntimeChannel(
 	await Updater.localInfo.channel(),
 );
 const runtimeVersion = await Updater.localInfo.version();
+const developmentQaMode = isDevelopmentQaMode(runtimeChannel, process.env);
 const nativeBinary =
 	process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local";
 const nativePath = join(PATHS.RESOURCES_FOLDER, "app", "native", nativeBinary);
@@ -701,6 +712,8 @@ const REPOSITORY_BARRIER_COVERED_SHUTDOWN_STEPS = new Set([
 ]);
 let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
+let planningRuntime: WhaleHallPlanningRuntime | null = null;
+let planningMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
 let activityWindowDelivery: ActivityWindowDeliveryService | null = null;
 let activityWindowDeliveryStore: ActivityWindowDeliveryStore | null = null;
 interface ActivityWindowDeliveryLifecycleKey {
@@ -1061,6 +1074,115 @@ const shutdownAllowedClientRequests = new Set<keyof ClientRequestSchema>([
 ]);
 
 const clientRequestHandlers: ClientRequestHandlers = {
+	listPlans: async () => ({
+		plans: await (await requirePlanningRuntime()).listPlans(),
+	}),
+	getPlan: async ({ planId }) => ({
+		plan: await (await requirePlanningRuntime()).getPlan(planId),
+	}),
+	createPlanDraft: async ({ input, operationId, timeZone }) => {
+		assertRendererTimeZone(timeZone);
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.createPlanDraft({ input, operationId });
+		return { planId: plan.id };
+	},
+	sendPlanMessage: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.sendPlanMessage(command);
+		throwIfPlanningAnalysisUnavailable(plan);
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	confirmPlanRevision: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.confirmPlanRevision(command);
+		await reconcileExecutingPlanningGoal();
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	setPlanningTaskStatus: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.setTaskStatus(command);
+		throwIfPlanningAnalysisUnavailable(plan);
+		await reconcileExecutingPlanningGoal();
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	confirmPlanningObservation: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.confirmObservationAttribution(command);
+		throwIfPlanningAnalysisUnavailable(plan);
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	pausePlan: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.pausePlan(command);
+		await reconcileExecutingPlanningGoal();
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	resumePlan: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.resumePlan(command);
+		throwIfPlanningAnalysisUnavailable(plan);
+		await reconcileExecutingPlanningGoal();
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	completePlan: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.completePlan(command);
+		await reconcileExecutingPlanningGoal();
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	archivePlan: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.archivePlan(command);
+		await reconcileExecutingPlanningGoal();
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	undoPlanAdjustment: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.undoPlanAdjustment(command);
+		await reconcileExecutingPlanningGoal();
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	retryPendingPlanAnalysis: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.retryPendingAnalysis(command);
+		throwIfPlanningAnalysisUnavailable(plan);
+		return { plan: await runtime.getPlan(plan.id) };
+	},
+	loadPlanningCalendar: async () => {
+		const events = (await agent.listPlanningCalendar()).events;
+		const redactedTaskTitles = await planningCalendarTaskTitles(events);
+		return {
+			events: events.map((event) =>
+				projectNativeCalendarEvent(
+					event,
+					redactedTaskTitles.get(event.eventId) ?? event.title,
+				),
+			),
+			timeZone:
+				Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+		};
+	},
+	mutatePlanningCalendar: async (mutation) => {
+		const result = await mutateRendererCalendar(
+			mutation.mutationId,
+			[mutation],
+		);
+		if (!result.ok) {
+			return {
+				ok: false as const,
+				mutationId: mutation.mutationId,
+				conflict: result.conflicts[0]!,
+			};
+		}
+		return {
+			ok: true as const,
+			mutationId: mutation.mutationId,
+			event: result.events[0] ?? null,
+			warning: result.warnings[0] ?? null,
+		};
+	},
+	mutatePlanningCalendarBatch: ({ batchId, mutations }) =>
+		mutateRendererCalendar(batchId, mutations),
 	getAppUpdateStatus: (input) => {
 		if (!hasExactKeys(input, [])) {
 			throw new Error("Invalid application update status request.");
@@ -1469,10 +1591,10 @@ const guardedClientRequestHandlers = Object.fromEntries(
 const drainClientRequests = () => clientRequestBarrier.drain();
 
 const clientRPC = BrowserView.defineRPC<ClientRPC>({
-	// A user-initiated legacy Keychain migration may wait on one native
-	// authorization sheet. Normal monitoring/status requests keep their much
-	// shorter LocalToolClient deadlines.
-	maxRequestTime: 130_000,
+	// A planning turn may consume the full verified-model budget and then make
+	// one schema-repair attempt. Keep the transport alive for that bounded work;
+	// normal monitoring/status requests retain their shorter service deadlines.
+	maxRequestTime: 260_000,
 	handlers: {
 		requests: guardedClientRequestHandlers,
 		messages: {},
@@ -1602,16 +1724,24 @@ const hmrAvailable = (async (): Promise<boolean> => {
 async function viewUrl(view: "client" | "pet"): Promise<string> {
 	const bundled = `views://${view}/index.html`;
 	const hmrUrl = `${HMR_ORIGIN}/${view}/index.html`;
-	if (await hmrAvailable) return hmrUrl;
+	const qaEnabled = developmentQaMode && view === "client";
+	if (await hmrAvailable) return `${hmrUrl}${qaEnabled ? "?qa=1" : ""}`;
 	console.log(`[views] Vite is unavailable; using ${bundled}`);
+	// Electrobun's views:// handler treats query text as part of the asset path.
+	// QA controls therefore remain available only through the dev HMR origin.
 	return bundled;
 }
 
 const petWidth = 360;
 const petHeight = 300;
 const display = Screen.getPrimaryDisplay();
-const clientWidth = Math.min(1280, Math.max(1000, display.workArea.width - 80));
-const clientHeight = Math.min(800, Math.max(720, display.workArea.height - 80));
+const qaWindowSize = developmentQaWindowSize(runtimeChannel, process.env);
+const clientWidth =
+	qaWindowSize?.width ??
+	Math.min(1280, Math.max(1000, display.workArea.width - 80));
+const clientHeight =
+	qaWindowSize?.height ??
+	Math.min(800, Math.max(720, display.workArea.height - 80));
 
 async function createClientWindow(): Promise<BrowserWindow> {
 	const window = new BrowserWindow({
@@ -1758,6 +1888,10 @@ function shutdown(): Promise<void> {
 	shutdownRequested = true;
 	agent.beginShutdown();
 	sidecar.beginShutdown();
+	if (planningMaintenanceTimer !== null) {
+		clearInterval(planningMaintenanceTimer);
+		planningMaintenanceTimer = null;
+	}
 	if (shutdownPromise) return shutdownPromise;
 	if (!shutdownAccountCaptured) {
 		shutdownAccountCaptured = true;
@@ -2080,6 +2214,7 @@ function shutdown(): Promise<void> {
 	shutdownPromise = operation;
 	void operation.then(
 		() => {
+			planningRuntime = null;
 			if (shutdownPromise === operation) shutdownPromise = null;
 		},
 		() => {
@@ -2150,6 +2285,27 @@ startupPromise = (async () => {
 			if (authSession.accountId) {
 				await planningAuthority.load();
 			}
+			planningRuntime = new WhaleHallPlanningRuntime(
+				agent,
+				{
+					planChanged(change) {
+						if (clientWindow !== null) clientRPC.send.planChanged(change);
+					},
+					calendarChanged(version) {
+						if (clientWindow !== null) {
+							clientRPC.send.calendarChanged({ version });
+						}
+					},
+					notification(notification) {
+						if (clientWindow !== null) {
+							clientRPC.send.planningNotification(notification);
+						}
+					},
+				},
+				() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+			);
+			await reconcileExecutingPlanningGoal();
+			startPlanningMaintenance();
 			let timeline: TimelineV2Runtime;
 			try {
 				timeline = await timelineLifecycle.ensureStarted({
@@ -2207,6 +2363,7 @@ startupPromise = (async () => {
 					);
 				});
 			}
+			planningRuntime = null;
 			if (shutdownRequested) return;
 			// A failed health/query can leave a child allocated but unusable.
 			// Stop it before retrying so AgentRuntime cannot mistake that child
@@ -2570,4 +2727,286 @@ function createRawFiveMinuteAuditSource(
 			};
 		},
 	};
+}
+
+async function requirePlanningRuntime(): Promise<WhaleHallPlanningRuntime> {
+	if (planningRuntime !== null) return planningRuntime;
+	await startupPromise;
+	if (planningRuntime === null) {
+		throw new Error("PLANNING_OFFLINE");
+	}
+	return planningRuntime;
+}
+
+function assertRendererTimeZone(timeZone: string): void {
+	try {
+		new Intl.DateTimeFormat("en", { timeZone }).format();
+	} catch {
+		throw new Error("PLANNING_VALIDATION: invalid IANA time zone");
+	}
+}
+
+function throwIfPlanningAnalysisUnavailable(plan: {
+	analysisDiagnostic: unknown;
+}): void {
+	if (plan.analysisDiagnostic !== null) {
+		throw new Error("MODEL_UNAVAILABLE");
+	}
+}
+
+function projectNativeCalendarEvent(
+	event: import("../agent/local-protocol").LocalPlanningCalendarEvent,
+	title = event.title,
+): PlanningCalendarEventProjection {
+	return {
+		id: event.eventId,
+		title,
+		kind: event.kind,
+		state: event.state,
+		schedule: structuredClone(event.schedule),
+		recurrence: event.recurrence ? structuredClone(event.recurrence) : null,
+		occurrenceId: event.occurrenceId,
+		sourcePlanId: event.sourcePlanId,
+		sourceTaskId: event.sourceTaskId,
+		scheduleOrigin: event.scheduleOrigin,
+		userLocked: event.userLocked,
+		editable: event.editable,
+		version: event.version,
+	};
+}
+
+async function planningCalendarTaskTitles(
+	events: readonly import("../agent/local-protocol").LocalPlanningCalendarEvent[],
+): Promise<Map<string, string>> {
+	const planning = await requirePlanningRuntime();
+	const planIds = new Set(
+		events.flatMap((event) =>
+			event.redactedContent && event.sourcePlanId ? [event.sourcePlanId] : [],
+		),
+	);
+	const tasksByPlan = new Map<string, Map<string, string>>();
+	await Promise.all(
+		[...planIds].map(async (planId) => {
+			const plan = await planning.runtime.getPlan(planId).catch(() => null);
+			if (!plan) return;
+			tasksByPlan.set(
+				planId,
+				new Map(plan.tasks.map((task) => [task.id, task.title])),
+			);
+		}),
+	);
+	const titles = new Map<string, string>();
+	for (const event of events) {
+		if (!event.redactedContent || !event.sourcePlanId || !event.sourceTaskId) {
+			continue;
+		}
+		const title = tasksByPlan.get(event.sourcePlanId)?.get(event.sourceTaskId);
+		if (title) titles.set(event.eventId, title);
+	}
+	return titles;
+}
+
+function nativeCalendarEvent(
+	event: PlanningCalendarEventProjection,
+	forceUserLock: boolean,
+): import("../agent/local-protocol").LocalPlanningCalendarEvent {
+	return {
+		schemaVersion: "calendar.v1",
+		eventId: event.id,
+		title:
+			event.kind === "plan" && event.scheduleOrigin === "model"
+				? "计划任务"
+				: event.title,
+		sealedContentRef: null,
+		redactedContent:
+			event.kind === "plan" && event.scheduleOrigin === "model",
+		kind: event.kind,
+		state: event.state,
+		schedule: structuredClone(event.schedule),
+		recurrence: event.recurrence ? structuredClone(event.recurrence) : null,
+		occurrenceId: event.occurrenceId,
+		sourcePlanId: event.sourcePlanId,
+		sourceTaskId: event.sourceTaskId,
+		scheduleOrigin: event.kind === "plan" ? event.scheduleOrigin ?? "user" : null,
+		userLocked: event.userLocked || forceUserLock,
+		editable: event.editable,
+		version: event.version,
+	};
+}
+
+async function mutateRendererCalendar(
+	batchId: string,
+	mutations: readonly PlanningCalendarMutationProjection[],
+): Promise<
+	import("../shared/planning").PlanningCalendarBatchResultProjection
+> {
+	try {
+		const affectedPlanIds = [
+			...new Set(
+				mutations
+					.flatMap((mutation) => [
+						mutation.before?.sourcePlanId ?? "",
+						mutation.after?.sourcePlanId ?? "",
+					])
+					.filter(Boolean),
+			),
+		];
+		const result = await agent.mutatePlanningCalendar({
+			operationId: batchId,
+			mutations: mutations.map((mutation) =>
+				mutation.kind === "delete"
+					? {
+							action: "delete" as const,
+							eventId: mutation.eventId,
+							expectedVersion: mutation.expectedVersion ?? 0,
+						}
+					: {
+							action: "upsert" as const,
+							expectedVersion: mutation.expectedVersion,
+							event: nativeCalendarEvent(
+								mutation.after!,
+								shouldForceRendererPlanLock(mutation),
+							),
+						},
+			),
+			outbox: [
+				{
+					entryId: `renderer-calendar:${batchId}`,
+					kind: "calendar-changed",
+					aggregateId: "calendar",
+					payload: {
+						batchId,
+						mutationCount: mutations.length,
+						planIds: affectedPlanIds,
+						requiresPlanningReestimate: true,
+					},
+					createdAtMs: Date.now(),
+				},
+			],
+		});
+		const events = result.outcomes.flatMap((outcome) =>
+			outcome.event ? [projectNativeCalendarEvent(outcome.event)] : [],
+		);
+		const planning = await requirePlanningRuntime();
+		await planning.flushOutbox();
+		await reconcileExecutingPlanningGoal();
+		return { ok: true, batchId, events, warnings: [] };
+	} catch (error) {
+		const stale =
+			error !== null &&
+			typeof error === "object" &&
+			(("code" in error && String(error.code) === "BUSY") ||
+				("details" in error &&
+					error.details !== null &&
+					typeof error.details === "object" &&
+					"reason" in error.details &&
+					String(error.details.reason) === "stale-version"));
+		return {
+			ok: false,
+			batchId,
+			conflicts: [
+				{
+					reason: stale ? "stale-version" : "service-unavailable",
+					severity: "error",
+					affectedEventIds: mutations.map((item) => item.eventId),
+					message: stale
+						? "日程已被其他操作更新，请重新载入。"
+						: "本地日历暂时不可用，原安排保持不变。",
+					nextAction: stale ? "retry" : "keep-proposed",
+				},
+			],
+		};
+	}
+}
+
+let planningMaintenanceRunning = false;
+
+function startPlanningMaintenance(): void {
+	if (planningMaintenanceTimer !== null) return;
+	void runPlanningMaintenance();
+	planningMaintenanceTimer = setInterval(() => {
+		void runPlanningMaintenance();
+	}, 60_000);
+}
+
+async function runPlanningMaintenance(): Promise<void> {
+	if (planningMaintenanceRunning || shutdownPromise !== null) return;
+	planningMaintenanceRunning = true;
+	try {
+		const planning = planningRuntime;
+		if (!planning) return;
+		await planning.flushOutbox();
+		await planning.recoverPendingAdjustments();
+		await planning.runDailySummaries();
+		const timeline = timelineLifecycle.current;
+		if (timeline) {
+			await timeline.service.releaseAgentInputs();
+			for (;;) {
+				const batch = await timeline.service.queryAgentInputs({
+					limit: 32,
+					leaseDurationMs: 120_000,
+				});
+				if (batch.inputs.length === 0) break;
+				for (const envelope of batch.inputs) {
+					if (envelope.state !== "LEASED" || !envelope.leaseToken) continue;
+					await planning.consumeTimelineInput(envelope.input);
+					await timeline.service.commitAgentInput(
+						envelope.input.agentInputId,
+						envelope.leaseToken,
+					);
+				}
+				if (batch.inputs.length < 32) break;
+			}
+		}
+		await reconcileExecutingPlanningGoal();
+		await planning.collectVaultGarbageIfDue();
+	} catch (error) {
+		console.warn(
+			"[planning] local maintenance retry",
+			error instanceof Error ? error.name : "UNKNOWN",
+		);
+	} finally {
+		planningMaintenanceRunning = false;
+	}
+}
+
+async function reconcileExecutingPlanningGoal(): Promise<void> {
+	const planning = planningRuntime;
+	const reflection = reflectionRuntime;
+	if (!planning || !reflection) return;
+	const now = Date.now();
+	const events = (await agent.listPlanningCalendar()).events
+		.filter(
+			(event) =>
+				event.kind === "plan" &&
+				event.state === "committed" &&
+				!event.schedule.allDay &&
+				event.sourcePlanId !== null &&
+				event.sourceTaskId !== null &&
+				Date.parse(event.schedule.start) <= now &&
+				Date.parse(event.schedule.end) > now,
+		)
+		.sort((left, right) =>
+			left.schedule.allDay || right.schedule.allDay
+				? 0
+				: left.schedule.start.localeCompare(right.schedule.start),
+		);
+	const event = events[0];
+	if (!event || event.schedule.allDay || !event.sourcePlanId || !event.sourceTaskId) {
+		await setRuntimeGoal(reflection, null);
+		return;
+	}
+	const plan = await planning.runtime.getPlan(event.sourcePlanId).catch(() => null);
+	const task = plan?.tasks.find((item) => item.id === event.sourceTaskId);
+	if (!plan || !task || plan.status !== "active" || task.status !== "pending") {
+		await setRuntimeGoal(reflection, null);
+		return;
+	}
+	await setRuntimeGoal(reflection, {
+		goalId: task.id,
+		planId: plan.id,
+		text: task.title,
+		activatedAtMs: Date.parse(event.schedule.start),
+	});
+	await timelineLifecycle.current?.service.pullNow();
 }

@@ -371,6 +371,46 @@ export function prepareMacWrapperFromEnvironment(
 }
 
 /**
+ * Electrobun 1.18 skips both its macOS codesign pass and the postWrap hook for
+ * dev bundles, but still runs postPackage. Sign the completed dev bundle there
+ * so its resource seal covers version.json, build.json, views, and native
+ * children. Non-dev builds keep their existing postWrap/Developer ID flow.
+ */
+export function prepareDevelopmentMacWrapperFromEnvironment(
+	environment: NodeJS.ProcessEnv = process.env,
+): void {
+	if (
+		environment.ELECTROBUN_OS !== "macos" ||
+		environment.ELECTROBUN_BUILD_ENV !== "dev"
+	) {
+		return;
+	}
+	const buildDirectory = requiredEnvironment(
+		environment,
+		"ELECTROBUN_BUILD_DIR",
+	);
+	const appName = requiredEnvironment(environment, "ELECTROBUN_APP_NAME");
+	const appIdentifier = requiredEnvironment(
+		environment,
+		"ELECTROBUN_APP_IDENTIFIER",
+	);
+	const signing = resolveMacSigningPlan({
+		environment,
+		buildEnvironment: "dev",
+		identities: readMacCodeSigningIdentities(),
+	});
+	prepareMacWrapper({
+		bundlePath: join(buildDirectory, `${appName}.app`),
+		buildDirectory,
+		appIdentifier,
+		electrobunWillSign: false,
+		developerIdentity:
+			signing.kind === "developer-id" ? signing.identity : undefined,
+		localIdentity: signing.kind === "local" ? signing.identity : undefined,
+	});
+}
+
+/**
  * Electrobun signs its archived inner app only when a Developer ID is
  * configured. A non-Developer-ID build therefore cannot safely ship the
  * default self-extracting wrapper: its full update archive contains an
@@ -680,6 +720,10 @@ export function verifyMacWrapperFromEnvironment(
 			`.native/macos-${architecture}`,
 		),
 	});
+	// Electrobun dev produces only the runnable bundle. It does not create an
+	// update archive, so stale canary/stable artifacts must not be mistaken for
+	// a dev deliverable. Packaged channels continue through the archive gate.
+	if (buildEnvironment === "dev") return;
 	verifyUpdateArchive({
 		artifactDirectory: requiredEnvironment(
 			environment,

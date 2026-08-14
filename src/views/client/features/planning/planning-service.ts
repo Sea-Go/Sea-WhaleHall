@@ -2,6 +2,10 @@ import type {
 	GeneratedPlanDraft,
 	GenerationStatus,
 	Plan,
+	PlanCreateInput,
+	PlanSummaryView,
+	PlanTaskStatus,
+	PlanView,
 	PlanInput,
 	PlanningBusyWindow,
 	PlanningConflict,
@@ -16,6 +20,109 @@ import type {
 	PlanningCommitResult,
 } from "../../../../shared/planning-authority";
 
+export type PlanningServiceErrorCode =
+	| "model-unavailable"
+	| "stale-version"
+	| "offline"
+	| "conflict"
+	| "validation"
+	| "not-found"
+	| "unknown";
+
+export class PlanningServiceError extends Error {
+	readonly code: PlanningServiceErrorCode;
+	readonly retryable: boolean;
+
+	constructor(
+		code: PlanningServiceErrorCode,
+		message: string,
+		options: { retryable?: boolean; cause?: unknown } = {},
+	) {
+		super(message, { cause: options.cause });
+		this.name = "PlanningServiceError";
+		this.code = code;
+		this.retryable = options.retryable ?? code !== "validation";
+	}
+}
+
+export type PlanningServiceEvent =
+	| { kind: "planChanged"; planId: string }
+	| { kind: "calendarChanged"; planId: string | null }
+	| { kind: "notificationChanged"; planId: string | null };
+
+export interface PlanningWriteContext {
+	operationId: string;
+	expectedVersion: number;
+}
+
+export interface CreatePlanDraftRequest {
+	input: PlanCreateInput;
+	operationId: string;
+}
+
+export interface CreatePlanDraftResult {
+	planId: string;
+}
+
+export interface SendPlanMessageRequest extends PlanningWriteContext {
+	planId: string;
+	content: string;
+}
+
+export interface ConfirmPlanRevisionRequest extends PlanningWriteContext {
+	planId: string;
+	revisionId: string;
+}
+
+export interface SetPlanTaskStatusRequest extends PlanningWriteContext {
+	planId: string;
+	taskId: string;
+	status: PlanTaskStatus;
+}
+
+export interface ConfirmObservationAttributionRequest
+	extends PlanningWriteContext {
+	planId: string;
+	observationId: string;
+	taskId: string | null;
+}
+
+export interface ChangePlanStatusRequest extends PlanningWriteContext {
+	planId: string;
+}
+
+export interface UndoPlanAdjustmentRequest extends PlanningWriteContext {
+	planId: string;
+	adjustmentId: string;
+	adjustmentVersion: number;
+}
+
+/**
+ * Renderer-facing port. Implementations validate transport/persistence DTOs and
+ * expose only stable view models to the planning controller.
+ */
+export interface PlanningService {
+	subscribe(listener: (event: PlanningServiceEvent) => void): () => void;
+	listPlans(): Promise<readonly PlanSummaryView[]>;
+	getPlan(planId: string): Promise<PlanView>;
+	createPlanDraft(
+		request: CreatePlanDraftRequest,
+	): Promise<CreatePlanDraftResult>;
+	sendPlanMessage(request: SendPlanMessageRequest): Promise<void>;
+	confirmPlanRevision(request: ConfirmPlanRevisionRequest): Promise<void>;
+	setTaskStatus(request: SetPlanTaskStatusRequest): Promise<void>;
+	confirmObservationAttribution(
+		request: ConfirmObservationAttributionRequest,
+	): Promise<void>;
+	pausePlan(request: ChangePlanStatusRequest): Promise<void>;
+	resumePlan(request: ChangePlanStatusRequest): Promise<void>;
+	completePlan(request: ChangePlanStatusRequest): Promise<void>;
+	archivePlan(request: ChangePlanStatusRequest): Promise<void>;
+	undoPlanAdjustment(request: UndoPlanAdjustmentRequest): Promise<void>;
+	retryPendingAnalysis(request: ChangePlanStatusRequest): Promise<void>;
+}
+
+/* Legacy generation contracts retained until old QA adapters are removed. */
 export interface PlanningAvailabilityRequest {
 	startDate: string;
 	endDateExclusive: string;

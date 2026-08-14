@@ -8,6 +8,9 @@ import type {
 	CancelAgentRunRequest,
 	ClientRPC,
 	CommitPlanningDraftRequest,
+	ConfirmPlanRevisionCommand,
+	ConfirmPlanningObservationCommand,
+	CreatePlanDraftCommand,
 	DecideAgentToolApprovalRequest,
 	GetAgentRunSnapshotRequest,
 	ListProactiveFeedbackRequest,
@@ -16,14 +19,21 @@ import type {
 	LocalRuntimeStatus,
 	MonitoringPermissionSettingsTarget,
 	PetPresentationEvent,
+	PlanningCalendarMutationProjection,
+	PlanningChangeProjection,
+	PlanningNotificationProjection,
+	PlanningWriteCommand,
 	PrivateTrainingWindowExportRequest,
 	ProactiveFeedbackAvailable,
 	SavePlanningDraftRequest,
+	SendPlanMessageCommand,
 	SetAgentReadPermissionsRequest,
+	SetPlanningTaskStatusCommand,
 	SetProactiveFeedbackPolicyRequest,
 	StartConversationTurnRequest,
 	StartTaskPlanningRunRequest,
 	SubmitPlanningClarificationRequest,
+	UndoPlanningAdjustmentCommand,
 } from "../../shared/contracts";
 
 type StatusListener = (status: LocalRuntimeStatus) => void;
@@ -34,6 +44,11 @@ type ProactiveFeedbackAvailableListener = (
 	event: ProactiveFeedbackAvailable,
 ) => void;
 type AppUpdateStatusListener = (snapshot: AppUpdateSnapshot) => void;
+type PlanChangeListener = (change: PlanningChangeProjection) => void;
+type CalendarChangeListener = (version: number) => void;
+type PlanningNotificationListener = (
+	notification: PlanningNotificationProjection,
+) => void;
 
 const statusListeners = new Set<StatusListener>();
 const visibilityListeners = new Set<VisibilityListener>();
@@ -42,9 +57,15 @@ const authSessionExpiredListeners = new Set<AuthSessionExpiredListener>();
 const proactiveFeedbackAvailableListeners =
 	new Set<ProactiveFeedbackAvailableListener>();
 const appUpdateStatusListeners = new Set<AppUpdateStatusListener>();
+const planChangeListeners = new Set<PlanChangeListener>();
+const calendarChangeListeners = new Set<CalendarChangeListener>();
+const planningNotificationListeners = new Set<PlanningNotificationListener>();
 
 const rpc = Electroview.defineRPC<ClientRPC>({
-	maxRequestTime: 35_000,
+	// Planning analysis is a bounded local-model request and may include one
+	// structured-output repair pass. Match the Bun-side transport budget so the
+	// persisted request can finish instead of surfacing a false renderer timeout.
+	maxRequestTime: 260_000,
 	handlers: {
 		requests: {},
 		messages: {
@@ -68,6 +89,17 @@ const rpc = Electroview.defineRPC<ClientRPC>({
 			petVisibilityChanged: ({ visible }) => {
 				for (const listener of visibilityListeners) listener(visible);
 			},
+			planChanged: (change) => {
+				for (const listener of planChangeListeners) listener(change);
+			},
+			calendarChanged: ({ version }) => {
+				for (const listener of calendarChangeListeners) listener(version);
+			},
+			planningNotification: (notification) => {
+				for (const listener of planningNotificationListeners) {
+					listener(notification);
+				}
+			},
 		},
 	},
 });
@@ -75,6 +107,35 @@ const rpc = Electroview.defineRPC<ClientRPC>({
 new Electroview({ rpc });
 
 export const clientApi = {
+	listPlans: () => rpc.request.listPlans({}),
+	getPlan: (planId: string) => rpc.request.getPlan({ planId }),
+	createPlanDraft: (command: CreatePlanDraftCommand) =>
+		rpc.request.createPlanDraft(command),
+	sendPlanMessage: (command: SendPlanMessageCommand) =>
+		rpc.request.sendPlanMessage(command),
+	confirmPlanRevision: (command: ConfirmPlanRevisionCommand) =>
+		rpc.request.confirmPlanRevision(command),
+	setPlanningTaskStatus: (command: SetPlanningTaskStatusCommand) =>
+		rpc.request.setPlanningTaskStatus(command),
+	confirmPlanningObservation: (command: ConfirmPlanningObservationCommand) =>
+		rpc.request.confirmPlanningObservation(command),
+	pausePlan: (command: PlanningWriteCommand) => rpc.request.pausePlan(command),
+	resumePlan: (command: PlanningWriteCommand) => rpc.request.resumePlan(command),
+	completePlan: (command: PlanningWriteCommand) =>
+		rpc.request.completePlan(command),
+	archivePlan: (command: PlanningWriteCommand) =>
+		rpc.request.archivePlan(command),
+	undoPlanAdjustment: (command: UndoPlanningAdjustmentCommand) =>
+		rpc.request.undoPlanAdjustment(command),
+	retryPendingPlanAnalysis: (command: PlanningWriteCommand) =>
+		rpc.request.retryPendingPlanAnalysis(command),
+	loadPlanningCalendar: () => rpc.request.loadPlanningCalendar({}),
+	mutatePlanningCalendar: (mutation: PlanningCalendarMutationProjection) =>
+		rpc.request.mutatePlanningCalendar(mutation),
+	mutatePlanningCalendarBatch: (
+		batchId: string,
+		mutations: PlanningCalendarMutationProjection[],
+	) => rpc.request.mutatePlanningCalendarBatch({ batchId, mutations }),
 	getAppUpdateStatus: () => rpc.request.getAppUpdateStatus({}),
 	checkForAppUpdate: () => rpc.request.checkForAppUpdate({}),
 	downloadAppUpdate: () => rpc.request.downloadAppUpdate({}),
@@ -177,5 +238,17 @@ export const clientApi = {
 	onAppUpdateStatus(listener: AppUpdateStatusListener): () => void {
 		appUpdateStatusListeners.add(listener);
 		return () => appUpdateStatusListeners.delete(listener);
+	},
+	onPlanChanged(listener: PlanChangeListener): () => void {
+		planChangeListeners.add(listener);
+		return () => planChangeListeners.delete(listener);
+	},
+	onCalendarChanged(listener: CalendarChangeListener): () => void {
+		calendarChangeListeners.add(listener);
+		return () => calendarChangeListeners.delete(listener);
+	},
+	onPlanningNotification(listener: PlanningNotificationListener): () => void {
+		planningNotificationListeners.add(listener);
+		return () => planningNotificationListeners.delete(listener);
 	},
 };

@@ -306,6 +306,9 @@ function unwrap<T>(result: AgentRunRpcResult<T>): T {
 
 function toAgentInput(input: PlanInput, timeZone: string): TaskPlanningInput {
 	if (!input.type) throw new Error("生成计划前必须选择计划类型。");
+	if (input.type === "fuzzy") {
+		throw new Error("模糊计划只能通过本地动态计划运行时生成。");
+	}
 	return {
 		goal: input.goal,
 		planType: input.type,

@@ -116,6 +116,9 @@ describe("CalendarController CRUD and rollback", () => {
 			recurrence: null,
 			occurrenceId: null,
 			sourcePlanId: null,
+			sourceTaskId: null,
+			scheduleOrigin: "user",
+			userLocked: false,
 			editable: true,
 			version: 0,
 		};
@@ -135,6 +138,50 @@ describe("CalendarController CRUD and rollback", () => {
 		expect((await controller.undoDelete())?.ok).toBe(true);
 		expect(controller.getSnapshot().events[0]?.title).toBe("更新测试");
 		expect(controller.getSnapshot().undo).toBeNull();
+	});
+
+	test("locks a model-created task after a user calendar edit", async () => {
+		const service = new MockCalendarService({ latencyMs: 0 });
+		const controller = new CalendarController(service, idSequence());
+		await controller.load("normal");
+		const before = controller
+			.getSnapshot()
+			.events.find((event) => event.scheduleOrigin === "model");
+		if (!before) throw new Error("Missing model-created event");
+
+		const result = await controller.update({ ...before, title: "用户固定的安排" });
+		expect(result.ok).toBe(true);
+		expect(
+			controller.getSnapshot().events.find((event) => event.id === before.id)
+				?.userLocked,
+		).toBe(true);
+	});
+
+	test("explicitly unlocks only editable model plan events for future rescheduling", async () => {
+		const service = new MockCalendarService({ latencyMs: 0 });
+		const controller = new CalendarController(service, idSequence());
+		await controller.load("normal");
+		const before = controller
+			.getSnapshot()
+			.events.find((event) => event.scheduleOrigin === "model");
+		if (!before) throw new Error("Missing model-created event");
+
+		expect((await controller.update({ ...before, title: "用户固定的安排" })).ok).toBe(true);
+		const locked = controller.getSnapshot().events.find((event) => event.id === before.id);
+		expect(locked?.userLocked).toBe(true);
+		const lockedVersion = locked?.version;
+
+		expect((await controller.setPlanEventLocked(before.id, false)).ok).toBe(true);
+		const unlocked = controller.getSnapshot().events.find((event) => event.id === before.id);
+		expect(unlocked?.userLocked).toBe(false);
+		expect(unlocked?.version).toBe((lockedVersion ?? 0) + 1);
+
+		const manual = controller
+			.getSnapshot()
+			.events.find((event) => event.scheduleOrigin === "user");
+		if (manual) {
+			expect((await controller.setPlanEventLocked(manual.id, false)).ok).toBe(false);
+		}
 	});
 
 	test("rolls back a rejected drag and exposes a structured reason", async () => {
@@ -240,6 +287,8 @@ describe("CalendarController CRUD and rollback", () => {
 			title: "冲突计划",
 			kind: "plan",
 			sourcePlanId: "plan-conflict",
+			sourceTaskId: "task-conflict",
+			scheduleOrigin: "model",
 			version: 0,
 		};
 		const result = await controller.create(candidate);

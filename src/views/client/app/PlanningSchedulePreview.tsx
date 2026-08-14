@@ -25,6 +25,9 @@ function proposalEvent(
 		recurrence: null,
 		occurrenceId: null,
 		sourcePlanId: item.sourcePlanId,
+		sourceTaskId: item.taskId,
+		scheduleOrigin: "model",
+		userLocked: false,
 		editable: true,
 		version: item.version,
 	};
@@ -52,6 +55,9 @@ function busyEvent(
 		recurrence: null,
 		occurrenceId: null,
 		sourcePlanId: item.kind === "committed-plan" ? item.id : null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+		userLocked: false,
 		editable: false,
 		version: 1,
 	};

@@ -4,29 +4,111 @@ import {
 	instantToDateInZone,
 	rangesOverlap,
 } from "./date-time";
-import type {
-	CalendarBatchMutationResult,
-	CalendarConflict,
-	CalendarEvent,
-	CalendarMutation,
-	CalendarMutationResult,
-} from "../../../../shared/calendar";
 
-export type {
-	AllDaySchedule,
-	CalendarBatchMutationResult,
-	CalendarConflict,
-	CalendarConflictReason,
-	CalendarEvent,
-	CalendarEventKind,
-	CalendarEventState,
-	CalendarMutation,
-	CalendarMutationKind,
-	CalendarMutationResult,
-	Recurrence,
-	RecurrenceScope,
-	TimedSchedule,
-} from "../../../../shared/calendar";
+export type CalendarEventKind =
+	| "plan"
+	| "manual-block"
+	| "external"
+	| "break";
+export type CalendarEventState = "proposed" | "committed";
+export type CalendarScheduleOrigin = "model" | "user";
+
+export interface TimedSchedule {
+	allDay: false;
+	start: string;
+	end: string;
+	timeZone: string;
+}
+
+export interface AllDaySchedule {
+	allDay: true;
+	startDate: string;
+	endDateExclusive: string;
+}
+
+export interface Recurrence {
+	seriesId: string;
+	rrule: string;
+	timeZone: string;
+	exceptionDates: readonly string[];
+}
+
+export interface CalendarEvent {
+	id: string;
+	title: string;
+	kind: CalendarEventKind;
+	state: CalendarEventState;
+	schedule: TimedSchedule | AllDaySchedule;
+	recurrence: Recurrence | null;
+	occurrenceId: string | null;
+	sourcePlanId: string | null;
+	/** Stable task ownership for planned work; null for non-task calendar entries. */
+	sourceTaskId: string | null;
+	/** Identifies whether planning automation or the user created this schedule. */
+	scheduleOrigin: CalendarScheduleOrigin | null;
+	/** User-edited planned work is protected from future automatic rescheduling. */
+	userLocked: boolean;
+	editable: boolean;
+	version: number;
+}
+
+export type CalendarConflictReason =
+	| "overlaps-manual-block"
+	| "overlaps-external-event"
+	| "overlaps-committed-plan"
+	| "outside-available-hours"
+	| "insufficient-duration"
+	| "stale-version"
+	| "recurrence-restriction"
+	| "read-only-event"
+	| "service-unavailable";
+
+export interface CalendarConflict {
+	reason: CalendarConflictReason;
+	severity: "warning" | "error";
+	affectedEventIds: readonly string[];
+	message: string;
+	nextAction: "edit" | "retry" | "inspect" | "keep-proposed";
+}
+
+export type RecurrenceScope = "occurrence" | "following" | "series";
+export type CalendarMutationKind = "create" | "update" | "delete" | "restore";
+
+export interface CalendarMutation {
+	mutationId: string;
+	kind: CalendarMutationKind;
+	eventId: string;
+	expectedVersion: number | null;
+	before: CalendarEvent | null;
+	after: CalendarEvent | null;
+	recurrenceScope: RecurrenceScope | null;
+}
+
+export type CalendarMutationResult =
+	| {
+			ok: true;
+			mutationId: string;
+			event: CalendarEvent | null;
+			warning: CalendarConflict | null;
+	  }
+	| {
+			ok: false;
+			mutationId: string;
+			conflict: CalendarConflict;
+	  };
+
+export type CalendarBatchMutationResult =
+	| {
+			ok: true;
+			batchId: string;
+			events: readonly CalendarEvent[];
+			warnings: readonly CalendarConflict[];
+	  }
+	| {
+			ok: false;
+			batchId: string;
+			conflicts: readonly CalendarConflict[];
+	  };
 
 export class CalendarDomainError extends Error {
 	constructor(
@@ -39,7 +121,8 @@ export class CalendarDomainError extends Error {
 			| "invalid-version"
 			| "external-editable"
 			| "invalid-recurrence"
-			| "invalid-occurrence",
+			| "invalid-occurrence"
+			| "invalid-planning-metadata",
 		message: string,
 	) {
 		super(message);
@@ -63,6 +146,25 @@ export function assertValidCalendarEvent(event: CalendarEvent): void {
 		throw new CalendarDomainError(
 			"external-editable",
 			"外部日历默认必须保持只读。",
+		);
+	}
+	if (
+		typeof event.userLocked !== "boolean" ||
+		(event.kind !== "plan" &&
+			(event.sourcePlanId !== null ||
+				event.sourceTaskId !== null ||
+				event.scheduleOrigin !== null ||
+				event.userLocked)) ||
+		(event.sourceTaskId !== null && event.sourcePlanId === null) ||
+		(event.scheduleOrigin === "model" &&
+			(event.sourcePlanId === null || event.sourceTaskId === null)) ||
+		(event.scheduleOrigin !== null &&
+			event.scheduleOrigin !== "model" &&
+			event.scheduleOrigin !== "user")
+	) {
+		throw new CalendarDomainError(
+			"invalid-planning-metadata",
+			"计划日程的计划来源、任务来源与锁定状态不一致。",
 		);
 	}
 
@@ -123,6 +225,15 @@ export function cloneCalendarEvent(event: CalendarEvent): CalendarEvent {
 				}
 			: null,
 	};
+}
+
+export function canUserUnlockPlanEvent(event: CalendarEvent): boolean {
+	return (
+		event.editable &&
+		event.kind === "plan" &&
+		event.scheduleOrigin === "model" &&
+		event.userLocked
+	);
 }
 
 function eventDates(event: CalendarEvent): {

@@ -6,6 +6,7 @@ import type {
 	PlanInput,
 } from "../../features/planning/domain";
 import type {
+	PlanningAuthorityDraft,
 	PlanningAuthorityInput,
 	PlanningAuthorityRpcResult,
 	PlanningAuthoritySnapshot,
@@ -23,12 +24,20 @@ export class ElectrobunPlanningAuthorityGateway implements PlanningAuthorityGate
 		draft: GeneratedPlanDraft,
 		expectedRevision: number | null,
 	): Promise<PlanningAuthoritySnapshot> {
+		const planType = draft.plan.type;
+		if (planType === "fuzzy") {
+			throw new Error("模糊计划不能写入旧版 PlanningAuthority。");
+		}
+		const authorityDraft: PlanningAuthorityDraft = {
+			...structuredClone(draft),
+			plan: { ...structuredClone(draft.plan), type: planType },
+		};
 		const { clientApi } = await import("../../rpc");
 		return unwrap(await clientApi.savePlanningDraft({
 			requestId: crypto.randomUUID(),
 			expectedRevision,
 			input: authorityInput(input),
-			draft: structuredClone(draft),
+			draft: authorityDraft,
 		}));
 	}
 
@@ -49,6 +58,9 @@ export class ElectrobunPlanningAuthorityGateway implements PlanningAuthorityGate
 
 function authorityInput(input: PlanInput): PlanningAuthorityInput {
 	if (!input.type) throw new Error("计划类型尚未确认，无法保存本地草案。");
+	if (input.type === "fuzzy") {
+		throw new Error("模糊计划不能写入旧版 PlanningAuthority。");
+	}
 	return { ...structuredClone(input), type: input.type };
 }
 
