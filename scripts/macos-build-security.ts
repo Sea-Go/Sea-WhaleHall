@@ -313,6 +313,11 @@ export function verifyMacWrapper({
 	);
 }
 
+/**
+ * Prepares the macOS application wrapper using the configured build environment and signing plan.
+ *
+ * @param environment - Environment variables that define the wrapper path, build settings, and signing configuration.
+ */
 export function prepareMacWrapperFromEnvironment(
 	environment: NodeJS.ProcessEnv = process.env,
 ): void {
@@ -367,6 +372,45 @@ export function prepareMacWrapperFromEnvironment(
 			buildEnvironment !== "dev" && signing.kind === "developer-id",
 		developerIdentity:
 			signing.kind === "developer-id" ? signing.identity : undefined,
+	});
+}
+
+/**
+ * Signs a completed macOS development application bundle.
+ */
+export function prepareDevelopmentMacWrapperFromEnvironment(
+	environment: NodeJS.ProcessEnv = process.env,
+	readIdentities: () => ReturnType<typeof readMacCodeSigningIdentities> =
+		readMacCodeSigningIdentities,
+): void {
+	if (
+		environment.ELECTROBUN_OS !== "macos" ||
+		environment.ELECTROBUN_BUILD_ENV !== "dev"
+	) {
+		return;
+	}
+	const buildDirectory = requiredEnvironment(
+		environment,
+		"ELECTROBUN_BUILD_DIR",
+	);
+	const appName = requiredEnvironment(environment, "ELECTROBUN_APP_NAME");
+	const appIdentifier = requiredEnvironment(
+		environment,
+		"ELECTROBUN_APP_IDENTIFIER",
+	);
+	const signing = resolveMacSigningPlan({
+		environment,
+		buildEnvironment: "dev",
+		identities: readIdentities(),
+	});
+	prepareMacWrapper({
+		bundlePath: join(buildDirectory, `${appName}.app`),
+		buildDirectory,
+		appIdentifier,
+		electrobunWillSign: false,
+		developerIdentity:
+			signing.kind === "developer-id" ? signing.identity : undefined,
+		localIdentity: signing.kind === "local" ? signing.identity : undefined,
 	});
 }
 
@@ -637,6 +681,14 @@ function assertArchiveTreeContainsNoLinks(root: string): void {
 	}
 }
 
+/**
+ * Verifies the macOS application wrapper and, for packaged builds, its update archive.
+ *
+ * Development builds verify only the runnable application bundle; packaged builds also
+ * require a valid update archive and apply signing-specific archive checks.
+ *
+ * @param environment - Environment variables that define the build and signing configuration
+ */
 export function verifyMacWrapperFromEnvironment(
 	environment: NodeJS.ProcessEnv = process.env,
 ): void {
@@ -680,6 +732,10 @@ export function verifyMacWrapperFromEnvironment(
 			`.native/macos-${architecture}`,
 		),
 	});
+	// Electrobun dev produces only the runnable bundle. It does not create an
+	// update archive, so stale canary/stable artifacts must not be mistaken for
+	// a dev deliverable. Packaged channels continue through the archive gate.
+	if (buildEnvironment === "dev") return;
 	verifyUpdateArchive({
 		artifactDirectory: requiredEnvironment(
 			environment,
