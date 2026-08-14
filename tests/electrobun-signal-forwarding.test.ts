@@ -50,6 +50,35 @@ describe("Electrobun lifecycle signal forwarding", () => {
 		});
 	});
 
+	test("preserves the exact Windows CRLF runtime while applying the patch", () => {
+		const windowsVendor = `before\r\n${ELECTROBUN_VENDOR_SIGNAL_SENTINEL.replaceAll("\n", "\r\n")}\r\nafter`;
+		const rewritten = rewriteElectrobunSignalForwarding(windowsVendor);
+
+		expect(rewritten.changed).toBeTrue();
+		expect(rewritten.source).not.toContain(
+			ELECTROBUN_VENDOR_SIGNAL_SENTINEL.replaceAll("\n", "\r\n"),
+		);
+		expect(rewritten.source.replaceAll("\r\n", "")).not.toContain("\n");
+		assertElectrobunSignalForwarding(rewritten.source);
+		expect(rewriteElectrobunSignalForwarding(rewritten.source)).toEqual({
+			source: rewritten.source,
+			changed: false,
+		});
+	});
+
+	test("rejects mixed or unsupported runtime line endings", () => {
+		expect(() =>
+			rewriteElectrobunSignalForwarding(
+				ELECTROBUN_VENDOR_SIGNAL_SENTINEL.replace("\n", "\r\n"),
+			),
+		).toThrow("mixed line endings");
+		expect(() =>
+			rewriteElectrobunSignalForwarding(
+				ELECTROBUN_VENDOR_SIGNAL_SENTINEL.replace("\n", "\r"),
+			),
+		).toThrow("unsupported line ending");
+	});
+
 	test("upgrades the previous forwarder without leaving a startup signal gap", () => {
 		const upgraded = rewriteElectrobunSignalForwarding(
 			ELECTROBUN_WHALEHALL_LEGACY_SIGNAL_FORWARDING,

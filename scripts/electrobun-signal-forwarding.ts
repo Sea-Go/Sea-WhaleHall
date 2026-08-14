@@ -82,13 +82,14 @@ export type ElectrobunSignalForwardingRewrite = {
 export function rewriteElectrobunSignalForwarding(
 	source: string,
 ): ElectrobunSignalForwardingRewrite {
-	const vendorCount = countExact(source, ELECTROBUN_VENDOR_SIGNAL_SENTINEL);
+	const { canonical, lineEnding } = canonicalSignalSource(source);
+	const vendorCount = countExact(canonical, ELECTROBUN_VENDOR_SIGNAL_SENTINEL);
 	const patchedCount = countExact(
-		source,
+		canonical,
 		ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
 	);
 	const legacyCount = countExact(
-		source,
+		canonical,
 		ELECTROBUN_WHALEHALL_LEGACY_SIGNAL_FORWARDING,
 	);
 	if (
@@ -96,14 +97,15 @@ export function rewriteElectrobunSignalForwarding(
 		((vendorCount === 1 && legacyCount === 0) ||
 			(vendorCount === 0 && legacyCount === 1))
 	) {
-		const rewritten = source.replace(
+		const rewritten = canonical.replace(
 			vendorCount === 1
 				? ELECTROBUN_VENDOR_SIGNAL_SENTINEL
 				: ELECTROBUN_WHALEHALL_LEGACY_SIGNAL_FORWARDING,
 			ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
 		);
-		assertElectrobunSignalForwarding(rewritten);
-		return { source: rewritten, changed: true };
+		const rendered = renderSignalSource(rewritten, lineEnding);
+		assertElectrobunSignalForwarding(rendered);
+		return { source: rendered, changed: true };
 	}
 	if (vendorCount === 0 && legacyCount === 0 && patchedCount === 1) {
 		return { source, changed: false };
@@ -115,13 +117,14 @@ export function rewriteElectrobunSignalForwarding(
 }
 
 export function assertElectrobunSignalForwarding(source: string): void {
-	const vendorCount = countExact(source, ELECTROBUN_VENDOR_SIGNAL_SENTINEL);
+	const { canonical } = canonicalSignalSource(source);
+	const vendorCount = countExact(canonical, ELECTROBUN_VENDOR_SIGNAL_SENTINEL);
 	const patchedCount = countExact(
-		source,
+		canonical,
 		ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING,
 	);
 	const legacyCount = countExact(
-		source,
+		canonical,
 		ELECTROBUN_WHALEHALL_LEGACY_SIGNAL_FORWARDING,
 	);
 	if (vendorCount !== 0 || legacyCount !== 0 || patchedCount !== 1) {
@@ -213,6 +216,30 @@ function countExact(source: string, value: string): number {
 		count += 1;
 		offset = index + value.length;
 	}
+}
+
+function canonicalSignalSource(source: string): {
+	canonical: string;
+	lineEnding: "\n" | "\r\n";
+} {
+	const withoutCrLf = source.replaceAll("\r\n", "");
+	if (withoutCrLf.includes("\r")) {
+		throw new Error(
+			"Electrobun runtime main contains an unsupported line ending.",
+		);
+	}
+	const hasCrLf = source.includes("\r\n");
+	if (hasCrLf && withoutCrLf.includes("\n")) {
+		throw new Error("Electrobun runtime main contains mixed line endings.");
+	}
+	return {
+		canonical: hasCrLf ? source.replaceAll("\r\n", "\n") : source,
+		lineEnding: hasCrLf ? "\r\n" : "\n",
+	};
+}
+
+function renderSignalSource(source: string, lineEnding: "\n" | "\r\n"): string {
+	return lineEnding === "\r\n" ? source.replaceAll("\n", "\r\n") : source;
 }
 
 function requiredEnvironment(
