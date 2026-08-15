@@ -64,6 +64,12 @@ describe("Stable application update release", () => {
 			"Upload every asset to a draft, re-download, and publish\n        run: |\n          set -euo pipefail",
 		);
 		expect(workflow).toContain(
+			"quality:\n    name: Re-run complete candidate checks",
+		);
+		expect(workflow).toContain(
+			"- name: Install Linux sensor dependencies\n        run: scripts/ci/install-linux-dependencies.sh debian sensor",
+		);
+		expect(workflow).toContain(
 			"release_scope: ${{ steps.release.outputs.release_scope }}",
 		);
 		expect(workflow).toContain(
