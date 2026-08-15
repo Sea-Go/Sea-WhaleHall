@@ -19,6 +19,10 @@ const scriptPath = join(
 );
 const temporaryDirectories: string[] = [];
 const shellTestTimeoutMs = 15_000;
+const canonicalRepositoryUrl =
+	"https://github.com/Sea-Go/Sea-WhaleHall.git";
+const dataCenterCiRepositoryUrl =
+	"file:///srv/datacenter-ci-sources/Sea-WhaleHall.git";
 
 afterEach(() => {
 	for (const directory of temporaryDirectories.splice(0)) {
@@ -26,7 +30,66 @@ afterEach(() => {
 	}
 });
 
-describe("DataCenter integration trigger status polling", () => {
+describe("DataCenter integration trigger", () => {
+	test("keeps the pull request workflow on the canonical default", () => {
+		const workflow = readFileSync(
+			join(
+				import.meta.dir,
+				"..",
+				".github",
+				"workflows",
+				"datacenter-integration.yml",
+			),
+			"utf8",
+		);
+
+		expect(workflow).not.toContain(
+			"DATACENTER_WHALEHALL_REPOSITORY_URL",
+		);
+	});
+
+	test(
+		"uses the canonical GitHub repository by default",
+		async () => {
+			const result = await runTrigger("timeout-once");
+
+			expect(result.exitCode).toBe(0);
+			expect(result.repositoryUrls).toEqual([canonicalRepositoryUrl]);
+		},
+		shellTestTimeoutMs,
+	);
+
+	test(
+		"allows the fixed DataCenter CI repository mirror",
+		async () => {
+			const result = await runTrigger("timeout-once", {
+				DATACENTER_WHALEHALL_REPOSITORY_URL: dataCenterCiRepositoryUrl,
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(result.repositoryUrls).toEqual([dataCenterCiRepositoryUrl]);
+		},
+		shellTestTimeoutMs,
+	);
+
+	test(
+		"rejects arbitrary repository URLs before calling GitLab",
+		async () => {
+			const result = await runTrigger("timeout-once", {
+				DATACENTER_WHALEHALL_REPOSITORY_URL:
+					"https://attacker.example/Sea-WhaleHall.git",
+			});
+
+			expect(result.exitCode).toBe(1);
+			expect(result.repositoryUrls).toEqual([]);
+			expect(result.statusRequests).toEqual([]);
+			expect(result.stderr).toContain(
+				"must exactly match an approved WhaleHall repository URL",
+			);
+		},
+		shellTestTimeoutMs,
+	);
+
 	test(
 		"recovers after one temporary status read timeout",
 		async () => {
@@ -137,6 +200,7 @@ async function runTrigger(
 	stdout: string;
 	stderr: string;
 	statusRequests: string[];
+	repositoryUrls: string[];
 	sleeps: string[];
 }> {
 	const directory = mkdtempSync(
@@ -147,6 +211,7 @@ async function runTrigger(
 	mkdirSync(executableDirectory);
 	const curlLogPath = join(directory, "curl.log");
 	const curlStatePath = join(directory, "curl.state");
+	const repositoryUrlLogPath = join(directory, "repository-url.log");
 	const sleepLogPath = join(directory, "sleep.log");
 
 	writeExecutable(join(executableDirectory, "curl"), fakeCurlScript);
@@ -165,6 +230,7 @@ async function runTrigger(
 			FAKE_CURL_SCENARIO: scenario,
 			FAKE_CURL_LOG: curlLogPath,
 			FAKE_CURL_STATE: curlStatePath,
+			FAKE_REPOSITORY_URL_LOG: repositoryUrlLogPath,
 			FAKE_SLEEP_LOG: sleepLogPath,
 			...environment,
 		},
@@ -182,6 +248,7 @@ async function runTrigger(
 		stdout,
 		stderr,
 		statusRequests: readLines(curlLogPath),
+		repositoryUrls: readLines(repositoryUrlLogPath),
 		sleeps: readLines(sleepLogPath),
 	};
 }
@@ -208,16 +275,23 @@ set -euo pipefail
 output_path=""
 max_time=""
 request_method="GET"
+repository_url=""
 write_out=""
 while (($# > 0)); do
 	case "$1" in
-		--output|--max-time|--connect-timeout|--header|--form-string|--write-out)
+		--output|--max-time|--connect-timeout|--header|--write-out)
 			if [[ "$1" == "--output" ]]; then
 				output_path="$2"
 			elif [[ "$1" == "--max-time" ]]; then
 				max_time="$2"
 			elif [[ "$1" == "--write-out" ]]; then
 				write_out="$2"
+			fi
+			shift 2
+			;;
+		--form-string)
+			if [[ "$2" == variables\\[WHALEHALL_REPOSITORY_URL\\]=* ]]; then
+				repository_url="\${2#*=}"
 			fi
 			shift 2
 			;;
@@ -235,6 +309,7 @@ while (($# > 0)); do
 done
 
 if [[ "$request_method" == "POST" ]]; then
+	printf '%s\n' "$repository_url" >>"$FAKE_REPOSITORY_URL_LOG"
 	printf '%s' '{"id":78,"web_url":"https://gitlab.example/pipelines/78"}' >"$output_path"
 	exit 0
 fi

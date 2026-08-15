@@ -3,7 +3,9 @@
 set -euo pipefail
 
 readonly datacenter_gitlab_origin="https://gitlab.sea-ridethewindbreakthewaves.xyz"
-readonly whalehall_repository_url="https://github.com/Sea-Go/Sea-WhaleHall.git"
+readonly canonical_whalehall_repository_url="https://github.com/Sea-Go/Sea-WhaleHall.git"
+readonly datacenter_ci_whalehall_repository_url="file:///srv/datacenter-ci-sources/Sea-WhaleHall.git"
+readonly whalehall_repository_url="${DATACENTER_WHALEHALL_REPOSITORY_URL:-$canonical_whalehall_repository_url}"
 readonly pipeline_deadline_ceiling_seconds=3600
 readonly pipeline_deadline_seconds="${DATACENTER_PIPELINE_DEADLINE_SECONDS:-$pipeline_deadline_ceiling_seconds}"
 readonly poll_interval_seconds=15
@@ -40,6 +42,13 @@ if [[ ! "$DATACENTER_GITLAB_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] ||
 	echo "DATACENTER_GITLAB_REF is invalid." >&2
 	exit 1
 fi
+case "$whalehall_repository_url" in
+	"$canonical_whalehall_repository_url"|"$datacenter_ci_whalehall_repository_url") ;;
+	*)
+		echo "DATACENTER_WHALEHALL_REPOSITORY_URL must exactly match an approved WhaleHall repository URL." >&2
+		exit 1
+		;;
+esac
 
 work_dir=$(mktemp -d)
 # Invoked indirectly by the EXIT trap below.

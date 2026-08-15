@@ -232,6 +232,7 @@ jobs:
       DATACENTER_GITLAB_REF: ${{ vars.DATACENTER_GITLAB_REF }}
       DATACENTER_GITLAB_TRIGGER_TOKEN: ${{ secrets.DATACENTER_GITLAB_TRIGGER_TOKEN }}
       DATACENTER_GITLAB_API_TOKEN: ${{ secrets.DATACENTER_GITLAB_API_TOKEN }}
+      DATACENTER_WHALEHALL_REPOSITORY_URL: file:///srv/datacenter-ci-sources/Sea-WhaleHall.git
     steps:
       - name: Checkout protected integration trigger
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
