@@ -7,38 +7,66 @@ import {
 	verifyManifestSignature,
 } from "./app-update-manifest";
 
-const EXPECTED_FILES = [
-	"stable-macos-arm64-update.json",
-	"stable-macos-arm64-WhaleHall.app.tar.zst",
-	"stable-macos-arm64-WhaleHall.dmg",
-	"stable-macos-arm64-manifest.json",
-	"stable-macos-arm64-manifest.sig",
-	"stable-win-x64-update.json",
-	"stable-win-x64-WhaleHall.tar.zst",
-	"stable-win-x64-WhaleHall-Setup.zip",
-	"stable-win-x64-manifest.json",
-	"stable-win-x64-manifest.sig",
-] as const;
+const RELEASE_TARGETS = {
+	macos: {
+		prefix: "stable-macos-arm64",
+		platform: "macos",
+		arch: "arm64",
+		files: [
+			"stable-macos-arm64-update.json",
+			"stable-macos-arm64-WhaleHall.app.tar.zst",
+			"stable-macos-arm64-WhaleHall.dmg",
+			"stable-macos-arm64-manifest.json",
+			"stable-macos-arm64-manifest.sig",
+		],
+	},
+	windows: {
+		prefix: "stable-win-x64",
+		platform: "win",
+		arch: "x64",
+		files: [
+			"stable-win-x64-update.json",
+			"stable-win-x64-WhaleHall.tar.zst",
+			"stable-win-x64-WhaleHall-Setup.zip",
+			"stable-win-x64-manifest.json",
+			"stable-win-x64-manifest.sig",
+		],
+	},
+} as const;
+
+export type StableReleaseScope = "macos-only" | "macos-and-windows";
 
 export async function verifyStableReleaseDirectory({
 	artifactDirectory,
 	version,
 	publicKeySpkiBase64,
+	releaseScope = "macos-and-windows",
 }: {
 	artifactDirectory: string;
 	version: string;
 	publicKeySpkiBase64: string;
+	releaseScope?: StableReleaseScope;
 }): Promise<void> {
+	if (releaseScope !== "macos-only" && releaseScope !== "macos-and-windows") {
+		throw new Error(
+			"Stable release scope must be macos-only or macos-and-windows.",
+		);
+	}
 	const directory = resolve(artifactDirectory);
 	const entries = readdirSync(directory).sort();
+	const targets =
+		releaseScope === "macos-only"
+			? [RELEASE_TARGETS.macos]
+			: [RELEASE_TARGETS.macos, RELEASE_TARGETS.windows];
+	const expectedFiles = targets.flatMap((target) => target.files);
 	if (entries.some((entry) => entry.endsWith(".patch"))) {
 		throw new Error(
 			"Stable release directory contains a forbidden delta patch.",
 		);
 	}
 	if (
-		entries.length !== EXPECTED_FILES.length ||
-		EXPECTED_FILES.some((entry) => !entries.includes(entry))
+		entries.length !== expectedFiles.length ||
+		expectedFiles.some((entry) => !entries.includes(entry))
 	) {
 		throw new Error(
 			`Stable release assets are incomplete or unexpected: ${entries.join(", ")}`,
@@ -50,7 +78,7 @@ export async function verifyStableReleaseDirectory({
 			throw new Error(`Stable release asset is missing or empty: ${entry}`);
 		}
 	}
-	for (const prefix of ["stable-macos-arm64", "stable-win-x64"] as const) {
+	for (const { prefix, platform, arch } of targets) {
 		const manifestPath = join(directory, `${prefix}-manifest.json`);
 		const signaturePath = join(directory, `${prefix}-manifest.sig`);
 		const manifest: AppUpdateManifest = parseAppUpdateManifest(
@@ -58,6 +86,11 @@ export async function verifyStableReleaseDirectory({
 		);
 		if (manifest.version !== version) {
 			throw new Error(`${prefix} manifest version does not match v${version}.`);
+		}
+		if (manifest.platform !== platform || manifest.arch !== arch) {
+			throw new Error(
+				`${prefix} manifest must target ${platform}-${arch}.`,
+			);
 		}
 		const updateMetadata: unknown = JSON.parse(
 			readFileSync(join(directory, `${prefix}-update.json`), "utf8"),
@@ -116,10 +149,21 @@ function argumentValue(name: string): string {
 	return value;
 }
 
+function releaseScopeArgument(): StableReleaseScope {
+	const value = argumentValue("release-scope");
+	if (value !== "macos-only" && value !== "macos-and-windows") {
+		throw new Error(
+			"--release-scope must be macos-only or macos-and-windows.",
+		);
+	}
+	return value;
+}
+
 if (import.meta.main) {
 	await verifyStableReleaseDirectory({
 		artifactDirectory: argumentValue("artifact-directory"),
 		version: argumentValue("version"),
+		releaseScope: releaseScopeArgument(),
 		publicKeySpkiBase64:
 			process.env.WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64?.trim() ?? "",
 	});

@@ -15,6 +15,14 @@ on:
         description: Chinese release notes shown in the client and on GitHub
         required: true
         type: string
+      release_scope:
+        description: Stable platforms to publish
+        required: true
+        default: macos-and-windows
+        type: choice
+        options:
+          - macos-only
+          - macos-and-windows
 
 concurrency:
   group: whalehall-stable-release
@@ -39,11 +47,13 @@ jobs:
       published_at: ${{ steps.release.outputs.published_at }}
       previous_tag: ${{ steps.release.outputs.previous_tag }}
       public_key_fingerprint: ${{ steps.release.outputs.public_key_fingerprint }}
+      release_scope: ${{ steps.release.outputs.release_scope }}
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_VERSION: ${{ inputs.version }}
       MINIMUM_SUPPORTED_VERSION: ${{ inputs.minimum_supported_version }}
       RELEASE_NOTES: ${{ inputs.release_notes }}
+      RELEASE_SCOPE: ${{ inputs.release_scope }}
       WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64: ${{ secrets.WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64 }}
     steps:
       - name: Require the canonical repository and protected branch
@@ -83,6 +93,14 @@ jobs:
           release_notes_file="$RUNNER_TEMP/release-notes.md"
           printf '%s' "$RELEASE_NOTES" > "$release_notes_file"
 
+          case "$RELEASE_SCOPE" in
+            macos-only|macos-and-windows) ;;
+            *)
+              echo "::error::Stable release scope must be macos-only or macos-and-windows."
+              exit 1
+              ;;
+          esac
+
           tag="v$RELEASE_VERSION"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "::error::Release $tag already exists. Stable releases are immutable."
@@ -105,6 +123,7 @@ jobs:
             --version "$RELEASE_VERSION"
             --minimum-supported-version "$MINIMUM_SUPPORTED_VERSION"
             --release-notes-file "$release_notes_file"
+            --release-scope "$RELEASE_SCOPE"
           )
           if [[ -n "$previous_tag" ]]; then
             if [[ ! "$previous_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -112,7 +131,9 @@ jobs:
               exit 1
             fi
             previous_directory="$RUNNER_TEMP/previous-release"
+            previous_assets_file="$RUNNER_TEMP/previous-release-assets.txt"
             mkdir -p "$previous_directory"
+            gh release view "$previous_tag" --json assets --jq '.assets[].name' > "$previous_assets_file"
             gh release download "$previous_tag" \
               --pattern 'stable-macos-arm64-manifest.*' \
               --dir "$previous_directory"
@@ -120,6 +141,7 @@ jobs:
               --previous-manifest "$previous_directory/stable-macos-arm64-manifest.json"
               --previous-manifest-signature "$previous_directory/stable-macos-arm64-manifest.sig"
               --previous-version "${previous_tag#v}"
+              --previous-release-assets-file "$previous_assets_file"
             )
           fi
           "${validation[@]}"
@@ -145,6 +167,7 @@ jobs:
             echo "published_at=$published_at"
             echo "previous_tag=$previous_tag_output"
             echo "public_key_fingerprint=$public_key_fingerprint"
+            echo "release_scope=$RELEASE_SCOPE"
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload validated release notes
@@ -373,6 +396,7 @@ jobs:
   windows:
     name: Authenticode-signed Windows x64
     needs: [prepare, quality, datacenter]
+    if: ${{ needs.prepare.outputs.release_scope == 'macos-and-windows' }}
     runs-on: windows-2025
     timeout-minutes: 55
     environment: stable-release
@@ -512,7 +536,20 @@ jobs:
 
   publish:
     name: Verify draft assets and atomically publish Stable
-    needs: [prepare, macos, windows]
+    needs: [prepare, quality, datacenter, macos, windows]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        needs.prepare.result == 'success' &&
+        needs.quality.result == 'success' &&
+        needs.datacenter.result == 'success' &&
+        needs.macos.result == 'success' &&
+        (
+          (needs.prepare.outputs.release_scope == 'macos-only' && needs.windows.result == 'skipped') ||
+          (needs.prepare.outputs.release_scope == 'macos-and-windows' && needs.windows.result == 'success')
+        )
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: stable-release
@@ -524,6 +561,7 @@ jobs:
       MINIMUM_SUPPORTED_VERSION: ${{ needs.prepare.outputs.minimum_supported_version }}
       PUBLISHED_AT: ${{ needs.prepare.outputs.published_at }}
       EXPECTED_PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+      RELEASE_SCOPE: ${{ needs.prepare.outputs.release_scope }}
       WHALEHALL_APP_UPDATE_PRIVATE_KEY_PKCS8_BASE64: ${{ secrets.WHALEHALL_APP_UPDATE_PRIVATE_KEY_PKCS8_BASE64 }}
       WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64: ${{ secrets.WHALEHALL_APP_UPDATE_PUBLIC_KEY_SPKI_BASE64 }}
     steps:
@@ -567,6 +605,7 @@ jobs:
           path: release-assets
 
       - name: Download Windows release inputs
+        if: ${{ needs.prepare.outputs.release_scope == 'macos-and-windows' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: stable-win-x64
@@ -580,7 +619,11 @@ jobs:
 
       - name: Generate and verify signed platform manifests
         run: |
-          for target in macos:arm64 win:x64; do
+          targets=(macos:arm64)
+          if [[ "$RELEASE_SCOPE" == "macos-and-windows" ]]; then
+            targets+=(win:x64)
+          fi
+          for target in "${targets[@]}"; do
             platform=${target%%:*}
             arch=${target##*:}
             bun run scripts/app-update-manifest.ts \
@@ -594,7 +637,8 @@ jobs:
           done
           bun run scripts/app-update-verify-release.ts \
             --artifact-directory release-assets \
-            --version "$RELEASE_VERSION"
+            --version "$RELEASE_VERSION" \
+            --release-scope "$RELEASE_SCOPE"
 
       - name: Upload every asset to a draft, re-download, and publish
         run: |
@@ -620,11 +664,14 @@ jobs:
               --version "$RELEASE_VERSION"
               --minimum-supported-version "$MINIMUM_SUPPORTED_VERSION"
               --release-notes-file release-metadata/release-notes.md
+              --release-scope "$RELEASE_SCOPE"
             )
             if [[ "$current_previous_tag" != "none" ]]; then
               previous_directory="$RUNNER_TEMP/publish-previous-release"
+              previous_assets_file="$RUNNER_TEMP/publish-previous-release-assets.txt"
               rm -rf "$previous_directory"
               mkdir -p "$previous_directory"
+              gh release view "$current_previous_tag" --json assets --jq '.assets[].name' > "$previous_assets_file"
               gh release download "$current_previous_tag" \
                 --pattern 'stable-macos-arm64-manifest.*' \
                 --dir "$previous_directory"
@@ -632,6 +679,7 @@ jobs:
                 --previous-manifest "$previous_directory/stable-macos-arm64-manifest.json"
                 --previous-manifest-signature "$previous_directory/stable-macos-arm64-manifest.sig"
                 --previous-version "${current_previous_tag#v}"
+                --previous-release-assets-file "$previous_assets_file"
               )
             fi
             "${validation[@]}"
@@ -659,7 +707,8 @@ jobs:
           gh release download "$tag" --dir "$verification_directory"
           bun run scripts/app-update-verify-release.ts \
             --artifact-directory "$verification_directory" \
-            --version "$RELEASE_VERSION"
+            --version "$RELEASE_VERSION" \
+            --release-scope "$RELEASE_SCOPE"
 
           assert_stable_baseline
           gh release edit "$tag" --draft=false --latest
