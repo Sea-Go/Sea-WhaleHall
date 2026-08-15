@@ -75,6 +75,9 @@ describe("Stable application update release", () => {
 		expect(workflow).toContain(
 			"if: ${{ needs.prepare.outputs.release_scope == 'macos-and-windows' }}",
 		);
+		expect(workflow).toContain(
+			"DATACENTER_WHALEHALL_REPOSITORY_URL: file:///srv/datacenter-ci-sources/Sea-WhaleHall.git",
+		);
 		expect(workflow.split('--release-scope "$RELEASE_SCOPE"')).toHaveLength(
 			5,
 		);
