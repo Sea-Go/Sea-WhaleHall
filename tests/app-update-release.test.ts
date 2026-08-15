@@ -63,9 +63,26 @@ describe("Stable application update release", () => {
 		expect(workflow).toContain(
 			"Upload every asset to a draft, re-download, and publish\n        run: |\n          set -euo pipefail",
 		);
+		expect(workflow).toContain(
+			"release_scope: ${{ steps.release.outputs.release_scope }}",
+		);
+		expect(workflow).toContain(
+			"if: ${{ needs.prepare.outputs.release_scope == 'macos-and-windows' }}",
+		);
+		expect(workflow.split('--release-scope "$RELEASE_SCOPE"')).toHaveLength(
+			5,
+		);
 	});
 
 	test("requires monotonic release versions and minimum supported floors", () => {
+		expect(() =>
+			validateStableReleaseInputs({
+				version: "1.0.0",
+				minimumSupportedVersion: "1.0.0",
+				releaseNotes: "notes",
+				releaseScope: "macos-only",
+			}),
+		).not.toThrow();
 		const previous: AppUpdateManifest = {
 			schemaVersion: "whalehall.app-update-manifest.v1",
 			appId: "com.seago.whalehall",
@@ -100,10 +117,27 @@ describe("Stable application update release", () => {
 			}),
 		).toString("base64");
 		const previousAuthority = {
+			releaseScope: "macos-only" as const,
 			previousManifestSignature,
+			previousReleaseAssetNames: [
+				"stable-macos-arm64-manifest.json",
+				"stable-macos-arm64-manifest.sig",
+			],
 			previousVersion: previous.version,
 			publicKeySpkiBase64: keys.publicKeySpkiBase64,
 		};
+		expect(() =>
+			validateStableReleaseInputs({
+				version: "1.3.0",
+				minimumSupportedVersion: "1.1.0",
+				releaseNotes: "notes",
+				releaseScope: "macos-and-windows",
+				previousManifest: previous,
+				previousManifestSignature,
+				previousVersion: previous.version,
+				publicKeySpkiBase64: keys.publicKeySpkiBase64,
+			}),
+		).not.toThrow();
 		expect(() =>
 			validateStableReleaseInputs({
 				version: "1.3.0",
@@ -150,6 +184,34 @@ describe("Stable application update release", () => {
 				previousVersion: "1.2.2",
 			}),
 		).toThrow("tag and signed manifest do not match");
+		expect(() =>
+			validateStableReleaseInputs({
+				version: "1.3.0",
+				minimumSupportedVersion: "1.1.0",
+				releaseNotes: "notes",
+				previousManifest: previous,
+				...previousAuthority,
+				previousReleaseAssetNames: [
+					...previousAuthority.previousReleaseAssetNames,
+					"stable-win-x64-manifest.json",
+					"stable-win-x64-manifest.sig",
+				],
+			}),
+		).toThrow("cannot remove Windows");
+		expect(() =>
+			validateStableReleaseInputs({
+				version: "1.3.0",
+				minimumSupportedVersion: "1.1.0",
+				releaseNotes: "notes",
+				previousManifest: previous,
+				...previousAuthority,
+				releaseScope: "macos-and-windows",
+				previousReleaseAssetNames: [
+					...previousAuthority.previousReleaseAssetNames,
+					"stable-win-x64-manifest.json",
+				],
+			}),
+		).toThrow("incomplete manifest/signature pair");
 	});
 
 	test("creates a tag-pinned one-asset manifest and detached Ed25519 signature", async () => {
@@ -244,6 +306,74 @@ describe("Stable application update release", () => {
 				publicKeySpkiBase64: keys.publicKeySpkiBase64,
 			}),
 		).rejects.toThrow("forbidden delta patch");
+	});
+
+	test("strictly verifies a macOS-only Stable asset set", async () => {
+		const directory = temporaryDirectory();
+		const keys = signingKeys();
+		writePlatformArtifacts(directory, "macos", "arm64", "3.1.0");
+		await createSignedAppUpdateManifest({
+			artifactDirectory: directory,
+			platform: "macos",
+			arch: "arm64",
+			version: "3.1.0",
+			minimumSupportedVersion: "3.0.0",
+			publishedAt: "2026-08-13T08:00:00.000Z",
+			releaseNotes: "notes",
+			...keys,
+		});
+		await expect(
+			verifyStableReleaseDirectory({
+				artifactDirectory: directory,
+				version: "3.1.0",
+				publicKeySpkiBase64: keys.publicKeySpkiBase64,
+				releaseScope: "macos-only",
+			}),
+		).resolves.toBeUndefined();
+
+		writeFileSync(join(directory, "stable-win-x64-unexpected.txt"), "extra");
+		await expect(
+			verifyStableReleaseDirectory({
+				artifactDirectory: directory,
+				version: "3.1.0",
+				publicKeySpkiBase64: keys.publicKeySpkiBase64,
+				releaseScope: "macos-only",
+			}),
+		).rejects.toThrow("incomplete or unexpected");
+	});
+
+	test("binds every Stable asset prefix to its platform and architecture", async () => {
+		const directory = temporaryDirectory();
+		const keys = signingKeys();
+		for (const [platform, arch] of [
+			["macos", "arm64"],
+			["win", "x64"],
+		] as const) {
+			writePlatformArtifacts(directory, platform, arch, "3.2.0");
+			await createSignedAppUpdateManifest({
+				artifactDirectory: directory,
+				platform,
+				arch,
+				version: "3.2.0",
+				minimumSupportedVersion: "3.0.0",
+				publishedAt: "2026-08-13T08:00:00.000Z",
+				releaseNotes: "notes",
+				...keys,
+			});
+		}
+		for (const suffix of ["manifest.json", "manifest.sig", "update.json"]) {
+			writeFileSync(
+				join(directory, `stable-macos-arm64-${suffix}`),
+				readFileSync(join(directory, `stable-win-x64-${suffix}`)),
+			);
+		}
+		await expect(
+			verifyStableReleaseDirectory({
+				artifactDirectory: directory,
+				version: "3.2.0",
+				publicKeySpkiBase64: keys.publicKeySpkiBase64,
+			}),
+		).rejects.toThrow("must target macos-arm64");
 	});
 
 	test("locks the embedded Bun entry paths used by the package gate", () => {
