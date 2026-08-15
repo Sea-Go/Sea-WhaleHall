@@ -131,6 +131,18 @@ describe("Stable application update release", () => {
 				version: "1.3.0",
 				minimumSupportedVersion: "1.1.0",
 				releaseNotes: "notes",
+				releaseScope: "macos-and-windows",
+				previousManifest: previous,
+				previousManifestSignature,
+				previousVersion: previous.version,
+				publicKeySpkiBase64: keys.publicKeySpkiBase64,
+			}),
+		).not.toThrow();
+		expect(() =>
+			validateStableReleaseInputs({
+				version: "1.3.0",
+				minimumSupportedVersion: "1.1.0",
+				releaseNotes: "notes",
 				previousManifest: previous,
 				...previousAuthority,
 			}),

@@ -48,12 +48,17 @@ export function validateStableReleaseInputs({
 		);
 	}
 	if (previousManifest === undefined) return;
-	if (previousReleaseAssetNames === undefined) {
+	if (
+		previousReleaseAssetNames === undefined &&
+		releaseScope === "macos-only"
+	) {
 		throw new Error(
 			"The previous Stable release asset list is required for target validation.",
 		);
 	}
-	validatePreviousReleaseTargets(releaseScope, previousReleaseAssetNames);
+	if (previousReleaseAssetNames !== undefined) {
+		validatePreviousReleaseTargets(releaseScope, previousReleaseAssetNames);
+	}
 	const previous = parseAppUpdateManifest(previousManifest);
 	if (previousVersion === undefined || previous.version !== previousVersion) {
 		throw new Error(
@@ -161,7 +166,11 @@ if (import.meta.main) {
 	if (previousAssetsArgument >= 0 && !previousAssetsPath) {
 		throw new Error("--previous-release-assets-file requires a path.");
 	}
-	const releaseScope = argumentValue("release-scope");
+	const releaseScopeIndex = process.argv.indexOf("--release-scope");
+	const releaseScope =
+		releaseScopeIndex < 0
+			? "macos-and-windows"
+			: process.argv[releaseScopeIndex + 1];
 	if (
 		releaseScope !== "macos-only" &&
 		releaseScope !== "macos-and-windows"

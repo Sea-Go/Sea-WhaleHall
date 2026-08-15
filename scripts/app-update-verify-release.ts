@@ -150,7 +150,9 @@ function argumentValue(name: string): string {
 }
 
 function releaseScopeArgument(): StableReleaseScope {
-	const value = argumentValue("release-scope");
+	const index = process.argv.indexOf("--release-scope");
+	if (index < 0) return "macos-and-windows";
+	const value = process.argv[index + 1];
 	if (value !== "macos-only" && value !== "macos-and-windows") {
 		throw new Error(
 			"--release-scope must be macos-only or macos-and-windows.",
