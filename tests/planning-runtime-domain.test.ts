@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { OllamaJsonClient } from "../src/agent/model/ollama-json-client";
 import {
 	assertPlanningModelOutputForRequest,
 	assertPlanningPlan,
@@ -17,7 +16,7 @@ import {
 	type PlanningModelProposal,
 	type PlanningPlan,
 	PlanningPlanValidationError,
-	QwenPlanningModel,
+	planningModelInputProjection,
 	rollingSevenDayWindow,
 } from "../src/agent/planning";
 
@@ -173,7 +172,7 @@ describe("planning structured model boundary", () => {
 		).toThrow();
 	});
 
-	test("uses an Ollama-compatible steering schema while strict validation rejects bad formats", () => {
+	test("uses a provider-compatible steering schema while strict validation rejects bad formats", () => {
 		expect(JSON.stringify(PLANNING_MODEL_OUTPUT_SCHEMA)).not.toContain(
 			'"pattern"',
 		);
@@ -206,25 +205,32 @@ describe("planning structured model boundary", () => {
 		).toBeFalse();
 	});
 
-	test("reuses OllamaJsonClient structured JSON instead of a parallel transport", async () => {
-		let body: Record<string, unknown> | null = null;
-		const output = validProposal();
-		const client = new OllamaJsonClient({
-			fetch: async (_input, init) => {
-				body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-				return Response.json({
-					message: { content: JSON.stringify(output) },
-				});
-			},
+	test("projects only the bounded semantic context for the remote Mastra call", () => {
+		const projected = planningModelInputProjection({
+			...modelRequest(),
+			messages: [
+				{
+					id: "message-secret-id",
+					planId: "plan-1",
+					role: "user",
+					content: "验证需求",
+					createdAt: "2026-08-13T02:00:00Z",
+					causedByOperationId: "operation-secret-id",
+				},
+			],
 		});
-		const model = new QwenPlanningModel(client);
-		await expect(model.analyze(modelRequest())).resolves.toEqual(output);
-		expect(body).toMatchObject({
-			model: "qwen3:4b",
-			stream: false,
-			think: false,
-			format: { oneOf: expect.any(Array) },
+		expect(projected).toMatchObject({
+			analysisMode: "manual-proposal",
+			conversation: [
+				{
+					role: "user",
+					content: "验证需求",
+					createdAt: "2026-08-13T02:00:00Z",
+				},
+			],
 		});
+		expect(JSON.stringify(projected)).not.toContain("message-secret-id");
+		expect(JSON.stringify(projected)).not.toContain("operation-secret-id");
 	});
 });
 

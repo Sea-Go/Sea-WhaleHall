@@ -4,6 +4,7 @@ import type {
 	LocalPlanningOutboxAck,
 	LocalPlanningOutboxEntry,
 } from "../src/agent/local-protocol";
+import type { PlanningModelPort } from "../src/agent/planning";
 import { WhaleHallPlanningRuntime } from "../src/bun/planning-runtime";
 import type { PlanningChangeProjection } from "../src/shared/planning";
 
@@ -51,6 +52,12 @@ describe("WhaleHallPlanningRuntime durable invalidations", () => {
 		} as unknown as AgentRuntime;
 		const planChanges: PlanningChangeProjection[] = [];
 		const calendarVersions: number[] = [];
+		const unusedModel: PlanningModelPort = {
+			modelVersion: "test-planning.v1",
+			async analyze() {
+				throw new Error("The outbox test must not invoke Planning analysis.");
+			},
+		};
 		const runtime = new WhaleHallPlanningRuntime(
 			agent,
 			{
@@ -58,6 +65,7 @@ describe("WhaleHallPlanningRuntime durable invalidations", () => {
 				calendarChanged: (version) => calendarVersions.push(version),
 			},
 			"Asia/Shanghai",
+			unusedModel,
 		);
 
 		await runtime.flushOutbox();

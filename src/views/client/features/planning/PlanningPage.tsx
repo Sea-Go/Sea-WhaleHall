@@ -120,7 +120,7 @@ const operationLabels: Record<Exclude<PlanningOperation, "create">, string> = {
 	complete: "正在确认计划完成",
 	archive: "正在归档计划",
 	"undo-adjustment": "正在撤销上次自动调整",
-	"retry-analysis": "正在重新请求本地模型分析",
+	"retry-analysis": "正在重新请求计划分析服务",
 };
 
 function formatDate(date: string | null): string {
@@ -300,7 +300,7 @@ export function PlanningPage({
 				{state.status === "model-unavailable" && !state.content ? (
 					<FailurePanel
 						icon={<Bot size={24} />}
-						title="本地模型暂时不可用"
+						title="计划分析服务暂时不可用"
 						message={state.message}
 						retryable={state.retryable}
 						onRetry={() => void controller.retry()}
@@ -1315,7 +1315,7 @@ function ConversationPanel({
 			</div>
 			{hasPending ? (
 				<div className="planning-conversation__pending">
-					<span>消息已持久保存，正在等待本地模型。</span>
+					<span>消息已持久保存，正在等待计划分析服务。</span>
 					<Button
 						variant="ghost"
 						size="small"

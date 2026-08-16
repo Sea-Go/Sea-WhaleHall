@@ -15,10 +15,11 @@ flowchart LR
 
 ## 与 Reflection / Timeline v2 的关系
 
-Mastra 不接管行为采集、自然窗口封闭或 Timeline v2 的确定性规则，但它现在是
-两个可配置模型角色的唯一编排边界。`agent` 继续由 Mastra Agent 通过 model relay
+Mastra 不接管行为采集、自然窗口封闭或 Timeline v2 的确定性规则，但它是
+桌面所有生成式模型调用的唯一编排边界。`agent` 继续由 Mastra Agent 通过 model relay
 调用；`reflection` 则由无持久化的 `activity-reflection` Workflow 和仅含 Mastra 原生本地
-Skill 元工具的 Agent 使用客户端构造的完整 prompt 调用通用 relay。
+Skill 元工具的 Agent 使用客户端构造的完整 prompt 调用通用 relay；Dynamic Planning
+通过 live-only `planning.analyze` 调用同一 Mastra model，但使用独立审计用途。
 
 ```mermaid
 flowchart LR
@@ -26,8 +27,8 @@ flowchart LR
   Bridge -->|"完整本地 prompt"| Sidecar["Mastra Workflow + 原生本地 Skills"]
   Sidecar -->|"OpenAI-compatible body"| Bridge
   Bridge -->|"bearer\npurpose=activity"| DataCenter["DataCenter /v1/chat/completions\n内测模型交互审计"]
-  DataCenter -->|"转发"| Qwen["CPU qwen3:1.7b"]
-  Qwen --> DataCenter --> Bridge
+  DataCenter -->|"转发"| Provider["DataCenter-owned model provider"]
+  Provider --> DataCenter --> Bridge
 ```
 
 Sidecar 是客户端的一部分：它会在一次调用的内存中看到完整 `userPrompt`，并用
@@ -39,10 +40,8 @@ Workflow 不创建可恢复 Agent run、不注册产品 Tool，也不保存 snap
 activity Agent。
 
 `LocalToolClient` 继续通过 JSONL 驱动 Rust Local Tool Host；EventJournal 继续
-提供 durable cursor replay；Timeline v2 继续使用 deterministic cold start、经
-manifest 校验的 ModernBERT 分类以及本地固定 `qwen3:4b` 生成带引用的 hypothesis。
-这些本地、锁定版本的旧推理组件不是 `config.yaml` 模型角色，不能作为新模型调用的
-入口；其单独的迁移边界见 `docs/MODEL_CALL_BOUNDARY.md`。
+提供 durable cursor replay；Timeline v2 固定使用确定性分类与带事实引用的模板，
+Reflection journal 使用保守 abstain 路径。生产桌面不连接或探测本机模型服务。
 
 两条本地流水线共享 Bun 的生命周期和账号清理屏障，但状态所有权彼此隔离：
 Mastra 的 conversation、workflow、审批与权威日历进入字段加密的 Agent
@@ -53,14 +52,15 @@ repository 管理。Mastra 首版不会把 browser、accessibility、activity、
 macOS 的签名 Observer 和不可变 `whalehall-vault-broker-v2` 安全链保持不变。
 Vault Broker 负责敏感 observation content；新增的 credential helper 只负责
 固定 WhaleHall namespace 下的账号凭据和 Agent 数据密钥，二者不能互相替代。
-可编辑 `config.yaml` 只保存 `reflection` 与 `agent` 两个固定角色的 `name`；DataCenter
-origin 固定在代码中，Timeline 和 ModernBERT 也不从该文件接受远端模型地址。
+可编辑 `config.yaml` 只保存 `reflection` 与 `agent` 两个固定配置角色；Dynamic
+Planning 复用 Agent model allowlist，但 relay 审计用途固定为 `planning`。DataCenter
+origin 固定在代码中；Timeline 与 Reflection journal 不从配置接受模型地址。
 
 ## 不可跨越的边界
 
 - React 不导入 Mastra、AI SDK、数据库、Rust 协议或 native API；Renderer 不提交 `userId`。
 - Sidecar 不接触 access token、refresh token、厂商 API Key或 OS 凭据库，不监听 HTTP 端口，也不启用 Mastra Server、Studio、Cloud 或遥测。
-- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。所有远端模型调用只使用当前账号的短期 bearer，并由 Bun 添加代码所有的 `agent|activity` purpose；不存在可绕过 session 的独立 reflection route。
+- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。所有远端模型调用要求当前认证会话，并由 Bun 添加代码所有的 `agent|activity|planning` purpose；不存在可绕过 session 的独立模型 route。
 - `reflection.analyze` 协议包含由 Bun 生成的完整 `userPrompt` 和 opaque invocation ID；它只在本地 Bun/Sidecar 内存中流转。原始窗口、模型输出、事件和分数都不得回传 Renderer 或 Agent Tool。
 - DataCenter 不添加 system prompt、不聚合事件、不格式化时间/action、不计算分数，也不执行 Tool。内测版会按认证 user 保存 exact request/response，并提供开发成员的受控查询；这是 internal-only 审计能力。
 - Rust Local Tool Host 继续拥有传感器和本地能力。首版 Mastra Agent 不注册 browser、accessibility、activity、cleanup 或完整 Rust Tool catalogue。
@@ -69,9 +69,9 @@ origin 固定在代码中，Timeline 和 ModernBERT 也不从该文件接受远�
 
 `src/agent/mastra-host` 是独立 Node ESM Sidecar，固定依赖：
 
-- `@mastra/core@1.55.0`
-- `@mastra/memory@1.24.0`
-- `@ai-sdk/openai-compatible@3.0.20`
+- `@mastra/core@1.57.0`
+- `@mastra/memory@1.26.0`
+- `@ai-sdk/openai-compatible@3.0.29`
 - `zod@4.4.3`
 
 打包使用 Node `22.18.0`。`scripts/node-runtime-manifest.ts` 固定官方归档 URL 和 SHA-256；缓存命中仍重新校验，随后只提取 `node[.exe]`。`scripts/build-agent-host.ts` 使用这个二进制检查生成的 Sidecar，而不是依赖用户 PATH 中的 Node。
@@ -113,6 +113,11 @@ AuthGate、递增 generation、终止模型流并清理旧账号的本地运行�
 
 Bun 在模型后验证 schema、引用、日期、IANA 时区、时长、截止日期、周容量、全天/重复/DST、冲突和 revision。如果无效或生成期间日历变化，只读取最新快照并自动修复一次。第二次仍失败时保存并显示完整冲突草案，不生成 fallback schedule，不提交日历。最终确认使用 expected revision 在单事务中批量写入；失败保留草案。
 
+独立的 Dynamic PlanningRuntime 使用 `planning.analyze` 获得 strict JSON 语义结果。
+`PlanningRuntime` 仍独占七日 scheduler、ETA、稳定 operation identity、proposal/confirm、
+失败持久化、重试、幂等、取消和日历原子写入。provider-facing Schema 不生成
+`pattern`；task key 的 ASCII grammar 由 app-side validator 强制执行。
+
 ## 远端服务
 
 DataCenter data origin 公开桌面所需的：
@@ -125,9 +130,9 @@ DataCenter data origin 公开桌面所需的：
 - Agent 注册、consent、crypto context 与 desktop event API
 
 DataCenter Chat endpoint 只以 bearer subject 确定账号，拒绝 body/header 中的自报身份与
-供应商凭据，执行 16 MiB 大小限制、精确模型 allowlist、
-限流和幂等检查，然后把原始 OpenAI-compatible 字节转发到固定 CPU-only Ollama
-loopback。SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，
+供应商凭据，执行 16 MiB 大小限制、精确模型 allowlist、账号配额、限流和幂等检查，
+然后把原始 OpenAI-compatible 字节转发到 DataCenter 所有的 allowlisted provider。
+SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，
 流式中断不会续传。请求幂等键保持由 run ID 与 exact body 派生；
 `X-WhaleHall-Model-Purpose` 只由 Bun bridge 设置，Sidecar、Renderer 和 body 都不能覆盖。
 raw activity outbox、receipt、score 与 Agent job 使用账号专属 ledger；未登录窗口不上传，
@@ -147,9 +152,8 @@ versioned Vault Broker，并继续执行既有 post-wrap/post-package 签名和�
 在 macOS 授予 monitoring 权限前，先按 README 使用
 `bun run setup:macos-signing -- --create` 建立固定本地开发身份。
 
-远端服务使用 `services/model-relay/main.ts`，relay 固定绑定
-`127.0.0.1:8787`，并且只向 CPU-only Ollama loopback
-`127.0.0.1:11437` 转发 allowlisted 的 `qwen3:1.7b`。完整门禁：
+远端服务使用 `services/model-relay/main.ts`；其监听地址与上游 provider 是 DataCenter
+部署配置，不属于桌面运行时，也不能由客户端覆盖。完整门禁：
 
 ```bash
 bun run typecheck

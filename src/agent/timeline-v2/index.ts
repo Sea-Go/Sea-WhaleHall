@@ -5,7 +5,6 @@ export * from "./contract";
 export * from "./episodes";
 export * from "./evidence";
 export * from "./hypothesis";
-export * from "./modernbert-classifier";
 export * from "./processor";
 export * from "./repository";
 export * from "./runtime";

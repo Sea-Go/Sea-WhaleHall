@@ -30,8 +30,8 @@ flowchart TB
     Observer["Signed macOS Observer"] --> Server
     Server --> EventJournal["EventJournal · SQLite WAL"]
     EventJournal -->|"desktop.event push + cursor replay"| Reflection
-    Reflection --> Classifier["deterministic cold-start / verified ModernBERT classification"]
-    Reflection --> Qwen["Local qwen3:4b · cited hypothesis text only"]
+	Reflection --> Classifier["Deterministic episode classification"]
+	Reflection --> Hypothesis["Deterministic cited hypotheses"]
     Reflection --> ReflectionJournal["TimelineJournal · SQLite WAL"]
     Server --> VaultBroker["Signed versioned Vault Broker\nsensitive observation content"]
     Server --> Core["Local Tool core"]
@@ -48,8 +48,9 @@ flowchart TB
   end
 ```
 
-The TypeScript reflection boundary continues to own deterministic Reflection
-and Timeline v2 windowing, while Rust owns Tool registration, native sensing,
+The TypeScript reflection boundary owns conservative deterministic Reflection
+inference and Timeline v2 windowing, classification, and cited hypotheses,
+while Rust owns Tool registration, native sensing,
 event journaling, validation, execution, progress, cancellation, and
 concurrency control. Every configurable desktop model role uses the local
 Mastra Sidecar: chat/activity Agent calls use Mastra Agents and sealed-window
@@ -58,7 +59,7 @@ prompt from a sealed window, and normalizes the model JSON into reviewable
 time/action events plus a local score receipt. Mastra does not absorb the
 sensor catalogue or the deterministic Reflection pipeline.
 
-Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. Every configurable remote model call, including sealed-window reflection, uses DataCenter's single `/v1/chat/completions` gateway with the current account's short-lived bearer. Bun adds the code-owned `agent` or `activity` purpose; the request body cannot declare a user. Internal-test DataCenter deployments retain the exact request and response for developer review under the authenticated user. Before a WhaleHall release, DataCenter must already provide durable exact-response replay and user-scoped audit storage, and the pinned [DataCenter integration workflow](.github/workflows/datacenter-integration.yml) must pass for the exact WhaleHall candidate. Browser contexts never communicate directly, never receive bearer tokens, and never supply account identity.
+Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. Every remote model call, including sealed-window reflection and Dynamic Planning analysis, uses DataCenter's single `/v1/chat/completions` gateway with the current account's short-lived bearer. Bun adds the code-owned `agent`, `activity`, or `planning` purpose; the request body cannot declare a user. Internal-test DataCenter deployments retain the exact request and response for developer review under the authenticated user. Before a WhaleHall release, DataCenter must already provide durable exact-response replay and user-scoped audit storage, and the pinned [DataCenter integration workflow](.github/workflows/datacenter-integration.yml) must pass for the exact WhaleHall candidate. Browser contexts never communicate directly, never receive bearer tokens or relay keys, and never supply account identity.
 
 Production login uses the fixed DataCenter email/password service. The submitted password is immediately cleared from React state; access and refresh credentials remain in Bun's secure credential storage. Model relay access is derived only from that authenticated session: WhaleHall does not provision a second desktop key, fabricate credentials, or fall back to a remote Agent.
 
@@ -85,9 +86,9 @@ Project contribution and frontend implementation rules:
 - [`docs/frontend/UI_REFERENCES.md`](docs/frontend/UI_REFERENCES.md) — permitted UI reference principles and brand limits;
 - [`docs/frontend/FRONTEND_STANDARD.md`](docs/frontend/FRONTEND_STANDARD.md) — feature-first React architecture and Definition of Done;
 - [`docs/frontend/CALENDAR_STANDARD.md`](docs/frontend/CALENDAR_STANDARD.md) — calendar domain, adapter, interaction, timezone, and QA rules.
-- [`docs/REFLECTION_SYSTEM.md`](docs/REFLECTION_SYSTEM.md) — behavior events, 64/5-minute windows, persistence, model locks, privacy, and training/runtime operations.
+- [`docs/REFLECTION_SYSTEM.md`](docs/REFLECTION_SYSTEM.md) — behavior events, 64/5-minute windows, deterministic inference, persistence, privacy, and runtime operations.
 - [`config.example.yaml`](config.example.yaml) and [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) — the authenticated internal-test model gateway and configuration guide.
-- [`docs/MODEL_CALL_BOUNDARY.md`](docs/MODEL_CALL_BOUNDARY.md) — Mastra-only configurable model-call policy and audited local-inference exceptions.
+- [`docs/MODEL_CALL_BOUNDARY.md`](docs/MODEL_CALL_BOUNDARY.md) — Mastra-only desktop model-call policy and zero-local-model release gate.
 
 Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. The first Agent release exposes only three read Tools and five approval-bound planning/calendar writes; it does not register the sensor, accessibility, browser, activity, or cleanup catalogue.
 
@@ -319,7 +320,12 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 - `browser.history`, `browser.searches`, and `browser.downloads` query the local `browser.sqlite3` import. All browser Tools require the high-impact `browser.read` permission.
 - `editor.status` reports explicit VS Code bridge enablement, spool health, quarantine state, open edit bursts, and durable outbox backlog without returning document content. It requires `editor.metadata`.
 
-Timeline v2 classifies with the explicit `deterministic-cold-start.v2` implementation by default. Its ModernBERT episode adapter is a separate opt-in runtime boundary: it sends facts only after a caller-pinned v2 artifact manifest matches field-for-field, and P0 production composition accepts loopback endpoints only. Remote ModernBERT HTTPS is rejected because it would bypass the authenticated DataCenter model-audit path. The editable two-role `config.yaml` selects DataCenter-backed model names but cannot turn an arbitrary endpoint into a Timeline model. The reviewed local `qwen3:4b` Teacher remains an internal fallback and never receives or supplies ModernBERT class probabilities. Serving code or an endpoint address alone is never treated as proof that a trained, calibrated artifact is ready. WhaleHall still does not control a browser.
+Timeline v2 always classifies with `deterministic-cold-start.v2` and produces
+grounded `deterministic-template.v2` hypotheses from cited facts. Reflection
+uses a conservative deterministic abstention path. Production desktop builds
+do not probe or connect to a local model listener; configurable generation is
+restricted to the authenticated DataCenter/Mastra boundary. WhaleHall still
+does not control a browser.
 
 ## Foreground application usage and SQLite
 

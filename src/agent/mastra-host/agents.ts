@@ -3,6 +3,7 @@ import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
 import { Memory } from "@mastra/memory";
 import { ACTIVITY_REFLECTION_SYSTEM_PROMPT } from "../activity-reflection-prompt";
+import { PLANNING_MODEL_SYSTEM_PROMPT } from "../planning/model";
 import { activityReflectionNativeSkillPaths } from "./activity-reflection-skills";
 import {
 	type ActivityReflectionWorkflow,
@@ -22,6 +23,7 @@ export interface MastraAgentSet {
 	mastra: Mastra;
 	conversation: Agent<"whalehall-conversation">;
 	planning: Agent<"whalehall-planning">;
+	planningAnalysis: Agent<"whalehall-planning-analysis">;
 	activityReflectionSkillCatalog: Agent<"whalehall-activity-reflection-skills">;
 	activityReflection: Agent<"whalehall-activity-reflection">;
 	planningWorkflow: TaskPlanningWorkflow;
@@ -104,6 +106,15 @@ export function createMastraAgentSet(
 		model,
 		maxRetries: 0,
 	});
+	const planningAnalysis = new Agent({
+		id: "whalehall-planning-analysis",
+		name: "WhaleHall 动态计划分析器",
+		description: "为本地 PlanningRuntime 返回严格结构化的语义分析。",
+		instructions: PLANNING_MODEL_SYSTEM_PROMPT,
+		model,
+		tools: {},
+		maxRetries: 0,
+	});
 	const activityReflectionSkillCatalog = new Agent({
 		id: "whalehall-activity-reflection-skills",
 		name: "WhaleHall 活动反思 Skill 目录",
@@ -134,11 +145,11 @@ export function createMastraAgentSet(
 	);
 	const mastra = new Mastra({
 		storage: options.storage.composite,
-		// The reflection Agent deliberately remains unregistered. Mastra 1.55
-		// makes registered Agents durable and persists their internal agent-loop
-		// snapshots even when the enclosing Workflow opts out. A standalone Agent
-		// uses Mastra's ephemeral in-memory host, which keeps this raw-window
-		// prompt/output out of the desktop database and reverse storage protocol.
+		// Reflection and dynamic Planning analysis deliberately remain unregistered.
+		// Registered Agents are durable and may persist internal agent-loop snapshots
+		// even when an enclosing Workflow opts out. Standalone Agents use Mastra's
+		// ephemeral in-memory host, keeping these live inputs/outputs out of the
+		// desktop database and reverse storage protocol.
 		agents: { conversation, planning },
 		workflows: {
 			planning: planningWorkflow,
@@ -150,6 +161,7 @@ export function createMastraAgentSet(
 		mastra,
 		conversation,
 		planning,
+		planningAnalysis,
 		activityReflectionSkillCatalog,
 		activityReflection,
 		planningWorkflow,

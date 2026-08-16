@@ -257,7 +257,7 @@ describe("RemoteAuthSessionManager", () => {
 				method: "POST",
 				headers: { "X-WhaleHall-Agent-Key": "retired-desktop-key" },
 			},
-			"activity",
+			"planning",
 		);
 		await manager.bearerFetch("/v1/agent/register", {
 			method: "POST",
@@ -270,7 +270,7 @@ describe("RemoteAuthSessionManager", () => {
 		expect(headers.get("x-whalehall-agent-key")).toBeNull();
 		expect(headers.get("authorization")).toStartWith("Bearer ");
 		expect(headers.get("x-session-generation")).toBe("1");
-		expect(headers.get("x-whalehall-model-purpose")).toBe("activity");
+		expect(headers.get("x-whalehall-model-purpose")).toBe("planning");
 		expect(observed.bearerHeaders?.get("authorization")).toStartWith("Bearer ");
 		expect(observed.bearerHeaders?.get("x-whalehall-agent-key")).toBeNull();
 		expect(observed.modelRedirect).toBe("error");

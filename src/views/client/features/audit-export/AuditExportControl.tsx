@@ -244,7 +244,7 @@ export function AuditExportControl({
 				</div>
 				<p>
 					生产分析仍只来自按 64 条/5 分钟或边界自然封窗的窗口。导出时，尚未封窗的有效语义事件会生成明确标记的
-					audit-only 确定性投影；它不会写回生产时间线，也不会调用 Qwen。
+					audit-only 确定性投影；它不会写回生产时间线，也不会调用模型服务。
 				</p>
 				<div className="audit-export-control__capture-actions">
 					<Button

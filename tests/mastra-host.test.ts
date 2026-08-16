@@ -221,6 +221,52 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
+	test("runs Dynamic Planning through the live strict planning.analyze entry", async () => {
+		const host = new FakeHost();
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+
+		const response = await harness.request("planning.analyze", {
+			invocationId: "dynamic-planning-invocation",
+			requestId: "planning-analysis:operation-1",
+			analysis: {
+				planId: "plan-1",
+				analysisMode: "manual-proposal",
+				currentGoal: "验证一个长期收入方向",
+				currentType: null,
+				trigger: "initial-analysis",
+				effectiveWindow: {
+					startDate: "2026-08-14",
+					endDateExclusive: "2026-08-21",
+					timeZone: "Asia/Shanghai",
+				},
+				messages: [],
+				currentTasks: [],
+				currentEstimate: null,
+				currentSchedulingPreferences: null,
+				observationEvidence: [],
+				calendarEvents: [],
+			},
+		});
+
+		expect(response).toMatchObject({
+			ok: true,
+			result: {
+				outcome: "proposal",
+				recommendedType: "fuzzy",
+				confidence: 0.4,
+			},
+		});
+		expect(host.modelOrigins).toEqual(["planning-analysis:operation-1"]);
+		expect(host.calls).toContain("model/relay.open");
+		const body = host.modelBodies[0];
+		expect(body?.tools).toBeUndefined();
+		expect(JSON.stringify(body?.response_format)).not.toContain('"pattern"');
+		await harness.shutdown();
+	}, 30_000);
+
 	test("uses the conversation Agent for proactive feedback without memory or local Tools", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
@@ -901,6 +947,7 @@ class SidecarHarness {
 					methods: expect.arrayContaining([
 						"conversation.start",
 						"planning.start",
+						"planning.analyze",
 						"activity.start",
 						"planning.answer",
 						"agent.approveTool",
@@ -1393,6 +1440,35 @@ class FakeHost {
 			);
 			return;
 		}
+		if (params.originatingRequestId === "planning-analysis:operation-1") {
+			await send(
+				successResponse(request.requestId, {
+					relayId: params.relayId,
+					status: 200,
+					headers: { "content-type": "application/json" },
+					completed: true,
+					bodyBase64: Buffer.from(
+						JSON.stringify({
+							id: "chatcmpl-dynamic-planning",
+							object: "chat.completion",
+							created: 1,
+							model: params.modelId,
+							choices: [
+								{
+									index: 0,
+									message: {
+										role: "assistant",
+										content: JSON.stringify(dynamicPlanningProposalFixture()),
+									},
+									finish_reason: "stop",
+								},
+							],
+						}),
+					).toString("base64"),
+				}),
+			);
+			return;
+		}
 		await send(
 			successResponse(request.requestId, {
 				relayId: params.relayId,
@@ -1512,6 +1588,47 @@ class FakeHost {
 			event: { kind: "model/relay.end" },
 		});
 	}
+}
+
+function dynamicPlanningProposalFixture(): Record<string, unknown> {
+	return {
+		outcome: "proposal",
+		recommendedType: "fuzzy",
+		rationaleSummary: "路径需要先验证。",
+		assumptions: [],
+		clarificationQuestions: [],
+		assistantMessage: "先执行七天验证任务，再动态修正预计日期。",
+		goal: "验证一个长期收入方向",
+		estimatedCompletionDate: "2036-08-13",
+		confidence: 0.4,
+		estimateBasis: "当前只有方向性证据。",
+		schedulingPreferenceSource: "user-provided",
+		schedulingPreferences: {
+			weeklyCapacityMinutes: 120,
+			sessionMinutes: 60,
+			availableWindows: [
+				{ dayOfWeek: 6, startTime: "09:00", endTime: "11:00" },
+			],
+		},
+		tasks: [
+			{
+				taskKey: "validate-market",
+				purpose: "validation",
+				title: "验证需求",
+				description: "完成一次小规模访谈。",
+				estimatedMinutes: 60,
+				dependencyKeys: [],
+			},
+			{
+				taskKey: "review-market",
+				purpose: "review",
+				title: "复盘验证结果",
+				description: "决定是否继续当前方向。",
+				estimatedMinutes: 60,
+				dependencyKeys: ["validate-market"],
+			},
+		],
+	};
 }
 
 function openAiSse(content: string): Uint8Array {

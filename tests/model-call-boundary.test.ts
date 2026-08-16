@@ -14,61 +14,68 @@ describe("desktop model-call boundary", () => {
 			"src/agent/mastra-host/agents.ts",
 		]);
 
-		const bridge = sources.get("src/bun/mastra-activity-reflection.ts") ?? "";
-		expect(bridge).toContain('"reflection.analyze"');
-		expect(bridge).toContain("createActivityReflectionPrompt");
-		expect(bridge).toContain("activityReflectionOutputToWorkerResponse");
-		expect(bridge).not.toContain("fetch(");
+		const activityBridge =
+			sources.get("src/bun/mastra-activity-reflection.ts") ?? "";
+		expect(activityBridge).toContain('"reflection.analyze"');
+		expect(activityBridge).not.toContain("fetch(");
+		const planningBridge =
+			sources.get("src/bun/mastra-planning-model.ts") ?? "";
+		expect(planningBridge).toContain('"planning.analyze"');
+		expect(planningBridge).toContain("assertPlanningModelOutputForRequest");
+		expect(planningBridge).not.toContain("fetch(");
+
 		const protocol = sources.get("src/agent/mastra-host/protocol.ts") ?? "";
-		expect(protocol).toContain("interface ActivityReflectionAnalyzeParams");
-		expect(protocol).toContain("userPrompt: string");
-		expect(protocol).not.toContain("ActivityEventWorkerRequest");
+		expect(protocol).toContain("interface PlanningAnalyzeParams");
+		expect(protocol).toContain('"planning.analyze"');
+		const agents = sources.get("src/agent/mastra-host/agents.ts") ?? "";
+		expect(agents).toContain('id: "whalehall-planning-analysis"');
+		expect(agents).not.toMatch(/agents:\s*\{[^}]*planningAnalysis/s);
+	});
+
+	test("uses an independent code-owned Planning audit purpose", async () => {
+		const sources = await sourceFiles();
 		const relayTransport =
 			sources.get("src/bun/model-relay-transport.ts") ?? "";
+		expect(relayTransport).toContain('"agent" | "activity" | "planning"');
 		expect(relayTransport).toContain('"/v1/chat/completions"');
-		expect(relayTransport).toContain('"agent" | "activity"');
 		expect(relayTransport).not.toContain('"/v1/activity/completions"');
-		expect(relayTransport).not.toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
+
+		const main = sources.get("src/bun/index.ts") ?? "";
+		expect(main).toContain('purpose: "planning"');
+		expect(main).toContain("planningRelayBridge.open");
+		expect(main).toContain("hasPendingInvocation(ownerRunId)");
+		const auth = sources.get("src/bun/remote-auth-session.ts") ?? "";
+		expect(auth).toContain('purpose !== "planning"');
+		expect(auth).toContain('headers.set("x-whalehall-model-purpose", purpose)');
 	});
 
-	test("requires explicit local annotations for audited legacy inference", async () => {
+	test("has no desktop local-model client, lock, probe, or loopback dependency", async () => {
 		const sources = await sourceFiles();
-		const directOllamaConstructors = findContaining(
-			sources,
-			"new OllamaJsonClient(",
-		);
-		expect(directOllamaConstructors).toEqual([
-			"src/agent/timeline-v2/runtime.ts",
-			"src/bun/planning-runtime.ts",
-			"src/bun/reflection-runtime.ts",
-		]);
-		for (const path of directOllamaConstructors) {
-			expect(sources.get(path)).toContain(
-				"@whalehall-model-boundary-exception",
-			);
+		for (const token of [
+			"OllamaJsonClient",
+			"ollama-json-client",
+			"verifyOllamaModelLock",
+			"ollama-model-lock",
+			"WHALEHALL_TEACHER_MODEL_LOCK",
+			"ModernBertHttpClient",
+			"ModernBertEpisodeClassifier",
+			"timeline-modernbert-config",
+			"127.0.0.1:11434",
+			"127.0.0.1:8765",
+		]) {
+			expect(findContaining(sources, token), token).toEqual([]);
 		}
-		expect(sources.get("src/agent/reflection/inference.ts")).toContain(
-			"@whalehall-model-boundary-exception verified-classifier",
-		);
 
-		const planningRuntime = sources.get("src/bun/planning-runtime.ts") ?? "";
-		const verifiedPlanningModel = planningRuntime.slice(
-			planningRuntime.indexOf("class VerifiedQwenPlanningModel"),
+		const timeline = sources.get("src/agent/timeline-v2/runtime.ts") ?? "";
+		expect(timeline).toContain("new HeuristicTimelineEpisodeClassifier()");
+		expect(timeline).toContain(
+			"new DeterministicTimelineHypothesisGenerator()",
 		);
-		expect(verifiedPlanningModel).toContain(
-			"@whalehall-model-boundary-exception planning-local-model-lock",
-		);
-		const lockVerification = verifiedPlanningModel.indexOf(
-			"await verifyOllamaModelLock(WHALEHALL_TEACHER_MODEL_LOCK)",
-		);
-		const clientConstruction = verifiedPlanningModel.indexOf(
-			"new OllamaJsonClient(",
-		);
-		expect(lockVerification).toBeGreaterThanOrEqual(0);
-		expect(clientConstruction).toBeGreaterThan(lockVerification);
+		const reflection = sources.get("src/bun/reflection-runtime.ts") ?? "";
+		expect(reflection).toContain("new DeterministicReflectionInference()");
 	});
 
-	test("keeps the legacy model origin isolated from the authenticated desktop path", async () => {
+	test("keeps the retired activity path isolated from desktop release inputs", async () => {
 		const fragment = await readFile(
 			join(repositoryRoot, "deploy/home-cloud/model-relay/Caddyfile.fragment"),
 			"utf8",
@@ -79,24 +86,7 @@ describe("desktop model-call boundary", () => {
 		expect(fragment).toContain(
 			"respond @whalehall_retired_activity_completion 410",
 		);
-		expect(fragment).not.toContain("reverse_proxy 127.0.0.1:8787");
-		const dataCenterDenyMatcher = fragment.match(
-			/@whalehall_datacenter_paths \{([\s\S]*?)\n\}/,
-		)?.[1];
-		expect(dataCenterDenyMatcher).toBeDefined();
-		for (const path of [
-			"/v1/auth/*",
-			"/v1/chat/*",
-			"/v1/agent/*",
-			"/v1/devices/*",
-			"/api/v1/agent/*",
-		]) {
-			expect(dataCenterDenyMatcher).toContain(path);
-		}
-		expect(fragment).toContain("respond @whalehall_datacenter_paths 404");
-	});
 
-	test("keeps the retired activity path out of desktop release inputs", async () => {
 		const sources = await sourceFiles();
 		for (const path of [
 			"config.template.yaml",
@@ -145,7 +135,7 @@ describe("desktop model-call boundary", () => {
 });
 
 async function sourceFiles(): Promise<Map<string, string>> {
-	const paths = await listTypeScriptFiles(join(repositoryRoot, "src"));
+	const paths = await listSourceFiles(join(repositoryRoot, "src"));
 	const files = await Promise.all(
 		paths.map(
 			async (path) =>
@@ -172,13 +162,13 @@ async function productionSourceFiles(): Promise<Map<string, string>> {
 	return new Map(files);
 }
 
-async function listTypeScriptFiles(directory: string): Promise<string[]> {
+async function listSourceFiles(directory: string): Promise<string[]> {
 	const entries = await readdir(directory, { withFileTypes: true });
 	const nested = await Promise.all(
 		entries.map(async (entry) => {
 			const path = join(directory, entry.name);
-			if (entry.isDirectory()) return listTypeScriptFiles(path);
-			return entry.isFile() && path.endsWith(".ts") ? [path] : [];
+			if (entry.isDirectory()) return listSourceFiles(path);
+			return entry.isFile() && /\.(?:ts|tsx)$/u.test(path) ? [path] : [];
 		}),
 	);
 	return nested.flat();

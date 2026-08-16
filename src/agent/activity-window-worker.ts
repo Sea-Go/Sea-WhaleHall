@@ -2452,7 +2452,7 @@ function normalizeResponseReferences(
 		}
 		return {
 			...event,
-			// Qwen has seen only this immutable raw window. If it fabricates a
+			// The remote model has seen only this immutable raw window. If it fabricates a
 			// sub-event identifier, keep the useful classification but bind it to
 			// the one durable source we can prove: this exact window. This avoids a
 			// brittle copy-the-cursor requirement for a compact CPU model while

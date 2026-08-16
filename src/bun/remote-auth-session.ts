@@ -301,7 +301,11 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				"模型 Bearer 凭据只能发送到固定聊天入口。",
 			);
 		}
-		if (purpose !== "agent" && purpose !== "activity") {
+		if (
+			purpose !== "agent" &&
+			purpose !== "activity" &&
+			purpose !== "planning"
+		) {
 			throw new RemoteAuthError(
 				"unexpected",
 				"模型请求用途不是 WhaleHall 允许的固定用途。",

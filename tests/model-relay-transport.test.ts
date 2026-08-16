@@ -151,6 +151,33 @@ describe("ModelRelayTransport", () => {
 		expect(captured[0]?.headers.get("x-whalehall-model-purpose")).toBeNull();
 	});
 
+	test("uses an independent host-owned purpose for dynamic Planning", async () => {
+		const captured: Array<{ path: string; purpose: string }> = [];
+		const transport = new ModelRelayTransport(
+			{
+				authorizedFetch: async (path, _init, purpose) => {
+					captured.push({ path, purpose });
+					return Response.json({ ok: true });
+				},
+			},
+			{ purpose: "planning" },
+		);
+		await transport.open(
+			{
+				runId: "planning-analysis-invocation-1",
+				body: {
+					model: "approved-model",
+					messages: [{ role: "user", content: "bounded planning input" }],
+				},
+			},
+			{ onResponse() {}, onChunk() {} },
+		);
+
+		expect(captured).toEqual([
+			{ path: "/v1/chat/completions", purpose: "planning" },
+		]);
+	});
+
 	test("polls a durable in-flight operation with the same exact request", async () => {
 		const requests: Array<{ body: string; key: string }> = [];
 		const waits: number[] = [];

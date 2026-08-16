@@ -14,6 +14,13 @@ import {
 	createActivityReflectionRuntimeOutputSchema,
 	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
 } from "../activity-reflection-prompt";
+import {
+	assertPlanningModelOutputForRequest,
+	type PlanningModelAnalysisRequest,
+	type PlanningModelOutput,
+	PlanningModelOutputError,
+	planningModelInputProjection,
+} from "../planning/model";
 import { loadActivityReflectionNativeSkillContext } from "./activity-reflection-skills";
 import {
 	type ActivityReflectionWorkflowDriverInput,
@@ -32,6 +39,10 @@ import {
 	HostMastraStorage,
 } from "./mastra-storage";
 import { ModelRelay } from "./model-relay";
+import {
+	dynamicPlanningInputSchema,
+	dynamicPlanningOutputSchema,
+} from "./planning-analysis";
 import {
 	type PlanningWorkflowClarification,
 	type PlanningWorkflowCompletion,
@@ -59,6 +70,7 @@ import {
 	type ConversationStartParams,
 	type HostPlanningState,
 	isRecord,
+	type PlanningAnalyzeParams,
 	type PlanningAnswerParams,
 	type PlanningStartParams,
 	type RunAcceptedResult,
@@ -96,6 +108,8 @@ const maxRetainedRuns = 256;
 const maxClarificationRounds = 3;
 /** Must finish before the Bun-side 210-second reflection deadline. */
 export const DEFAULT_ACTIVITY_REFLECTION_WORKFLOW_TIMEOUT_MS = 195_000;
+/** Must finish before the Bun-side 130-second dynamic Planning deadline. */
+export const DEFAULT_DYNAMIC_PLANNING_ANALYSIS_TIMEOUT_MS = 120_000;
 interface ConversationRunContext {
 	conversationId: string;
 	resourceId: string;
@@ -205,6 +219,8 @@ export class AgentHostRuntime {
 				return this.startConversation(request.requestId, request.params);
 			case "planning.start":
 				return this.startPlanning(request.requestId, request.params);
+			case "planning.analyze":
+				return this.analyzeDynamicPlanning(request.params);
 			case "activity.start":
 				return this.startActivityAnalysis(request.requestId, request.params);
 			case "reflection.analyze":
@@ -429,6 +445,70 @@ export class AgentHostRuntime {
 		record.snapshot.activityJobId = activityJobId;
 		this.schedule(record, () => this.executeActivityAnalysis(record));
 		return accepted(record);
+	}
+
+	/**
+	 * Performs exactly one live semantic Planning call. Durable plan state,
+	 * scheduling, proposals, retries and idempotency remain Bun-owned.
+	 */
+	private async analyzeDynamicPlanning(
+		params: PlanningAnalyzeParams,
+	): Promise<PlanningModelOutput> {
+		this.ensureReady();
+		const invocationId = requiredString(params.invocationId, "invocationId");
+		const requestId = requiredString(params.requestId, "requestId");
+		const parsedInput = dynamicPlanningInputSchema.safeParse(params.analysis);
+		if (!parsedInput.success) {
+			throw runtimeError(
+				"INVALID_REQUEST",
+				"Dynamic Planning analysis input failed its private protocol contract.",
+			);
+		}
+		const analysis = parsedInput.data as PlanningModelAnalysisRequest;
+		const agents = this.requireAgents();
+		const relay = this.requireRelay();
+		try {
+			return await relay.runInContext(
+				{ runId: invocationId, originatingRequestId: requestId },
+				async () => {
+					const result = await this.hostRunContext.run(invocationId, () =>
+						agents.planningAnalysis.generate(
+							JSON.stringify(planningModelInputProjection(analysis)),
+							{
+								runId: invocationId,
+								abortSignal: AbortSignal.timeout(
+									DEFAULT_DYNAMIC_PLANNING_ANALYSIS_TIMEOUT_MS,
+								),
+								requestContext: new RequestContext(),
+								maxSteps: 1,
+								toolChoice: "none",
+								modelSettings: { temperature: 0 },
+								structuredOutput: {
+									schema: dynamicPlanningOutputSchema,
+									errorStrategy: "strict",
+									jsonPromptInjection: false,
+								},
+							},
+						),
+					);
+					const parsedOutput = dynamicPlanningOutputSchema.safeParse(
+						result.object,
+					);
+					if (!parsedOutput.success) throw new PlanningModelOutputError();
+					assertPlanningModelOutputForRequest(parsedOutput.data, analysis);
+					return parsedOutput.data;
+				},
+			);
+		} catch (error) {
+			if (error instanceof PlanningModelOutputError) {
+				throw runtimeError(
+					"PLANNING_OUTPUT_INVALID",
+					"Dynamic Planning output failed its semantic contract.",
+					true,
+				);
+			}
+			throw error;
+		}
 	}
 
 	/**
@@ -1173,20 +1253,20 @@ export class AgentHostRuntime {
 					runId: invocationId,
 					abortSignal,
 					requestContext: new RequestContext(),
-					// Qwen's CPU Ollama endpoint does not honor the native Skill tool
-					// calls reliably. The rules above were already loaded locally via
+					// The current provider does not reliably honor native Skill tool
+					// calls. The rules above were already loaded locally via
 					// Mastra's `getSkill()` API, so make exactly one no-Tool model call.
 					maxSteps: 1,
 					toolChoice: "none",
-					// Reflection is a deterministic classification/aggregation task.
-					// Keep CPU Qwen sampling stable across retryable sealed windows.
+					// Reflection is a classification/aggregation task. Keep sampling
+					// stable across retryable sealed windows.
 					modelSettings: { temperature: 0 },
 					context: [nativeSkillContext],
 					structuredOutput: {
 						schema: providerOutputSchema,
 						errorStrategy: "strict",
 						// This one-step call has no Tools, so native structured output
-						// can constrain CPU Ollama without the former tool/schema conflict.
+						// can constrain the provider without a tool/schema conflict.
 						jsonPromptInjection: false,
 					},
 				});

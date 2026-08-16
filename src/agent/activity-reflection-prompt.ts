@@ -115,7 +115,7 @@ export const activityReflectionModelOutputSchema = z
 			.trim()
 			.min(1)
 			.max(80)
-			// Ollama's JSON-schema converter accepts only fully anchored patterns.
+			// Some OpenAI-compatible schema converters accept only anchored patterns.
 			.regex(/^.*[\u3400-\u9fff].*$/u),
 	})
 	.strict()
@@ -153,7 +153,7 @@ export type ActivityReflectionModelOutput = z.infer<
 >;
 
 /**
- * Builds the per-window schema that is actually sent to CPU Qwen. It limits
+ * Builds the per-window schema sent to the DataCenter-owned provider. It limits
  * segment tokens to the current local index and requires null epoch fields so
  * the model cannot invent long timestamps it cannot reliably copy.
  */
@@ -1084,7 +1084,7 @@ function hasReviewableScoreReason(value: string): boolean {
 }
 
 /**
- * Qwen 1.7B is reliable at choosing a short segment token but not at copying
+ * The remote classifier chooses a short segment token rather than copying
  * long epoch milliseconds from a large raw window. Resolve those tokens only
  * on the desktop, from the same local observations that were compressed for
  * the model.

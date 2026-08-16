@@ -88,7 +88,7 @@ export type PlanningState =
 function productErrorMessage(code: PlanningServiceErrorCode): string {
 	switch (code) {
 		case "model-unavailable":
-			return "本地模型暂时不可用。你的消息已保留，可在模型恢复后继续分析。";
+			return "计划分析服务暂时不可用。你的消息已保留，可在服务恢复后继续分析。";
 		case "stale-version":
 			return "计划已在别处更新。请载入最新版本后再操作。";
 		case "offline":

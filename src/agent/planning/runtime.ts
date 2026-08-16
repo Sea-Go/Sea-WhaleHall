@@ -1,6 +1,6 @@
-import { OllamaClientError } from "../model/ollama-json-client";
 import {
 	assertPlanningModelOutputForRequest,
+	PlanningModelInvocationError,
 	type PlanningModelOutput,
 	PlanningModelOutputError,
 	type PlanningModelPort,
@@ -969,7 +969,9 @@ export class PlanningRuntime {
 				observationEvidence: plan.observationEvidence,
 				calendarEvents,
 			};
-			output = await this.model.analyze(analysisRequest);
+			output = await this.model.analyze(analysisRequest, {
+				requestId: `planning-analysis:${operationId}`,
+			});
 			assertPlanningModelOutputForRequest(output, analysisRequest);
 		} catch (error) {
 			return this.persistAnalysisFailure(
@@ -2155,15 +2157,13 @@ function diagnosticForAnalysisFailure(
 			recordedAt,
 		};
 	}
-	if (error instanceof OllamaClientError) {
+	if (error instanceof PlanningModelInvocationError) {
 		return {
 			source: "planning-model",
 			code:
-				error.code === "request_timeout"
+				error.code === "request-timeout"
 					? "request-timeout"
-					: error.code === "schema_mismatch" ||
-							error.code === "invalid_json" ||
-							error.code === "invalid_response_envelope"
+					: error.code === "invalid-output"
 						? "invalid-output"
 						: "model-unavailable",
 			retryable: error.retryable,

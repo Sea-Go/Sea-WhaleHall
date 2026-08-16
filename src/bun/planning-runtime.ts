@@ -1,15 +1,8 @@
 import type { AgentRuntime } from "../agent/agent-runtime";
-import { OllamaJsonClient } from "../agent/model/ollama-json-client";
-import {
-	verifyOllamaModelLock,
-	WHALEHALL_TEACHER_MODEL_LOCK,
-} from "../agent/model/ollama-model-lock";
 import {
 	localDateAt,
 	NativePlanningCalendar,
 	NativePlanningRepository,
-	type PlanningModelAnalysisRequest,
-	type PlanningModelOutput,
 	type PlanningModelPort,
 	type PlanningObservationPort,
 	type PlanningObservationQuery,
@@ -17,7 +10,6 @@ import {
 	type PlanningPlan,
 	PlanningRuntime,
 	projectTimelinePlanningObservation,
-	QwenPlanningModel,
 	scheduledTaskIntervals,
 } from "../agent/planning";
 import type { AgentInputV1 } from "../agent/timeline-v2/types";
@@ -46,13 +38,14 @@ export class WhaleHallPlanningRuntime {
 		private readonly agent: AgentRuntime,
 		private readonly notifications: PlanningRuntimeNotifications,
 		timeZone: string | (() => string),
+		model: PlanningModelPort,
 	) {
 		this.observations = new PlanningObservationInbox();
 		this.repository = new NativePlanningRepository(agent);
 		this.runtime = new PlanningRuntime({
 			repository: this.repository,
 			calendar: new NativePlanningCalendar(agent),
-			model: new VerifiedQwenPlanningModel(),
+			model,
 			observations: this.observations,
 			timeZone,
 		});
@@ -604,44 +597,6 @@ class PlanningObservationInbox implements PlanningObservationPort {
 	}
 }
 
-class VerifiedQwenPlanningModel implements PlanningModelPort {
-	readonly modelVersion =
-		`${WHALEHALL_TEACHER_MODEL_LOCK.model}@${WHALEHALL_TEACHER_MODEL_LOCK.digest.slice(0, 12)}`;
-	private model: QwenPlanningModel | null = null;
-	private verification: Promise<QwenPlanningModel> | null = null;
-
-	async analyze(
-		request: PlanningModelAnalysisRequest,
-	): Promise<PlanningModelOutput> {
-		return (await this.verified()).analyze(request);
-	}
-
-	private async verified(): Promise<QwenPlanningModel> {
-		if (this.model) return this.model;
-		if (!this.verification) {
-			this.verification = (async () => {
-				await verifyOllamaModelLock(WHALEHALL_TEACHER_MODEL_LOCK);
-				// @whalehall-model-boundary-exception planning-local-model-lock
-				// Dynamic planning is deliberately local, fixed to the verified teacher
-				// lock, and exposes only the structured PlanningModelPort contract.
-				const client = new OllamaJsonClient({
-					baseUrl: WHALEHALL_TEACHER_MODEL_LOCK.baseUrl,
-					model: WHALEHALL_TEACHER_MODEL_LOCK.model,
-					contextLength: WHALEHALL_TEACHER_MODEL_LOCK.numCtx,
-					keepAlive: "30m",
-				});
-				this.model = new QwenPlanningModel(client, {
-					modelVersion: this.modelVersion,
-				});
-				return this.model;
-			})().finally(() => {
-				this.verification = null;
-			});
-		}
-		return this.verification;
-	}
-}
-
 function projectSummary(plan: PlanningPlan): PlanningPlanSummaryProjection {
 	// Execution summaries remain anchored to the confirmed revision while a new
 	// conversation proposal is waiting. Drafts can still preview their first ETA.
@@ -694,7 +649,7 @@ function projectPersistentNotifications(plan: PlanningPlan) {
 			id: `planning-analysis:${proposed.id}`,
 			planId: plan.id,
 			kind: "analysis-ready",
-			message: "本地分析已完成，有一版新提案等待你确认。",
+			message: "计划分析已完成，有一版新提案等待你确认。",
 			createdAt: proposed.createdAt,
 		});
 	}
@@ -736,7 +691,7 @@ function projectPersistentNotifications(plan: PlanningPlan) {
 			id: `planning-diagnostic:${plan.id}:${plan.version}`,
 			planId: plan.id,
 			kind: "attention-required",
-			message: "本地模型暂时不可用，消息已保存，可稍后重试。",
+			message: "计划分析服务暂时不可用，消息已保存，可稍后重试。",
 			createdAt: plan.updatedAt,
 		});
 	}

@@ -1,4 +1,5 @@
 import type { ActivityAnalysisWorkerResult } from "../../shared/activity-analysis-contract";
+import type { PlanningModelAnalysisRequest } from "../planning/model";
 
 export const AGENT_HOST_PROTOCOL_VERSION = 1 as const;
 export const AGENT_HOST_SERVICE = "whalehall-agent-host" as const;
@@ -27,6 +28,7 @@ export interface AgentHostErrorPayload {
 		| "SESSION_NOT_FOUND"
 		| "MODEL_RELAY_ERROR"
 		| "MODEL_RELAY_UNAVAILABLE"
+		| "PLANNING_OUTPUT_INVALID"
 		| "ACTIVITY_OUTPUT_INVALID"
 		| "CANCELLED"
 		| "UNSUPPORTED_METHOD"
@@ -133,6 +135,14 @@ export interface PlanningAnswerParams {
 	expectedVersion?: number;
 }
 
+/** A live-only dynamic PlanningRuntime semantic analysis invocation. */
+export interface PlanningAnalyzeParams {
+	invocationId: string;
+	/** Stable durable operation identity used by the relay idempotency key. */
+	requestId: string;
+	analysis: PlanningModelAnalysisRequest;
+}
+
 export type { ActivityAnalysisWorkerResult } from "../../shared/activity-analysis-contract";
 
 export interface ActivityAnalysisStartParams {
@@ -220,6 +230,7 @@ export type AgentHostMethod =
 	| "runtime.shutdown"
 	| "conversation.start"
 	| "planning.start"
+	| "planning.analyze"
 	| "activity.start"
 	| "reflection.analyze"
 	| "planning.answer"
@@ -268,6 +279,7 @@ export type AgentHostRequest =
 	| RequestEnvelope<"runtime.shutdown", Record<string, never>>
 	| RequestEnvelope<"conversation.start", ConversationStartParams>
 	| RequestEnvelope<"planning.start", PlanningStartParams>
+	| RequestEnvelope<"planning.analyze", PlanningAnalyzeParams>
 	| RequestEnvelope<"activity.start", ActivityAnalysisStartParams>
 	| RequestEnvelope<"reflection.analyze", ActivityReflectionAnalyzeParams>
 	| RequestEnvelope<"planning.answer", PlanningAnswerParams>
@@ -413,6 +425,7 @@ export const AGENT_HOST_METHODS: readonly AgentHostMethod[] = [
 	"runtime.shutdown",
 	"conversation.start",
 	"planning.start",
+	"planning.analyze",
 	"activity.start",
 	"reflection.analyze",
 	"planning.answer",
