@@ -1,13 +1,13 @@
 # 本地 Mastra Agent 与模型转发
 
-WhaleHall 的“Agent 本地”是指：对话上下文、Memory、规划 Workflow、澄清、Tool Loop、审批、日历冲突修复和恢复状态均在桌面客户端运行。模型推理可由远端模型完成，但远端服务只会是身份与原始请求转发器，不是 Agent。生产桌面端使用远端账号密码登录；bearer 与个人 relay key 只保留在 Bun 主进程，不下发给 Renderer 或 Sidecar。
+WhaleHall 的“Agent 本地”是指：对话上下文、Memory、规划 Workflow、澄清、Tool Loop、审批、日历冲突修复和恢复状态均在桌面客户端运行。模型推理可由远端模型完成，但远端服务只会是身份与原始请求转发器，不是 Agent。生产桌面端使用远端账号密码登录；bearer 只保留在 Bun 主进程，不下发给 Renderer 或 Sidecar。
 
 ```mermaid
 flowchart LR
   React["React WebView\n只负责 UI"] <-->|"Typed RPC"| Bun["Bun 主进程\n身份、存储、日历、政策"]
   Bun <-->|"Content-Length stdio"| Sidecar["Node 22.18 Mastra Sidecar\nAgent、Memory、Workflow、Tool Loop"]
   Sidecar -->|"完整 OpenAI-compatible body"| Bun
-  Bun -->|"HTTPS · 认证/Bearer\n聊天 relay key · Agent v2 签名"| DataCenter["DataCenter data origin\n认证、聊天、Agent、同步"]
+  Bun -->|"HTTPS · 认证/Bearer\n模型 purpose · Agent v2 签名"| DataCenter["DataCenter data origin\n认证、聊天、Agent、同步"]
   DataCenter -->|"聊天模型转发"| Provider["模型供应商"]
   Bun --> SQLite["字段加密 SQLite"]
   Bun --> Vault["Credential Manager / Keychain"]
@@ -25,13 +25,13 @@ flowchart LR
   Window["已封闭活动窗口"] --> Bridge["Bun: 完整 prompt、时间片/分数校验"]
   Bridge -->|"完整本地 prompt"| Sidecar["Mastra Workflow + 原生本地 Skills"]
   Sidecar -->|"OpenAI-compatible body"| Bridge
-  Bridge -->|"bearer + personal key\npurpose=activity"| DataCenter["DataCenter /v1/chat/completions\n内测模型交互审计"]
+  Bridge -->|"bearer\npurpose=activity"| DataCenter["DataCenter /v1/chat/completions\n内测模型交互审计"]
   DataCenter -->|"转发"| Qwen["CPU qwen3:1.7b"]
   Qwen --> DataCenter --> Bridge
 ```
 
 Sidecar 是客户端的一部分：它会在一次调用的内存中看到完整 `userPrompt`，并用
-Mastra 生成 OpenAI-compatible body；它不接触 relay key、bearer、上游凭据或 Renderer。
+Mastra 生成 OpenAI-compatible body；它不接触 bearer、上游凭据或 Renderer。
 Workflow 不创建可恢复 Agent run、不注册产品 Tool，也不保存 snapshot；reflection Agent
 仅允许 Mastra 为两个打包 `SKILL.md` 提供的本地只读 `skill`、`skill_read`、`skill_search` 元工具，
 并保持未注册，避免 Mastra durable agent-loop 写入原始 prompt。Bun 将模型 JSON 本地转换为
@@ -53,14 +53,14 @@ repository 管理。Mastra 首版不会把 browser、accessibility、activity、
 macOS 的签名 Observer 和不可变 `whalehall-vault-broker-v2` 安全链保持不变。
 Vault Broker 负责敏感 observation content；新增的 credential helper 只负责
 固定 WhaleHall namespace 下的账号凭据和 Agent 数据密钥，二者不能互相替代。
-可编辑 `config.yaml` 只保存 `reflection` 与 `agent` 两个固定角色的
-`name/baseurl/apikey`；Timeline 和 ModernBERT 不从该文件接受远端模型地址。
+可编辑 `config.yaml` 只保存 `reflection` 与 `agent` 两个固定角色的 `name`；DataCenter
+origin 固定在代码中，Timeline 和 ModernBERT 也不从该文件接受远端模型地址。
 
 ## 不可跨越的边界
 
 - React 不导入 Mastra、AI SDK、数据库、Rust 协议或 native API；Renderer 不提交 `userId`。
 - Sidecar 不接触 access token、refresh token、厂商 API Key或 OS 凭据库，不监听 HTTP 端口，也不启用 Mastra Server、Studio、Cloud 或遥测。
-- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。所有远端模型调用要求同一账号的短期 bearer 加个人 relay key，并由 Bun 添加代码所有的 `agent|activity` purpose；不存在可绕过 session 的独立 reflection route。
+- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。所有远端模型调用只使用当前账号的短期 bearer，并由 Bun 添加代码所有的 `agent|activity` purpose；不存在可绕过 session 的独立 reflection route。
 - `reflection.analyze` 协议包含由 Bun 生成的完整 `userPrompt` 和 opaque invocation ID；它只在本地 Bun/Sidecar 内存中流转。原始窗口、模型输出、事件和分数都不得回传 Renderer 或 Agent Tool。
 - DataCenter 不添加 system prompt、不聚合事件、不格式化时间/action、不计算分数，也不执行 Tool。内测版会按认证 user 保存 exact request/response，并提供开发成员的受控查询；这是 internal-only 审计能力。
 - Rust Local Tool Host 继续拥有传感器和本地能力。首版 Mastra Agent 不注册 browser、accessibility、activity、cleanup 或完整 Rust Tool catalogue。
@@ -89,12 +89,12 @@ Agent 数据库位于平台 `userData/agent/whalehall-agent.sqlite3`，与 Rust 
 ## 认证
 
 桌面使用 `POST /v1/auth/sessions` 的邮箱密码登录，并安全保存 refresh token；短期
-access token 和 personal relay key 只停留在 Bun 主进程。密码提交后立即从 React
+access token 只停留在 Bun 主进程。密码提交后立即从 React
 state 清除，不写入数据库、日志、argv 或环境变量。refresh、退出与会话过期会先关闭
 AuthGate、递增 generation、终止模型流并清理旧账号的本地运行，再允许新账号开始。
 
-`config.yaml` 的 `agent` 角色固定为 `qwen3:1.7b` 与 DataCenter origin。每个聊天请求
-同时附带 bearer 和 `X-WhaleHall-Agent-Key`；relay 验证两者同属一个账户后才转发。
+`config.yaml` 的 `agent` 角色固定为 `qwen3:1.7b`；DataCenter origin 固定在代码中。每个
+聊天请求附带当前 session bearer 与代码所有的 purpose；relay 从 bearer 确定账户后转发。
 
 ## 对话、Tool 与审批
 
@@ -124,8 +124,8 @@ DataCenter data origin 公开桌面所需的：
 - `POST /v1/chat/completions`
 - Agent 注册、consent、crypto context 与 desktop event API
 
-DataCenter Chat endpoint 同时验证 bearer subject 和该 subject 的 personal Agent key，拒绝
-body/header 中的自报身份与供应商凭据，执行 16 MiB 大小限制、精确模型 allowlist、
+DataCenter Chat endpoint 只以 bearer subject 确定账号，拒绝 body/header 中的自报身份与
+供应商凭据，执行 16 MiB 大小限制、精确模型 allowlist、
 限流和幂等检查，然后把原始 OpenAI-compatible 字节转发到固定 CPU-only Ollama
 loopback。SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，
 流式中断不会续传。请求幂等键保持由 run ID 与 exact body 派生；

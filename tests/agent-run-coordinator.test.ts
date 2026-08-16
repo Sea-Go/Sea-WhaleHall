@@ -627,7 +627,7 @@ describe("AgentRunCoordinator", () => {
 			},
 			{
 				code: "MODEL_RELAY_UNAVAILABLE" as const,
-				message: "personal relay key is temporarily unavailable",
+				message: "account model relay is temporarily unavailable",
 				retryable: false,
 			},
 			{

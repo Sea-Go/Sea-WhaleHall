@@ -108,10 +108,61 @@ describe("desktop model-call boundary", () => {
 		}
 		expect(findContaining(sources, "/v1/activity/completions")).toEqual([]);
 	});
+
+	test("keeps bearer as the sole desktop model credential", async () => {
+		const sources = await productionSourceFiles();
+		expect(
+			findContaining(sources, "data-staging.sea-ridethewindbreakthewaves.xyz"),
+		).toEqual([]);
+		const forbiddenSendPatterns = [
+			/headers\.(?:set|append)\(\s*["']x-whalehall-agent-key["']/iu,
+			/["']x-whalehall-agent-key["']\s*:/iu,
+			/\bagentKey\s*:/u,
+			/\brequireAgentKey\b/u,
+			/\bauthenticateAgentKey\b/u,
+			/\bpersonalRelayKey\b/u,
+		];
+		for (const [path, source] of sources) {
+			for (const pattern of forbiddenSendPatterns) {
+				expect(
+					source,
+					`${path} must not restore retired key authentication`,
+				).not.toMatch(pattern);
+			}
+		}
+
+		const remoteAuth = sources.get("src/bun/remote-auth-session.ts") ?? "";
+		expect(remoteAuth).toContain('headers.delete("x-whalehall-agent-key")');
+		const provisioner = sources.get("scripts/provision-relay-owner.ts") ?? "";
+		expect(provisioner).not.toContain("agentKeyHash");
+		expect(provisioner).not.toContain("randomBytes");
+
+		for (const path of ["config.template.yaml", "config.example.yaml"]) {
+			const configuration = await readFile(join(repositoryRoot, path), "utf8");
+			expect(configuration).not.toMatch(/^\s*(?:apikey|baseurl):/imu);
+		}
+	});
 });
 
 async function sourceFiles(): Promise<Map<string, string>> {
 	const paths = await listTypeScriptFiles(join(repositoryRoot, "src"));
+	const files = await Promise.all(
+		paths.map(
+			async (path) =>
+				[relative(repositoryRoot, path), await readFile(path, "utf8")] as const,
+		),
+	);
+	return new Map(files);
+}
+
+async function productionSourceFiles(): Promise<Map<string, string>> {
+	const paths = (
+		await Promise.all(
+			["src", "services", "scripts"].map((path) =>
+				listProductionSourceFiles(join(repositoryRoot, path)),
+			),
+		)
+	).flat();
 	const files = await Promise.all(
 		paths.map(
 			async (path) =>
@@ -128,6 +179,18 @@ async function listTypeScriptFiles(directory: string): Promise<string[]> {
 			const path = join(directory, entry.name);
 			if (entry.isDirectory()) return listTypeScriptFiles(path);
 			return entry.isFile() && path.endsWith(".ts") ? [path] : [];
+		}),
+	);
+	return nested.flat();
+}
+
+async function listProductionSourceFiles(directory: string): Promise<string[]> {
+	const entries = await readdir(directory, { withFileTypes: true });
+	const nested = await Promise.all(
+		entries.map(async (entry) => {
+			const path = join(directory, entry.name);
+			if (entry.isDirectory()) return listProductionSourceFiles(path);
+			return entry.isFile() && /\.(?:[cm]?[jt]sx?)$/u.test(path) ? [path] : [];
 		}),
 	);
 	return nested.flat();

@@ -13,6 +13,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import type {
 	RelayClaimResult,
+	RelayModelPurpose,
 	RelayRecordClaim,
 	RelayRecordStore,
 	RelayUser,
@@ -178,6 +179,7 @@ export class FileSessionStore implements SessionStore {
 interface FileRelayMetadata {
 	recordId: string;
 	subject: string;
+	purpose: RelayModelPurpose;
 	idempotencyKey: string;
 	requestHash: string;
 	model: string;
@@ -213,7 +215,10 @@ export class FileRelayRecordStore implements RelayRecordStore {
 			const metadataPath = join(this.directory, `${keyName}.json`);
 			const existing = await readMetadata(metadataPath);
 			if (existing && existing.expiresAtMs > claim.createdAtMs) {
-				if (existing.requestHash !== claim.requestHash) {
+				if (
+					existing.requestHash !== claim.requestHash ||
+					existing.purpose !== claim.purpose
+				) {
 					return { kind: "conflict", recordId: existing.recordId };
 				}
 				if (existing.state === "inflight")
@@ -257,6 +262,7 @@ export class FileRelayRecordStore implements RelayRecordStore {
 			const metadata: FileRelayMetadata = {
 				recordId,
 				subject: claim.subject,
+				purpose: claim.purpose,
 				idempotencyKey: claim.idempotencyKey,
 				requestHash: claim.requestHash,
 				model: claim.model,
@@ -399,13 +405,17 @@ async function deleteRecordArtifacts(
 
 function validateUser(value: unknown): RelayUser {
 	if (!isRecord(value)) throw new Error("Relay user record is malformed.");
+	// Existing deployments may retain this retired hash until their next
+	// operator-managed rewrite. Validate its old shape, then discard it.
+	if (value.agentKeyHash !== undefined) {
+		boundedString(value.agentKeyHash, 4_096);
+	}
 	return {
 		id: boundedString(value.id, 256),
 		email: boundedString(value.email, 320).trim().toLowerCase(),
 		displayName: boundedString(value.displayName, 256),
 		initials: boundedString(value.initials, 16),
 		passwordHash: boundedString(value.passwordHash, 4_096),
-		agentKeyHash: boundedString(value.agentKeyHash, 4_096),
 		disabled: value.disabled === true,
 	};
 }
@@ -447,6 +457,10 @@ function validateMetadata(value: unknown): FileRelayMetadata {
 	return {
 		recordId: safeRecordId(value.recordId),
 		subject: boundedString(value.subject, 256),
+		purpose:
+			// Before purpose became mandatory this store served only the ordinary
+			// chat route. Classify those records as agent without weakening replay.
+			value.purpose === undefined ? "agent" : relayModelPurpose(value.purpose),
 		idempotencyKey: boundedString(value.idempotencyKey, 200),
 		requestHash: hexDigest(value.requestHash),
 		model: boundedString(value.model, 256),
@@ -462,6 +476,13 @@ function validateMetadata(value: unknown): FileRelayMetadata {
 				? null
 				: boundedString(value.failureReason, 64),
 	};
+}
+
+function relayModelPurpose(value: unknown): RelayModelPurpose {
+	if (value !== "agent" && value !== "activity") {
+		throw new Error("Relay model purpose is invalid.");
+	}
+	return value;
 }
 
 function scopedFileName(subject: string, idempotencyKey: string): string {

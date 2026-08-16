@@ -10,7 +10,6 @@ import type { AuthSessionIdentity } from "./auth-session";
 import {
 	type CloudSyncConfiguration,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-	WHALEHALL_DATA_CENTER_STAGING_BASE_URL,
 } from "./client-config";
 import {
 	cloudSyncConsentDigest,
@@ -1113,10 +1112,7 @@ function validateDataCenterBaseUrl(value: string): URL {
 	) {
 		throw new Error("DataCenter base URL must be an HTTPS origin.");
 	}
-	if (
-		url.origin !== WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL &&
-		url.origin !== WHALEHALL_DATA_CENTER_STAGING_BASE_URL
-	) {
+	if (url.origin !== WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL) {
 		throw new Error("DataCenter base URL is not a code-owned origin.");
 	}
 	return new URL(url.origin);

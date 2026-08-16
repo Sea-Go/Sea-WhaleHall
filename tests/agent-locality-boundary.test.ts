@@ -21,6 +21,14 @@ describe("local Agent production boundary", () => {
 		expect(clientConfiguration).toContain(
 			"WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL",
 		);
+		expect(clientConfiguration).toContain(
+			'"https://data.sea-ridethewindbreakthewaves.xyz"',
+		);
+		expect(clientConfiguration).not.toContain("data-staging");
+		expect(bunComposition).toContain(
+			"baseUrl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL",
+		);
+		expect(bunComposition).not.toContain("configuration.agent.baseurl");
 		expect(clientConfiguration).not.toContain("/v1/activity/analyze");
 		expect(activityPrompt).toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
 		expect(activityPrompt).toContain("COMPRESSED_ACTIVITY_EVENTS_JSON");

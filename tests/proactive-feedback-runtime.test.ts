@@ -212,7 +212,7 @@ describe("ProactiveFeedbackRuntime", () => {
 		fixture.runtime.dispose();
 	});
 
-	test("does not attribute windows when personal relay capability is absent", async () => {
+	test("does not attribute windows when model relay capability is absent", async () => {
 		const fixture = createFixture({ capabilityAvailable: false });
 		await fixture.runtime.prepareSessionActivation(identity);
 		await fixture.runtime.sessionReady(identity);

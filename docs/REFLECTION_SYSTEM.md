@@ -543,13 +543,9 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 ```yaml
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
-  apikey: "IGNORED_USE_AUTHENTICATED_SESSION"
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
-  apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
 
 cloudSync:
   enabled: false
@@ -560,11 +556,9 @@ cloudSync:
     presence: "off"
 ```
 
-运行时两个角色都使用 agent 选择的 production 或 staging DataCenter origin。reflection
-中单独填写的已批准 origin 和旧 model-origin 值只为兼容解析，都会归一化到 agent origin；
-reflection `apikey` 被忽略。personal relay key 必须是 owner-only user-data 文件中的直接
-字面量密钥，不支持环境变量引用。无效、部分、symlink 或超大的配置会回退到安全默认值，且
-不会覆盖用户原文件。
+运行时两个角色都使用代码固定的 production DataCenter origin。旧文件中的 `baseurl` 和
+`apikey` 只为兼容解析，其值在配置边界被丢弃，既不会发送或记录，也不会触发自动重写。
+无效、部分、symlink 或超大的配置会回退到安全默认值，且不会覆盖用户原文件。
 
 这份 YAML 配置家里云 Qwen 1.7B 的两个固定 relay 能力：reflection 及 Agent。内部 Teacher
 和可选 ModernBERT 仍是独立的 runtime trust boundary：Teacher lock 与 Timeline artifact pin 不会因为填写一个 URL 而被放宽；
@@ -586,7 +580,7 @@ action、短时间片与隐私边界，后者负责目标相关有效投入的�
 两个 Skill 的文件和执行结果只存在于本地 Sidecar，不属于远端 relay，也不会成为产品 Tool。`context.response_contract` 锚定 request ID、
 window ID、唯一稳定的 window source anchor、完整 source cursor 清单、封窗原因、时间范围和时区，
 不替换或裁剪原始窗口。这个 prompt 只在客户端 Bun/Sidecar 的单次调用中存在；Sidecar 经 Mastra
-生成 OpenAI-compatible body，再由 Bun 使用当前 session bearer + personal relay key 请求固定
+生成 OpenAI-compatible body，再由 Bun 使用当前 session bearer 请求固定
 DataCenter `/v1/chat/completions`，并添加 code-owned `purpose=activity`。
 
 DataCenter 验证当前 user、模型 allowlist、大小、限流与转发；它不含 system prompt、事件聚合、

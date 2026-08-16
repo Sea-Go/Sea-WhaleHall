@@ -244,6 +244,9 @@ function assertRelayRequest(request: ModelRelayRequest): void {
 		"user_id" in request.body ||
 		"accessToken" in request.body ||
 		"apiKey" in request.body ||
+		"purpose" in request.body ||
+		"modelPurpose" in request.body ||
+		"model_purpose" in request.body ||
 		"token" in request.body ||
 		"key" in request.body ||
 		"api_key" in request.body ||

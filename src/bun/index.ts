@@ -81,7 +81,7 @@ import {
 	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
-	WHALEHALL_RELAY_MODEL,
+	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
 import { DataCenterContentCrypto } from "./data-center-crypto";
@@ -225,23 +225,9 @@ const activityReflectionConfiguration =
 const agentModelConfiguration = agentModelConfigurationFromConfiguration(
 	clientConfiguration.configuration,
 );
-if (activityReflectionConfiguration === null) {
-	console.warn(
-		"WhaleHall cloud reflection is inactive until the authenticated personal relay capability is provisioned.",
-	);
-}
-if (agentModelConfiguration === null) {
-	console.warn(
-		"WhaleHall Agent relay is inactive until the literal personal relay key is provisioned.",
-	);
-}
-const configuredModelId =
-	agentModelConfiguration?.name ??
-	activityReflectionConfiguration?.modelName ??
-	WHALEHALL_RELAY_MODEL;
-const reflectionModelId =
-	activityReflectionConfiguration?.modelName ?? WHALEHALL_RELAY_MODEL;
-const dataCenterModelApiBaseUrl = `${clientConfiguration.configuration.agent.baseurl}/v1`;
+const configuredModelId = agentModelConfiguration.name;
+const reflectionModelId = activityReflectionConfiguration.modelName;
+const dataCenterModelApiBaseUrl = `${WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL}/v1`;
 const agentModelRelayProvider = "whalehall-relay";
 const reflectionModelRelayProvider = "whalehall-activity-reflection";
 let activeGoalStore!: AccountScopedActiveGoalStore;
@@ -308,8 +294,7 @@ async function publishReflectionRuntime(
 }
 
 const authSession = new RemoteAuthSessionManager(credentialStore, {
-	baseUrl: clientConfiguration.configuration.agent.baseurl,
-	agentKey: agentModelConfiguration?.apikey,
+	baseUrl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 	onBeforeSessionActivate: (identity) =>
 		proactiveFeedbackRuntime.prepareSessionActivationForAuth(identity),
 	onSessionActivated: (identity) =>
@@ -398,9 +383,7 @@ proactiveFeedbackRuntime = new ProactiveFeedbackRuntime({
 	repository: agentRepository,
 	currentSession: () => authSession.captureCurrentSession(),
 	isCurrentSession: (identity) => authSession.isCurrentSession(identity),
-	isCapabilityAvailable: () =>
-		activityReflectionConfiguration !== null &&
-		agentModelConfiguration !== null,
+	isCapabilityAvailable: () => true,
 	cutoverCloudOwner: (accountId) => cutoverReflectionCloudOwner(accountId),
 	startDelivery: async () => {
 		const runtime = reflectionRuntime;
@@ -452,9 +435,9 @@ const modelRelay = new ModelRelayTransport(authSession, { purpose: "agent" });
 const activityAgentModelRelay = new ModelRelayTransport(authSession, {
 	purpose: "activity",
 });
-const activityReflectionModelRelay = activityReflectionConfiguration
-	? new ModelRelayTransport(authSession, { purpose: "activity" })
-	: null;
+const activityReflectionModelRelay = new ModelRelayTransport(authSession, {
+	purpose: "activity",
+});
 const sidecar = new MastraSidecarClient({
 	nodePath,
 	entryPath: sidecarEntryPath,
@@ -547,13 +530,11 @@ activityAgentRelayBridge = new SidecarModelRelayBridge({
 	modelId: configuredModelId,
 	send: (event) => sidecar.sendRelayEvent(event),
 });
-if (activityReflectionModelRelay !== null) {
-	activityReflectionRelayBridge = new SidecarModelRelayBridge({
-		transport: activityReflectionModelRelay,
-		modelId: reflectionModelId,
-		send: (event) => sidecar.sendRelayEvent(event),
-	});
-}
+activityReflectionRelayBridge = new SidecarModelRelayBridge({
+	transport: activityReflectionModelRelay,
+	modelId: reflectionModelId,
+	send: (event) => sidecar.sendRelayEvent(event),
+});
 const agentToolPolicy = new AgentToolPolicy(agentRepository);
 const agentToolExecutor = new WhaleHallAgentToolExecutor({
 	calendar: calendarRepository,
@@ -623,7 +604,7 @@ const agent = new AgentRuntime(
 	{ requireStartupGoalPreparation: true },
 );
 dataCenterSync = new DataCenterSyncService({
-	baseUrl: clientConfiguration.configuration.agent.baseurl,
+	baseUrl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 	configuration: clientConfiguration.configuration.cloudSync,
 	repository: agentRepository,
 	events: agent,
@@ -2405,12 +2386,7 @@ async function startActivityWindowDelivery(
 	const owner = authSession.captureCurrentSession();
 	const configuration = activityReflectionConfiguration;
 	const reflectionBridge = activityReflectionRelayBridge;
-	if (
-		configuration === null ||
-		reflectionBridge === null ||
-		owner === null ||
-		shutdownRequested
-	) {
+	if (reflectionBridge === null || owner === null || shutdownRequested) {
 		return;
 	}
 	if (

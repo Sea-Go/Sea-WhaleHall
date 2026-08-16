@@ -1,15 +1,11 @@
-# Internal-test model content is sent through the authenticated DataCenter
-# session. Reflection keeps its legacy shape for compatible owner files, but
-# its apikey is ignored; only agent.apikey is a personal relay credential.
+# Model content is sent through the authenticated DataCenter session. The
+# DataCenter origin is fixed in application code; this file contains no model
+# credential or endpoint.
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
-  apikey: "IGNORED_USE_AUTHENTICATED_SESSION"
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
-  apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
 
 # Cloud synchronization is opt-in. Content uses a DataCenter-issued X25519
 # context and client-envelope.v1 only when this flag and the domain consent are

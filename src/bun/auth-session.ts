@@ -7,8 +7,8 @@ export type { AuthSessionIdentity } from "../shared/session-identity";
 /** A session generation binds local encrypted work to one exact account login. */
 /**
  * The Bun composition depends only on this narrow desktop authentication
- * contract. Implementations keep access, refresh, and personal relay keys out
- * of both renderers and the Mastra sidecar.
+ * contract. Implementations keep access and refresh credentials out of both
+ * renderers and the Mastra sidecar.
  */
 export interface DesktopAuthSessionManager {
 	readonly accountId: string | null;

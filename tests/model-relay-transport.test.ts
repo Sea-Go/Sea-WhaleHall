@@ -242,7 +242,7 @@ describe("ModelRelayTransport", () => {
 		expect(requests).toBe(2);
 	});
 
-	test("rejects every renderer or sidecar supplied identity alias", async () => {
+	test("rejects every renderer or sidecar supplied identity, credential, or purpose alias", async () => {
 		const transport = new ModelRelayTransport({} as RemoteAuthSessionManager);
 		for (const [index, key] of [
 			"userId",
@@ -250,6 +250,9 @@ describe("ModelRelayTransport", () => {
 			"user_id",
 			"accessToken",
 			"apiKey",
+			"purpose",
+			"modelPurpose",
+			"model_purpose",
 			"token",
 			"key",
 			"api_key",

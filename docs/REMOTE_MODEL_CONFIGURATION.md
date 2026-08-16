@@ -7,23 +7,19 @@
 POST https://data.sea-ridethewindbreakthewaves.xyz/v1/chat/completions
 ```
 
-每个请求同时要求当前原生会话的 bearer、该账号的 personal relay key、由 run ID 与
-exact body 派生的 `Idempotency-Key`，以及 Bun 主进程添加的
+每个请求要求当前原生会话的 bearer、由 run ID 与 exact body 派生的
+`Idempotency-Key`，以及 Bun 主进程添加的
 `X-WhaleHall-Model-Purpose: agent|activity`。DataCenter 只从认证 session 确定 user；
-Renderer、Sidecar 和 JSON body 都不能提供或覆盖 user/purpose/token/key。
+Renderer、Sidecar 和 JSON body 都不能提供或覆盖 user/purpose/token。
 
 ## 配置
 
 ```yaml
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
-  apikey: "IGNORED_USE_AUTHENTICATED_SESSION"
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
-  apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
 
 cloudSync:
   enabled: false
@@ -34,22 +30,21 @@ cloudSync:
     presence: "off"
 ```
 
-`reflection` 暂时保留三字段形态以兼容已存在的 owner 文件；它的 `baseurl` 在运行时跟随
-agent 角色选择的 production/staging DataCenter，`apikey` 被忽略。旧 model-origin 地址和
-旧 reflection key 可以被解析并迁移为这一语义，但不会再被发送。唯一有效的模型能力是
-owner-only `agent.apikey`。
+新配置的两个角色只允许选择固定模型名。DataCenter production origin 是代码所有常量，
+不能由安装包、环境变量或用户配置覆盖。旧文件中的 `reflection.baseurl`、
+`reflection.apikey`、`agent.baseurl` 和 `agent.apikey` 仍可兼容解析，但其值在配置边界即被
+丢弃：不会发送、记录、返回给运行时，也不会触发自动重写。
 
-checked-in 示例只有不可用占位符。首次启动把模板复制到 user-data `config.yaml`，权限为
-`0600`；无效文件不会被应用自动重写。首版按安装配置一个 personal relay key，因此开发
-成员应使用与其 DataCenter 账号匹配的内测配置；切换到不匹配账号时模型请求会安全失败，
-不会退回 model origin。
+首次启动把 checked-in 模板复制到 user-data `config.yaml`，权限为 `0600`；无效或旧文件
+不会被应用自动重写。用户只需用 DataCenter 账号登录即可获得模型 relay 能力。账号切换会
+终止旧账号流并使用新 session；无有效 session 时安全失败，不会退回独立 model origin。
 
 ## 内测审计与数据边界
 
 此版本明确是 internal-only。为满足开发调试，DataCenter 按认证 user 保存每次模型请求的
 exact request 和 exact response，并提供受控的开发者查询/筛选。首版允许这些模型内容在
 云端明文持久化，不启用客户端内容加密。它不改变普通 desktop-event cloud sync 的默认
-关闭状态，也不把 token、personal relay key 或上游凭据写入审计内容。
+关闭状态，也不把 token 或上游凭据写入审计内容。
 
 客户端仍负责完整 prompt、Memory、Tool、规划 Workflow、时间/action/分数校验与本地恢复；
 DataCenter 只认证、分类、审计和转发 OpenAI-compatible 字节。流式响应保持顺序和取消；
@@ -67,7 +62,7 @@ DataCenter 只认证、分类、审计和转发 OpenAI-compatible 字节。流�
 
 ## 失败策略
 
-无 session、personal key 不匹配、DataCenter 不可用、响应丢失或账号切换都 fail closed。
+无 session、DataCenter 不可用、响应丢失或账号切换都 fail closed。
 客户端不回退独立 model origin，不把 user ID 写入 body，也不把凭据下发给 Sidecar/Renderer。
 响应丢失保留账号专属 outbox 并用相同 request/idempotency key 重试；取消保留既有 durable
 恢复状态。

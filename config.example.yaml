@@ -1,15 +1,11 @@
-# Internal-test model content is sent through the authenticated DataCenter
-# session. The reflection key field remains only so old config files keep their
-# shape; it is ignored and is not a credential.
+# Model content is sent through the authenticated DataCenter session. The
+# DataCenter origin is fixed in application code; this file contains no model
+# credential or endpoint.
 reflection:
   name: "qwen3:1.7b"
-  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
-  apikey: "IGNORED_USE_AUTHENTICATED_SESSION"
 
 agent:
   name: "qwen3:1.7b"
-  baseurl: "https://data.sea-ridethewindbreakthewaves.xyz"
-  apikey: "REPLACE_WITH_PERSONAL_RELAY_KEY"
 
 # Content encryption is implemented but remains separately opt-in. Enabling it
 # also requires a per-domain "content" consent below.

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
@@ -11,16 +11,9 @@ import {
 import { dirname, resolve } from "node:path";
 import { createScryptPasswordHash } from "../services/model-relay/password";
 import type { RelayUser } from "../services/model-relay/types";
-import {
-	DEFAULT_CLIENT_CONFIGURATION,
-	UNPROVISIONED_REFLECTION_RELAY_KEY,
-	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-	WHALEHALL_RELAY_MODEL,
-	writeProvisionedClientConfiguration,
-} from "../src/bun/client-config";
 
 type Arguments = {
-	configPath: string;
+	ignoredConfigPath: string | null;
 	usersPath: string;
 	replace: boolean;
 };
@@ -34,44 +27,27 @@ async function main(): Promise<void> {
 	const passwordConfirmation = await prompt("再次输入登录密码: ", true);
 	if (password !== passwordConfirmation)
 		throw new Error("两次输入的登录密码不一致。");
-	const personalRelayKey = `whk_${randomBytes(32).toString("base64url")}`;
-	const [passwordHash, agentKeyHash] = await Promise.all([
-		createScryptPasswordHash(password),
-		createScryptPasswordHash(personalRelayKey),
-	]);
+	const passwordHash = await createScryptPasswordHash(password);
 	const user: RelayUser = {
 		id: `user-${randomUUID()}`,
 		email,
 		displayName,
 		initials,
 		passwordHash,
-		agentKeyHash,
 	};
 
 	writeRelayUsersFile(args.usersPath, user, args.replace);
-	writeProvisionedClientConfiguration({
-		path: args.configPath,
-		configuration: {
-			reflection: {
-				name: WHALEHALL_RELAY_MODEL,
-				baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-				apikey: UNPROVISIONED_REFLECTION_RELAY_KEY,
-			},
-			agent: {
-				name: WHALEHALL_RELAY_MODEL,
-				baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-				apikey: personalRelayKey,
-			},
-			cloudSync: structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync),
-		},
-	});
+	if (args.ignoredConfigPath !== null) {
+		process.stderr.write(
+			"--config 已退役；Bearer-only 客户端不读取或修改该路径。\n",
+		);
+	}
 
 	process.stdout.write(
 		`${[
-			"已写入 owner-only 本机 config.yaml 与仅含哈希的 relay 用户文件。",
-			`本机配置：${args.configPath}`,
+			"已写入仅含登录密码哈希的 relay 用户文件。",
 			`待部署用户文件：${args.usersPath}`,
-			"个人 relay key 仅保存在本机 config.yaml，未打印、未写入用户文件；用户文件不再包含 reflection 凭据字段。",
+			"模型请求仅使用该账号登录会话的 Bearer；未生成或写入第二模型凭据。",
 		].join("\n")}\n`,
 	);
 }
@@ -98,16 +74,19 @@ function parseArguments(values: readonly string[]): Arguments {
 		}
 		throw new Error(`未知参数：${value}`);
 	}
-	if (!configPath || !usersPath) {
+	if (!usersPath) {
 		throw new Error(
-			"用法：bun run provision:relay-owner -- --config /绝对路径/config.yaml --users /绝对路径/relay-users.json [--replace]",
+			"用法：bun run provision:relay-owner -- --users /绝对路径/relay-users.json [--replace]",
 		);
 	}
-	if (!configPath.startsWith("/") || !usersPath.startsWith("/")) {
-		throw new Error("--config 和 --users 必须是绝对路径。");
+	if (
+		!usersPath.startsWith("/") ||
+		(configPath !== null && !configPath.startsWith("/"))
+	) {
+		throw new Error("--users 与兼容的 --config 参数必须是绝对路径。");
 	}
 	return {
-		configPath: resolve(configPath),
+		ignoredConfigPath: configPath === null ? null : resolve(configPath),
 		usersPath: resolve(usersPath),
 		replace,
 	};

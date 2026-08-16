@@ -15,7 +15,7 @@ flowchart TB
     Pet["Transparent Canvas pet window"] -->|"Typed RPC"| Bun
     Bun <-->|"private Content-Length stdio"| Mastra["Bundled Node 22.18 Mastra Sidecar\nconversation, planning, Tool loop"]
     Mastra -->|"complete OpenAI-compatible request"| Bun
-    Bun -.->|"HTTPS · bearer · personal relay key · purpose · Agent v2 signature"| DataCenter["DataCenter data origin\nauth, model audit, Agent, cloud sync"]
+    Bun -.->|"HTTPS · bearer · purpose · Agent v2 signature"| DataCenter["DataCenter data origin\nauth, model audit, Agent, cloud sync"]
     DataCenter -->|"chat model forwarding"| LLM["OpenAI-compatible model"]
     Bun --> AgentDB["Encrypted Agent SQLite"]
     Bun --> CredentialHelper["Credential helper\nCredential Manager / Keychain"]
@@ -58,9 +58,9 @@ prompt from a sealed window, and normalizes the model JSON into reviewable
 time/action events plus a local score receipt. Mastra does not absorb the
 sensor catalogue or the deterministic Reflection pipeline.
 
-Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. Every configurable remote model call, including sealed-window reflection, uses DataCenter's single `/v1/chat/completions` gateway with a short-lived bearer and the same account's personal relay key. Bun adds the code-owned `agent` or `activity` purpose; the request body cannot declare a user. Internal-test DataCenter deployments retain the exact request and response for developer review under the authenticated user. Before a WhaleHall release, DataCenter must already provide durable exact-response replay and user-scoped audit storage, and the pinned [DataCenter integration workflow](.github/workflows/datacenter-integration.yml) must pass for the exact WhaleHall candidate. Browser contexts never communicate directly, never receive bearer tokens or relay keys, and never supply account identity.
+Conversation history assembly, planning workflows, clarification, Tool selection, approval binding, conflict validation, recovery, and local persistence run inside the desktop application. Every configurable remote model call, including sealed-window reflection, uses DataCenter's single `/v1/chat/completions` gateway with the current account's short-lived bearer. Bun adds the code-owned `agent` or `activity` purpose; the request body cannot declare a user. Internal-test DataCenter deployments retain the exact request and response for developer review under the authenticated user. Before a WhaleHall release, DataCenter must already provide durable exact-response replay and user-scoped audit storage, and the pinned [DataCenter integration workflow](.github/workflows/datacenter-integration.yml) must pass for the exact WhaleHall candidate. Browser contexts never communicate directly, never receive bearer tokens, and never supply account identity.
 
-Production login uses the configured remote email/password service. The submitted password is immediately cleared from React state; access and refresh credentials remain in Bun's secure credential storage, while the personal relay key remains only in owner-provisioned local `config.yaml`. WhaleHall does not fabricate credentials or fall back to a remote Agent.
+Production login uses the fixed DataCenter email/password service. The submitted password is immediately cleared from React state; access and refresh credentials remain in Bun's secure credential storage. Model relay access is derived only from that authenticated session: WhaleHall does not provision a second desktop key, fabricate credentials, or fall back to a remote Agent.
 
 ## Development areas / 开发区域
 
@@ -73,7 +73,7 @@ Production login uses the configured remote email/password service. The submitte
 | Electrobun main process   | [`src/bun`](src/bun)                                         | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition           |
 | Shared frontend contracts | [`src/shared`](src/shared)                                   | Electrobun Typed RPC schemas shared with both WebViews                                                            |
 | Credential helper         | [`whalehall-credential-helper`](whalehall-credential-helper) | One-shot OS vault access without secrets in argv, environment, stderr, or Renderer RPC                            |
-| Remote model relay        | [`services/model-relay`](services/model-relay)               | Model-origin reflection forwarding only in production Caddy; never an Agent                                       |
+| Remote model relay        | [`services/model-relay`](services/model-relay)               | Bearer-only agent/activity model forwarding at the DataCenter boundary; never an Agent                            |
 | Rust Local protocol       | [`whalehall-local/protocol`](whalehall-local/protocol)       | JSONL requests, responses, tool descriptors, events, and errors                                                   |
 | Rust Local core           | [`whalehall-local/core`](whalehall-local/core)               | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence                      |
 | Rust Local server         | [`whalehall-local/server`](whalehall-local/server)           | Concurrent stdin/stdout JSONL server and packaged executable                                                      |
@@ -201,11 +201,12 @@ The pre-build hook builds the React views, compiles `whalehall-local-server` and
 the credential helper, verifies and stages the pinned Node runtime, and bundles
 the local Mastra Sidecar. On macOS it also builds and signs the Observer and
 versioned Vault Broker before the existing post-wrap and post-package security
-checks run. Desktop authentication and model requests use the owner-provisioned
-`config.yaml` fixed-role configuration. Reflection, chat, Agent registration,
-and opt-in cloud sync all use the selected code-owned DataCenter origin. Only
-the personal relay key is a live model credential; the legacy reflection key
-field is ignored. Upstream model credentials remain in DataCenter. See
+checks run. Desktop authentication and model requests use the fixed production
+DataCenter origin. The owner-editable `config.yaml` selects only the two fixed
+model roles and cloud-sync policy; it contains no endpoint or model credential.
+Historical `baseurl` and `apikey` fields are accepted for compatibility but are
+discarded without rewriting the file. Upstream model credentials remain in
+DataCenter. See
 [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) for
 the configuration and deployment boundary, and
 [`docs/CONVERSATION_AGENT_INTEGRATION.md`](docs/CONVERSATION_AGENT_INTEGRATION.md)

@@ -4,8 +4,6 @@ export interface RelayUser {
 	displayName: string;
 	initials: string;
 	passwordHash: string;
-	/** scrypt hash of the owner's personal desktop relay key. */
-	agentKeyHash: string;
 	disabled?: boolean;
 }
 
@@ -47,6 +45,7 @@ export interface SessionStore {
 export interface RelayRecordClaim {
 	recordId: string;
 	subject: string;
+	purpose: RelayModelPurpose;
 	idempotencyKey: string;
 	requestHash: string;
 	model: string;
@@ -55,6 +54,8 @@ export interface RelayRecordClaim {
 	createdAtMs: number;
 	expiresAtMs: number;
 }
+
+export type RelayModelPurpose = "agent" | "activity";
 
 export interface StoredRelayResponse {
 	status: number;
