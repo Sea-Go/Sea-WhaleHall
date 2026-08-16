@@ -4,6 +4,7 @@ import {
 	CredentialHelperClient,
 	CredentialHelperError,
 	type CredentialHelperRunner,
+	LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL,
 } from "../src/bun/credential-helper-client";
 
 const encoder = new TextEncoder();
@@ -70,12 +71,44 @@ describe("CredentialHelperClient", () => {
 		});
 	});
 
-	test("maps NOT_FOUND reads to null and rejects arbitrary secret names", async () => {
-		const client = createClient(async () => response("ERR NOT_FOUND\n", undefined, 1));
-		await expect(client.read(AUTH_REFRESH_TOKEN_CREDENTIAL)).resolves.toBeNull();
+	test("maps production NOT_FOUND reads to null and keeps legacy access delete-only", async () => {
+		const operations: Array<Record<string, unknown>> = [];
+		const client = createClient(async () =>
+			response("ERR NOT_FOUND\n", undefined, 1),
+		);
+		await expect(
+			client.read(AUTH_REFRESH_TOKEN_CREDENTIAL),
+		).resolves.toBeNull();
+		await expect(
+			client.read(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL),
+		).rejects.toEqual(
+			expect.objectContaining({ code: "SECRET_NAME_NOT_ALLOWED" }),
+		);
+		await expect(
+			client.write(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL, "retired-token"),
+		).rejects.toEqual(
+			expect.objectContaining({ code: "SECRET_NAME_NOT_ALLOWED" }),
+		);
 		await expect(client.read("auth.access-token.current")).rejects.toEqual(
 			expect.objectContaining({ code: "SECRET_NAME_NOT_ALLOWED" }),
 		);
+
+		const deletionClient = createClient(async (input) => {
+			operations.push(parseRequest(input).header);
+			return response("OK DELETED 1\n");
+		});
+		await expect(
+			deletionClient.delete(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL),
+		).resolves.toBeUndefined();
+		expect(operations).toEqual([
+			{
+				version: 1,
+				kind: "named-secret",
+				operation: "delete",
+				installationId: "install-1",
+				name: LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL,
+			},
+		]);
 	});
 
 	test("fails closed on malformed payload sizes and any stderr", async () => {
@@ -126,10 +159,9 @@ function parseRequest(input: Uint8Array): {
 	const newline = input.indexOf(10);
 	if (newline < 1) throw new CredentialHelperError("PROTOCOL_ERROR");
 	return {
-		header: JSON.parse(new TextDecoder().decode(input.subarray(0, newline))) as Record<
-			string,
-			unknown
-		>,
+		header: JSON.parse(
+			new TextDecoder().decode(input.subarray(0, newline)),
+		) as Record<string, unknown>,
 		body: input.slice(newline + 1),
 	};
 }

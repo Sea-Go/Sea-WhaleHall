@@ -6,7 +6,7 @@ import {
 } from "../src/bun/remote-auth-session";
 import type { ProactiveFeedbackPolicy } from "../src/shared/proactive-feedback";
 
-const refreshTokenKey = "auth.refresh-token.current";
+const refreshTokenKey = "auth.refresh-token.production.v1";
 
 class MemoryCredentials implements SecureCredentialStore {
 	readonly values = new Map<string, string>();

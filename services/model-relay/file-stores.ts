@@ -479,7 +479,7 @@ function validateMetadata(value: unknown): FileRelayMetadata {
 }
 
 function relayModelPurpose(value: unknown): RelayModelPurpose {
-	if (value !== "agent" && value !== "activity") {
+	if (value !== "agent" && value !== "activity" && value !== "planning") {
 		throw new Error("Relay model purpose is invalid.");
 	}
 	return value;

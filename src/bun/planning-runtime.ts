@@ -328,11 +328,11 @@ export class WhaleHallPlanningRuntime {
 			? (plan.estimates.find((item) => item.id === proposed.estimateId) ?? null)
 			: null;
 		const windowRevision = active ?? proposed;
-		const calendar = await this.agent.listPlanningCalendar({
+		const calendar = await this.agent.listAllPlanningCalendar({
 			sourcePlanId: plan.id,
 		});
 		const calendarById = new Map(
-			calendar.events.map((event) => [event.eventId, event]),
+			calendar.map((event) => [event.eventId, event]),
 		);
 		const schedulesByTask = new Map<
 			string,

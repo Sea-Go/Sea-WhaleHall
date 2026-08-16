@@ -78,6 +78,8 @@ export type ClientConfigurationLoadResult = {
 	configuration: ClientConfiguration;
 	path: string;
 	status: ClientConfigurationLoadStatus;
+	/** Retired or unverifiable configuration consent never crosses origins. */
+	cloudSyncConsentBlockedByRetiredOrigin: boolean;
 };
 
 export type LoadOrCreateClientConfigurationOptions = {
@@ -120,12 +122,15 @@ export function loadOrCreateClientConfiguration(
 				configuration: structuredClone(DEFAULT_CLIENT_CONFIGURATION),
 				path,
 				status: "legacy",
+				cloudSyncConsentBlockedByRetiredOrigin: true,
 			};
 		}
 		return {
 			configuration: parsed.configuration,
 			path,
 			status: seeded ? "seeded" : "loaded",
+			cloudSyncConsentBlockedByRetiredOrigin:
+				parsed.cloudSyncConsentBlockedByRetiredOrigin,
 		};
 	} catch {
 		return defaultConfiguration(path, "invalid");
@@ -165,6 +170,7 @@ function defaultConfiguration(
 		configuration: structuredClone(DEFAULT_CLIENT_CONFIGURATION),
 		path,
 		status,
+		cloudSyncConsentBlockedByRetiredOrigin: true,
 	};
 }
 
@@ -202,17 +208,16 @@ function readRegularFile(path: string): string {
 	return readFileSync(path, "utf8");
 }
 
-function parseConfiguration(
-	source: string,
-):
-	| { kind: "current"; configuration: ClientConfiguration }
+function parseConfiguration(source: string):
+	| {
+			kind: "current";
+			configuration: ClientConfiguration;
+			cloudSyncConsentBlockedByRetiredOrigin: boolean;
+	  }
 	| { kind: "legacy" } {
 	const value = Bun.YAML.parse(source);
 	if (isLegacyConfiguration(value)) return { kind: "legacy" };
-	return {
-		kind: "current",
-		configuration: normalizeClientConfiguration(value),
-	};
+	return { kind: "current", ...normalizeClientConfiguration(value) };
 }
 
 function isLegacyConfiguration(value: unknown): boolean {
@@ -223,7 +228,10 @@ function isLegacyConfiguration(value: unknown): boolean {
 	);
 }
 
-function normalizeClientConfiguration(value: unknown): ClientConfiguration {
+function normalizeClientConfiguration(value: unknown): {
+	configuration: ClientConfiguration;
+	cloudSyncConsentBlockedByRetiredOrigin: boolean;
+} {
 	if (
 		!isRecord(value) ||
 		!(
@@ -233,14 +241,44 @@ function normalizeClientConfiguration(value: unknown): ClientConfiguration {
 	) {
 		throw new Error("Client configuration root is invalid.");
 	}
+	const reflection = normalizeModelConfiguration(
+		value.reflection,
+		"reflection",
+	);
+	const agent = normalizeModelConfiguration(value.agent, "agent");
+	const cloudSyncConsentBlockedByRetiredOrigin = legacyAgentOriginChanged(
+		value.agent,
+	);
 	return {
-		reflection: normalizeModelConfiguration(value.reflection, "reflection"),
-		agent: normalizeModelConfiguration(value.agent, "agent"),
-		cloudSync:
-			value.cloudSync === undefined
+		configuration: {
+			reflection,
+			agent,
+			cloudSync: cloudSyncConsentBlockedByRetiredOrigin
 				? structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync)
-				: normalizeCloudSyncConfiguration(value.cloudSync),
+				: value.cloudSync === undefined
+					? structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync)
+					: normalizeCloudSyncConfiguration(value.cloudSync),
+		},
+		cloudSyncConsentBlockedByRetiredOrigin,
 	};
+}
+
+function legacyAgentOriginChanged(value: unknown): boolean {
+	if (!isRecord(value) || value.baseurl === undefined) return false;
+	if (typeof value.baseurl !== "string") return true;
+	try {
+		const endpoint = new URL(value.baseurl.trim());
+		return !(
+			endpoint.origin === WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL &&
+			(endpoint.pathname === "" || endpoint.pathname === "/") &&
+			endpoint.username === "" &&
+			endpoint.password === "" &&
+			endpoint.search === "" &&
+			endpoint.hash === ""
+		);
+	} catch {
+		return true;
+	}
 }
 
 function normalizeModelConfiguration(

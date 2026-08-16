@@ -22,6 +22,11 @@ pub const DEFAULT_VAULT_LIST_LIMIT: usize = 100;
 pub const MAX_VAULT_LIST_LIMIT: usize = 1_000;
 pub const DEFAULT_PLANNING_VAULT_REFERENCE_LIMIT: usize = 100;
 pub const MAX_PLANNING_VAULT_REFERENCE_LIMIT: usize = 1_000;
+pub const DEFAULT_CALENDAR_LIST_LIMIT: usize = 100;
+pub const MAX_CALENDAR_LIST_LIMIT: usize = 1_000;
+/// Leaves 128 KiB for the response envelope, request identifier, and future
+/// protocol fields while keeping a calendar page below the JSONL line limit.
+pub const MAX_CALENDAR_LIST_RESULT_BYTES: usize = MAX_JSONL_LINE_BYTES - 128 * 1024;
 
 pub mod error_codes {
     pub const INVALID_REQUEST: &str = "INVALID_REQUEST";
@@ -1267,7 +1272,7 @@ pub struct PlanningOperationGetResult {
     pub result: Option<Value>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CalendarListParams {
     #[serde(default)]
@@ -1280,12 +1285,33 @@ pub struct CalendarListParams {
     pub from_date: Option<String>,
     #[serde(default)]
     pub to_date_exclusive: Option<String>,
+    /// Opaque cursor returned by the preceding page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Maximum number of stored rows scanned by one page. The core validates
+    /// this value against `MAX_CALENDAR_LIST_LIMIT` before querying SQLite.
+    #[serde(default = "default_calendar_list_limit")]
+    pub limit: usize,
+}
+
+impl Default for CalendarListParams {
+    fn default() -> Self {
+        Self {
+            source_plan_id: None,
+            source_task_id: None,
+            from_date: None,
+            to_date_exclusive: None,
+            cursor: None,
+            limit: DEFAULT_CALENDAR_LIST_LIMIT,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarListResult {
     pub events: Vec<PlanningCalendarEvent>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1496,6 +1522,10 @@ const fn default_planning_vault_reference_limit() -> usize {
     DEFAULT_PLANNING_VAULT_REFERENCE_LIMIT
 }
 
+const fn default_calendar_list_limit() -> usize {
+    DEFAULT_CALENDAR_LIST_LIMIT
+}
+
 fn default_object_value() -> Value {
     Value::Object(serde_json::Map::new())
 }
@@ -1662,6 +1692,38 @@ mod tests {
         assert_eq!(encoded["references"][0]["source"], "history");
         assert!(encoded["references"][0].get("runtimePayload").is_none());
         assert!(encoded["references"][0].get("goal").is_none());
+    }
+
+    #[test]
+    fn calendar_list_pagination_defaults_and_wire_shape_are_stable() {
+        let params: CalendarListParams = serde_json::from_value(serde_json::json!({}))
+            .expect("parse backward-compatible calendar list request");
+        assert_eq!(params.cursor, None);
+        assert_eq!(params.limit, DEFAULT_CALENDAR_LIST_LIMIT);
+
+        let explicit: CalendarListParams = serde_json::from_value(serde_json::json!({
+            "cursor": "cl1_6576656e742d31",
+            "limit": 7
+        }))
+        .expect("parse paginated calendar list request");
+        assert_eq!(explicit.cursor.as_deref(), Some("cl1_6576656e742d31"));
+        assert_eq!(explicit.limit, 7);
+
+        let result = serde_json::to_value(CalendarListResult {
+            events: Vec::new(),
+            next_cursor: Some("cl1_6576656e742d31".to_owned()),
+        })
+        .expect("serialize paginated calendar list result");
+        assert_eq!(result["events"], serde_json::json!([]));
+        assert_eq!(result["nextCursor"], "cl1_6576656e742d31");
+        assert!(
+            serde_json::from_value::<CalendarListParams>(serde_json::json!({
+                "cursor": null,
+                "limit": 10,
+                "offset": 1
+            }))
+            .is_err()
+        );
     }
 
     #[test]

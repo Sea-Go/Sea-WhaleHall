@@ -1,5 +1,10 @@
 import { z } from "zod";
 import {
+	MAX_PLANNING_MODEL_CALENDAR_EVENTS,
+	MAX_PLANNING_MODEL_CONTEXT_MESSAGES,
+	MAX_PLANNING_MODEL_OBSERVATION_EVIDENCE,
+} from "../planning/model";
+import {
 	PLAN_TASK_PURPOSES,
 	PLAN_TASK_STATUSES,
 	PLAN_TYPES,
@@ -63,7 +68,7 @@ export const dynamicPlanningInputSchema = z
 					})
 					.strict(),
 			)
-			.max(256),
+			.max(MAX_PLANNING_MODEL_CONTEXT_MESSAGES),
 		currentTasks: z
 			.array(
 				z
@@ -113,7 +118,7 @@ export const dynamicPlanningInputSchema = z
 					})
 					.strict(),
 			)
-			.max(1_000),
+			.max(MAX_PLANNING_MODEL_OBSERVATION_EVIDENCE),
 		calendarEvents: z
 			.array(
 				z
@@ -133,7 +138,7 @@ export const dynamicPlanningInputSchema = z
 					})
 					.strict(),
 			)
-			.max(2_000),
+			.max(MAX_PLANNING_MODEL_CALENDAR_EVENTS),
 	})
 	.strict();
 

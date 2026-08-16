@@ -8,10 +8,29 @@ import { isSemanticEventV2 } from "./timeline-v2/contract";
 import type { CoverageLevel, SemanticEventV2 } from "./timeline-v2/types";
 
 export const MAX_JSONL_LINE_BYTES = 1024 * 1024;
+/** Count bound per byte-bounded native calendar page. */
+export const LOCAL_PLANNING_CALENDAR_PAGE_LIMIT = 100;
 export const LOCAL_CONTROL_TIMEOUT_MS = 5000;
 export const LOCAL_PERMISSION_REFRESH_TIMEOUT_MS = 32_000;
 export const LOCAL_KEY_MIGRATION_TIMEOUT_MS = 120_000;
 export const LOCAL_TOOL_TIMEOUT_MS = 30_000;
+
+const localProtocolUtf8Encoder = new TextEncoder();
+
+/** Matches SQLite BINARY ordering for the UTF-8 planning identifiers on disk. */
+export function compareLocalUtf8Binary(left: string, right: string): number {
+	const leftBytes = localProtocolUtf8Encoder.encode(left);
+	const rightBytes = localProtocolUtf8Encoder.encode(right);
+	const sharedLength = Math.min(leftBytes.length, rightBytes.length);
+	for (let index = 0; index < sharedLength; index += 1) {
+		const leftByte = leftBytes[index];
+		const rightByte = rightBytes[index];
+		if (leftByte === undefined || rightByte === undefined) break;
+		const difference = leftByte - rightByte;
+		if (difference !== 0) return difference;
+	}
+	return leftBytes.length - rightBytes.length;
+}
 
 export type LocalMethod =
 	| "runtime.health"
@@ -485,10 +504,13 @@ export type LocalPlanningCalendarList = {
 	sourceTaskId?: string;
 	fromDate?: string;
 	toDateExclusive?: string;
+	cursor?: string;
+	limit?: number;
 };
 
 export type LocalPlanningCalendarListResult = {
 	events: LocalPlanningCalendarEvent[];
+	nextCursor: string | null;
 };
 
 export type LocalPlanningCalendarMutation =

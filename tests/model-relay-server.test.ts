@@ -288,12 +288,24 @@ describe("model relay forwarding", () => {
 				"x-whalehall-agent-key": "a".repeat(1_025),
 			}),
 		);
+		const planning = await fixture.handler(
+			chatRequest(accessToken, body, "planning-request", {
+				"x-whalehall-model-purpose": "planning",
+			}),
+		);
 
 		expect(missingBearer.status).toBe(401);
 		expect(withoutLegacyKey.status).toBe(200);
 		expect(arbitraryLegacyKey.status).toBe(200);
 		expect(overlongLegacyKey.status).toBe(200);
-		expect(upstreamCalls).toBe(3);
+		expect(planning.status).toBe(200);
+		expect(upstreamCalls).toBe(4);
+		expect(fixture.records.snapshot().map((record) => record.purpose)).toEqual([
+			"agent",
+			"agent",
+			"agent",
+			"planning",
+		]);
 	});
 
 	test("forwards exact request bytes, tool schemas, and SSE bytes without leaking desktop credentials upstream", async () => {

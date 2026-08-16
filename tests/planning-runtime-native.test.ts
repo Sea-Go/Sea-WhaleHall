@@ -206,10 +206,10 @@ class FakeNativePlanningAgent {
 		return planningMutationResult(snapshot);
 	}
 
-	async listPlanningCalendar(): ReturnType<
-		AgentRuntime["listPlanningCalendar"]
+	async listAllPlanningCalendar(): ReturnType<
+		AgentRuntime["listAllPlanningCalendar"]
 	> {
-		return { events: [] };
+		return [];
 	}
 
 	async mutatePlanningCalendar(

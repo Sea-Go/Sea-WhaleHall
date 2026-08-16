@@ -44,6 +44,9 @@ describe("desktop model-call boundary", () => {
 		expect(main).toContain('purpose: "planning"');
 		expect(main).toContain("planningRelayBridge.open");
 		expect(main).toContain("hasPendingInvocation(ownerRunId)");
+		expect(
+			main.match(/dynamicPlanningModel\?\.cancelPending\(\)/gu),
+		).toHaveLength(2);
 		const auth = sources.get("src/bun/remote-auth-session.ts") ?? "";
 		expect(auth).toContain('purpose !== "planning"');
 		expect(auth).toContain('headers.set("x-whalehall-model-purpose", purpose)');

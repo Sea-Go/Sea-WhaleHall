@@ -4,9 +4,10 @@ import type {
 	AuthSessionIdentity,
 	DesktopAuthSessionManager,
 } from "./auth-session";
+import { AUTH_REFRESH_TOKEN_CREDENTIAL } from "./credential-helper-client";
 import type { ModelRelayPurpose } from "./model-relay-transport";
 
-const REFRESH_TOKEN_KEY = "auth.refresh-token.current";
+const REFRESH_TOKEN_KEY = AUTH_REFRESH_TOKEN_CREDENTIAL;
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 export interface SecureCredentialStore {
@@ -126,11 +127,12 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			const transition = this.transitionTail;
 			const refresh = this.refreshPromise?.operation ?? null;
 			const remoteSettlements = [...this.remoteSettlements];
-			await Promise.allSettled(
-				refresh === null
-					? [transition, ...remoteSettlements]
-					: [transition, refresh, ...remoteSettlements],
-			);
+			const settlements: Promise<unknown>[] = [
+				transition,
+				...remoteSettlements,
+			];
+			if (refresh !== null) settlements.push(refresh);
+			await Promise.allSettled(settlements);
 			if (
 				this.transitionTail === transition &&
 				(this.refreshPromise?.operation ?? null) === refresh &&

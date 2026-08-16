@@ -7,6 +7,7 @@ import {
 	PlanningModelInvocationError,
 	type PlanningModelOutput,
 	type PlanningModelPort,
+	planningModelTransportRequest,
 } from "../agent/planning/model";
 import { MastraSidecarError } from "./mastra-sidecar-client";
 
@@ -83,9 +84,10 @@ export class MastraPlanningModel implements PlanningModelPort {
 			abort();
 		}, this.timeoutMs);
 		try {
+			const transportRequest = planningModelTransportRequest(request);
 			const output = await this.options.sidecar.request<unknown>(
 				"planning.analyze",
-				{ invocationId, requestId, analysis: request },
+				{ invocationId, requestId, analysis: transportRequest },
 				{
 					requestId: `dynamic:${requestId}`,
 					timeoutMs: this.timeoutMs,
@@ -148,15 +150,24 @@ export class MastraPlanningModel implements PlanningModelPort {
 		return this.pending.has(invocationId);
 	}
 
-	close(): void {
-		this.closed = true;
-		for (const [invocationId, pending] of this.pending) {
-			if (!pending.controller.signal.aborted) {
-				pending.controller.abort();
+	/** Revokes every account-bound capability without permanently closing the model. */
+	cancelPending(): void {
+		const pendingInvocations = [...this.pending.entries()];
+		// Revoke capabilities synchronously before notifying any fallible relay.
+		this.pending.clear();
+		for (const [invocationId, pending] of pendingInvocations) {
+			if (!pending.controller.signal.aborted) pending.controller.abort();
+			try {
 				this.options.onInvocationAbort?.(invocationId);
+			} catch {
+				// Capability revocation is authoritative; bridge abort is best effort.
 			}
 		}
-		this.pending.clear();
+	}
+
+	close(): void {
+		this.closed = true;
+		this.cancelPending();
 	}
 }
 

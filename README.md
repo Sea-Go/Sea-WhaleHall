@@ -74,7 +74,7 @@ Production login uses the fixed DataCenter email/password service. The submitted
 | Electrobun main process   | [`src/bun`](src/bun)                                         | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition           |
 | Shared frontend contracts | [`src/shared`](src/shared)                                   | Electrobun Typed RPC schemas shared with both WebViews                                                            |
 | Credential helper         | [`whalehall-credential-helper`](whalehall-credential-helper) | One-shot OS vault access without secrets in argv, environment, stderr, or Renderer RPC                            |
-| Remote model relay        | [`services/model-relay`](services/model-relay)               | Bearer-only agent/activity model forwarding at the DataCenter boundary; never an Agent                            |
+| Remote model relay        | [`services/model-relay`](services/model-relay)               | Bearer-only agent/activity/planning forwarding at the DataCenter boundary; never an Agent                         |
 | Rust Local protocol       | [`whalehall-local/protocol`](whalehall-local/protocol)       | JSONL requests, responses, tool descriptors, events, and errors                                                   |
 | Rust Local core           | [`whalehall-local/core`](whalehall-local/core)               | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence                      |
 | Rust Local server         | [`whalehall-local/server`](whalehall-local/server)           | Concurrent stdin/stdout JSONL server and packaged executable                                                      |
@@ -206,8 +206,15 @@ checks run. Desktop authentication and model requests use the fixed production
 DataCenter origin. The owner-editable `config.yaml` selects only the two fixed
 model roles and cloud-sync policy; it contains no endpoint or model credential.
 Historical `baseurl` and `apikey` fields are accepted for compatibility but are
-discarded without rewriting the file. Upstream model credentials remain in
-DataCenter. See
+discarded without rewriting the file. Every installation performs one
+code-versioned production-origin cutover before authentication: an SQLite
+`prepared` journal atomically clears origin-scoped transport state, the retired
+refresh-token slot is deleted, and only then is the journal marked `complete`.
+Production uses credential and SQLite namespaces unknown to retired builds, so
+a concurrently running old client cannot feed staging state back into the new
+runtime. Retired or unverifiable cloud consent remains disabled until explicit
+production consent, while local conversations and other account data remain
+untouched. Upstream model credentials remain in DataCenter. See
 [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) for
 the configuration and deployment boundary, and
 [`docs/CONVERSATION_AGENT_INTEGRATION.md`](docs/CONVERSATION_AGENT_INTEGRATION.md)

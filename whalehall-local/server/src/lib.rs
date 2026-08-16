@@ -62,6 +62,7 @@ use observer::{ObserverSupervisor, ObserverSupervisorConfig};
 const EVENT_RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const OBSERVATION_RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const STARTUP_GOAL_CHANGE_ENV: &str = "WHALEHALL_STARTUP_GOAL_CHANGE_JSON";
+const MAX_REQUEST_ID_BYTES: usize = 256;
 
 pub async fn serve<R, W>(reader: R, writer: W) -> io::Result<()>
 where
@@ -763,6 +764,14 @@ where
                 continue;
             }
         };
+        if request.id.is_empty() || request.id.len() > MAX_REQUEST_ID_BYTES {
+            let _ = output_tx.send(OutboundMessage::Response(Response::failure(
+                None,
+                error_codes::INVALID_REQUEST,
+                format!("Request id must contain 1 to {MAX_REQUEST_ID_BYTES} UTF-8 bytes."),
+            )));
+            continue;
+        }
 
         dispatch_request(
             request,
@@ -1701,6 +1710,31 @@ fn is_empty_object(value: &Value) -> bool {
     value.as_object().is_some_and(Map::is_empty)
 }
 
+fn serialize_bounded_outbound_message(message: &OutboundMessage) -> io::Result<Vec<u8>> {
+    let line = serde_json::to_vec(message).map_err(io::Error::other)?;
+    if line.len() <= MAX_JSONL_LINE_BYTES {
+        return Ok(line);
+    }
+
+    let response_id = match message {
+        OutboundMessage::Response(Response::Success { id, .. }) => Some(id.clone()),
+        OutboundMessage::Response(Response::Failure { id, .. }) => id.clone(),
+        _ => None,
+    };
+    let failure = |id| {
+        OutboundMessage::Response(Response::failure(
+            id,
+            error_codes::INTERNAL_ERROR,
+            format!("Outbound JSONL line exceeds {MAX_JSONL_LINE_BYTES} bytes."),
+        ))
+    };
+    let bounded = serde_json::to_vec(&failure(response_id)).map_err(io::Error::other)?;
+    if bounded.len() <= MAX_JSONL_LINE_BYTES {
+        return Ok(bounded);
+    }
+    serde_json::to_vec(&failure(None)).map_err(io::Error::other)
+}
+
 async fn write_messages<W>(
     mut writer: W,
     mut receiver: mpsc::UnboundedReceiver<OutboundMessage>,
@@ -1709,7 +1743,8 @@ where
     W: AsyncWrite + Unpin,
 {
     while let Some(message) = receiver.recv().await {
-        let line = serde_json::to_vec(&message).map_err(io::Error::other)?;
+        let line = serialize_bounded_outbound_message(&message)?;
+        debug_assert!(line.len() <= MAX_JSONL_LINE_BYTES);
         writer.write_all(&line).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
@@ -2869,5 +2904,68 @@ mod tests {
         server.await.expect("server join").expect("server result");
         assert!(line.contains("INVALID_REQUEST"));
         assert!(line.contains("1048576"));
+    }
+
+    #[test]
+    fn outbound_writer_replaces_an_oversized_message_with_a_bounded_failure() {
+        let oversized = OutboundMessage::Response(Response::success(
+            "calendar-list-large".to_owned(),
+            serde_json::json!({"events": ["x".repeat(MAX_JSONL_LINE_BYTES)]}),
+        ));
+        assert!(
+            serde_json::to_vec(&oversized)
+                .expect("serialize oversized fixture")
+                .len()
+                > MAX_JSONL_LINE_BYTES
+        );
+        let bounded = serialize_bounded_outbound_message(&oversized)
+            .expect("replace oversized outbound message");
+        assert!(bounded.len() <= MAX_JSONL_LINE_BYTES);
+        let response: Response = serde_json::from_slice(&bounded).expect("parse bounded failure");
+        assert!(matches!(
+            response,
+            Response::Failure {
+                id: Some(id),
+                error,
+                ..
+            } if id == "calendar-list-large" && error.code == error_codes::INTERNAL_ERROR
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_request_ids_that_cannot_fit_the_bounded_response_envelope() {
+        let (mut input, server_input) = duplex(4096);
+        let (server_output, output) = duplex(4096);
+        let (_directory, activity) = test_activity();
+        let server = tokio::spawn(serve_with_activity(
+            BufReader::new(server_input),
+            server_output,
+            activity,
+        ));
+        let request = serde_json::json!({
+            "id": "r".repeat(MAX_REQUEST_ID_BYTES + 1),
+            "method": "runtime.health",
+            "params": {}
+        });
+        input
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("write request with unbounded id");
+        input.shutdown().await.expect("close input");
+
+        let mut output = BufReader::new(output);
+        let mut line = String::new();
+        output.read_line(&mut line).await.expect("read rejection");
+        server.await.expect("server join").expect("server result");
+        let response: Response = serde_json::from_str(&line).expect("parse rejection");
+        assert!(matches!(
+            response,
+            Response::Failure {
+                id: None,
+                error,
+                ..
+            } if error.code == error_codes::INVALID_REQUEST
+        ));
+        assert!(line.len() <= MAX_JSONL_LINE_BYTES + 1);
     }
 }

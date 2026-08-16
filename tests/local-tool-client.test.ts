@@ -5,10 +5,14 @@ import { join } from "node:path";
 import type {
 	LocalEventGoalChange,
 	LocalMonitoringStatus,
+	LocalPlanningCalendarEvent,
 	LocalPlanningPlanSnapshot,
 	LocalToolDescriptor,
 } from "../src/agent/local-protocol";
-import { parseLocalMessage } from "../src/agent/local-protocol";
+import {
+	compareLocalUtf8Binary,
+	parseLocalMessage,
+} from "../src/agent/local-protocol";
 import {
 	type ChildTransport,
 	createLocalToolProcessEnvironment,
@@ -1278,6 +1282,77 @@ describe("LocalToolClient", () => {
 		await client.stop();
 	});
 
+	test("validates and forwards byte-bounded calendar page cursors", async () => {
+		const requests: Array<{ method: string; params: Record<string, unknown> }> =
+			[];
+		const maximumEventIdCursor = `cl1_${"61".repeat(256)}`;
+		const child = new FakeChild((line, process) => {
+			const request = JSON.parse(line) as {
+				id: string;
+				method: string;
+				params: Record<string, unknown>;
+			};
+			if (request.method !== "calendar.list") return;
+			requests.push({ method: request.method, params: request.params });
+			const cursor = request.params.cursor;
+			process.respond({
+				id: request.id,
+				ok: true,
+				result:
+					cursor === maximumEventIdCursor
+						? { events: [localCalendarEvent("event-b")], nextCursor: null }
+						: {
+								events: [localCalendarEvent("event-a")],
+								nextCursor: maximumEventIdCursor,
+							},
+			});
+		});
+		const client = new LocalToolClient("fake", { spawn: () => child });
+		await client.start();
+
+		await expect(
+			client.listPlanningCalendar({
+				fromDate: "2026-08-13",
+				toDateExclusive: "2026-08-22",
+				limit: 100,
+			}),
+		).resolves.toEqual({
+			events: [localCalendarEvent("event-a")],
+			nextCursor: maximumEventIdCursor,
+		});
+		await expect(
+			client.listPlanningCalendar({
+				cursor: maximumEventIdCursor,
+				limit: 100,
+			}),
+		).resolves.toEqual({
+			events: [localCalendarEvent("event-b")],
+			nextCursor: null,
+		});
+		expect(requests).toEqual([
+			{
+				method: "calendar.list",
+				params: {
+					fromDate: "2026-08-13",
+					toDateExclusive: "2026-08-22",
+					limit: 100,
+				},
+			},
+			{
+				method: "calendar.list",
+				params: { cursor: maximumEventIdCursor, limit: 100 },
+			},
+		]);
+		await client.stop();
+	});
+
+	test("compares non-ASCII identifiers using SQLite UTF-8 BINARY semantics", () => {
+		const privateUse = "event-\u{e000}";
+		const supplementary = "event-\u{10000}";
+		expect(supplementary < privateUse).toBe(true);
+		expect(compareLocalUtf8Binary(privateUse, supplementary)).toBeLessThan(0);
+	});
+
 	test("times out a tool call and sends a best-effort cancellation", async () => {
 		const methods: string[] = [];
 		const child = new FakeChild((line) => {
@@ -1427,6 +1502,32 @@ function desktopEvent(): DesktopEventV1 {
 		goalVersion: null,
 		sensitivity: "metadata",
 		payload: { appId: "com.microsoft.VSCode", appName: "Visual Studio Code" },
+	};
+}
+
+function localCalendarEvent(eventId: string): LocalPlanningCalendarEvent {
+	return {
+		schemaVersion: "calendar.v1",
+		eventId,
+		title: "外部日程",
+		sealedContentRef: null,
+		redactedContent: false,
+		kind: "external",
+		state: "committed",
+		schedule: {
+			allDay: false,
+			start: "2026-08-14T01:00:00Z",
+			end: "2026-08-14T02:00:00Z",
+			timeZone: "Asia/Shanghai",
+		},
+		recurrence: null,
+		occurrenceId: null,
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+		userLocked: false,
+		editable: false,
+		version: 1,
 	};
 }
 

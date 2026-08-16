@@ -265,6 +265,21 @@ describe("EncryptedAgentRepository", () => {
 		});
 		await repository.appendDataCenterConsumerAudit(audit);
 		await repository.appendDataCenterConsumerAudit(audit);
+		const retainedConversation = {
+			accountId: "account-a",
+			id: "retained-conversation",
+			title: "保留本地会话",
+			createdAtMs: 12_200,
+			updatedAtMs: 12_200,
+		};
+		await repository.putConversation(retainedConversation);
+		const secondRetainedConversation = {
+			...retainedConversation,
+			accountId: "account-b",
+			id: "retained-conversation-b",
+			title: "保留其他账户本地会话",
+		};
+		await repository.putConversation(secondRetainedConversation);
 
 		const conflicting = { ...batch, batchKey: `${batch.batchKey}-other` };
 		await expect(
@@ -350,7 +365,119 @@ describe("EncryptedAgentRepository", () => {
 		await expect(
 			reopened.getDataCenterPendingAdvance("account-a"),
 		).resolves.toEqual(advance);
+		const secondBatch = createPendingDataCenterBatch(
+			"account-b",
+			[
+				{
+					...JSON.parse(batch.body).events[0],
+					eventId: `de1_${"b".repeat(64)}`,
+				},
+			],
+			13_100,
+		);
+		await reopened.putDataCenterPendingBatch(secondBatch);
+		const cutoverId = "datacenter-production-origin-v1";
+		expect(reopened.prepareDataCenterProductionOriginCutover(cutoverId)).toBe(
+			"prepared",
+		);
+		await expect(
+			reopened.getDataCenterAgentCredentials("account-a"),
+		).resolves.toBeNull();
+		await expect(
+			reopened.getDataCenterAgentCredentials("account-b"),
+		).resolves.toBeNull();
+		await expect(
+			reopened.getDataCenterPendingAdvance("account-a"),
+		).resolves.toBeNull();
+		await expect(
+			reopened.getDataCenterPendingBatch("account-b"),
+		).resolves.toBeNull();
+		expect(reopened.getDataCenterConsumerOwner()).toBeNull();
+		await expect(
+			reopened.listDataCenterConsumerAudits("account-a"),
+		).resolves.toEqual([]);
+		await expect(
+			reopened.getConversation("account-a", retainedConversation.id),
+		).resolves.toEqual(retainedConversation);
+		await expect(
+			reopened.getConversation("account-b", secondRetainedConversation.id),
+		).resolves.toEqual(secondRetainedConversation);
+
+		// Simulate an older process writing staging transport state after the first
+		// prepared transaction, then crashing before the external token is deleted.
+		await reopened.putDataCenterAgentCredentials(secondCredentials);
 		reopened.close();
+		const recovered = new EncryptedAgentRepository({
+			databasePath: path,
+			installationId: "install-1",
+			keyStore: keys,
+			now: () => 21_000,
+		});
+		expect(recovered.prepareDataCenterProductionOriginCutover(cutoverId)).toBe(
+			"prepared",
+		);
+		await expect(
+			recovered.getDataCenterAgentCredentials("account-b"),
+		).resolves.toBeNull();
+		recovered.completeDataCenterProductionOriginCutover(cutoverId);
+		expect(recovered.prepareDataCenterProductionOriginCutover(cutoverId)).toBe(
+			"already-complete",
+		);
+
+		// Completion is one-shot: transport state created by the fixed production
+		// runtime is retained on later starts.
+		await recovered.putDataCenterAgentCredentials(credentials);
+		await recovered.putDataCenterPendingBatch(batch);
+		expect(recovered.prepareDataCenterProductionOriginCutover(cutoverId)).toBe(
+			"already-complete",
+		);
+		await expect(
+			recovered.getDataCenterAgentCredentials("account-a"),
+		).resolves.toEqual(credentials);
+
+		// Simulate a staging process that already held a v7 connection when the v8
+		// migration completed. It can still write the retired physical table, but
+		// production reads exclusively from its new namespace.
+		const retiredWriter = new Database(path, { strict: true });
+		retiredWriter.exec(`
+			INSERT INTO datacenter_agent_credentials
+			 (account_id, key_version, cipher_version, state_nonce,
+			  state_ciphertext, updated_at_ms)
+			SELECT account_id, key_version, cipher_version, state_nonce,
+			       state_ciphertext, updated_at_ms
+			FROM datacenter_production_agent_credentials;
+
+			INSERT INTO datacenter_pending_batch
+			 (account_id, operation_key, request_hash, key_version, cipher_version,
+			  record_nonce, record_ciphertext, created_at_ms)
+			SELECT account_id, operation_key, request_hash, key_version, cipher_version,
+			       record_nonce, record_ciphertext, created_at_ms
+			FROM datacenter_production_pending_batch;
+		`);
+		expect(
+			retiredWriter
+				.query("SELECT COUNT(*) AS count FROM datacenter_agent_credentials")
+				.get(),
+		).toEqual({ count: 1 });
+		expect(
+			retiredWriter
+				.query("SELECT COUNT(*) AS count FROM datacenter_pending_batch")
+				.get(),
+		).toEqual({ count: 1 });
+		retiredWriter.close();
+		expect(
+			recovered.deleteDataCenterPendingBatch("account-a", batch.batchKey),
+		).toBeTrue();
+		expect(recovered.prepareDataCenterProductionOriginCutover(cutoverId)).toBe(
+			"already-complete",
+		);
+		await expect(
+			recovered.getDataCenterAgentCredentials("account-a"),
+		).resolves.toEqual(credentials);
+		await expect(
+			recovered.getDataCenterPendingBatch("account-a"),
+		).resolves.toBeNull();
+		recovered.close();
 	});
 
 	test("enforces signed i64 cursors in encrypted DataCenter records", async () => {
@@ -1240,7 +1367,7 @@ describe("EncryptedAgentRepository", () => {
 		repository.close();
 	});
 
-	test("upgrades schema v6 with the durable pending-reset journal", async () => {
+	test("upgrades schema v6 through the current durable journals", async () => {
 		const keys = new MemoryKeyStore();
 		const { path, repository } = createRepository(keys, () => 29_000);
 		await repository.ensureAccount("account-a");
@@ -1272,7 +1399,71 @@ describe("EncryptedAgentRepository", () => {
 			verified
 				.query("SELECT version FROM encrypted_agent_schema WHERE singleton = 1")
 				.get(),
-		).toEqual({ version: 7 });
+		).toEqual({ version: 8 });
+		verified.close();
+	});
+
+	test("upgrades schema v7 with the production-origin cutover journal", async () => {
+		const keys = new MemoryKeyStore();
+		const { path, repository } = createRepository(keys, () => 31_000);
+		await repository.ensureAccount("account-a");
+		repository.close();
+
+		const legacy = new Database(path, { strict: true });
+		legacy
+			.query(
+				"UPDATE encrypted_agent_schema SET version = 7 WHERE singleton = 1",
+			)
+			.run();
+		legacy.exec(`
+			DROP TABLE datacenter_origin_cutovers;
+			DROP TABLE datacenter_production_pending_batch;
+			DROP TABLE datacenter_production_pending_advance;
+			DROP TABLE datacenter_production_agent_credentials;
+			DROP TABLE datacenter_production_consumer_owner;
+			DROP TABLE datacenter_production_consumer_audit;
+		`);
+		legacy.close();
+
+		const upgraded = new EncryptedAgentRepository({
+			databasePath: path,
+			installationId: "install-1",
+			keyStore: keys,
+			now: () => 32_000,
+		});
+		expect(() =>
+			upgraded.completeDataCenterProductionOriginCutover(
+				"datacenter-production-origin-v1",
+			),
+		).toThrow("was not prepared");
+		expect(
+			upgraded.prepareDataCenterProductionOriginCutover(
+				"datacenter-production-origin-v1",
+			),
+		).toBe("prepared");
+		upgraded.completeDataCenterProductionOriginCutover(
+			"datacenter-production-origin-v1",
+		);
+		upgraded.close();
+
+		const verified = new Database(path, { readonly: true, strict: true });
+		expect(
+			verified
+				.query("SELECT version FROM encrypted_agent_schema WHERE singleton = 1")
+				.get(),
+		).toEqual({ version: 8 });
+		expect(
+			verified
+				.query(
+					`SELECT state, prepared_at_ms, completed_at_ms
+					 FROM datacenter_origin_cutovers WHERE cutover_id = ?`,
+				)
+				.get("datacenter-production-origin-v1"),
+		).toEqual({
+			state: "complete",
+			prepared_at_ms: 32_000,
+			completed_at_ms: 32_000,
+		});
 		verified.close();
 	});
 

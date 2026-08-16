@@ -76,6 +76,36 @@ export interface PlanningModelAnalysisRequest {
 	calendarEvents: readonly PlanningCalendarEvent[];
 }
 
+/** Private-stdio/model context bound; durable conversation history remains complete. */
+export const MAX_PLANNING_MODEL_CONTEXT_MESSAGES = 256;
+export const MAX_PLANNING_MODEL_OBSERVATION_EVIDENCE = 1_000;
+export const MAX_PLANNING_MODEL_CALENDAR_EVENTS = 2_000;
+
+/** Keeps the newest semantic context while preserving the authoritative snapshot. */
+export function planningModelTransportRequest(
+	request: PlanningModelAnalysisRequest,
+): PlanningModelAnalysisRequest {
+	if (
+		request.messages.length <= MAX_PLANNING_MODEL_CONTEXT_MESSAGES &&
+		request.observationEvidence.length <=
+			MAX_PLANNING_MODEL_OBSERVATION_EVIDENCE &&
+		request.calendarEvents.length <= MAX_PLANNING_MODEL_CALENDAR_EVENTS
+	) {
+		return request;
+	}
+	return {
+		...request,
+		messages: request.messages.slice(-MAX_PLANNING_MODEL_CONTEXT_MESSAGES),
+		observationEvidence: request.observationEvidence.slice(
+			-MAX_PLANNING_MODEL_OBSERVATION_EVIDENCE,
+		),
+		calendarEvents: request.calendarEvents.slice(
+			0,
+			MAX_PLANNING_MODEL_CALENDAR_EVENTS,
+		),
+	};
+}
+
 export interface PlanningModelPort {
 	readonly modelVersion: string;
 	analyze(

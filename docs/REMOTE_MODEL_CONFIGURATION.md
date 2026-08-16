@@ -9,7 +9,7 @@ POST https://data.sea-ridethewindbreakthewaves.xyz/v1/chat/completions
 
 每个请求要求当前原生会话的 bearer、由 run ID 与 exact body 派生的
 `Idempotency-Key`，以及 Bun 主进程添加的
-`X-WhaleHall-Model-Purpose: agent|activity`。DataCenter 只从认证 session 确定 user；
+`X-WhaleHall-Model-Purpose: agent|activity|planning`。DataCenter 只从认证 session 确定 user；
 Renderer、Sidecar 和 JSON body 都不能提供或覆盖 user/purpose/token。
 
 ## 配置
@@ -34,6 +34,19 @@ cloudSync:
 不能由安装包、环境变量或用户配置覆盖。旧文件中的 `reflection.baseurl`、
 `reflection.apikey`、`agent.baseurl` 和 `agent.apikey` 仍可兼容解析，但其值在配置边界即被
 丢弃：不会发送、记录、返回给运行时，也不会触发自动重写。
+
+每个安装都会按代码固定的 cutover ID 执行一次 production-origin 迁移，不依赖旧配置是否仍能
+证明来源。SQLite v8 先在同一事务中写入 `prepared` journal，并清除旧来源的设备凭据、待发送
+批次、consumer owner 与同步审计；随后删除旧版使用的 refresh-token 凭据名，最后才把 journal
+标记为 `complete`。任一步失败或崩溃都会在下一次认证和网络启动前重复安全清理。新版登录只读写
+旧版不知道的 production-only 凭据名，DataCenter 同步也只读写新的 production SQLite 表和
+本地 consumer cursor；新 credential helper 对旧凭据名仅允许删除，读取和写入都会拒绝。因此
+并行或降级运行的 staging 客户端不能把旧 token、pending、设备身份或 cursor 回灌给 production
+runtime。
+
+旧 `agent.baseurl` 属于非 production、旧 schema 或配置无效时，cloud sync 与全部 consent 仍会在
+每次加载时保持关闭，直到用户明确提供当前 production 配置与授权。旧配置文件、本地会话、其他
+账户数据和本地事件 journal 都不会被自动改写或删除。
 
 首次启动把 checked-in 模板复制到 user-data `config.yaml`，权限为 `0600`；无效或旧文件
 不会被应用自动重写。用户只需用 DataCenter 账号登录即可获得模型 relay 能力。账号切换会

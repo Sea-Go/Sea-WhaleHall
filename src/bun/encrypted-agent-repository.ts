@@ -42,7 +42,7 @@ import {
 	planningDraftDigest,
 } from "./planning-authority-digest";
 
-const DATABASE_SCHEMA_VERSION = 7;
+const DATABASE_SCHEMA_VERSION = 8;
 // Database schema version 2 was never published or used by a released build,
 // so no schema-2 ciphertext exists to migrate. Existing ciphertext remains
 // bound to schema=1; table evolution must not make account records undecryptable.
@@ -271,6 +271,10 @@ export interface DataCenterConsumerAuditRecord {
 	createdAtMs: number;
 }
 
+export type DataCenterProductionOriginCutoverPreparation =
+	| "prepared"
+	| "already-complete";
+
 export type EncryptedAgentRepositoryErrorCode =
 	| "INVALID_ARGUMENT"
 	| "ACCOUNT_KEY_MISSING"
@@ -374,8 +378,8 @@ type PreparedCipher = {
 };
 
 type DataCenterPendingTable =
-	| "datacenter_pending_batch"
-	| "datacenter_pending_advance";
+	| "datacenter_production_pending_batch"
+	| "datacenter_production_pending_advance";
 
 type PreparedCalendarEvent = {
 	record: AgentCalendarEventRecord;
@@ -555,6 +559,93 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		await this.accountContext(accountId);
 	}
 
+	/**
+	 * Establishes the crash journal and atomically drops only origin-bound
+	 * DataCenter transport state. A recovered prepared journal repeats the exact
+	 * cleanup before the external refresh-token deletion is retried.
+	 */
+	prepareDataCenterProductionOriginCutover(
+		cutoverId: string,
+	): DataCenterProductionOriginCutoverPreparation {
+		this.requireOpen();
+		validateStorageComponent(cutoverId, "cutoverId");
+		const preparedAtMs = this.now();
+		validateTimestamp(preparedAtMs, "preparedAtMs");
+		const prepare = this.database.transaction(() => {
+			const existing = this.database
+				.query(
+					"SELECT state FROM datacenter_origin_cutovers WHERE cutover_id = ?",
+				)
+				.get(cutoverId) as { state: "prepared" | "complete" } | null;
+			if (existing?.state === "complete") return "already-complete" as const;
+			if (existing === null) {
+				this.database
+					.query(
+						`INSERT INTO datacenter_origin_cutovers
+						 (cutover_id, state, prepared_at_ms, completed_at_ms)
+						 VALUES (?, 'prepared', ?, NULL)`,
+					)
+					.run(cutoverId, preparedAtMs);
+			}
+			this.database.query("DELETE FROM datacenter_pending_batch").run();
+			this.database.query("DELETE FROM datacenter_pending_advance").run();
+			this.database.query("DELETE FROM datacenter_agent_credentials").run();
+			this.database.query("DELETE FROM datacenter_consumer_owner").run();
+			this.database.query("DELETE FROM datacenter_consumer_audit").run();
+			this.database
+				.query("DELETE FROM datacenter_production_pending_batch")
+				.run();
+			this.database
+				.query("DELETE FROM datacenter_production_pending_advance")
+				.run();
+			this.database
+				.query("DELETE FROM datacenter_production_agent_credentials")
+				.run();
+			this.database
+				.query("DELETE FROM datacenter_production_consumer_owner")
+				.run();
+			this.database
+				.query("DELETE FROM datacenter_production_consumer_audit")
+				.run();
+			return "prepared" as const;
+		});
+		return prepare.immediate();
+	}
+
+	/** Marks a prepared origin cutover complete after the external token is gone. */
+	completeDataCenterProductionOriginCutover(cutoverId: string): void {
+		this.requireOpen();
+		validateStorageComponent(cutoverId, "cutoverId");
+		const completedAtMs = this.now();
+		validateTimestamp(completedAtMs, "completedAtMs");
+		const complete = this.database.transaction(() => {
+			const existing = this.database
+				.query(
+					"SELECT state FROM datacenter_origin_cutovers WHERE cutover_id = ?",
+				)
+				.get(cutoverId) as { state: "prepared" | "complete" } | null;
+			if (existing?.state === "complete") return;
+			if (existing?.state !== "prepared") {
+				throw invalidArgument(
+					"DataCenter production-origin cutover was not prepared.",
+				);
+			}
+			const result = this.database
+				.query(
+					`UPDATE datacenter_origin_cutovers
+					 SET state = 'complete', completed_at_ms = ?
+					 WHERE cutover_id = ? AND state = 'prepared'`,
+				)
+				.run(completedAtMs, cutoverId);
+			if (result.changes !== 1) {
+				throw invalidArgument(
+					"DataCenter production-origin cutover changed concurrently.",
+				);
+			}
+		});
+		complete.immediate();
+	}
+
 	async getDataCenterAgentCredentials(
 		accountId: string,
 	): Promise<DataCenterAgentCredentialsRecord | null> {
@@ -564,13 +655,13 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			.query(
 				`SELECT key_version, cipher_version, state_nonce AS nonce,
 				        state_ciphertext AS ciphertext, updated_at_ms
-				 FROM datacenter_agent_credentials WHERE account_id = ?`,
+				 FROM datacenter_production_agent_credentials WHERE account_id = ?`,
 			)
 			.get(accountId) as DataCenterCipherRow | null;
 		if (!row) return null;
 		const value = await this.decryptJson(
 			accountId,
-			"datacenter_agent_credentials",
+			"datacenter_production_agent_credentials",
 			accountId,
 			"state",
 			row,
@@ -588,14 +679,14 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		validateDataCenterAgentCredentialsRecord(record);
 		const cipher = await this.encryptJson(
 			record.accountId,
-			"datacenter_agent_credentials",
+			"datacenter_production_agent_credentials",
 			record.accountId,
 			"state",
 			record,
 		);
 		this.database
 			.query(
-				`INSERT INTO datacenter_agent_credentials
+				`INSERT INTO datacenter_production_agent_credentials
 				 (account_id, key_version, cipher_version, state_nonce,
 				  state_ciphertext, updated_at_ms)
 				 VALUES (?, ?, ?, ?, ?, ?)
@@ -621,7 +712,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	): Promise<DataCenterPendingBatchRecord | null> {
 		return this.getDataCenterPendingRecord(
 			accountId,
-			"datacenter_pending_batch",
+			"datacenter_production_pending_batch",
 			isDataCenterPendingBatchRecord,
 		);
 	}
@@ -631,7 +722,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	): Promise<void> {
 		validateDataCenterPendingBatchRecord(record);
 		await this.putDataCenterPendingRecord(
-			"datacenter_pending_batch",
+			"datacenter_production_pending_batch",
 			record.accountId,
 			record.batchKey,
 			record.requestHash,
@@ -665,7 +756,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		}
 		const cipher = await this.encryptJson(
 			advance.accountId,
-			"datacenter_pending_advance",
+			"datacenter_production_pending_advance",
 			advance.accountId,
 			"record",
 			advance,
@@ -674,7 +765,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			const existing = this.database
 				.query(
 					`SELECT operation_key, request_hash
-					 FROM datacenter_pending_batch WHERE account_id = ?`,
+					 FROM datacenter_production_pending_batch WHERE account_id = ?`,
 				)
 				.get(batch.accountId) as {
 				operation_key: string;
@@ -690,7 +781,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			if (
 				this.database
 					.query(
-						"SELECT 1 AS present FROM datacenter_pending_advance WHERE account_id = ?",
+						"SELECT 1 AS present FROM datacenter_production_pending_advance WHERE account_id = ?",
 					)
 					.get(batch.accountId) !== null
 			) {
@@ -700,14 +791,14 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			}
 			const deleted = this.database
 				.query(
-					`DELETE FROM datacenter_pending_batch
+					`DELETE FROM datacenter_production_pending_batch
 					 WHERE account_id = ? AND operation_key = ? AND request_hash = ?`,
 				)
 				.run(batch.accountId, batch.batchKey, batch.requestHash);
 			if (deleted.changes !== 1) return false;
 			this.database
 				.query(
-					`INSERT INTO datacenter_pending_advance
+					`INSERT INTO datacenter_production_pending_advance
 					 (account_id, operation_key, request_hash, key_version,
 					  cipher_version, record_nonce, record_ciphertext, created_at_ms)
 					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -729,7 +820,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 
 	deleteDataCenterPendingBatch(accountId: string, batchKey: string): boolean {
 		return this.deleteDataCenterPendingRecord(
-			"datacenter_pending_batch",
+			"datacenter_production_pending_batch",
 			accountId,
 			batchKey,
 		);
@@ -740,7 +831,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	): Promise<DataCenterPendingAdvanceRecord | null> {
 		return this.getDataCenterPendingRecord(
 			accountId,
-			"datacenter_pending_advance",
+			"datacenter_production_pending_advance",
 			isDataCenterPendingAdvanceRecord,
 		);
 	}
@@ -750,7 +841,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 	): Promise<void> {
 		validateDataCenterPendingAdvanceRecord(record);
 		await this.putDataCenterPendingRecord(
-			"datacenter_pending_advance",
+			"datacenter_production_pending_advance",
 			record.accountId,
 			record.advanceKey,
 			record.requestHash,
@@ -764,7 +855,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		advanceKey: string,
 	): boolean {
 		return this.deleteDataCenterPendingRecord(
-			"datacenter_pending_advance",
+			"datacenter_production_pending_advance",
 			accountId,
 			advanceKey,
 		);
@@ -775,7 +866,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		return this.database
 			.query(
 				`SELECT account_id AS accountId, updated_at_ms AS updatedAtMs
-				 FROM datacenter_consumer_owner WHERE singleton = 1`,
+				 FROM datacenter_production_consumer_owner WHERE singleton = 1`,
 			)
 			.get() as DataCenterConsumerOwnerRecord | null;
 	}
@@ -786,7 +877,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		await this.accountContext(accountId);
 		this.database
 			.query(
-				`INSERT INTO datacenter_consumer_owner
+				`INSERT INTO datacenter_production_consumer_owner
 				 (singleton, account_id, updated_at_ms) VALUES (1, ?, ?)
 				 ON CONFLICT(singleton) DO UPDATE SET
 				  account_id = excluded.account_id,
@@ -802,7 +893,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		validateDataCenterConsumerAuditRecord(record);
 		const cipher = await this.encryptJson(
 			record.toAccountId,
-			"datacenter_consumer_audit",
+			"datacenter_production_consumer_audit",
 			record.id,
 			"record",
 			record,
@@ -811,7 +902,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		const append = this.database.transaction(() => {
 			this.database
 				.query(
-					`INSERT INTO datacenter_consumer_audit
+					`INSERT INTO datacenter_production_consumer_audit
 					 (audit_id, account_id, key_version, cipher_version, record_nonce,
 					  record_ciphertext, created_at_ms)
 					 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -828,15 +919,15 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				);
 			this.database
 				.query(
-					`DELETE FROM datacenter_consumer_audit
+					`DELETE FROM datacenter_production_consumer_audit
 					 WHERE account_id = ? AND created_at_ms < ?`,
 				)
 				.run(record.toAccountId, cutoffMs);
 			this.database
 				.query(
-					`DELETE FROM datacenter_consumer_audit
+					`DELETE FROM datacenter_production_consumer_audit
 					 WHERE account_id = ? AND audit_id IN (
-					  SELECT audit_id FROM datacenter_consumer_audit
+					  SELECT audit_id FROM datacenter_production_consumer_audit
 					  WHERE account_id = ?
 					  ORDER BY created_at_ms DESC, audit_id DESC
 					  LIMIT -1 OFFSET ?
@@ -865,7 +956,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				`SELECT audit_id, key_version, cipher_version,
 				        record_nonce AS nonce, record_ciphertext AS ciphertext,
 				        created_at_ms AS updated_at_ms
-				 FROM datacenter_consumer_audit
+				 FROM datacenter_production_consumer_audit
 				 WHERE account_id = ?
 				 ORDER BY created_at_ms ASC, audit_id ASC LIMIT ?`,
 			)
@@ -876,7 +967,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		for (const row of rows) {
 			const value = await this.decryptJson(
 				accountId,
-				"datacenter_consumer_audit",
+				"datacenter_production_consumer_audit",
 				row.audit_id,
 				"record",
 				row,
@@ -3557,9 +3648,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		);
 		const write = this.database.transaction(() => {
 			const otherTable: DataCenterPendingTable =
-				table === "datacenter_pending_batch"
-					? "datacenter_pending_advance"
-					: "datacenter_pending_batch";
+				table === "datacenter_production_pending_batch"
+					? "datacenter_production_pending_advance"
+					: "datacenter_production_pending_batch";
 			if (
 				this.database
 					.query(`SELECT 1 AS present FROM ${otherTable} WHERE account_id = ?`)
@@ -4261,6 +4352,75 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				);
 				CREATE INDEX IF NOT EXISTS datacenter_consumer_audit_by_account
 					ON datacenter_consumer_audit(account_id, created_at_ms, audit_id);
+
+				-- Production uses a new physical namespace. Retired binaries can keep an
+				-- already-open v7 connection, but they do not know these tables and cannot
+				-- repopulate state consumed by the fixed production runtime.
+				CREATE TABLE IF NOT EXISTS datacenter_production_agent_credentials (
+					account_id TEXT PRIMARY KEY,
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					state_nonce BLOB NOT NULL,
+					state_ciphertext BLOB NOT NULL,
+					updated_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS datacenter_production_pending_batch (
+					account_id TEXT PRIMARY KEY,
+					operation_key TEXT NOT NULL,
+					request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					record_nonce BLOB NOT NULL,
+					record_ciphertext BLOB NOT NULL,
+					created_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS datacenter_production_pending_advance (
+					account_id TEXT PRIMARY KEY,
+					operation_key TEXT NOT NULL,
+					request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					record_nonce BLOB NOT NULL,
+					record_ciphertext BLOB NOT NULL,
+					created_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS datacenter_production_consumer_owner (
+					singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+					account_id TEXT NOT NULL,
+					updated_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+
+				CREATE TABLE IF NOT EXISTS datacenter_production_consumer_audit (
+					audit_id TEXT PRIMARY KEY,
+					account_id TEXT NOT NULL,
+					key_version INTEGER NOT NULL,
+					cipher_version INTEGER NOT NULL,
+					record_nonce BLOB NOT NULL,
+					record_ciphertext BLOB NOT NULL,
+					created_at_ms INTEGER NOT NULL,
+					FOREIGN KEY (account_id) REFERENCES encrypted_accounts(account_id) ON DELETE CASCADE
+				);
+				CREATE INDEX IF NOT EXISTS datacenter_production_consumer_audit_by_account
+					ON datacenter_production_consumer_audit(account_id, created_at_ms, audit_id);
+
+				CREATE TABLE IF NOT EXISTS datacenter_origin_cutovers (
+					cutover_id TEXT PRIMARY KEY,
+					state TEXT NOT NULL CHECK (state IN ('prepared', 'complete')),
+					prepared_at_ms INTEGER NOT NULL,
+					completed_at_ms INTEGER,
+					CHECK (
+						(state = 'prepared' AND completed_at_ms IS NULL)
+						OR
+						(state = 'complete' AND completed_at_ms IS NOT NULL)
+					)
+				);
 			`);
 			if (!schema) {
 				this.database

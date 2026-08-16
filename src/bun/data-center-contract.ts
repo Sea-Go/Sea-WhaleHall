@@ -22,7 +22,8 @@ import type {
 	DataCenterPendingBatchRecord,
 } from "./encrypted-agent-repository";
 
-export const DATA_CENTER_CONSUMER_ID = "whalehall.datacenter.v1";
+/** Production-only local cursor; retired staging builds own a different slot. */
+export const DATA_CENTER_CONSUMER_ID = "whalehall.datacenter.production.v1";
 export const DATA_CENTER_REGISTER_PATH = "/v1/agent/register";
 export const DATA_CENTER_BATCH_PATH = "/api/v1/agent/events/desktop/batch";
 export const DATA_CENTER_CURSOR_PATH = "/api/v1/agent/events/desktop/cursor";

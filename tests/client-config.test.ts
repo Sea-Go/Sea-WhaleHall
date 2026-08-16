@@ -101,6 +101,7 @@ describe("WhaleHall client config.yaml", () => {
 		});
 
 		expect(result.status).toBe("seeded");
+		expect(result.cloudSyncConsentBlockedByRetiredOrigin).toBeFalse();
 		expect(result.path).toBe(join(userDataDirectory, "config.yaml"));
 		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
 		expect(readFileSync(result.path, "utf8")).toBe(currentConfiguration());
@@ -132,6 +133,7 @@ describe("WhaleHall client config.yaml", () => {
 		});
 
 		expect(result.status).toBe("loaded");
+		expect(result.cloudSyncConsentBlockedByRetiredOrigin).toBeTrue();
 		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
 		expect(JSON.stringify(result.configuration)).not.toContain("apikey");
 		expect(JSON.stringify(result.configuration)).not.toContain("baseurl");
@@ -139,6 +141,67 @@ describe("WhaleHall client config.yaml", () => {
 			agentModelConfigurationFromConfiguration(result.configuration).baseurl,
 		).toBe(WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL);
 		expect(readFileSync(path, "utf8")).toBe(source);
+	});
+
+	test("fails closed when legacy staging consent would cross into production", () => {
+		const directory = temporaryDirectory();
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		const source = legacyKeyConfiguration()
+			.replace(
+				"https://retired-staging.example.test",
+				"https://data-staging.sea-ridethewindbreakthewaves.xyz",
+			)
+			.replace("enabled: false", "enabled: true")
+			.replace("activity: off", "activity: content");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		writeFileSync(path, source);
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.status).toBe("loaded");
+		expect(result.cloudSyncConsentBlockedByRetiredOrigin).toBeTrue();
+		expect(result.configuration.cloudSync).toEqual(
+			DEFAULT_CLIENT_CONFIGURATION.cloudSync,
+		);
+		expect(readFileSync(path, "utf8")).toBe(source);
+
+		const reloaded = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+		expect(reloaded.cloudSyncConsentBlockedByRetiredOrigin).toBeTrue();
+		expect(reloaded.configuration.cloudSync).toEqual(
+			DEFAULT_CLIENT_CONFIGURATION.cloudSync,
+		);
+		expect(readFileSync(path, "utf8")).toBe(source);
+	});
+
+	test("preserves consent only for a legacy file already bound to production", () => {
+		const directory = temporaryDirectory();
+		const userDataDirectory = join(directory, "user-data");
+		const path = join(userDataDirectory, "config.yaml");
+		const source = legacyKeyConfiguration()
+			.replace(
+				"https://retired-staging.example.test",
+				WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+			)
+			.replace("enabled: false", "enabled: true")
+			.replace("activity: off", "activity: metadata");
+		mkdirSync(userDataDirectory, { mode: 0o700 });
+		writeFileSync(path, source);
+
+		const result = loadOrCreateClientConfiguration({
+			userDataDirectory,
+			bundledTemplatePath: writeTemplate(directory),
+		});
+
+		expect(result.cloudSyncConsentBlockedByRetiredOrigin).toBeFalse();
+		expect(result.configuration.cloudSync.enabled).toBeTrue();
+		expect(result.configuration.cloudSync.consents.activity).toBe("metadata");
 	});
 
 	test("loads a pre-cloudSync two-role file with safe defaults", () => {
@@ -161,6 +224,7 @@ describe("WhaleHall client config.yaml", () => {
 		});
 
 		expect(result.status).toBe("loaded");
+		expect(result.cloudSyncConsentBlockedByRetiredOrigin).toBeFalse();
 		expect(result.configuration.cloudSync).toEqual(
 			DEFAULT_CLIENT_CONFIGURATION.cloudSync,
 		);
@@ -187,6 +251,7 @@ describe("WhaleHall client config.yaml", () => {
 		});
 
 		expect(result.status).toBe("legacy");
+		expect(result.cloudSyncConsentBlockedByRetiredOrigin).toBeTrue();
 		expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
 		expect(
 			agentModelConfigurationFromConfiguration(result.configuration),
@@ -216,6 +281,7 @@ describe("WhaleHall client config.yaml", () => {
 			});
 
 			expect(result.status).toBe("invalid");
+			expect(result.cloudSyncConsentBlockedByRetiredOrigin).toBeTrue();
 			expect(result.configuration).toEqual(DEFAULT_CLIENT_CONFIGURATION);
 			expect(readFileSync(path, "utf8")).toBe(source);
 		}

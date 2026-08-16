@@ -864,7 +864,7 @@ function rejectIdentityHeaders(headers: Headers): void {
 
 function modelPurpose(headers: Headers): RelayModelPurpose {
 	const value = headers.get("x-whalehall-model-purpose");
-	if (value !== "agent" && value !== "activity") {
+	if (value !== "agent" && value !== "activity" && value !== "planning") {
 		throw new HttpError(
 			400,
 			"invalid-model-purpose",

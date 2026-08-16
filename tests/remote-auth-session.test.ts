@@ -73,7 +73,7 @@ describe("RemoteAuthSessionManager", () => {
 		});
 		expect(seen[0]?.headers.get("x-whalehall-agent-key")).toBeNull();
 		expect(seen[0]?.redirect).toBe("error");
-		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+		expect(credentials.values.get("auth.refresh-token.production.v1")).toBe(
 			"refresh-token-signed-in-0123456789",
 		);
 	});
@@ -81,7 +81,7 @@ describe("RemoteAuthSessionManager", () => {
 	test("preserves initial restore behavior when there is no live session", async () => {
 		const credentials = new MemoryCredentials();
 		credentials.values.set(
-			"auth.refresh-token.current",
+			"auth.refresh-token.production.v1",
 			"refresh-token-persisted-0123456789",
 		);
 		const cleared: Array<string | null> = [];
@@ -166,7 +166,9 @@ describe("RemoteAuthSessionManager", () => {
 		await activationStarted;
 		expect(manager.getSession()).toBeNull();
 		expect(manager.captureCurrentSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 
 		releaseActivation();
 		await signingIn;
@@ -196,7 +198,9 @@ describe("RemoteAuthSessionManager", () => {
 		).rejects.toThrow("injected durable owner failure");
 		expect(cleared).toEqual(["account-1"]);
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 	});
 
 	test("does not emit an expiry event when an initial post-activation callback fails", async () => {
@@ -221,7 +225,9 @@ describe("RemoteAuthSessionManager", () => {
 			manager.signIn({ email: "test@example.com", password: "password" }),
 		).rejects.toThrow("injected initial session-ready failure");
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(lifecycle).toEqual(["clear:account-1"]);
 	});
 
@@ -422,7 +428,9 @@ describe("RemoteAuthSessionManager", () => {
 		).rejects.toThrow("injected session-ready failure");
 		expect(manager.getSession()).toBeNull();
 		expect(manager.captureCurrentSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(lifecycle).toEqual(["clear:account-1", "expired"]);
 		expect(modelCalls).toBe(1);
 	});
@@ -461,7 +469,9 @@ describe("RemoteAuthSessionManager", () => {
 		await expect(signingIn).rejects.toMatchObject({ kind: "expired" });
 		await signingOut;
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBe(false);
+		expect(credentials.values.has("auth.refresh-token.production.v1")).toBe(
+			false,
+		);
 	});
 
 	test("does not let an account A refresh reactivate after account B signs in", async () => {
@@ -520,7 +530,7 @@ describe("RemoteAuthSessionManager", () => {
 		expect(await staleRequest).toMatchObject({ kind: "expired" });
 		expect(manager.accountId).toBe("account-b");
 		expect(manager.getSession()?.id).toBe("session-account-b");
-		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+		expect(credentials.values.get("auth.refresh-token.production.v1")).toBe(
 			"refresh-token-account-b-0123456789",
 		);
 		expect(activations).toEqual(["account-a", "account-b"]);
@@ -551,7 +561,9 @@ describe("RemoteAuthSessionManager", () => {
 		});
 
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(activations).toEqual(["account-a"]);
 	});
 
@@ -603,7 +615,7 @@ describe("RemoteAuthSessionManager", () => {
 		await expect(first).rejects.toMatchObject({ kind: "expired" });
 		await expect(second).resolves.toMatchObject({ id: "session-overlap-2" });
 		expect(manager.getSession()?.id).toBe("session-overlap-2");
-		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+		expect(credentials.values.get("auth.refresh-token.production.v1")).toBe(
 			"refresh-token-overlap-2-0123456789",
 		);
 		const winningActivation = events.lastIndexOf("activate:session-overlap-2");
@@ -647,9 +659,9 @@ describe("RemoteAuthSessionManager", () => {
 			"activate:account-2",
 		]);
 		expect(manager.accountId).toBe("account-2");
-		expect(credentials.values.get("auth.refresh-token.current")).toContain(
-			"switch-2",
-		);
+		expect(
+			credentials.values.get("auth.refresh-token.production.v1"),
+		).toContain("switch-2");
 	});
 
 	test("clears the live owner before a replacement sign-in waits on the network", async () => {
@@ -692,7 +704,9 @@ describe("RemoteAuthSessionManager", () => {
 
 		expect(manager.captureCurrentSession()).toBeNull();
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(barriers).toEqual(["activate:account-a", "clear:account-a"]);
 
 		releaseReplacement();
@@ -723,7 +737,7 @@ describe("RemoteAuthSessionManager", () => {
 		});
 
 		await manager.signIn({ email: "a@example.com", password: "password" });
-		credentials.values.delete("auth.refresh-token.current");
+		credentials.values.delete("auth.refresh-token.production.v1");
 		await expect(manager.restoreSession()).resolves.toBeNull();
 
 		expect(manager.getSession()).toBeNull();
@@ -765,7 +779,9 @@ describe("RemoteAuthSessionManager", () => {
 
 		expect(manager.getSession()).toBeNull();
 		expect(manager.captureCurrentSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(barriers).toEqual(["clear:account-a"]);
 
 		releaseRefresh();
@@ -825,7 +841,7 @@ describe("RemoteAuthSessionManager", () => {
 		expect(await staleRestore).toMatchObject({ kind: "expired" });
 		expect(manager.accountId).toBe("account-b");
 		expect(manager.getSession()?.id).toBe("session-account-b");
-		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+		expect(credentials.values.get("auth.refresh-token.production.v1")).toBe(
 			"refresh-token-account-b-0123456789",
 		);
 		expect(events).toEqual([
@@ -856,7 +872,9 @@ describe("RemoteAuthSessionManager", () => {
 		await Promise.resolve();
 
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBe(false);
+		expect(credentials.values.has("auth.refresh-token.production.v1")).toBe(
+			false,
+		);
 		expect(order[0]).toBe("barrier");
 	});
 
@@ -915,7 +933,9 @@ describe("RemoteAuthSessionManager", () => {
 			kind: "expired",
 		});
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBe(false);
+		expect(credentials.values.has("auth.refresh-token.production.v1")).toBe(
+			false,
+		);
 		expect(order).toEqual(["barrier:account-1", "expired"]);
 	});
 });

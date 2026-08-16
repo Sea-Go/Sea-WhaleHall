@@ -55,7 +55,7 @@ export interface RelayRecordClaim {
 	expiresAtMs: number;
 }
 
-export type RelayModelPurpose = "agent" | "activity";
+export type RelayModelPurpose = "agent" | "activity" | "planning";
 
 export interface StoredRelayResponse {
 	status: number;

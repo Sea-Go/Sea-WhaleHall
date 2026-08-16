@@ -9,7 +9,7 @@ This native Node 22 service is intentionally not an Agent. It exposes only:
 - `POST /v1/chat/completions`
 
 The chat endpoint requires a short-lived bearer token and the code-owned
-`X-WhaleHall-Model-Purpose: agent|activity` header. It resolves the account only
+`X-WhaleHall-Model-Purpose: agent|activity|planning` header. It resolves the account only
 from the bearer subject. Historical `X-WhaleHall-Agent-Key` input is ignored
 for compatibility, never authenticated, forwarded, logged, or stored. Neither
 the desktop bearer nor upstream Qwen credentials are forwarded upstream or
@@ -36,7 +36,7 @@ options. It always:
 - forwards only to CPU-only Ollama
   `http://127.0.0.1:11437/v1/chat/completions`;
 - allows only `qwen3:1.7b`;
-- records authenticated agent/activity requests and responses for 30 days.
+- records authenticated agent/activity/planning requests and responses for 30 days.
 
 Required environment values are intentionally limited to local file paths:
 

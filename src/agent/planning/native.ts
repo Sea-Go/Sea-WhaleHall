@@ -43,7 +43,7 @@ type NativePlanningAgent = Pick<
 	| "getPlanningOperationResult"
 	| "upsertPlanningPlan"
 	| "mutatePlanningPlan"
-	| "listPlanningCalendar"
+	| "listAllPlanningCalendar"
 	| "mutatePlanningCalendar"
 	| "sealVaultBatch"
 	| "openVaultBatch"
@@ -160,7 +160,7 @@ export class NativePlanningCalendar implements PlanningCalendarPort {
 	async listEvents(
 		query: PlanningCalendarQuery,
 	): Promise<readonly PlanningCalendarEvent[]> {
-		const result = await this.agent.listPlanningCalendar({
+		const events = await this.agent.listAllPlanningCalendar({
 			// Native v1 indexes RFC3339 UTC dates. Widen by one local date on
 			// either side, then apply the authoritative named-timezone interval
 			// filter below so positive/negative UTC offsets cannot lose events.
@@ -177,7 +177,7 @@ export class NativePlanningCalendar implements PlanningCalendarPort {
 			"00:00",
 			query.timeZone,
 		);
-		return result.events.flatMap((event) => {
+		return events.flatMap((event) => {
 			const projected = fromCalendarEvent(event);
 			return projected &&
 				compareInstants(projected.start, end) < 0 &&

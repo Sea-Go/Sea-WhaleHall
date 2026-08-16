@@ -85,6 +85,7 @@ import {
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
 import { DataCenterContentCrypto } from "./data-center-crypto";
+import { runDataCenterProductionOriginCutover } from "./data-center-origin-cutover";
 import {
 	DataCenterSyncService,
 	dataCenterSyncDiagnosticCode,
@@ -179,6 +180,11 @@ if (clientConfiguration.status === "invalid") {
 		"WhaleHall client config.yaml is invalid; safe defaults remain active.",
 	);
 }
+if (clientConfiguration.cloudSyncConsentBlockedByRetiredOrigin) {
+	console.warn(
+		"WhaleHall cloud sync consent was disabled because its production origin could not be verified; grant production consent explicitly.",
+	);
+}
 const runtimeIdentity = loadOrCreateReflectionIdentity(
 	join(localDataPath, "reflection-identity.v1.json"),
 );
@@ -198,6 +204,15 @@ const agentRepository = new EncryptedAgentRepository({
 	installationId,
 	keyStore: credentialStore,
 });
+const productionOriginCutover = await runDataCenterProductionOriginCutover({
+	repository: agentRepository,
+	credentials: credentialStore,
+});
+if (productionOriginCutover === "completed") {
+	console.warn(
+		"WhaleHall initialized the fixed production credential boundary; sign-in is required.",
+	);
+}
 const calendarRepository = new CalendarRepository(agentRepository, {
 	timeZone: () =>
 		Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
@@ -302,6 +317,7 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 			// Account ownership is revoked even if the activity Agent relay is failing.
 		}
 		try {
+			dynamicPlanningModel?.cancelPending();
 			planningRelayBridge?.abortAll();
 		} catch {
 			// Account ownership is revoked even if dynamic Planning is failing.
@@ -326,6 +342,7 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 			// Account transitions remain fail-closed for background Agent calls.
 		}
 		try {
+			dynamicPlanningModel?.cancelPending();
 			planningRelayBridge?.abortAll();
 		} catch {
 			// Account transitions remain fail-closed for dynamic Planning calls.
@@ -1148,7 +1165,7 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	loadPlanningCalendar: async () => {
-		const events = (await agent.listPlanningCalendar()).events;
+		const events = await agent.listAllPlanningCalendar();
 		const redactedTaskTitles = await planningCalendarTaskTitles(events);
 		return {
 			events: events.map((event) =>
@@ -2996,7 +3013,7 @@ async function reconcileExecutingPlanningGoal(): Promise<void> {
 	const reflection = reflectionRuntime;
 	if (!planning || !reflection) return;
 	const now = Date.now();
-	const events = (await agent.listPlanningCalendar()).events
+	const events = (await agent.listAllPlanningCalendar())
 		.filter(
 			(event) =>
 				event.kind === "plan" &&

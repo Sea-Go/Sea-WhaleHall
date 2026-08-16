@@ -5,8 +5,12 @@ const MAX_STDOUT_BYTES = MAX_SECRET_BYTES + 128;
 const MAX_STDERR_BYTES = 1_024;
 const DEFAULT_TIMEOUT_MS = 5_000;
 
-export const AUTH_REFRESH_TOKEN_CREDENTIAL = "auth.refresh-token.current";
-const ALLOWED_SECRET_NAMES = new Set([AUTH_REFRESH_TOKEN_CREDENTIAL]);
+/** Production-only name; retired builds do not know or overwrite this slot. */
+export const AUTH_REFRESH_TOKEN_CREDENTIAL = "auth.refresh-token.production.v1";
+/** Compatibility-only deletion target used by the production-origin cutover. */
+export const LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL =
+	"auth.refresh-token.current";
+const CURRENT_SECRET_NAMES = new Set([AUTH_REFRESH_TOKEN_CREDENTIAL]);
 
 export type CredentialKeyReference = {
 	installationId: string;
@@ -65,10 +69,7 @@ export class CredentialHelperClient
 	private readonly runner: CredentialHelperRunner;
 	private readonly installationId: string;
 
-	constructor(
-		binaryPath: string,
-		options: CredentialHelperClientOptions,
-	) {
+	constructor(binaryPath: string, options: CredentialHelperClientOptions) {
 		validateComponent(options.installationId, "installationId");
 		if (
 			options.timeoutMs !== undefined &&
@@ -125,7 +126,7 @@ export class CredentialHelperClient
 	}
 
 	async readSecret(name: string): Promise<string | null> {
-		validateSecretName(name);
+		validateSecretOperation(name, "read");
 		try {
 			const response = await this.request({
 				version: PROTOCOL_VERSION,
@@ -143,7 +144,10 @@ export class CredentialHelperClient
 				bytes.fill(0);
 			}
 		} catch (error) {
-			if (error instanceof CredentialHelperError && error.code === "NOT_FOUND") {
+			if (
+				error instanceof CredentialHelperError &&
+				error.code === "NOT_FOUND"
+			) {
 				return null;
 			}
 			throw error;
@@ -151,7 +155,7 @@ export class CredentialHelperClient
 	}
 
 	async writeSecret(name: string, value: string): Promise<void> {
-		validateSecretName(name);
+		validateSecretOperation(name, "write");
 		const secret = new TextEncoder().encode(value);
 		try {
 			if (secret.byteLength < 1 || secret.byteLength > MAX_SECRET_BYTES) {
@@ -171,7 +175,10 @@ export class CredentialHelperClient
 				},
 				secret,
 			);
-			if (response.header !== "OK STORED" || response.payload.byteLength !== 0) {
+			if (
+				response.header !== "OK STORED" ||
+				response.payload.byteLength !== 0
+			) {
 				throw new CredentialHelperError("PROTOCOL_ERROR");
 			}
 		} finally {
@@ -180,7 +187,7 @@ export class CredentialHelperClient
 	}
 
 	async deleteSecret(name: string): Promise<{ deleted: boolean }> {
-		validateSecretName(name);
+		validateSecretOperation(name, "delete");
 		const response = await this.request({
 			version: PROTOCOL_VERSION,
 			kind: "named-secret",
@@ -196,7 +203,9 @@ export class CredentialHelperClient
 		secret?: Uint8Array,
 	): Promise<HelperResponse> {
 		const headerBytes = new TextEncoder().encode(`${JSON.stringify(header)}\n`);
-		const input = new Uint8Array(headerBytes.byteLength + (secret?.byteLength ?? 0));
+		const input = new Uint8Array(
+			headerBytes.byteLength + (secret?.byteLength ?? 0),
+		);
 		input.set(headerBytes);
 		if (secret) input.set(secret, headerBytes.byteLength);
 		let result: CredentialHelperRunResult;
@@ -322,8 +331,14 @@ function requireDeleted(response: HelperResponse): boolean {
 	throw new CredentialHelperError("PROTOCOL_ERROR");
 }
 
-function validateSecretName(name: string): void {
-	if (!ALLOWED_SECRET_NAMES.has(name)) {
+function validateSecretOperation(
+	name: string,
+	operation: "read" | "write" | "delete",
+): void {
+	if (
+		!CURRENT_SECRET_NAMES.has(name) &&
+		!(operation === "delete" && name === LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL)
+	) {
 		throw new CredentialHelperError("SECRET_NAME_NOT_ALLOWED");
 	}
 }

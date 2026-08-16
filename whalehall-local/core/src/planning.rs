@@ -24,16 +24,17 @@ use whalehall_local_protocol::{
     CALENDAR_SCHEMA_VERSION, CalendarEventKind, CalendarEventState, CalendarGetParams,
     CalendarGetResult, CalendarListParams, CalendarListResult, CalendarMutateParams,
     CalendarMutation, CalendarMutationActor, CalendarMutationOutcome, CalendarMutationResult,
-    CalendarSchedule, MAX_PLANNING_LIST_LIMIT, MAX_PLANNING_OUTBOX_LIMIT,
-    MAX_PLANNING_VAULT_REFERENCE_LIMIT, PLANNING_SCHEMA_VERSION, PlanConversationMessage,
-    PlanEstimate, PlanObservationEvidence, PlanRevision, PlanSchedulingWindow, PlanSnapshot,
-    PlanStatus, PlanTask, PlanTaskStatus, PlanningCalendarEvent, PlanningGetParams,
-    PlanningGetResult, PlanningListParams, PlanningListResult, PlanningMutateParams,
-    PlanningMutationResult, PlanningOperationGetParams, PlanningOperationGetResult,
-    PlanningOutboxAckParams, PlanningOutboxAckResult, PlanningOutboxDraft, PlanningOutboxEntry,
-    PlanningOutboxKind, PlanningOutboxListParams, PlanningOutboxListResult, PlanningOutboxStatus,
-    PlanningUpsertParams, PlanningVaultReference, PlanningVaultReferenceSource,
-    PlanningVaultReferencesParams, PlanningVaultReferencesResult, REDACTED_PLAN_CALENDAR_TITLE,
+    CalendarSchedule, MAX_CALENDAR_LIST_LIMIT, MAX_CALENDAR_LIST_RESULT_BYTES,
+    MAX_PLANNING_LIST_LIMIT, MAX_PLANNING_OUTBOX_LIMIT, MAX_PLANNING_VAULT_REFERENCE_LIMIT,
+    PLANNING_SCHEMA_VERSION, PlanConversationMessage, PlanEstimate, PlanObservationEvidence,
+    PlanRevision, PlanSchedulingWindow, PlanSnapshot, PlanStatus, PlanTask, PlanTaskStatus,
+    PlanningCalendarEvent, PlanningGetParams, PlanningGetResult, PlanningListParams,
+    PlanningListResult, PlanningMutateParams, PlanningMutationResult, PlanningOperationGetParams,
+    PlanningOperationGetResult, PlanningOutboxAckParams, PlanningOutboxAckResult,
+    PlanningOutboxDraft, PlanningOutboxEntry, PlanningOutboxKind, PlanningOutboxListParams,
+    PlanningOutboxListResult, PlanningOutboxStatus, PlanningUpsertParams, PlanningVaultReference,
+    PlanningVaultReferenceSource, PlanningVaultReferencesParams, PlanningVaultReferencesResult,
+    REDACTED_PLAN_CALENDAR_TITLE,
 };
 
 const SCHEMA_VERSION: i64 = 1;
@@ -45,6 +46,7 @@ const MAX_SNAPSHOT_BYTES: usize = 900 * 1024;
 const MAX_OUTBOX_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_COLLECTION_ITEMS: usize = 10_000;
 const PLANNING_VAULT_REFERENCE_CURSOR_PREFIX: &str = "pvr1";
+const CALENDAR_LIST_CURSOR_PREFIX: &str = "cl1";
 
 #[derive(Clone)]
 pub struct PlanningStore {
@@ -413,12 +415,22 @@ impl PlanningStore {
         &self,
         params: &CalendarListParams,
     ) -> Result<CalendarListResult, PlanningStoreError> {
+        if !(1..=MAX_CALENDAR_LIST_LIMIT).contains(&params.limit) {
+            return Err(PlanningStoreError::Configuration(format!(
+                "calendar.list limit must be between 1 and {MAX_CALENDAR_LIST_LIMIT}"
+            )));
+        }
         if let Some(plan_id) = params.source_plan_id.as_deref() {
             validate_identifier("sourcePlanId", plan_id)?;
         }
         if let Some(task_id) = params.source_task_id.as_deref() {
             validate_identifier("sourceTaskId", task_id)?;
         }
+        let after_event_id = params
+            .cursor
+            .as_deref()
+            .map(parse_calendar_list_cursor)
+            .transpose()?;
         let range = match (&params.from_date, &params.to_date_exclusive) {
             (None, None) => None,
             (Some(from), Some(to)) => {
@@ -439,32 +451,96 @@ impl PlanningStore {
             }
         };
         let connection = connect(&self.inner.database_path)?;
-        let mut statement =
-            connection.prepare("SELECT event_json FROM calendar_events ORDER BY event_id ASC")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let fetch_limit = i64::try_from(params.limit.saturating_add(1)).map_err(|_| {
+            PlanningStoreError::Configuration("calendar.list limit is too large".to_owned())
+        })?;
+        let mut statement = connection.prepare(
+            "SELECT event_id, event_json
+               FROM calendar_events
+              WHERE event_id > ?1
+              ORDER BY event_id ASC
+              LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![after_event_id.as_deref().unwrap_or(""), fetch_limit],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        let scan_count = rows.len().min(params.limit);
         let mut events = Vec::new();
-        for row in rows {
-            let event: PlanningCalendarEvent = serde_json::from_str(&row?)?;
-            if params
+        let mut serialized_event_bytes = 0_usize;
+        let mut last_scanned_event_id: Option<String> = None;
+        for (index, (stored_event_id, event_json)) in rows.iter().take(scan_count).enumerate() {
+            let event: PlanningCalendarEvent = serde_json::from_str(event_json)?;
+            if event.event_id != *stored_event_id {
+                return Err(PlanningStoreError::Configuration(format!(
+                    "stored calendar event {stored_event_id} has mismatched eventId {}",
+                    event.event_id
+                )));
+            }
+            let matches_filters = !params
                 .source_plan_id
                 .as_ref()
                 .is_some_and(|plan_id| event.source_plan_id.as_ref() != Some(plan_id))
-            {
-                continue;
+                && !params
+                    .source_task_id
+                    .as_ref()
+                    .is_some_and(|task_id| event.source_task_id.as_ref() != Some(task_id))
+                && !range.is_some_and(|range| !calendar_event_overlaps_dates(&event, range));
+            let event_bytes = matches_filters
+                .then(|| serde_json::to_vec(&event).map(|encoded| encoded.len()))
+                .transpose()?;
+            let candidate_event_bytes =
+                serialized_event_bytes.saturating_add(event_bytes.unwrap_or(0));
+            let candidate_event_count = events.len() + usize::from(matches_filters);
+            let has_more_after_candidate = index + 1 < rows.len();
+            let candidate_next_cursor =
+                has_more_after_candidate.then(|| format_calendar_list_cursor(stored_event_id));
+            let candidate_bytes = calendar_list_result_serialized_len(
+                candidate_event_bytes,
+                candidate_event_count,
+                candidate_next_cursor.as_deref(),
+            )?;
+            if candidate_bytes > MAX_CALENDAR_LIST_RESULT_BYTES {
+                let Some(last_scanned_event_id) = last_scanned_event_id.as_deref() else {
+                    return Err(PlanningStoreError::Configuration(format!(
+                        "calendar event {stored_event_id} exceeds the calendar.list serialized byte budget"
+                    )));
+                };
+                let result = CalendarListResult {
+                    events,
+                    next_cursor: Some(format_calendar_list_cursor(last_scanned_event_id)),
+                };
+                debug_assert!(
+                    serde_json::to_vec(&result)
+                        .is_ok_and(|encoded| encoded.len() <= MAX_CALENDAR_LIST_RESULT_BYTES)
+                );
+                return Ok(result);
             }
-            if params
-                .source_task_id
-                .as_ref()
-                .is_some_and(|task_id| event.source_task_id.as_ref() != Some(task_id))
-            {
-                continue;
+            if matches_filters {
+                serialized_event_bytes = candidate_event_bytes;
+                events.push(event);
             }
-            if range.is_some_and(|range| !calendar_event_overlaps_dates(&event, range)) {
-                continue;
-            }
-            events.push(event);
+            last_scanned_event_id = Some(stored_event_id.clone());
         }
-        Ok(CalendarListResult { events })
+        let next_cursor = (rows.len() > scan_count).then(|| {
+            format_calendar_list_cursor(
+                last_scanned_event_id
+                    .as_deref()
+                    .expect("a truncated calendar page scanned at least one row"),
+            )
+        });
+        let result = CalendarListResult {
+            events,
+            next_cursor,
+        };
+        let serialized_result_bytes = serde_json::to_vec(&result)?.len();
+        if serialized_result_bytes > MAX_CALENDAR_LIST_RESULT_BYTES {
+            return Err(PlanningStoreError::Configuration(
+                "calendar.list result exceeded its serialized byte budget".to_owned(),
+            ));
+        }
+        Ok(result)
     }
 
     pub fn get_calendar_event(
@@ -1443,6 +1519,19 @@ fn validate_calendar_event(event: &PlanningCalendarEvent) -> Result<(), Planning
         )));
     }
     validate_identifier("eventId", &event.event_id)?;
+    let serialized_event_bytes = serde_json::to_vec(event)?.len();
+    let serialized_cursor = format_calendar_list_cursor(&event.event_id);
+    let serialized_list_bytes = calendar_list_result_serialized_len(
+        serialized_event_bytes,
+        1,
+        Some(serialized_cursor.as_str()),
+    )?;
+    if serialized_list_bytes > MAX_CALENDAR_LIST_RESULT_BYTES {
+        return Err(PlanningStoreError::Configuration(format!(
+            "calendar event {} exceeds the calendar.list serialized byte budget",
+            event.event_id
+        )));
+    }
     validate_content("calendar.title", &event.title, MAX_CONTENT_CHARS)?;
     if let Some(reference) = event.sealed_content_ref.as_deref() {
         validate_identifier("calendar.sealedContentRef", reference)?;
@@ -1802,6 +1891,65 @@ fn validate_identifier(label: &str, value: &str) -> Result<(), PlanningStoreErro
         )));
     }
     Ok(())
+}
+
+fn format_calendar_list_cursor(event_id: &str) -> String {
+    format!(
+        "{CALENDAR_LIST_CURSOR_PREFIX}_{}",
+        encode_hex(event_id.as_bytes())
+    )
+}
+
+fn parse_calendar_list_cursor(cursor: &str) -> Result<String, PlanningStoreError> {
+    let invalid =
+        || PlanningStoreError::Configuration("calendar.list cursor is malformed".to_owned());
+    let encoded = cursor
+        .strip_prefix(CALENDAR_LIST_CURSOR_PREFIX)
+        .and_then(|value| value.strip_prefix('_'))
+        .ok_or_else(&invalid)?;
+    if encoded.is_empty()
+        || encoded.len() > MAX_IDENTIFIER_BYTES * 2
+        || !encoded.len().is_multiple_of(2)
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(invalid());
+    }
+    let decoded = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).map_err(|_| invalid())?;
+            u8::from_str_radix(pair, 16).map_err(|_| invalid())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let event_id = String::from_utf8(decoded).map_err(|_| invalid())?;
+    validate_identifier("calendar cursor eventId", &event_id).map_err(|_| invalid())?;
+    if format_calendar_list_cursor(&event_id) != cursor {
+        return Err(invalid());
+    }
+    Ok(event_id)
+}
+
+fn calendar_list_result_serialized_len(
+    serialized_event_bytes: usize,
+    event_count: usize,
+    next_cursor: Option<&str>,
+) -> Result<usize, PlanningStoreError> {
+    let empty_result_bytes = serde_json::to_vec(&CalendarListResult {
+        events: Vec::new(),
+        next_cursor: next_cursor.map(ToOwned::to_owned),
+    })?
+    .len();
+    empty_result_bytes
+        .checked_add(serialized_event_bytes)
+        .and_then(|bytes| bytes.checked_add(event_count.saturating_sub(1)))
+        .ok_or_else(|| {
+            PlanningStoreError::Configuration(
+                "calendar.list serialized byte count overflowed".to_owned(),
+            )
+        })
 }
 
 fn validate_operation_id(operation_id: &str) -> Result<(), PlanningStoreError> {
@@ -2606,7 +2754,10 @@ fn harden_sqlite_permissions(_path: &Path) -> Result<(), PlanningStoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use whalehall_local_protocol::{CalendarEventState, CalendarScheduleOrigin, PlanAnalysisState};
+    use whalehall_local_protocol::{
+        CalendarEventState, CalendarScheduleOrigin, MAX_JSONL_LINE_BYTES, OutboundMessage,
+        PlanAnalysisState, Response,
+    };
 
     fn test_store() -> (tempfile::TempDir, PlanningStore) {
         let directory = tempfile::tempdir().expect("create planning test directory");
@@ -2761,6 +2912,53 @@ mod tests {
         let mut event = plan_event(version);
         event.state = CalendarEventState::Committed;
         event
+    }
+
+    fn manual_event(event_id: &str, local_date: &str, title: String) -> PlanningCalendarEvent {
+        PlanningCalendarEvent {
+            schema_version: CALENDAR_SCHEMA_VERSION.to_owned(),
+            event_id: event_id.to_owned(),
+            title,
+            sealed_content_ref: None,
+            redacted_content: false,
+            kind: CalendarEventKind::ManualBlock,
+            state: CalendarEventState::Committed,
+            schedule: CalendarSchedule::Timed(whalehall_local_protocol::CalendarTimedSchedule {
+                all_day: false,
+                start: format!("{local_date}T09:00:00+08:00"),
+                end: format!("{local_date}T10:00:00+08:00"),
+                time_zone: "Asia/Shanghai".to_owned(),
+            }),
+            recurrence: None,
+            occurrence_id: None,
+            source_plan_id: None,
+            source_task_id: None,
+            schedule_origin: None,
+            user_locked: false,
+            editable: true,
+            version: 1,
+        }
+    }
+
+    fn persist_manual_events(
+        store: &PlanningStore,
+        operation_id: &str,
+        events: Vec<PlanningCalendarEvent>,
+    ) {
+        store
+            .mutate_calendar(&CalendarMutateParams {
+                operation_id: operation_id.to_owned(),
+                actor: CalendarMutationActor::User,
+                mutations: events
+                    .into_iter()
+                    .map(|event| CalendarMutation::Upsert {
+                        expected_version: None,
+                        event: Box::new(event),
+                    })
+                    .collect(),
+                outbox: Vec::new(),
+            })
+            .expect("persist manual calendar events");
     }
 
     fn moved_plan_event(
@@ -3122,6 +3320,7 @@ mod tests {
                     source_task_id: None,
                     from_date: Some("2026-08-14".to_owned()),
                     to_date_exclusive: Some("2026-08-15".to_owned()),
+                    ..CalendarListParams::default()
                 })
                 .expect("filter calendar")
                 .events,
@@ -3147,6 +3346,194 @@ mod tests {
                 NaiveDate::from_ymd_opt(2026, 8, 15).unwrap(),
             )
         ));
+    }
+
+    #[test]
+    fn calendar_list_cursor_advances_in_event_id_order_across_filtered_empty_pages() {
+        let (_directory, store) = test_store();
+        persist_manual_events(
+            &store,
+            "seed-calendar-pagination",
+            vec![
+                manual_event("event-c", "2026-08-14", "第三项".to_owned()),
+                manual_event("event-a", "2026-08-13", "第一项".to_owned()),
+                manual_event("event-b", "2026-08-13", "第二项".to_owned()),
+            ],
+        );
+
+        let first = store
+            .list_calendar(&CalendarListParams {
+                limit: 2,
+                ..CalendarListParams::default()
+            })
+            .expect("read first ordered page");
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-a", "event-b"]
+        );
+        assert_eq!(
+            first.next_cursor.as_deref(),
+            Some(format_calendar_list_cursor("event-b").as_str())
+        );
+        let second = store
+            .list_calendar(&CalendarListParams {
+                cursor: first.next_cursor,
+                limit: 2,
+                ..CalendarListParams::default()
+            })
+            .expect("read second ordered page");
+        assert_eq!(
+            second
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-c"]
+        );
+        assert_eq!(second.next_cursor, None);
+
+        let filtered_first = store
+            .list_calendar(&CalendarListParams {
+                from_date: Some("2026-08-14".to_owned()),
+                to_date_exclusive: Some("2026-08-15".to_owned()),
+                limit: 2,
+                ..CalendarListParams::default()
+            })
+            .expect("read filtered empty page");
+        assert!(filtered_first.events.is_empty());
+        let filtered_cursor = filtered_first
+            .next_cursor
+            .expect("empty filtered page must advance its cursor");
+        assert_eq!(filtered_cursor, format_calendar_list_cursor("event-b"));
+        let filtered_second = store
+            .list_calendar(&CalendarListParams {
+                from_date: Some("2026-08-14".to_owned()),
+                to_date_exclusive: Some("2026-08-15".to_owned()),
+                cursor: Some(filtered_cursor),
+                limit: 2,
+                ..CalendarListParams::default()
+            })
+            .expect("read matching page after filtered empty page");
+        assert_eq!(
+            filtered_second
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event-c"]
+        );
+        assert_eq!(filtered_second.next_cursor, None);
+    }
+
+    #[test]
+    fn calendar_list_rejects_unbounded_limits_and_noncanonical_cursors() {
+        let (_directory, store) = test_store();
+        for limit in [0, MAX_CALENDAR_LIST_LIMIT + 1] {
+            assert!(
+                store
+                    .list_calendar(&CalendarListParams {
+                        limit,
+                        ..CalendarListParams::default()
+                    })
+                    .is_err(),
+                "limit {limit} must fail closed"
+            );
+        }
+        for cursor in ["event-a", "cl1_", "cl1_6576656E742d61", "cl1_00"] {
+            assert!(
+                store
+                    .list_calendar(&CalendarListParams {
+                        cursor: Some(cursor.to_owned()),
+                        ..CalendarListParams::default()
+                    })
+                    .is_err(),
+                "cursor {cursor} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_list_splits_on_serialized_bytes_without_skipping_a_candidate() {
+        let (_directory, store) = test_store();
+        let expected_ids = (0..12)
+            .map(|index| format!("large-event-{index:02}"))
+            .collect::<Vec<_>>();
+        for (index, event_id) in expected_ids.iter().enumerate() {
+            persist_manual_events(
+                &store,
+                &format!("seed-{event_id}"),
+                vec![manual_event(
+                    event_id,
+                    "2026-08-14",
+                    char::from(b'a' + u8::try_from(index).unwrap())
+                        .to_string()
+                        .repeat(95_000),
+                )],
+            );
+        }
+
+        let mut cursor = None;
+        let mut observed_ids = Vec::new();
+        for _ in 0..20 {
+            let page = store
+                .list_calendar(&CalendarListParams {
+                    cursor: cursor.clone(),
+                    limit: MAX_CALENDAR_LIST_LIMIT,
+                    ..CalendarListParams::default()
+                })
+                .expect("read byte-bounded calendar page");
+            let serialized_result = serde_json::to_vec(&page).expect("serialize calendar page");
+            assert!(serialized_result.len() <= MAX_CALENDAR_LIST_RESULT_BYTES);
+            let outbound = OutboundMessage::Response(Response::success(
+                "calendar-byte-page".to_owned(),
+                &page,
+            ));
+            assert!(
+                serde_json::to_vec(&outbound)
+                    .expect("serialize outbound calendar response")
+                    .len()
+                    <= MAX_JSONL_LINE_BYTES
+            );
+            observed_ids.extend(page.events.iter().map(|event| event.event_id.clone()));
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            assert_ne!(cursor.as_ref(), Some(&next_cursor));
+            cursor = Some(next_cursor);
+        }
+        assert_eq!(observed_ids, expected_ids);
+    }
+
+    #[test]
+    fn calendar_write_rejects_an_event_larger_than_one_page_budget() {
+        let (_directory, store) = test_store();
+        let mut oversized = manual_event(
+            "oversized-event",
+            "2026-08-14",
+            "📅".repeat(MAX_CONTENT_CHARS),
+        );
+        oversized.recurrence = Some(whalehall_local_protocol::CalendarRecurrence {
+            series_id: "oversized-series".to_owned(),
+            rrule: "FREQ=DAILY".to_owned(),
+            time_zone: "Asia/Shanghai".to_owned(),
+            exception_dates: vec!["2026-08-14".to_owned(); 45_000],
+        });
+        let error = store
+            .mutate_calendar(&CalendarMutateParams {
+                operation_id: "reject-oversized-calendar-event".to_owned(),
+                actor: CalendarMutationActor::User,
+                mutations: vec![CalendarMutation::Upsert {
+                    expected_version: None,
+                    event: Box::new(oversized),
+                }],
+                outbox: Vec::new(),
+            })
+            .expect_err("oversized calendar event must fail before persistence");
+        assert!(error.to_string().contains("serialized byte budget"));
     }
 
     #[test]
