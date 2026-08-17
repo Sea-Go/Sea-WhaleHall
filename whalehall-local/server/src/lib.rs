@@ -1797,6 +1797,42 @@ mod tests {
         (directory, activity)
     }
 
+    async fn exchange_jsonl_request<R, W>(input: &mut W, output: &mut R, request: Value) -> Value
+    where
+        R: AsyncBufRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        let request_id = request["id"]
+            .as_str()
+            .expect("JSONL test request has an id")
+            .to_owned();
+        input
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&request).expect("encode JSONL test request")
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write JSONL test request");
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                output
+                    .read_line(&mut line)
+                    .await
+                    .expect("read JSONL test response"),
+                0,
+                "server closed before responding to {request_id}"
+            );
+            let frame = serde_json::from_str::<Value>(&line).expect("parse JSONL test response");
+            if frame["id"] == request_id {
+                return frame;
+            }
+        }
+    }
+
     fn startup_goal_change_json() -> String {
         serde_json::json!({
             "previous": {
@@ -2178,6 +2214,112 @@ mod tests {
             "stale-version"
         );
         assert!(directory.path().join("planning.sqlite3").exists());
+    }
+
+    #[tokio::test]
+    async fn calendar_jsonl_fixture_traverses_every_page_until_next_cursor_is_null() {
+        let (mut input, server_input) = duplex(128 * 1024);
+        let (server_output, output) = duplex(128 * 1024);
+        let (_directory, activity) = test_activity();
+        let server = tokio::spawn(serve_with_activity(
+            BufReader::new(server_input),
+            server_output,
+            activity,
+        ));
+        let mut output = BufReader::new(output);
+        let event = |event_id: &str, date: &str| {
+            serde_json::json!({
+                "schemaVersion": "calendar.v1",
+                "eventId": event_id,
+                "title": format!("Fixture {event_id}"),
+                "sealedContentRef": null,
+                "redactedContent": false,
+                "kind": "manual-block",
+                "state": "committed",
+                "schedule": {
+                    "allDay": false,
+                    "start": format!("{date}T09:00:00+08:00"),
+                    "end": format!("{date}T10:00:00+08:00"),
+                    "timeZone": "Asia/Shanghai"
+                },
+                "recurrence": null,
+                "occurrenceId": null,
+                "sourcePlanId": null,
+                "sourceTaskId": null,
+                "scheduleOrigin": null,
+                "userLocked": false,
+                "editable": true,
+                "version": 1
+            })
+        };
+        let seeded = exchange_jsonl_request(
+            &mut input,
+            &mut output,
+            serde_json::json!({
+                "id": "calendar-page-seed",
+                "method": "calendar.mutate",
+                "params": {
+                    "operationId": "calendar-page-seed-op",
+                    "actor": "user",
+                    "mutations": [
+                        {"action": "upsert", "expectedVersion": null, "event": event("page-event-a", "2026-08-14")},
+                        {"action": "upsert", "expectedVersion": null, "event": event("page-event-b", "2026-08-15")},
+                        {"action": "upsert", "expectedVersion": null, "event": event("page-event-c", "2026-08-16")}
+                    ],
+                    "outbox": []
+                }
+            }),
+        )
+        .await;
+        assert_eq!(seeded["ok"], true);
+
+        let mut cursor = None;
+        let mut observed_event_ids = Vec::new();
+        for page_number in 1..=3 {
+            let page = exchange_jsonl_request(
+                &mut input,
+                &mut output,
+                serde_json::json!({
+                    "id": format!("calendar-page-{page_number}"),
+                    "method": "calendar.list",
+                    "params": {
+                        "cursor": cursor.clone(),
+                        "limit": 1
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(page["ok"], true);
+            let events = page["result"]["events"]
+                .as_array()
+                .expect("calendar page contains an events array");
+            assert_eq!(events.len(), 1);
+            observed_event_ids.push(
+                events[0]["eventId"]
+                    .as_str()
+                    .expect("calendar fixture event has an id")
+                    .to_owned(),
+            );
+            cursor = page["result"]["nextCursor"].as_str().map(ToOwned::to_owned);
+            if page_number < 3 {
+                assert!(cursor.is_some(), "non-terminal page must continue");
+            } else {
+                assert_eq!(cursor, None, "final page must terminate with null");
+            }
+        }
+        assert_eq!(
+            observed_event_ids,
+            vec!["page-event-a", "page-event-b", "page-event-c"]
+        );
+
+        input
+            .shutdown()
+            .await
+            .expect("close calendar fixture input");
+        server
+            .await
+            .expect("join calendar fixture server")
+            .expect("calendar fixture server result");
     }
 
     #[tokio::test]

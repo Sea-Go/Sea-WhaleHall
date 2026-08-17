@@ -7,7 +7,9 @@ import {
 } from "../src/bun/credential-helper-client";
 import { DATA_CENTER_CONSUMER_ID } from "../src/bun/data-center-contract";
 import {
+	DATA_CENTER_PRODUCTION_ORIGIN_CUTOVER_CREDENTIAL_ERROR_CODE,
 	DATA_CENTER_PRODUCTION_ORIGIN_CUTOVER_ID,
+	DataCenterProductionOriginCutoverCredentialError,
 	type DataCenterProductionOriginCutoverRepository,
 	runDataCenterProductionOriginCutover,
 } from "../src/bun/data-center-origin-cutover";
@@ -62,9 +64,22 @@ describe("DataCenter production-origin cutover", () => {
 			"staging-refresh-token",
 		);
 
-		await expect(
-			runDataCenterProductionOriginCutover({ repository, credentials }),
-		).rejects.toThrow("injected credential deletion failure");
+		const failure = runDataCenterProductionOriginCutover({
+			repository,
+			credentials,
+		});
+		await expect(failure).rejects.toBeInstanceOf(
+			DataCenterProductionOriginCutoverCredentialError,
+		);
+		await expect(failure).rejects.toMatchObject({
+			code: DATA_CENTER_PRODUCTION_ORIGIN_CUTOVER_CREDENTIAL_ERROR_CODE,
+			message: expect.stringContaining(
+				"No DataCenter network service was started",
+			),
+		});
+		await expect(failure).rejects.not.toThrow(
+			"injected credential deletion failure",
+		);
 		expect(repository.state).toBe("prepared");
 		expect(repository.completeCalls).toBe(0);
 		expect(repository.transportRows).toBe(0);

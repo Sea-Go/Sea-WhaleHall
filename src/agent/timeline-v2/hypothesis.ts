@@ -35,8 +35,10 @@ export class DeterministicTimelineHypothesisGenerator
 		return new Map(
 			episodes.map((episode) => {
 				const citedFactIds = [
-					...episode.evidenceFactIds,
-					...episode.supportingFactIds,
+					...new Set([
+						...episode.evidenceFactIds,
+						...episode.supportingFactIds,
+					]),
 				]
 					.filter((id) => factIds.has(id))
 					.slice(0, DETERMINISTIC_HYPOTHESIS_FACT_LIMIT);

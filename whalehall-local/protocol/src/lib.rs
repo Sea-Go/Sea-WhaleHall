@@ -1285,11 +1285,14 @@ pub struct CalendarListParams {
     pub from_date: Option<String>,
     #[serde(default)]
     pub to_date_exclusive: Option<String>,
-    /// Opaque cursor returned by the preceding page.
+    /// Opaque cursor returned by the preceding page. Callers must continue
+    /// requesting pages with each `nextCursor` until the result returns null;
+    /// an intermediate page may contain no matching events.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Maximum number of stored rows scanned by one page. The core validates
-    /// this value against `MAX_CALENDAR_LIST_LIMIT` before querying SQLite.
+    /// Maximum number of stored rows scanned by one page. When omitted, one
+    /// page scans `DEFAULT_CALENDAR_LIST_LIMIT` rows. The core validates an
+    /// explicit value against `MAX_CALENDAR_LIST_LIMIT` before querying SQLite.
     #[serde(default = "default_calendar_list_limit")]
     pub limit: usize,
 }
@@ -1311,6 +1314,8 @@ impl Default for CalendarListParams {
 #[serde(rename_all = "camelCase")]
 pub struct CalendarListResult {
     pub events: Vec<PlanningCalendarEvent>,
+    /// Opaque continuation cursor. Callers must request the next page until
+    /// this value is null, including after an empty page.
     pub next_cursor: Option<String>,
 }
 

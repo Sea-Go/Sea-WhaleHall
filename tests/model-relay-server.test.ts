@@ -807,7 +807,7 @@ describe("model relay forwarding", () => {
 });
 
 describe("model relay configuration", () => {
-	test("loads current users and discards a legacy agent key hash", async () => {
+	test("loads current users and discards even a malformed legacy agent key hash", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "whalehall-relay-users-"));
 		try {
 			const usersPath = join(directory, "users.json");
@@ -828,7 +828,7 @@ describe("model relay configuration", () => {
 							displayName: "Legacy",
 							initials: "L",
 							passwordHash,
-							agentKeyHash: "retired-hash-value",
+							agentKeyHash: { malformed: true },
 						},
 					],
 				}),

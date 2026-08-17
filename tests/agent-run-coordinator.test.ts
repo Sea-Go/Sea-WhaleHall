@@ -862,6 +862,60 @@ describe("AgentRunCoordinator", () => {
 		]);
 	});
 
+	test("does not flush a conversation delta without an assistant message identity", async () => {
+		const harness = createHarness();
+		const started = await harness.coordinator.startConversationTurn({
+			requestId: "request-missing-assistant-message",
+			clientMessageId: "client-missing-assistant-message",
+			text: "验证损坏快照不会发出无主消息增量",
+		});
+		if (started.kind !== "success") {
+			throw new Error("conversation run was not accepted");
+		}
+		const active = (
+			harness.coordinator as unknown as {
+				active: Map<
+					string,
+					{
+						snapshot: { assistantMessageId?: string };
+						pendingDelta: string;
+					}
+				>;
+			}
+		).active.get(started.data.runId);
+		if (!active) throw new Error("active conversation run was unavailable");
+		active.snapshot.assistantMessageId = undefined;
+
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				1,
+				{ kind: "run.started", runKind: "conversation" },
+				null,
+			),
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				2,
+				{
+					kind: "conversation.text.delta",
+					delta: "不会发送",
+					text: "不会发送",
+				},
+				null,
+			),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+
+		expect(active.pendingDelta).toBe("不会发送");
+		expect(
+			harness.events.some(
+				(event) => event.event.type === "conversation.message.delta",
+			),
+		).toBeFalse();
+	});
+
 	test("hydrates an active snapshot from the same sequence and assistant-content watermark", async () => {
 		const harness = createHarness();
 		const started = await harness.coordinator.startConversationTurn({

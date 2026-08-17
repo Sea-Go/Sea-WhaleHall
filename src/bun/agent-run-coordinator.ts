@@ -2116,7 +2116,12 @@ export class AgentRunCoordinator
 	}
 
 	private async flushDelta(run: ActiveRun): Promise<void> {
-		if (!run.pendingDelta || run.snapshot.kind !== "conversation-turn") return;
+		if (
+			!run.pendingDelta ||
+			run.snapshot.kind !== "conversation-turn" ||
+			!run.snapshot.assistantMessageId
+		)
+			return;
 		const delta = run.pendingDelta;
 		run.pendingDelta = "";
 		const startOffset = run.assistantContent.length - delta.length;

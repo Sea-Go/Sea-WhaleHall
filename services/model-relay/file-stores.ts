@@ -406,10 +406,8 @@ async function deleteRecordArtifacts(
 function validateUser(value: unknown): RelayUser {
 	if (!isRecord(value)) throw new Error("Relay user record is malformed.");
 	// Existing deployments may retain this retired hash until their next
-	// operator-managed rewrite. Validate its old shape, then discard it.
-	if (value.agentKeyHash !== undefined) {
-		boundedString(value.agentKeyHash, 4_096);
-	}
+	// operator-managed rewrite. It is never read, so discard it without
+	// letting a malformed legacy value reject the whole user store.
 	return {
 		id: boundedString(value.id, 256),
 		email: boundedString(value.email, 320).trim().toLowerCase(),

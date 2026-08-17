@@ -263,7 +263,10 @@ describe("WhaleHall client config.yaml", () => {
 		for (const source of [
 			currentConfiguration().replace(WHALEHALL_RELAY_MODEL, "qwen3:other"),
 			`${currentConfiguration()}unexpected: true\n`,
-			currentConfiguration().replace('name: "qwen3:1.7b"', "name: 42"),
+			currentConfiguration().replace(
+				`name: "${WHALEHALL_RELAY_MODEL}"`,
+				"name: 42",
+			),
 			legacyKeyConfiguration().replace(
 				'apikey: "retired-personal-relay-secret"',
 				"apikey:\n    nested: invalid",

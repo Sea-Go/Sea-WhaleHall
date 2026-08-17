@@ -85,7 +85,10 @@ import {
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
 import { DataCenterContentCrypto } from "./data-center-crypto";
-import { runDataCenterProductionOriginCutover } from "./data-center-origin-cutover";
+import {
+	DataCenterProductionOriginCutoverCredentialError,
+	runDataCenterProductionOriginCutover,
+} from "./data-center-origin-cutover";
 import {
 	DataCenterSyncService,
 	dataCenterSyncDiagnosticCode,
@@ -207,6 +210,11 @@ const agentRepository = new EncryptedAgentRepository({
 const productionOriginCutover = await runDataCenterProductionOriginCutover({
 	repository: agentRepository,
 	credentials: credentialStore,
+}).catch((error: unknown) => {
+	if (error instanceof DataCenterProductionOriginCutoverCredentialError) {
+		console.error(error.message);
+	}
+	throw error;
 });
 if (productionOriginCutover === "completed") {
 	console.warn(

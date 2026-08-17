@@ -169,6 +169,7 @@ versioned Vault Broker，并继续执行既有 post-wrap/post-package 签名和�
 ```bash
 bun run typecheck
 bun run test
+bun run lint:changed
 bun run build:views
 bun run test:sensors:ci
 bun run check

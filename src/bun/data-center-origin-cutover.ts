@@ -19,6 +19,25 @@ export type DataCenterProductionOriginCutoverResult =
 	| "completed"
 	| "already-complete";
 
+export const DATA_CENTER_PRODUCTION_ORIGIN_CUTOVER_CREDENTIAL_ERROR_CODE =
+	"LEGACY_CREDENTIAL_DELETE_FAILED";
+
+/**
+ * Fatal startup error raised when the retired origin credential cannot be
+ * removed. Authentication and DataCenter network owners must not start while
+ * an old origin credential may still be present.
+ */
+export class DataCenterProductionOriginCutoverCredentialError extends Error {
+	readonly code = DATA_CENTER_PRODUCTION_ORIGIN_CUTOVER_CREDENTIAL_ERROR_CODE;
+
+	constructor() {
+		super(
+			"WhaleHall could not establish the production authentication boundary because the retired credential could not be removed. No DataCenter network service was started; restart after secure credential storage is available.",
+		);
+		this.name = "DataCenterProductionOriginCutoverCredentialError";
+	}
+}
+
 /**
  * Runs before authentication or any DataCenter network owner exists.
  *
@@ -38,7 +57,14 @@ export async function runDataCenterProductionOriginCutover(options: {
 		options.repository.prepareDataCenterProductionOriginCutover(cutoverId);
 	if (preparation === "already-complete") return "already-complete";
 
-	await options.credentials.delete(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL);
+	try {
+		await options.credentials.delete(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL);
+	} catch {
+		// Fail closed without retaining or exposing the credential-store error.
+		// The durable journal remains prepared, so a later launch repeats both
+		// local cleanup and deletion before any network owner can be constructed.
+		throw new DataCenterProductionOriginCutoverCredentialError();
+	}
 	options.repository.completeDataCenterProductionOriginCutover(cutoverId);
 	return "completed";
 }

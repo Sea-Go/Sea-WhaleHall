@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { WebCryptoReflectionHasher } from "../src/agent/reflection/hash";
 import {
+	type ActivityEpisodeV2,
 	DeterministicEpisodeAssembler,
 	DeterministicEvidenceRenderer,
 	DeterministicTimelineHypothesisGenerator,
+	type EvidenceFactV2,
 	HeuristicTimelineEpisodeClassifier,
 	InMemoryTimelineV2Repository,
-	TimelineV2Processor,
-	type EvidenceFactV2,
 	type SemanticEventV2,
+	TimelineV2Processor,
 	type TimelineWindowV2,
 } from "../src/agent/timeline-v2";
 
@@ -45,8 +46,7 @@ function browserEvent(
 			opaqueWindowId: "browser-window",
 			domain: "example.invalid",
 			url:
-				options.url ??
-				"https://example.invalid/research?topic=graph#section",
+				options.url ?? "https://example.invalid/research?topic=graph#section",
 			title: "数据治理与知识图谱",
 			visibleText:
 				options.visibleText ??
@@ -106,9 +106,7 @@ function textValueEvent(
 			deletedChars: options.deletedChars,
 			deltaAvailable: options.deltaAvailable,
 			inputMethod: "unknown",
-			...(options.contentState === "unavailable"
-				? {}
-				: { label: "编辑区" }),
+			...(options.contentState === "unavailable" ? {} : { label: "编辑区" }),
 			...(options.addedText === undefined
 				? {}
 				: { addedText: options.addedText }),
@@ -237,10 +235,7 @@ describe("Timeline v2 real-capture regressions", () => {
 			}),
 		]);
 		const classification =
-			await new HeuristicTimelineEpisodeClassifier().classify(
-				facts,
-				null,
-			);
+			await new HeuristicTimelineEpisodeClassifier().classify(facts, null);
 		expect(classification.activity).toBe("research");
 	});
 
@@ -306,8 +301,7 @@ describe("Timeline v2 real-capture regressions", () => {
 		const facts = Array.from({ length: 12 }, (_, index) => fact(index + 1));
 		const assembler = new DeterministicEpisodeAssembler({
 			hasher,
-			hypotheses:
-				new DeterministicTimelineHypothesisGenerator(),
+			hypotheses: new DeterministicTimelineHypothesisGenerator(),
 		});
 		const episodes = await assembler.assemble(
 			windowFor([], 300_000),
@@ -324,10 +318,55 @@ describe("Timeline v2 real-capture regressions", () => {
 			).size,
 		).toBe(facts.length);
 		expect(
-			episodes.every(
-				(episode) => episode.endedAtMs > episode.startedAtMs,
-			),
+			episodes.every((episode) => episode.endedAtMs > episode.startedAtMs),
 		).toBeTrue();
+	});
+
+	test("deduplicates hypothesis citations before applying the four-fact limit", async () => {
+		const facts = Array.from({ length: 5 }, (_, index) => fact(index + 1));
+		const episode: ActivityEpisodeV2 = {
+			schemaVersion: "activity-episode.v2",
+			episodeId: "episode-deduplication",
+			revisionId: "revision-deduplication",
+			revision: 1,
+			supersedesRevisionId: null,
+			sourceWindowIds: ["window-under-test"],
+			startedAtMs: 1_000,
+			endedAtMs: 2_000,
+			goalVersion: null,
+			anchor: fact(1).anchor,
+			classification: {
+				activity: "development",
+				goalRelevance: null,
+				confidence: 0.9,
+				entropy: 0.1,
+				oodScore: 0.05,
+				abstain: false,
+				modelVersion: "test-classifier",
+			},
+			hypothesis: {
+				text: "可能在进行软件开发或排查技术问题",
+				citedFactIds: [],
+				generator: "deterministic-template.v2",
+			},
+			evidenceFactIds: ["fact-1", "fact-2"],
+			supportingFactIds: ["fact-1", "fact-3", "fact-4", "fact-5"],
+			coverage: ["metadata"],
+		};
+
+		const hypotheses =
+			await new DeterministicTimelineHypothesisGenerator().generate(
+				[episode],
+				facts,
+				null,
+			);
+
+		expect(hypotheses.get(episode.episodeId)?.citedFactIds).toEqual([
+			"fact-1",
+			"fact-2",
+			"fact-3",
+			"fact-4",
+		]);
 	});
 
 	test("uses the actual evidence period instead of the max-wait deadline", async () => {
@@ -339,8 +378,7 @@ describe("Timeline v2 real-capture regressions", () => {
 			evidence: new DeterministicEvidenceRenderer(hasher),
 			episodes: new DeterministicEpisodeAssembler({
 				hasher,
-				hypotheses:
-					new DeterministicTimelineHypothesisGenerator(),
+				hypotheses: new DeterministicTimelineHypothesisGenerator(),
 			}),
 			hasher,
 			clock: { nowMs: () => 300_000 },
@@ -395,10 +433,8 @@ describe("Timeline v2 real-capture regressions", () => {
 								episode.episodeId,
 								{
 									text: "可能在偏离目标进行软件开发",
-									citedFactIds:
-										episode.evidenceFactIds.slice(0, 1),
-									generator:
-										"qwen3:4b-cited.v2" as const,
+									citedFactIds: episode.evidenceFactIds.slice(0, 1),
+									generator: "qwen3:4b-cited.v2" as const,
 								},
 							]),
 						);
@@ -427,9 +463,7 @@ describe("Timeline v2 real-capture regressions", () => {
 		});
 		expect(result.summary.renderedText).not.toContain("软件开发");
 		expect(result.summary.renderedText).not.toContain("偏离目标");
-		expect(result.agentInput.segments[0]).toEqual(
-			result.summary.segments[0],
-		);
+		expect(result.agentInput.segments[0]).toEqual(result.summary.segments[0]);
 	});
 
 	test("forces no-goal relevance to null before Summary and AgentInput", async () => {
@@ -450,8 +484,7 @@ describe("Timeline v2 real-capture regressions", () => {
 						modelVersion: "contract-violating-test-double",
 					}),
 				},
-				hypotheses:
-					new DeterministicTimelineHypothesisGenerator(),
+				hypotheses: new DeterministicTimelineHypothesisGenerator(),
 			}),
 			hasher,
 			clock: { nowMs: () => 2_000 },
@@ -463,9 +496,7 @@ describe("Timeline v2 real-capture regressions", () => {
 		);
 		expect(result.episodes[0]?.classification.goalRelevance).toBeNull();
 		expect(result.summary.segments[0]?.goalRelevance).toBeNull();
-		expect(
-			result.summary.segments[0]?.classification.goalRelevance,
-		).toBeNull();
+		expect(result.summary.segments[0]?.classification.goalRelevance).toBeNull();
 		expect(result.agentInput.segments[0]?.goalRelevance).toBeNull();
 	});
 });

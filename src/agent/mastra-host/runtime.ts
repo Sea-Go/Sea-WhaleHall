@@ -144,6 +144,7 @@ export interface AgentHostRuntimeOptions {
 	now?: () => number;
 	onShutdownRequested?: () => void;
 	onBackgroundError?: (error: Error) => void;
+	dynamicPlanningAnalysisTimeoutMs?: number;
 }
 
 export class AgentHostRuntime {
@@ -154,6 +155,7 @@ export class AgentHostRuntime {
 	private readonly runs = new Map<string, RunRecord>();
 	private readonly onShutdownRequested: () => void;
 	private readonly onBackgroundError: (error: Error) => void;
+	private readonly dynamicPlanningAnalysisTimeoutMs: number;
 	private relay: ModelRelay | null = null;
 	private reflectionRelay: ModelRelay | null = null;
 	private storage: HostMastraStorage | null = null;
@@ -208,6 +210,9 @@ export class AgentHostRuntime {
 		this.adapters = new HostStateAdapters(this.runBoundPeer);
 		this.onShutdownRequested = options.onShutdownRequested ?? (() => undefined);
 		this.onBackgroundError = options.onBackgroundError ?? (() => undefined);
+		this.dynamicPlanningAnalysisTimeoutMs =
+			options.dynamicPlanningAnalysisTimeoutMs ??
+			DEFAULT_DYNAMIC_PLANNING_ANALYSIS_TIMEOUT_MS;
 	}
 
 	async dispatch(request: AgentHostRequest): Promise<unknown> {
@@ -472,32 +477,34 @@ export class AgentHostRuntime {
 			return await relay.runInContext(
 				{ runId: invocationId, originatingRequestId: requestId },
 				async () => {
-					const result = await this.hostRunContext.run(invocationId, () =>
-						agents.planningAnalysis.generate(
-							JSON.stringify(planningModelInputProjection(analysis)),
-							{
-								runId: invocationId,
-								abortSignal: AbortSignal.timeout(
-									DEFAULT_DYNAMIC_PLANNING_ANALYSIS_TIMEOUT_MS,
+					const result = await runDynamicPlanningAnalysisWithDeadline(
+						(abortSignal) =>
+							this.hostRunContext.run(invocationId, () =>
+								agents.planningAnalysis.generate(
+									JSON.stringify(planningModelInputProjection(analysis)),
+									{
+										runId: invocationId,
+										abortSignal,
+										requestContext: new RequestContext(),
+										maxSteps: 1,
+										toolChoice: "none",
+										modelSettings: { temperature: 0 },
+										structuredOutput: {
+											schema: dynamicPlanningProviderOutputSchema,
+											// App/domain validation below remains strict. `warn` prevents
+											// Mastra from hiding a parse failure behind a generic runtime
+											// error before WhaleHall can classify it as invalid output.
+											errorStrategy: "warn",
+											// The DataCenter-backed OpenAI-compatible provider rejects
+											// native response-format schemas while compiling its grammar.
+											// Inline injection keeps the provider call JSON-only while the
+											// same Zod and domain validators remain authoritative here.
+											jsonPromptInjection: "inline",
+										},
+									},
 								),
-								requestContext: new RequestContext(),
-								maxSteps: 1,
-								toolChoice: "none",
-								modelSettings: { temperature: 0 },
-								structuredOutput: {
-									schema: dynamicPlanningProviderOutputSchema,
-									// App/domain validation below remains strict. `warn` prevents
-									// Mastra from hiding a parse failure behind a generic runtime
-									// error before WhaleHall can classify it as invalid output.
-									errorStrategy: "warn",
-									// The DataCenter-backed OpenAI-compatible provider rejects
-									// native response-format schemas while compiling its grammar.
-									// Inline injection keeps the provider call JSON-only while the
-									// same Zod and domain validators remain authoritative here.
-									jsonPromptInjection: "inline",
-								},
-							},
-						),
+							),
+						this.dynamicPlanningAnalysisTimeoutMs,
 					);
 					const parsedOutput = dynamicPlanningOutputSchema.safeParse(
 						decodeDynamicPlanningProviderOutput(result.object, analysis),
@@ -512,6 +519,13 @@ export class AgentHostRuntime {
 				throw runtimeError(
 					"PLANNING_OUTPUT_INVALID",
 					"Dynamic Planning output failed its semantic contract.",
+					true,
+				);
+			}
+			if (error instanceof DynamicPlanningAnalysisDeadlineError) {
+				throw runtimeError(
+					"MODEL_RELAY_UNAVAILABLE",
+					"Dynamic Planning analysis timed out.",
 					true,
 				);
 			}
@@ -2098,6 +2112,49 @@ class ActivityReflectionWorkflowDeadlineError extends Error {
 		super("Activity reflection workflow timed out.");
 		this.name = "ActivityReflectionWorkflowDeadlineError";
 	}
+}
+
+class DynamicPlanningAnalysisDeadlineError extends Error {
+	constructor() {
+		super("Dynamic Planning analysis timed out.");
+		this.name = "DynamicPlanningAnalysisDeadlineError";
+	}
+}
+
+/**
+ * Bounds one live Planning model call with a locally identifiable deadline.
+ * Operation failures, including caller aborts, pass through unchanged.
+ */
+export function runDynamicPlanningAnalysisWithDeadline<TResult>(
+	operation: (signal: AbortSignal) => Promise<TResult>,
+	timeoutMs: number,
+): Promise<TResult> {
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+		return Promise.reject(new Error("Dynamic Planning timeout is invalid."));
+	}
+	return new Promise<TResult>((resolve, reject) => {
+		let settled = false;
+		const controller = new AbortController();
+		const finish = (settle: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			settle();
+		};
+		const timer = setTimeout(() => {
+			const error = new DynamicPlanningAnalysisDeadlineError();
+			finish(() => {
+				controller.abort(error);
+				reject(error);
+			});
+		}, timeoutMs);
+		void Promise.resolve()
+			.then(() => operation(controller.signal))
+			.then(
+				(value) => finish(() => resolve(value)),
+				(error: unknown) => finish(() => reject(error)),
+			);
+	});
 }
 
 /**

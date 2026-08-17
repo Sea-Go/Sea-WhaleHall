@@ -12,7 +12,7 @@ import { dirname, resolve } from "node:path";
 import { createScryptPasswordHash } from "../services/model-relay/password";
 import type { RelayUser } from "../services/model-relay/types";
 
-type Arguments = {
+export type ProvisionRelayOwnerArguments = {
 	ignoredConfigPath: string | null;
 	usersPath: string;
 	replace: boolean;
@@ -52,14 +52,20 @@ async function main(): Promise<void> {
 	);
 }
 
-function parseArguments(values: readonly string[]): Arguments {
+export function parseArguments(
+	values: readonly string[],
+): ProvisionRelayOwnerArguments {
 	let configPath: string | null = null;
 	let usersPath: string | null = null;
 	let replace = false;
 	for (let index = 0; index < values.length; index += 1) {
 		const value = values[index];
 		if (value === "--config") {
-			configPath = values[index + 1] ?? null;
+			const next = values[index + 1];
+			if (!next || next.startsWith("--")) {
+				throw new Error("--config 必须提供绝对路径。");
+			}
+			configPath = next;
 			index += 1;
 			continue;
 		}
@@ -192,9 +198,11 @@ function requireText(value: string, name: string, maximum: number): string {
 	return normalized;
 }
 
-void main().catch((error: unknown) => {
-	const message =
-		error instanceof Error ? error.message : "owner provisioning 失败。";
-	process.stderr.write(`${message}\n`);
-	process.exitCode = 1;
-});
+if (import.meta.main) {
+	void main().catch((error: unknown) => {
+		const message =
+			error instanceof Error ? error.message : "owner provisioning 失败。";
+		process.stderr.write(`${message}\n`);
+		process.exitCode = 1;
+	});
+}

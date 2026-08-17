@@ -47,6 +47,8 @@ const MAX_OUTBOX_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_COLLECTION_ITEMS: usize = 10_000;
 const PLANNING_VAULT_REFERENCE_CURSOR_PREFIX: &str = "pvr1";
 const CALENDAR_LIST_CURSOR_PREFIX: &str = "cl1";
+const OVERSIZED_LEGACY_CALENDAR_EVENT_DIAGNOSTIC: &str =
+    "calendar.list skipped one legacy event that exceeds its serialized byte budget";
 
 #[derive(Clone)]
 pub struct PlanningStore {
@@ -490,6 +492,50 @@ impl PlanningStore {
             let event_bytes = matches_filters
                 .then(|| serde_json::to_vec(&event).map(|encoded| encoded.len()))
                 .transpose()?;
+            if let Some(event_bytes) = event_bytes {
+                let event_cursor = format_calendar_list_cursor(stored_event_id);
+                let single_event_page_bytes = calendar_list_result_serialized_len(
+                    event_bytes,
+                    1,
+                    Some(event_cursor.as_str()),
+                )?;
+                if single_event_page_bytes > MAX_CALENDAR_LIST_RESULT_BYTES {
+                    validate_calendar_event_fields(&event)?;
+                    if !events.is_empty() {
+                        let previous_cursor =
+                            last_scanned_event_id.as_deref().ok_or_else(|| {
+                                PlanningStoreError::Configuration(
+                                    "calendar.list lost its preceding cursor".to_owned(),
+                                )
+                            })?;
+                        let result = CalendarListResult {
+                            events,
+                            next_cursor: Some(format_calendar_list_cursor(previous_cursor)),
+                        };
+                        if serde_json::to_vec(&result)?.len() > MAX_CALENDAR_LIST_RESULT_BYTES {
+                            return Err(PlanningStoreError::Configuration(
+                                "calendar.list result exceeded its serialized byte budget"
+                                    .to_owned(),
+                            ));
+                        }
+                        return Ok(result);
+                    }
+                    // Current writes reject this shape in validate_calendar_event.
+                    // Keep the wire contract unchanged, but emit one fixed,
+                    // content-free process diagnostic before advancing past it.
+                    eprintln!("{OVERSIZED_LEGACY_CALENDAR_EVENT_DIAGNOSTIC}");
+                    let result = CalendarListResult {
+                        events,
+                        next_cursor: Some(event_cursor),
+                    };
+                    if serde_json::to_vec(&result)?.len() > MAX_CALENDAR_LIST_RESULT_BYTES {
+                        return Err(PlanningStoreError::Configuration(
+                            "calendar.list result exceeded its serialized byte budget".to_owned(),
+                        ));
+                    }
+                    return Ok(result);
+                }
+            }
             let candidate_event_bytes =
                 serialized_event_bytes.saturating_add(event_bytes.unwrap_or(0));
             let candidate_event_count = events.len() + usize::from(matches_filters);
@@ -1513,12 +1559,7 @@ fn validate_calendar_update_ownership(
 }
 
 fn validate_calendar_event(event: &PlanningCalendarEvent) -> Result<(), PlanningStoreError> {
-    if event.schema_version != CALENDAR_SCHEMA_VERSION {
-        return Err(PlanningStoreError::Configuration(format!(
-            "calendar event schemaVersion must be {CALENDAR_SCHEMA_VERSION}"
-        )));
-    }
-    validate_identifier("eventId", &event.event_id)?;
+    validate_calendar_event_fields(event)?;
     let serialized_event_bytes = serde_json::to_vec(event)?.len();
     let serialized_cursor = format_calendar_list_cursor(&event.event_id);
     let serialized_list_bytes = calendar_list_result_serialized_len(
@@ -1532,6 +1573,16 @@ fn validate_calendar_event(event: &PlanningCalendarEvent) -> Result<(), Planning
             event.event_id
         )));
     }
+    Ok(())
+}
+
+fn validate_calendar_event_fields(event: &PlanningCalendarEvent) -> Result<(), PlanningStoreError> {
+    if event.schema_version != CALENDAR_SCHEMA_VERSION {
+        return Err(PlanningStoreError::Configuration(format!(
+            "calendar event schemaVersion must be {CALENDAR_SCHEMA_VERSION}"
+        )));
+    }
+    validate_identifier("eventId", &event.event_id)?;
     validate_content("calendar.title", &event.title, MAX_CONTENT_CHARS)?;
     if let Some(reference) = event.sealed_content_ref.as_deref() {
         validate_identifier("calendar.sealedContentRef", reference)?;
@@ -3506,6 +3557,222 @@ mod tests {
             cursor = Some(next_cursor);
         }
         assert_eq!(observed_ids, expected_ids);
+    }
+
+    #[test]
+    fn calendar_list_skips_a_valid_legacy_oversized_row_and_reaches_later_rows() {
+        let (_directory, store) = test_store();
+        let mut oversized = manual_event(
+            "legacy-event-a-oversized",
+            "2026-08-14",
+            "📅".repeat(MAX_CONTENT_CHARS),
+        );
+        oversized.recurrence = Some(whalehall_local_protocol::CalendarRecurrence {
+            series_id: "legacy-oversized-series".to_owned(),
+            rrule: "FREQ=DAILY".to_owned(),
+            time_zone: "Asia/Shanghai".to_owned(),
+            exception_dates: vec!["2026-08-14".to_owned(); 45_000],
+        });
+        let serialized_event_bytes = serde_json::to_vec(&oversized)
+            .expect("serialize legacy oversized calendar event")
+            .len();
+        assert!(
+            calendar_list_result_serialized_len(
+                serialized_event_bytes,
+                1,
+                Some(format_calendar_list_cursor(&oversized.event_id).as_str()),
+            )
+            .expect("measure legacy oversized calendar event")
+                > MAX_CALENDAR_LIST_RESULT_BYTES
+        );
+        validate_calendar_event_fields(&oversized)
+            .expect("legacy row is valid apart from its historical page size");
+
+        let mut connection = connect(store.database_path()).expect("open legacy fixture database");
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin legacy fixture transaction");
+        persist_calendar_event(&transaction, &oversized)
+            .expect("persist legacy event without current write validation");
+        transaction.commit().expect("commit legacy fixture");
+        persist_manual_events(
+            &store,
+            "seed-event-after-legacy-oversized",
+            vec![manual_event(
+                "legacy-event-b-readable",
+                "2026-08-15",
+                "仍可读取".to_owned(),
+            )],
+        );
+
+        let skipped = store
+            .list_calendar(&CalendarListParams {
+                limit: MAX_CALENDAR_LIST_LIMIT,
+                ..CalendarListParams::default()
+            })
+            .expect("skip valid legacy row that cannot fit one page");
+        assert!(skipped.events.is_empty());
+        assert_eq!(
+            skipped.next_cursor,
+            Some(format_calendar_list_cursor("legacy-event-a-oversized"))
+        );
+        let later = store
+            .list_calendar(&CalendarListParams {
+                cursor: skipped.next_cursor,
+                limit: MAX_CALENDAR_LIST_LIMIT,
+                ..CalendarListParams::default()
+            })
+            .expect("read rows after skipped legacy event");
+        assert_eq!(
+            later
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["legacy-event-b-readable"]
+        );
+        assert_eq!(later.next_cursor, None);
+    }
+
+    #[test]
+    fn calendar_list_returns_a_near_full_page_before_skipping_a_long_id_legacy_row() {
+        let (_directory, store) = test_store();
+        let mut near_full = manual_event(
+            "a-near-full-event",
+            "2026-08-14",
+            "📅".repeat(MAX_CONTENT_CHARS),
+        );
+        near_full.recurrence = Some(whalehall_local_protocol::CalendarRecurrence {
+            series_id: "near-full-series".to_owned(),
+            rrule: "FREQ=DAILY".to_owned(),
+            time_zone: "Asia/Shanghai".to_owned(),
+            exception_dates: Vec::new(),
+        });
+        let long_event_id = "z".repeat(MAX_IDENTIFIER_BYTES);
+        let short_cursor = format_calendar_list_cursor(&near_full.event_id);
+        let long_cursor = format_calendar_list_cursor(&long_event_id);
+        let mut lower = 0_usize;
+        let mut upper = 60_000_usize;
+        while lower < upper {
+            let candidate = lower + (upper - lower).div_ceil(2);
+            near_full
+                .recurrence
+                .as_mut()
+                .expect("near-full fixture recurrence")
+                .exception_dates = vec!["2026-08-13".to_owned(); candidate];
+            let event_bytes = serde_json::to_vec(&near_full)
+                .expect("serialize near-full fixture")
+                .len();
+            if calendar_list_result_serialized_len(event_bytes, 1, Some(&short_cursor))
+                .expect("measure near-full fixture")
+                <= MAX_CALENDAR_LIST_RESULT_BYTES
+            {
+                lower = candidate;
+            } else {
+                upper = candidate - 1;
+            }
+        }
+        near_full
+            .recurrence
+            .as_mut()
+            .expect("near-full fixture recurrence")
+            .exception_dates = vec!["2026-08-13".to_owned(); lower];
+        let near_full_bytes = serde_json::to_vec(&near_full)
+            .expect("serialize final near-full fixture")
+            .len();
+        assert!(
+            calendar_list_result_serialized_len(near_full_bytes, 1, Some(&short_cursor))
+                .expect("measure short-cursor page")
+                <= MAX_CALENDAR_LIST_RESULT_BYTES
+        );
+        assert!(
+            calendar_list_result_serialized_len(near_full_bytes, 1, Some(&long_cursor))
+                .expect("measure long-cursor page")
+                > MAX_CALENDAR_LIST_RESULT_BYTES
+        );
+        validate_calendar_event(&near_full).expect("near-full event remains writable");
+
+        let mut oversized =
+            manual_event(&long_event_id, "2026-08-15", "📅".repeat(MAX_CONTENT_CHARS));
+        oversized.recurrence = Some(whalehall_local_protocol::CalendarRecurrence {
+            series_id: "long-id-oversized-series".to_owned(),
+            rrule: "FREQ=DAILY".to_owned(),
+            time_zone: "Asia/Shanghai".to_owned(),
+            exception_dates: vec!["2026-08-15".to_owned(); 45_000],
+        });
+        validate_calendar_event_fields(&oversized)
+            .expect("oversized legacy row is otherwise valid");
+
+        let mut connection = connect(store.database_path()).expect("open legacy fixture database");
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin legacy fixture transaction");
+        persist_calendar_event(&transaction, &near_full).expect("persist near-full event");
+        persist_calendar_event(&transaction, &oversized).expect("persist oversized legacy event");
+        transaction.commit().expect("commit legacy fixture");
+
+        let first = store
+            .list_calendar(&CalendarListParams {
+                limit: MAX_CALENDAR_LIST_LIMIT,
+                ..CalendarListParams::default()
+            })
+            .expect("return the bounded page before the oversized row");
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(first.next_cursor, Some(short_cursor.clone()));
+        assert!(
+            serde_json::to_vec(&first)
+                .is_ok_and(|encoded| encoded.len() <= MAX_CALENDAR_LIST_RESULT_BYTES)
+        );
+
+        let skipped = store
+            .list_calendar(&CalendarListParams {
+                cursor: first.next_cursor,
+                limit: MAX_CALENDAR_LIST_LIMIT,
+                ..CalendarListParams::default()
+            })
+            .expect("skip the oversized row on its own page");
+        assert!(skipped.events.is_empty());
+        assert_eq!(skipped.next_cursor, Some(long_cursor.clone()));
+        assert!(
+            serde_json::to_vec(&skipped)
+                .is_ok_and(|encoded| encoded.len() <= MAX_CALENDAR_LIST_RESULT_BYTES)
+        );
+
+        let terminal = store
+            .list_calendar(&CalendarListParams {
+                cursor: skipped.next_cursor,
+                limit: MAX_CALENDAR_LIST_LIMIT,
+                ..CalendarListParams::default()
+            })
+            .expect("terminate after the skipped row");
+        assert!(terminal.events.is_empty());
+        assert_eq!(terminal.next_cursor, None);
+    }
+
+    #[test]
+    fn calendar_list_does_not_treat_ordinary_corruption_as_a_legacy_size_issue() {
+        let (_directory, store) = test_store();
+        persist_manual_events(
+            &store,
+            "seed-corrupt-calendar-row",
+            vec![manual_event(
+                "corrupt-calendar-row",
+                "2026-08-14",
+                "损坏前".to_owned(),
+            )],
+        );
+        let connection = connect(store.database_path()).expect("open corrupt fixture database");
+        connection
+            .execute(
+                "UPDATE calendar_events SET event_json = ?1 WHERE event_id = ?2",
+                params!["{not-json", "corrupt-calendar-row"],
+            )
+            .expect("corrupt stored event JSON");
+
+        assert!(matches!(
+            store.list_calendar(&CalendarListParams::default()),
+            Err(PlanningStoreError::Json(_))
+        ));
     }
 
     #[test]
