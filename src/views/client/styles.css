@@ -5,6 +5,7 @@
 @import "./shared/ui/ui.css";
 @import "./features/auth/AuthPage.css";
 @import "./app/AppShell.css";
+@import "./features/conversation/ConversationPage.css";
 @import "./features/planning/PlanningPage.css";
 @import "./features/calendar/CalendarPage.css";
 @import "./features/reports/ReportsPage.css";

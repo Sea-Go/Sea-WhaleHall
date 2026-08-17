@@ -10,6 +10,7 @@ import {
 } from "./features/app-update/public";
 import { AuthGate, type AuthSession } from "./features/auth/public";
 import { CalendarController } from "./features/calendar/public";
+import { ConversationController } from "./features/conversation/public";
 import { MonitoringController } from "./features/monitoring/public";
 import { PlanningController } from "./features/planning/public";
 import {
@@ -28,6 +29,7 @@ import { ElectrobunAuthService } from "./infrastructure/auth/ElectrobunAuthServi
 import { MockAuthService } from "./infrastructure/auth/MockAuthService";
 import { ElectrobunCalendarService } from "./infrastructure/calendar/ElectrobunCalendarService";
 import { MockCalendarService } from "./infrastructure/calendar/MockCalendarService";
+import { ElectrobunConversationService } from "./infrastructure/conversation/ElectrobunConversationService";
 import { ElectrobunMonitoringService } from "./infrastructure/monitoring/ElectrobunMonitoringService";
 import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/ElectrobunPetPresentationBridge";
 import { ElectrobunPlanningService } from "./infrastructure/planning/ElectrobunPlanningService";
@@ -138,6 +140,10 @@ function AuthenticatedApp({
 		() => new PlanningController(new ElectrobunPlanningService()),
 		[],
 	);
+	const conversationController = useMemo(
+		() => new ConversationController(new ElectrobunConversationService()),
+		[],
+	);
 	const proactiveFeedbackService = useMemo(
 		() =>
 			desktopRuntime
@@ -176,6 +182,9 @@ function AuthenticatedApp({
 	useStrictModeSafeDispose(planningController, (controller) =>
 		controller.dispose(),
 	);
+	useStrictModeSafeDispose(conversationController, (controller) =>
+		controller.dispose(),
+	);
 
 	const handleLogout = () => {
 		if (logoutPendingRef.current) return;
@@ -186,6 +195,7 @@ function AuthenticatedApp({
 				proactiveFeedbackPolicyController.dispose();
 				calendarController.clearAccountData();
 				planningController.dispose();
+				conversationController.dispose();
 			},
 		});
 	};
@@ -196,6 +206,7 @@ function AuthenticatedApp({
 			onLogout={handleLogout}
 			calendarService={calendarService}
 			calendarController={calendarController}
+			conversationController={conversationController}
 			planningController={planningController}
 			reportController={reportController}
 			preferencesController={preferencesController}
