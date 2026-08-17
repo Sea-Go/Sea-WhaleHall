@@ -805,6 +805,124 @@ describe("AgentRunCoordinator", () => {
 		});
 	});
 
+	test("emits UTF-16 start offsets for independently flushed conversation deltas", async () => {
+		const harness = createHarness();
+		const started = await harness.coordinator.startConversationTurn({
+			requestId: "request-delta-offsets",
+			clientMessageId: "client-delta-offsets",
+			text: "连续输出两个相同字符",
+		});
+		if (started.kind !== "success") {
+			throw new Error("conversation run was not accepted");
+		}
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				1,
+				{ kind: "run.started", runKind: "conversation" },
+				null,
+			),
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				2,
+				{ kind: "conversation.text.delta", delta: "🐋", text: "🐋" },
+				null,
+			),
+		);
+		await waitFor(
+			() =>
+				harness.events.filter(
+					(event) => event.event.type === "conversation.message.delta",
+				).length === 1,
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				3,
+				{ kind: "conversation.text.delta", delta: "🐋", text: "🐋🐋" },
+				null,
+			),
+		);
+		await waitFor(
+			() =>
+				harness.events.filter(
+					(event) => event.event.type === "conversation.message.delta",
+				).length === 2,
+		);
+
+		expect(
+			harness.events
+				.map((event) => event.event)
+				.filter((event) => event.type === "conversation.message.delta"),
+		).toEqual([
+			expect.objectContaining({ startOffset: 0, delta: "🐋" }),
+			expect.objectContaining({ startOffset: 2, delta: "🐋" }),
+		]);
+	});
+
+	test("hydrates an active snapshot from the same sequence and assistant-content watermark", async () => {
+		const harness = createHarness();
+		const started = await harness.coordinator.startConversationTurn({
+			requestId: "request-active-snapshot-watermark",
+			clientMessageId: "client-active-snapshot-watermark",
+			text: "验证活跃快照正文",
+		});
+		if (started.kind !== "success") {
+			throw new Error("conversation run was not accepted");
+		}
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				1,
+				{ kind: "run.started", runKind: "conversation" },
+				null,
+			),
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				started.data.runId,
+				2,
+				{
+					kind: "conversation.text.delta",
+					delta: "活跃正文",
+					text: "活跃正文",
+				},
+				null,
+			),
+		);
+		await waitFor(() =>
+			harness.events.some(
+				(event) => event.event.type === "conversation.message.delta",
+			),
+		);
+		const listMessages = harness.repository.listMessages.bind(
+			harness.repository,
+		);
+		harness.repository.listMessages = async (...args) =>
+			(await listMessages(...args)).map((message) =>
+				message.role === "assistant" ? { ...message, content: "" } : message,
+			);
+
+		const result = await harness.coordinator.getAgentRunSnapshot(
+			started.data.runId,
+		);
+		if (result.kind !== "success" || result.data.kind !== "conversation-turn") {
+			throw new Error("active conversation snapshot was unavailable");
+		}
+		const deltaEnvelope = harness.events.find(
+			(event) => event.event.type === "conversation.message.delta",
+		);
+		if (!deltaEnvelope) throw new Error("conversation delta was not emitted");
+		expect(result.data.lastSequence).toBe(deltaEnvelope.sequence);
+		expect(
+			result.data.conversation.messages.find(
+				(message) => message.role === "assistant",
+			)?.content,
+		).toBe("活跃正文");
+	});
+
 	test("isolates active and persisted runs by the Bun-authenticated account", async () => {
 		const harness = createHarness();
 		const accountA = await harness.coordinator.startConversationTurn({

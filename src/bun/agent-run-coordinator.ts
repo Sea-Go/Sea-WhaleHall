@@ -108,6 +108,44 @@ function messageProjection(
 	};
 }
 
+function withActiveAssistantContent(
+	thread: ConversationRpcThread,
+	snapshot: Extract<AgentRunSnapshot, { kind: "conversation-turn" }>,
+	content: string,
+): ConversationRpcThread {
+	const messageId = snapshot.assistantMessageId;
+	if (!messageId) return thread;
+	const existing = thread.messages.find((message) => message.id === messageId);
+	if (!existing && content.length === 0) return thread;
+	if (existing && existing.role !== "assistant") {
+		throw new Error("Conversation assistant message identity is inconsistent.");
+	}
+	const state: NonNullable<ConversationRpcMessage["state"]> =
+		snapshot.status === "completed"
+			? "complete"
+			: snapshot.status === "cancelled"
+				? "cancelled"
+				: snapshot.status === "failed"
+					? "failed"
+					: "streaming";
+	const assistant: ConversationRpcMessage = {
+		id: messageId,
+		role: "assistant",
+		content,
+		createdAtMs: existing?.createdAtMs ?? snapshot.startedAtMs + 1,
+		state,
+	};
+	return {
+		...thread,
+		updatedAtMs: Math.max(thread.updatedAtMs, snapshot.updatedAtMs),
+		messages: existing
+			? thread.messages.map((message) =>
+					message.id === messageId ? assistant : message,
+				)
+			: [...thread.messages, assistant],
+	};
+}
+
 function parsePlanningSession(
 	value: unknown,
 	fallbackId?: string,
@@ -1184,9 +1222,18 @@ export class AgentRunCoordinator
 				if (active.snapshot.kind === "activity-analysis") {
 					return { kind: "not-found", message: "找不到该本地 Agent 运行。" };
 				}
+				const capturedSnapshot = structuredClone(active.snapshot);
+				const activeAssistantContent =
+					capturedSnapshot.kind === "conversation-turn"
+						? active.assistantContent
+						: undefined;
 				return {
 					kind: "success",
-					data: await this.hydrateSnapshot(identity, active.snapshot),
+					data: await this.hydrateSnapshot(
+						identity,
+						capturedSnapshot,
+						activeAssistantContent,
+					),
 				};
 			}
 			const record = await this.inSession(identity, () =>
@@ -2072,12 +2119,14 @@ export class AgentRunCoordinator
 		if (!run.pendingDelta || run.snapshot.kind !== "conversation-turn") return;
 		const delta = run.pendingDelta;
 		run.pendingDelta = "";
+		const startOffset = run.assistantContent.length - delta.length;
 		await this.emit(
 			run,
 			{
 				type: "conversation.message.delta",
 				conversationId: run.snapshot.conversationId,
 				messageId: run.snapshot.assistantMessageId!,
+				startOffset,
 				delta,
 			},
 			false,
@@ -2639,21 +2688,31 @@ export class AgentRunCoordinator
 	private async hydrateSnapshot(
 		identity: AuthSessionIdentity,
 		snapshot: AgentRunSnapshot,
+		activeAssistantContent?: string,
 	): Promise<AgentRunSnapshot> {
-		if (snapshot.kind !== "conversation-turn") return structuredClone(snapshot);
+		const capturedSnapshot = structuredClone(snapshot);
+		if (capturedSnapshot.kind !== "conversation-turn") return capturedSnapshot;
 		const conversation = await this.inSession(identity, () =>
 			this.repository.getConversation(
 				identity.accountId,
-				snapshot.conversationId,
+				capturedSnapshot.conversationId,
 			),
 		);
+		const hydratedConversation = conversation
+			? await this.inSession(identity, () =>
+					this.buildConversation(conversation.accountId, conversation),
+				)
+			: capturedSnapshot.conversation;
 		return {
-			...structuredClone(snapshot),
-			conversation: conversation
-				? await this.inSession(identity, () =>
-						this.buildConversation(conversation.accountId, conversation),
-					)
-				: snapshot.conversation,
+			...capturedSnapshot,
+			conversation:
+				activeAssistantContent === undefined
+					? hydratedConversation
+					: withActiveAssistantContent(
+							hydratedConversation,
+							capturedSnapshot,
+							activeAssistantContent,
+						),
 		};
 	}
 

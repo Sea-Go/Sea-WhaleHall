@@ -98,6 +98,7 @@ export type AgentRunEvent =
 			type: "conversation.message.delta";
 			conversationId: string;
 			messageId: string;
+			startOffset: number;
 			delta: string;
 	  }
 	| {
