@@ -10,7 +10,7 @@ WhaleHall 桌面端的所有模型调用必须经过 `src/agent/mastra-host` 的
 
 | 用途 | Mastra 入口 | 职责与远端边界 |
 | --- | --- | --- |
-| `agent` | conversation、task-planning Agent/Workflow | Sidecar 构造 OpenAI-compatible 请求；Bun 使用当前账号的短期 bearer 经固定 DataCenter 网关发送。 |
+| `agent` | text-only conversation、task-planning Agent/Workflow | Sidecar 构造 OpenAI-compatible 请求；Bun 使用当前账号的短期 bearer 经固定 DataCenter 网关发送。当前 conversation 不注册产品 Tool。 |
 | `activity` | `reflection.analyze` → no-persistence activity-reflection Workflow | Bun 生成完整的 sealed-window prompt；Sidecar 只做一次严格结构化调用。后台 activity Agent 也使用该用途。 |
 | `planning` | `planning.analyze` → live-only planning-analysis Agent | 只返回 Dynamic Planning 的严格语义结果。持久化、幂等、七日排程、ETA、proposal/confirm、重试和取消仍由 Bun `PlanningRuntime` 所有。 |
 
@@ -24,6 +24,11 @@ token、key 或用户身份。Dynamic Planning 使用稳定的
 `activity-reflection` 与 `planning-analysis` 都是 live-only 入口，不注册到 durable
 Mastra Agent 集合。它们不创建产品 Tool、Memory 或 snapshot。前者的完整窗口 prompt，
 后者的计划语义快照，以及二者的模型输出，只存在于一次 Bun/Sidecar 调用内。
+
+生产 conversation 固定为纯文本调用，显式禁用 active Tools 与多步 Tool loop。模型若
+返回标准 Tool 事件或文本形式的 `<tool...>` 标记，Sidecar 必须在展示和持久化前终止本轮，
+不得解析、隐藏后继续或执行。只有固定 provider/version/model 通过流式与多轮 Tool
+conformance gate 后，才可在单独改动中重新启用本地 Tool allowlist。
 
 ## 零本机模型约束
 

@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { dynamicPlanningOutputSchema } from "../src/agent/mastra-host/planning-analysis";
+import {
+	decodeDynamicPlanningProviderOutput,
+	dynamicPlanningProviderOutputSchema,
+} from "../src/agent/mastra-host/planning-analysis";
 import type { AgentHostMethod } from "../src/agent/mastra-host/protocol";
 import type {
 	PlanningModelAnalysisRequest,
 	PlanningModelProposal,
 } from "../src/agent/planning";
+import { assertPlanningModelOutputForRequest } from "../src/agent/planning";
 import {
 	MAX_PLANNING_MODEL_CONTEXT_MESSAGES,
 	MAX_PLANNING_MODEL_OBSERVATION_EVIDENCE,
@@ -80,8 +84,250 @@ function proposalFixture(): PlanningModelProposal {
 
 describe("MastraPlanningModel", () => {
 	test("keeps the recursive provider JSON Schema free of pattern", () => {
-		const providerSchema = z.toJSONSchema(dynamicPlanningOutputSchema);
+		const providerSchema = z.toJSONSchema(dynamicPlanningProviderOutputSchema);
 		expect(JSON.stringify(providerSchema)).not.toContain('"pattern"');
+	});
+
+	test("normalizes the stable provider envelope into the strict proposal union", () => {
+		const proposal = proposalFixture();
+		expect(
+			decodeDynamicPlanningProviderOutput(
+				{
+					outcome: proposal.outcome,
+					recommendedType: proposal.recommendedType,
+					rationaleSummary: proposal.rationaleSummary,
+					assumptions: proposal.assumptions,
+					clarificationQuestions: proposal.clarificationQuestions,
+					assistantMessage: proposal.assistantMessage,
+					proposal: {
+						goal: proposal.goal,
+						estimatedCompletionDate: proposal.estimatedCompletionDate,
+						confidence: proposal.confidence,
+						estimateBasis: proposal.estimateBasis,
+						schedulingPreferenceSource: proposal.schedulingPreferenceSource,
+						schedulingPreferences: proposal.schedulingPreferences,
+						tasks: proposal.tasks,
+					},
+				},
+				requestFixture(),
+			),
+		).toEqual(proposal);
+	});
+
+	test("defaults an omitted proposal question list but rejects it for clarification", () => {
+		const proposal = proposalFixture();
+		const providerProposal = {
+			outcome: proposal.outcome,
+			recommendedType: proposal.recommendedType,
+			rationaleSummary: proposal.rationaleSummary,
+			assumptions: proposal.assumptions,
+			assistantMessage: proposal.assistantMessage,
+			proposal: {
+				goal: proposal.goal,
+				estimatedCompletionDate: proposal.estimatedCompletionDate,
+				confidence: proposal.confidence,
+				estimateBasis: proposal.estimateBasis,
+				schedulingPreferenceSource: proposal.schedulingPreferenceSource,
+				schedulingPreferences: proposal.schedulingPreferences,
+				tasks: proposal.tasks,
+			},
+		};
+		expect(
+			decodeDynamicPlanningProviderOutput(providerProposal, requestFixture()),
+		).toEqual(proposal);
+		expect(
+			decodeDynamicPlanningProviderOutput(
+				{
+					...providerProposal,
+					outcome: "needs-clarification",
+					proposal: null,
+				},
+				requestFixture(),
+			),
+		).toBeNull();
+	});
+
+	test("drops known proposal fields from a clarification but rejects arbitrary extras", () => {
+		const mixed = {
+			outcome: "needs-clarification",
+			recommendedType: "short-term",
+			rationaleSummary: "还缺少交付格式。",
+			assumptions: [],
+			clarificationQuestions: ["演示文稿面向什么受众？"],
+			assistantMessage: "请先确认受众。",
+			goal: "制作演示文稿",
+			estimatedCompletionDate: "2026-09-01",
+			confidence: 0.7,
+			estimateBasis: "基于当前说明。",
+			schedulingPreferenceSource: "user-provided",
+			schedulingPreferences: {
+				weeklyCapacityMinutes: 240,
+				sessionMinutes: 60,
+				availableWindows: [
+					{ dayOfWeek: 2, startTime: "19:00", endTime: "21:00" },
+				],
+			},
+			tasks: [proposalFixture().tasks[0]],
+		};
+		expect(
+			decodeDynamicPlanningProviderOutput(mixed, requestFixture()),
+		).toEqual({
+			outcome: "needs-clarification",
+			recommendedType: "short-term",
+			rationaleSummary: "还缺少交付格式。",
+			assumptions: [],
+			clarificationQuestions: ["演示文稿面向什么受众？"],
+			assistantMessage: "请先确认受众。",
+		});
+		expect(
+			decodeDynamicPlanningProviderOutput(
+				{ ...mixed, unexpected: true },
+				requestFixture(),
+			),
+		).toBeNull();
+		expect(
+			decodeDynamicPlanningProviderOutput(
+				{ ...mixed, clarificationQuestions: ["   "] },
+				requestFixture(),
+			),
+		).toBeNull();
+	});
+
+	test("keeps a complete mixed proposal confirmable and drops stray questions", () => {
+		const proposal = proposalFixture();
+		expect(
+			decodeDynamicPlanningProviderOutput(
+				{
+					outcome: "proposal",
+					recommendedType: "fuzzy",
+					rationaleSummary: proposal.rationaleSummary,
+					assumptions: proposal.assumptions,
+					clarificationQuestions: ["请确认演示文稿受众。"],
+					assistantMessage: "还需要确认受众。",
+					proposal: {
+						goal: proposal.goal,
+						estimatedCompletionDate: proposal.estimatedCompletionDate,
+						confidence: 0.9,
+						estimateBasis: proposal.estimateBasis,
+						schedulingPreferenceSource: proposal.schedulingPreferenceSource,
+						schedulingPreferences: proposal.schedulingPreferences,
+						tasks: proposal.tasks,
+					},
+				},
+				requestFixture(),
+			),
+		).toEqual({
+			...proposal,
+			outcome: "proposal",
+			recommendedType: "fuzzy",
+			clarificationQuestions: [],
+			assistantMessage: "还需要确认受众。",
+			confidence: 0.5,
+		});
+		expect(
+			decodeDynamicPlanningProviderOutput(
+				{
+					outcome: "proposal",
+					recommendedType: "fuzzy",
+					rationaleSummary: proposal.rationaleSummary,
+					assumptions: proposal.assumptions,
+					clarificationQuestions: ["请确认演示文稿受众。"],
+					assistantMessage: "还需要确认受众。",
+					proposal: {
+						goal: proposal.goal,
+						estimatedCompletionDate: proposal.estimatedCompletionDate,
+						confidence: 0.9,
+						estimateBasis: proposal.estimateBasis,
+						schedulingPreferenceSource: proposal.schedulingPreferenceSource,
+						schedulingPreferences: proposal.schedulingPreferences,
+						tasks: proposal.tasks,
+					},
+				},
+				{ ...requestFixture(), analysisMode: "automatic-adjustment" },
+			),
+		).toBeNull();
+	});
+
+	test("caps fuzzy proposal confidence before strict domain validation", () => {
+		const proposal = proposalFixture();
+		const decoded = decodeDynamicPlanningProviderOutput(
+			{
+				outcome: proposal.outcome,
+				recommendedType: proposal.recommendedType,
+				rationaleSummary: proposal.rationaleSummary,
+				assumptions: proposal.assumptions,
+				clarificationQuestions: [],
+				assistantMessage: proposal.assistantMessage,
+				proposal: {
+					goal: proposal.goal,
+					estimatedCompletionDate: proposal.estimatedCompletionDate,
+					confidence: 0.9,
+					estimateBasis: proposal.estimateBasis,
+					schedulingPreferenceSource: proposal.schedulingPreferenceSource,
+					schedulingPreferences: proposal.schedulingPreferences,
+					tasks: proposal.tasks,
+				},
+			},
+			requestFixture(),
+		);
+		expect(decoded).toMatchObject({ outcome: "proposal", confidence: 0.5 });
+	});
+
+	test("reclassifies a bad manual reuse label when no preference is confirmed", () => {
+		const proposal = proposalFixture();
+		const providerValue = {
+			outcome: proposal.outcome,
+			recommendedType: proposal.recommendedType,
+			rationaleSummary: proposal.rationaleSummary,
+			assumptions: ["用户已确认的排程偏好", "任务必须满足依赖关系"],
+			clarificationQuestions: [],
+			assistantMessage: proposal.assistantMessage,
+			proposal: {
+				goal: proposal.goal,
+				estimatedCompletionDate: proposal.estimatedCompletionDate,
+				confidence: proposal.confidence,
+				estimateBasis: proposal.estimateBasis,
+				schedulingPreferenceSource: "confirmed-reuse" as const,
+				schedulingPreferences: proposal.schedulingPreferences,
+				tasks: proposal.tasks,
+			},
+		};
+		const decoded = decodeDynamicPlanningProviderOutput(
+			providerValue,
+			requestFixture(),
+		);
+		expect(decoded).toMatchObject({
+			outcome: "proposal",
+			schedulingPreferenceSource: "user-provided",
+			assumptions: ["任务必须满足依赖关系"],
+			assistantMessage:
+				"已生成一版完整提案；请核对排程偏好，确认后才会开始执行。",
+		});
+		const withConfirmedPreferences = decodeDynamicPlanningProviderOutput(
+			providerValue,
+			{
+				...requestFixture(),
+				currentSchedulingPreferences: proposal.schedulingPreferences,
+			},
+		);
+		expect(withConfirmedPreferences).toMatchObject({
+			outcome: "proposal",
+			schedulingPreferenceSource: "confirmed-reuse",
+		});
+		const automaticRequest = {
+			...requestFixture(),
+			analysisMode: "automatic-adjustment" as const,
+		};
+		const automaticDecoded = decodeDynamicPlanningProviderOutput(
+			providerValue,
+			automaticRequest,
+		);
+		expect(automaticDecoded).toMatchObject({
+			schedulingPreferenceSource: "confirmed-reuse",
+		});
+		expect(() =>
+			assertPlanningModelOutputForRequest(automaticDecoded, automaticRequest),
+		).toThrow();
 	});
 
 	test("uses the narrow live method and stable durable request identity", async () => {

@@ -296,6 +296,9 @@ describe("PlanningRuntime creation and confirmation", () => {
 		expect(plan.analysisState).toBe("awaiting-user");
 		expect(plan.revisions).toEqual([]);
 		expect(plan.messages.at(-1)?.content).toContain("每周容量");
+		expect(plan.messages.at(-1)?.content).toContain(
+			"1. 你每周可以投入多少分钟？",
+		);
 	});
 
 	test("replays a stable operation without a second model call and rejects stale versions", async () => {

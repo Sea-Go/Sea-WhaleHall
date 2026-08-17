@@ -1,11 +1,11 @@
 # 本地 Mastra Agent 与模型转发
 
-WhaleHall 的“Agent 本地”是指：对话上下文、Memory、规划 Workflow、澄清、Tool Loop、审批、日历冲突修复和恢复状态均在桌面客户端运行。模型推理可由远端模型完成，但远端服务只会是身份与原始请求转发器，不是 Agent。生产桌面端使用远端账号密码登录；bearer 只保留在 Bun 主进程，不下发给 Renderer 或 Sidecar。
+WhaleHall 的“Agent 本地”是指：对话上下文、Memory、规划 Workflow、澄清、Tool 政策与审批基础设施、日历冲突修复和恢复状态均在桌面客户端运行。模型推理可由远端模型完成，但远端服务只会是身份与原始请求转发器，不是 Agent。生产桌面端使用远端账号密码登录；bearer 只保留在 Bun 主进程，不下发给 Renderer 或 Sidecar。当前 production conversation 为纯文本模式，不向模型注册产品 Tool。
 
 ```mermaid
 flowchart LR
   React["React WebView\n只负责 UI"] <-->|"Typed RPC"| Bun["Bun 主进程\n身份、存储、日历、政策"]
-  Bun <-->|"Content-Length stdio"| Sidecar["Node 22.18 Mastra Sidecar\nAgent、Memory、Workflow、Tool Loop"]
+  Bun <-->|"Content-Length stdio"| Sidecar["Node 22.18 Mastra Sidecar\nAgent、Memory、Workflow"]
   Sidecar -->|"完整 OpenAI-compatible body"| Bun
   Bun -->|"HTTPS · 认证/Bearer\n模型 purpose · Agent v2 签名"| DataCenter["DataCenter data origin\n认证、聊天、Agent、同步"]
   DataCenter -->|"聊天模型转发"| Provider["模型供应商"]
@@ -76,7 +76,7 @@ origin 固定在代码中；Timeline 与 Reflection journal 不从配置接受�
 
 打包使用 Node `22.18.0`。`scripts/node-runtime-manifest.ts` 固定官方归档 URL 和 SHA-256；缓存命中仍重新校验，随后只提取 `node[.exe]`。`scripts/build-agent-host.ts` 使用这个二进制检查生成的 Sidecar，而不是依赖用户 PATH 中的 Node。
 
-Sidecar 与 Bun 使用双向 `Content-Length` JSON framing：单帧上限 16 MiB，模型响应块上限 64 KiB。每个运行事件带严格递增 sequence 和版本；未知消息、重复终态、倒序事件或超限帧都会 fail closed。入站 host request 保持有序，但 reverse response 与 relay frame 会立即处理，避免 Workflow 在等待 Bun 回执时发生协议死锁。正常取消由 Bun 先按 `runId` 直接中止模型 relay，再通知 Sidecar；这条路径不等待 provider 响应头。Sidecar 崩溃或协议失败时，Bun 先中止全部 relay，再把相关运行标记为中断，并按 1/5/15 秒退避重启。已持久化的澄清 Workflow 和待审批状态仍可恢复。恢复审批时只有用户再次明确批准，Bun 才发起一次绑定参数的本地执行尝试；审批经原子消费后不自动重放，因此这是防重复的 at-most-once 语义，不是跨崩溃 exactly-once。
+Sidecar 与 Bun 使用双向 `Content-Length` JSON framing：单帧上限 16 MiB，模型响应块上限 64 KiB。每个运行事件带严格递增 sequence 和版本；未知消息、重复终态、倒序事件或超限帧都会 fail closed。入站 host request 保持有序，但 reverse response 与 relay frame 会立即处理，避免 Workflow 在等待 Bun 回执时发生协议死锁。正常取消由 Bun 先按 `runId` 直接中止模型 relay，再通知 Sidecar；这条路径不等待 provider 响应头。Sidecar 崩溃或协议失败时，Bun 先中止全部 relay，再把相关运行标记为中断，并按 1/5/15 秒退避重启。已持久化的澄清 Workflow 可以恢复；历史待审批状态只保留供人工处置，当前纯文本 conversation 不会自动恢复或执行 Tool。
 
 ## 本地状态和加密
 
@@ -96,16 +96,22 @@ AuthGate、递增 generation、终止模型流并清理旧账号的本地运行�
 `config.yaml` 的 `agent` 角色固定为 `qwen3:1.7b`；DataCenter origin 固定在代码中。每个
 聊天请求附带当前 session bearer 与代码所有的 purpose；relay 从 bearer 确定账户后转发。
 
-## 对话、Tool 与审批
+## 对话与保留的 Tool 审批基础设施
 
 用户消息先按 `clientMessageId` 幂等写入本地数据库，再启动 turn。Memory 默认只装载最近 24 条完整消息；partial、failed、cancelled 和 interrupted 助手消息会保留供 UI 恢复，但不自动进入下一次模型上下文。delta 由 Bun 聚合后推给 Renderer，并按 250 ms 或 512 字符阈值持久化。
 
-首版 Tool allowlist：
+生产 conversation 当前固定 `tools: {}`、`activeTools: []`、`toolChoice: none` 和
+单步生成。供应商必须在固定版本与模型摘要下通过 OpenAI-compatible 流式 Tool
+conformance gate，才允许重新注册产品 Tool。任何标准 Tool 事件或文本形式的
+`<tool...>` 保留标记在此期间都会终止本轮并返回脱敏协议错误；客户端不得把私有
+XML/JSON 标记解析成可执行调用，也不得将其写入消息或 Memory。
+
+以下 allowlist 与审批绑定仍作为未来重新启用时的本地政策基础设施保留：
 
 - 自动读取（需要持久化授权）：`calendar.list_events`、`planning.get_active_plan`、`planning.get_active_goal`。
 - 每次确认后写入：`planning.save_draft`、`calendar.create_event`、`calendar.update_event`、`calendar.delete_event`、`calendar.commit_plan_schedule`。
 
-审批绑定 `approvalId + runId + toolCallId + canonical arguments digest + Bun run revision`，十分钟有效且单次使用。Sidecar 自己的 version 不作为授权来源；Bun 在提议时生成 authoritative revision，Sidecar只能在后续调用中原样回传。Renderer 只看到 tool-specific 的标题、描述和风险，不看到原始参数或输出。消费审批前会重新验证数据库中解密出的 Tool、参数结构和摘要。恢复后的批准直接使用这份绑定参数在 Bun 内执行，不进入新 Sidecar；执行临界区内用户取消返回冲突，退出和 Sidecar 中断等待本地执行收敛。拒绝不执行 Tool。
+审批绑定 `approvalId + runId + toolCallId + canonical arguments digest + Bun run revision`，十分钟有效且单次使用。Sidecar 自己的 version 不作为授权来源；Bun 在提议时生成 authoritative revision，Sidecar只能在后续调用中原样回传。Renderer 只看到 tool-specific 的标题、描述和风险，不看到原始参数或输出。消费审批前会重新验证数据库中解密出的 Tool、参数结构和摘要。恢复后的批准直接使用这份绑定参数在 Bun 内执行，不进入新 Sidecar；执行临界区内用户取消返回冲突，退出和 Sidecar 中断等待本地执行收敛。当前文本对话不会创建新的 Tool 提议；历史待审批状态不得因升级而自动执行。
 
 ## 规划和日历
 
@@ -116,7 +122,12 @@ Bun 在模型后验证 schema、引用、日期、IANA 时区、时长、截止�
 独立的 Dynamic PlanningRuntime 使用 `planning.analyze` 获得 strict JSON 语义结果。
 `PlanningRuntime` 仍独占七日 scheduler、ETA、稳定 operation identity、proposal/confirm、
 失败持久化、重试、幂等、取消和日历原子写入。provider-facing Schema 不生成
-`pattern`；task key 的 ASCII grammar 由 app-side validator 强制执行。
+`pattern`，并以内联稳定 envelope 避免供应商原生 grammar 编译；task key 的 ASCII
+grammar 由 app-side validator 强制执行。手动分析中，完整且严格合法的 proposal 即使
+多带 clarification questions，也只会清掉这些多余问题后进入人工确认；相同混合输出在
+automatic-adjustment 中 fail closed，不能绕过确认自动改写日历。手动提案尚无已确认偏好
+时，provider 错标的 `confirmed-reuse` 会在确认边界前改回 `user-provided`；自动分析或已有
+偏好不走此兼容路径。
 
 ## 远端服务
 

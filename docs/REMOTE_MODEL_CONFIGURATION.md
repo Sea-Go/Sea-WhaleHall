@@ -59,9 +59,11 @@ exact request 和 exact response，并提供受控的开发者查询/筛选。�
 云端明文持久化，不启用客户端内容加密。它不改变普通 desktop-event cloud sync 的默认
 关闭状态，也不把 token 或上游凭据写入审计内容。
 
-客户端仍负责完整 prompt、Memory、Tool、规划 Workflow、时间/action/分数校验与本地恢复；
-DataCenter 只认证、分类、审计和转发 OpenAI-compatible 字节。流式响应保持顺序和取消；
-非流式与流式请求都保留既有 idempotency 语义。
+客户端仍负责完整 prompt、Memory、Tool 政策与审批基础设施、规划 Workflow、
+时间/action/分数校验与本地恢复；DataCenter 只认证、分类、审计和转发
+OpenAI-compatible 字节。当前 production conversation 为纯文本模式，不注册产品 Tool；
+Planning 与 Calendar 专页继续使用各自的权威本地路径。流式响应保持顺序和取消；非流式与
+流式请求都保留既有 idempotency 语义。
 
 ## Activity 账号隔离
 

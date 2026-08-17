@@ -872,7 +872,7 @@ function RevisionPanel({
 				) : (
 					<p>尚未提供可用时段，不能确认排程。</p>
 				)}
-				<small>包括沿用的偏好在内，都可在下方对话中修改。</small>
+				<small>这些偏好都可在下方对话中修改，确认后才会生效。</small>
 			</div>
 			{revision.assumptions.length > 0 ? (
 				<div className="planning-compact-list">

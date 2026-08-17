@@ -40,8 +40,10 @@ import {
 } from "./mastra-storage";
 import { ModelRelay } from "./model-relay";
 import {
+	decodeDynamicPlanningProviderOutput,
 	dynamicPlanningInputSchema,
 	dynamicPlanningOutputSchema,
+	dynamicPlanningProviderOutputSchema,
 } from "./planning-analysis";
 import {
 	type PlanningWorkflowClarification,
@@ -89,7 +91,6 @@ import {
 } from "./schemas";
 import {
 	type AgentToolExecutionInput,
-	canonicalToolName,
 	isApprovalRequiredToolName,
 } from "./tools";
 import {
@@ -484,15 +485,22 @@ export class AgentHostRuntime {
 								toolChoice: "none",
 								modelSettings: { temperature: 0 },
 								structuredOutput: {
-									schema: dynamicPlanningOutputSchema,
-									errorStrategy: "strict",
-									jsonPromptInjection: false,
+									schema: dynamicPlanningProviderOutputSchema,
+									// App/domain validation below remains strict. `warn` prevents
+									// Mastra from hiding a parse failure behind a generic runtime
+									// error before WhaleHall can classify it as invalid output.
+									errorStrategy: "warn",
+									// The DataCenter-backed OpenAI-compatible provider rejects
+									// native response-format schemas while compiling its grammar.
+									// Inline injection keeps the provider call JSON-only while the
+									// same Zod and domain validators remain authoritative here.
+									jsonPromptInjection: "inline",
 								},
 							},
 						),
 					);
 					const parsedOutput = dynamicPlanningOutputSchema.safeParse(
-						result.object,
+						decodeDynamicPlanningProviderOutput(result.object, analysis),
 					);
 					if (!parsedOutput.success) throw new PlanningModelOutputError();
 					assertPlanningModelOutputForRequest(parsedOutput.data, analysis);
@@ -786,6 +794,9 @@ export class AgentHostRuntime {
 										runId: record.snapshot.runId,
 										abortSignal: record.controller.signal,
 										requestContext,
+										activeTools: [],
+										toolChoice: "none",
+										maxSteps: 1,
 										memory: {
 											thread: context.conversationId,
 											resource: context.resourceId,
@@ -804,93 +815,50 @@ export class AgentHostRuntime {
 									);
 						let text = record.snapshot.text ?? "";
 						let receivedTextDelta = false;
+						const textGuard = new ToolMarkupGuard(
+							conversationToolProtocolError,
+						);
+						const appendText = async (delta: string): Promise<void> => {
+							if (!delta) return;
+							text += delta;
+							record.snapshot.text = text;
+							await this.emit(record, {
+								kind: "conversation.text.delta",
+								delta,
+								text,
+							});
+						};
 						for await (const chunk of stream.fullStream) {
 							if (this.isTerminal(record)) return;
 							if (chunk.type === "text-delta") {
-								const delta = chunk.payload.text;
 								receivedTextDelta = true;
-								text += delta;
-								record.snapshot.text = text;
-								await this.emit(record, {
-									kind: "conversation.text.delta",
-									delta,
-									text,
-								});
-								continue;
-							}
-							if (chunk.type === "tool-call") {
-								const toolName = requireCanonicalToolName(
-									chunk.payload.toolName,
-								);
-								await this.emit(record, {
-									kind: "agent.tool.call",
-									toolCallId: chunk.payload.toolCallId,
-									toolName,
-								});
-								continue;
-							}
-							if (chunk.type === "tool-call-approval") {
-								memoryExecution.suspendedForApproval = true;
-								const toolName = requireCanonicalToolName(
-									chunk.payload.toolName,
-								);
-								const argumentsValue = toolArguments(chunk.payload.args);
-								let proposal = record.toolProposals.get(
-									chunk.payload.toolCallId,
-								);
-								if (!proposal) {
-									proposal = await this.adapters.proposeTool({
-										runId: record.snapshot.runId,
-										toolCallId: chunk.payload.toolCallId,
-										name: toolName,
-										arguments: argumentsValue,
-									});
-									record.toolProposals.set(chunk.payload.toolCallId, proposal);
+								try {
+									await appendText(textGuard.push(chunk.payload.text));
+								} catch (error) {
+									agents.conversation.abortRunStream(record.snapshot.runId);
+									throw error;
 								}
-								await this.emit(record, {
-									kind: "agent.tool.approval.required",
-									toolCallId: chunk.payload.toolCallId,
-									toolName,
-									approval: publicToolApproval(proposal),
-									runVersion: proposal.runVersion,
-								});
 								continue;
 							}
-							if (chunk.type === "tool-result") {
-								const toolName = requireCanonicalToolName(
-									chunk.payload.toolName,
-								);
-								await this.emit(record, {
-									kind: "agent.tool.result",
-									toolCallId: chunk.payload.toolCallId,
-									toolName,
-									isError: chunk.payload.isError === true,
-								});
+							if (
+								chunk.type === "tool-call" ||
+								chunk.type === "tool-call-approval" ||
+								chunk.type === "tool-result"
+							) {
+								agents.conversation.abortRunStream(record.snapshot.runId);
+								throw conversationToolProtocolError();
 							}
 						}
 						if (this.isTerminal(record)) return;
 						const finishReason = await stream.finishReason;
 						if (finishReason === "suspended" || stream.status === "suspended") {
-							const proposal = [...record.toolProposals.values()].at(-1);
-							await this.suspend(
-								record,
-								proposal
-									? {
-											kind: "tool-approval",
-											toolCallId: proposal.toolCallId,
-											toolName: proposal.name,
-											approval: publicToolApproval(proposal),
-											runVersion: proposal.runVersion,
-										}
-									: { kind: "agent-suspended" },
-							);
-							return;
+							throw conversationToolProtocolError();
 						}
 						const finalText = await stream.text;
 						if (!receivedTextDelta && finalText) {
-							text += finalText;
-							record.snapshot.text = text;
+							await appendText(textGuard.push(finalText));
 						}
+						await appendText(textGuard.finish());
 						const memoryVersion = memoryExecution.persistedVersion;
 						if (memoryVersion === undefined) {
 							throw runtimeError(
@@ -941,15 +909,26 @@ export class AgentHostRuntime {
 						},
 					);
 					let text = "";
+					let receivedTextDelta = false;
+					const textGuard = new ToolMarkupGuard(activityToolProtocolError);
+					const appendText = (delta: string): void => {
+						text += delta;
+						if (text.length > maxConversationCharacters) {
+							throw runtimeError(
+								"ACTIVITY_OUTPUT_INVALID",
+								"Activity analysis response is too large.",
+							);
+						}
+					};
 					for await (const chunk of stream.fullStream) {
 						if (this.isTerminal(record)) return;
 						if (chunk.type === "text-delta") {
-							text += chunk.payload.text;
-							if (text.length > maxConversationCharacters) {
-								throw runtimeError(
-									"ACTIVITY_OUTPUT_INVALID",
-									"Activity analysis response is too large.",
-								);
+							receivedTextDelta = true;
+							try {
+								appendText(textGuard.push(chunk.payload.text));
+							} catch (error) {
+								agents.conversation.abortRunStream(record.snapshot.runId);
+								throw error;
 							}
 							continue;
 						}
@@ -958,10 +937,8 @@ export class AgentHostRuntime {
 							chunk.type === "tool-call-approval" ||
 							chunk.type === "tool-result"
 						) {
-							throw runtimeError(
-								"ACTIVITY_OUTPUT_INVALID",
-								"Activity analysis Agent attempted to use a forbidden Tool.",
-							);
+							agents.conversation.abortRunStream(record.snapshot.runId);
+							throw activityToolProtocolError();
 						}
 					}
 					if (this.isTerminal(record)) return;
@@ -973,13 +950,9 @@ export class AgentHostRuntime {
 						);
 					}
 					const finalText = await stream.text;
-					if (!text && finalText) text = finalText;
-					if (text.length > maxConversationCharacters) {
-						throw runtimeError(
-							"ACTIVITY_OUTPUT_INVALID",
-							"Activity analysis response is too large.",
-						);
-					}
+					if (!receivedTextDelta && finalText)
+						appendText(textGuard.push(finalText));
+					appendText(textGuard.finish());
 					if (!text.trim()) {
 						throw runtimeError(
 							"ACTIVITY_OUTPUT_INVALID",
@@ -2047,41 +2020,57 @@ function optionalVersion(value: unknown): number | undefined {
 	return value as number;
 }
 
-function requireCanonicalToolName(
-	value: string,
-): NonNullable<ReturnType<typeof canonicalToolName>> {
-	const name = canonicalToolName(value);
-	if (!name) {
-		throw runtimeError(
-			"INVALID_REQUEST",
-			`Agent attempted to use unavailable Tool ${value}.`,
-		);
+const reservedToolTagPrefixes = [
+	"<tool",
+	"</tool",
+	"<tool_call",
+	"</tool_call",
+] as const;
+const reservedToolTagPattern = /<\/?tool(?:_call)?(?=[\s/>])/i;
+
+class ToolMarkupGuard {
+	private pending = "";
+	constructor(private readonly createError: () => AgentHostRuntimeError) {}
+
+	push(delta: string): string {
+		this.pending += delta;
+		const normalized = this.pending.toLowerCase();
+		if (reservedToolTagPattern.test(normalized)) throw this.createError();
+
+		let retainedCharacters = 0;
+		for (const marker of reservedToolTagPrefixes) {
+			for (let length = 1; length <= marker.length; length += 1) {
+				if (normalized.endsWith(marker.slice(0, length))) {
+					retainedCharacters = Math.max(retainedCharacters, length);
+				}
+			}
+		}
+		const safeLength = this.pending.length - retainedCharacters;
+		const safe = this.pending.slice(0, safeLength);
+		this.pending = this.pending.slice(safeLength);
+		return safe;
 	}
-	return name;
+
+	finish(): string {
+		const tail = this.pending;
+		this.pending = "";
+		return tail;
+	}
 }
 
-function toolArguments(value: unknown): Record<string, unknown> {
-	if (!isRecord(value) || Array.isArray(value)) {
-		throw runtimeError(
-			"INVALID_REQUEST",
-			"Agent Tool arguments must be an object.",
-		);
-	}
-	const { __mastraMetadata: _metadata, ...argumentsValue } = value;
-	return structuredClone(argumentsValue);
+function conversationToolProtocolError(): AgentHostRuntimeError {
+	return runtimeError(
+		"MODEL_RELAY_ERROR",
+		"The model provider returned unsupported tool-call markup.",
+		true,
+	);
 }
 
-function publicToolApproval(proposal: HostToolProposal) {
-	return {
-		approvalId: proposal.approvalId,
-		toolCallId: proposal.toolCallId,
-		title: proposal.title,
-		description: proposal.description,
-		risk: proposal.risk,
-		inputDigest: proposal.inputDigest,
-		requestedAtMs: proposal.requestedAtMs,
-		expiresAtMs: proposal.expiresAtMs,
-	};
+function activityToolProtocolError(): AgentHostRuntimeError {
+	return runtimeError(
+		"ACTIVITY_OUTPUT_INVALID",
+		"Activity analysis provider returned unsupported tool-call markup.",
+	);
 }
 
 function conflictError(

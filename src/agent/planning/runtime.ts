@@ -1,6 +1,7 @@
 import {
 	assertPlanningModelOutputForRequest,
 	PlanningModelInvocationError,
+	type PlanningModelNeedsClarification,
 	type PlanningModelOutput,
 	PlanningModelOutputError,
 	type PlanningModelPort,
@@ -998,7 +999,7 @@ export class PlanningRuntime {
 							plan.id,
 							"assistant",
 							prefixedAssistantMessage(
-								output.assistantMessage,
+								clarificationAssistantMessage(output),
 								options.messagePrefix,
 							),
 							operationId,
@@ -2245,6 +2246,24 @@ function assistantMessageForOutput(output: PlanningModelOutput): string {
 		return `沿用已确认的排程偏好，可随时修改。${output.assistantMessage}`;
 	}
 	return output.assistantMessage;
+}
+
+function clarificationAssistantMessage(
+	output: PlanningModelNeedsClarification,
+): string {
+	const message = output.assistantMessage.trim();
+	const seen = new Set<string>();
+	const missingQuestions = output.clarificationQuestions
+		.map((question) => question.trim())
+		.filter((question) => {
+			if (!question || seen.has(question)) return false;
+			seen.add(question);
+			return !message.includes(question);
+		});
+	if (missingQuestions.length === 0) return message;
+	return `${message}\n\n需要你确认：\n${missingQuestions
+		.map((question, index) => `${index + 1}. ${question}`)
+		.join("\n")}`;
 }
 
 function prefixedAssistantMessage(message: string, prefix?: string): string {

@@ -17,7 +17,7 @@ import {
 	type PlanningWorkflowDriver,
 	type TaskPlanningWorkflow,
 } from "./planning-workflow";
-import { type AgentToolExecutor, createWhaleHallAgentTools } from "./tools";
+import type { AgentToolExecutor } from "./tools";
 
 export interface MastraAgentSet {
 	mastra: Mastra;
@@ -66,7 +66,6 @@ export function createMastraAgentSet(
 	const reflectionModel = reflectionProvider.chatModel(
 		options.reflectionModelId,
 	);
-	const tools = createWhaleHallAgentTools(options.executeTool);
 	const memory = new Memory({
 		storage: options.storage.composite,
 		options: {
@@ -83,13 +82,15 @@ export function createMastraAgentSet(
 		instructions: [
 			"你是 WhaleHall 桌面助手。使用清楚、自然、简洁的中文回答。",
 			"延续提供的会话上下文；不虚构本地数据、工具结果或已经执行的操作。",
-			"需要读取日历、当前计划或目标时，使用已注册的只读 Tool；不要猜测本地状态。",
-			"需要保存计划或改动日历时，使用已注册的写入 Tool，并等待用户审批；审批前不得声称操作已经完成。",
-			"未注册的本地能力不可调用，也不可用相近 Tool 冒充。",
+			"当前对话模式只提供文本回答；不得调用、伪造或输出任何 Tool、函数调用或工具标记。",
+			"问题若依赖本地日历、计划或目标，请明确提示用户前往对应页面，不要猜测本地状态。",
 		].join("\n"),
 		model,
 		memory,
-		tools,
+		// The production model does not yet conform to OpenAI tool-call output.
+		// Keep interactive chat text-only until that exact provider passes a
+		// dedicated conformance gate; raw provider markup is never executable.
+		tools: {},
 		maxRetries: 0,
 	});
 	const planning = new Agent({

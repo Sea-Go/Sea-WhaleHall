@@ -134,6 +134,16 @@ describe("planning structured model boundary", () => {
 				assistantMessage: "请补充容量。",
 			}),
 		).toBeTrue();
+		expect(
+			isPlanningModelOutput({
+				outcome: "needs-clarification",
+				recommendedType: "fuzzy",
+				rationaleSummary: "还缺少容量。",
+				assumptions: [],
+				clarificationQuestions: ["   "],
+				assistantMessage: "请补充容量。",
+			}),
+		).toBeFalse();
 	});
 
 	test("requires automatic analysis to reuse the exact confirmed scheduling preferences", () => {
