@@ -9,8 +9,8 @@ pub const KEY_BYTES: usize = 32;
 pub const MAX_REQUEST_HEADER_BYTES: usize = 4_096;
 pub const MAX_SECRET_BYTES: usize = 2_048;
 pub const SERVICE_NAMESPACE: &str = "com.seago.whalehall.auth";
-pub const AUTH_REFRESH_TOKEN_NAME: &str = "auth.refresh-token.current";
-const ALLOWED_SECRET_NAMES: &[&str] = &[AUTH_REFRESH_TOKEN_NAME];
+pub const AUTH_REFRESH_TOKEN_NAME: &str = "auth.refresh-token.production.v1";
+pub const LEGACY_AUTH_REFRESH_TOKEN_NAME: &str = "auth.refresh-token.current";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -270,7 +270,10 @@ fn validate_request(parsed: &ParsedRequest) -> Result<CredentialTarget, &'static
                 return Err("INVALID_REQUEST");
             }
             let name = request.name.as_deref().ok_or("INVALID_REQUEST")?;
-            if !ALLOWED_SECRET_NAMES.contains(&name) {
+            if name != AUTH_REFRESH_TOKEN_NAME
+                && !(name == LEGACY_AUTH_REFRESH_TOKEN_NAME
+                    && request.operation == CredentialOperation::Delete)
+            {
                 return Err("SECRET_NAME_NOT_ALLOWED");
             }
             match request.operation {
@@ -566,6 +569,27 @@ mod tests {
             handle_request(&backend, denied),
             HelperResponse::Error("SECRET_NAME_NOT_ALLOWED")
         ));
+
+        let mut legacy_delete = named_request(CredentialOperation::Delete, &[]);
+        legacy_delete.request.name = Some(LEGACY_AUTH_REFRESH_TOKEN_NAME.to_owned());
+        assert!(matches!(
+            handle_request(&backend, legacy_delete),
+            HelperResponse::Deleted(false)
+        ));
+
+        for operation in [CredentialOperation::Read, CredentialOperation::Write] {
+            let secret = if operation == CredentialOperation::Write {
+                token.as_slice()
+            } else {
+                &[]
+            };
+            let mut legacy_access = named_request(operation, secret);
+            legacy_access.request.name = Some(LEGACY_AUTH_REFRESH_TOKEN_NAME.to_owned());
+            assert!(matches!(
+                handle_request(&backend, legacy_access),
+                HelperResponse::Error("SECRET_NAME_NOT_ALLOWED")
+            ));
+        }
     }
 
     #[test]
@@ -639,6 +663,14 @@ mod tests {
         };
         assert_eq!(
             secret.windows_target_name(),
+            "com.seago.whalehall/secret/install-1/auth.refresh-token.production.v1"
+        );
+        let legacy_secret = CredentialTarget::NamedSecret {
+            installation_id: "install-1".to_owned(),
+            name: LEGACY_AUTH_REFRESH_TOKEN_NAME.to_owned(),
+        };
+        assert_eq!(
+            legacy_secret.windows_target_name(),
             "com.seago.whalehall/secret/install-1/auth.refresh-token.current"
         );
     }

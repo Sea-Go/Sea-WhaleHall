@@ -8,7 +8,7 @@ export interface ModelRelayAuthorization {
 	): Promise<Response>;
 }
 
-export type ModelRelayPurpose = "agent" | "activity";
+export type ModelRelayPurpose = "agent" | "activity" | "planning";
 
 const MAX_RELAY_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_STREAM_CHUNK_BYTES = 64 * 1024;
@@ -75,7 +75,11 @@ export class ModelRelayTransport {
 		options: ModelRelayTransportOptions = {},
 	) {
 		this.purpose = options.purpose ?? "agent";
-		if (this.purpose !== "agent" && this.purpose !== "activity") {
+		if (
+			this.purpose !== "agent" &&
+			this.purpose !== "activity" &&
+			this.purpose !== "planning"
+		) {
 			throw new Error("Model relay purpose is not approved.");
 		}
 		this.inflightRetryDelaysMs = validateRetryDelays(
@@ -244,6 +248,9 @@ function assertRelayRequest(request: ModelRelayRequest): void {
 		"user_id" in request.body ||
 		"accessToken" in request.body ||
 		"apiKey" in request.body ||
+		"purpose" in request.body ||
+		"modelPurpose" in request.body ||
+		"model_purpose" in request.body ||
 		"token" in request.body ||
 		"key" in request.body ||
 		"api_key" in request.body ||

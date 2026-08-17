@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	constants,
@@ -7,33 +6,20 @@ import {
 	lstatSync,
 	mkdirSync,
 	readFileSync,
-	renameSync,
-	unlinkSync,
-	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-/** All configurable remote model calls use an authenticated DataCenter origin. */
-export const WHALEHALL_RELAY_BASE_URL =
-	"https://model.sea-ridethewindbreakthewaves.xyz";
+/** Every desktop model and sync request uses this code-owned DataCenter origin. */
 export const WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL =
 	"https://data.sea-ridethewindbreakthewaves.xyz";
-export const WHALEHALL_DATA_CENTER_STAGING_BASE_URL =
-	"https://data-staging.sea-ridethewindbreakthewaves.xyz";
 export const WHALEHALL_RELAY_MODEL = "qwen3:1.7b";
-export const UNPROVISIONED_REFLECTION_RELAY_KEY =
-	"IGNORED_USE_AUTHENTICATED_SESSION";
-export const UNPROVISIONED_AGENT_RELAY_KEY = "REPLACE_WITH_PERSONAL_RELAY_KEY";
 
 const LEGACY_CONFIGURATION_SCHEMA_VERSION = "whalehall-client-config.v1";
 const MAXIMUM_CONFIGURATION_BYTES = 64 * 1024;
-const MAXIMUM_REFLECTION_RELAY_KEY_LENGTH = 1_024;
-const MAXIMUM_PERSONAL_RELAY_KEY_LENGTH = 1_024;
+const MAXIMUM_IGNORED_LEGACY_FIELD_LENGTH = 16_384;
 
 export type ModelConfiguration = {
 	name: typeof WHALEHALL_RELAY_MODEL;
-	baseurl: string;
-	apikey: string;
 };
 
 export type CloudSyncConsentLevel = "off" | "metadata" | "content";
@@ -66,13 +52,9 @@ export type ClientConfiguration = {
 export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 	reflection: {
 		name: WHALEHALL_RELAY_MODEL,
-		baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-		apikey: UNPROVISIONED_REFLECTION_RELAY_KEY,
 	},
 	agent: {
 		name: WHALEHALL_RELAY_MODEL,
-		baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-		apikey: UNPROVISIONED_AGENT_RELAY_KEY,
 	},
 	cloudSync: {
 		enabled: false,
@@ -88,7 +70,7 @@ export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 export type ClientConfigurationLoadStatus =
 	| "loaded"
 	| "seeded"
-	| "legacy-unprovisioned"
+	| "legacy"
 	| "invalid"
 	| "defaults";
 
@@ -96,6 +78,8 @@ export type ClientConfigurationLoadResult = {
 	configuration: ClientConfiguration;
 	path: string;
 	status: ClientConfigurationLoadStatus;
+	/** Retired or unverifiable configuration consent never crosses origins. */
+	cloudSyncConsentBlockedByRetiredOrigin: boolean;
 };
 
 export type LoadOrCreateClientConfigurationOptions = {
@@ -106,7 +90,6 @@ export type LoadOrCreateClientConfigurationOptions = {
 export type ModelRuntimeConfiguration = {
 	name: typeof WHALEHALL_RELAY_MODEL;
 	baseurl: string;
-	apikey: string;
 };
 
 export type ActivityReflectionRuntimeConfiguration = {
@@ -114,14 +97,10 @@ export type ActivityReflectionRuntimeConfiguration = {
 	scoreThreshold: number;
 };
 
-export type WriteProvisionedClientConfigurationOptions = {
-	path: string;
-	configuration: ClientConfiguration;
-};
-
 /**
  * Loads the user-owned config.yaml, seeding it once from the packaged
- * placeholder template. Invalid or legacy files are never overwritten.
+ * safe template. Invalid and legacy files are never overwritten. Historical
+ * baseurl/apikey fields remain parseable but are discarded at this boundary.
  */
 export function loadOrCreateClientConfiguration(
 	options: LoadOrCreateClientConfigurationOptions,
@@ -142,68 +121,30 @@ export function loadOrCreateClientConfiguration(
 			return {
 				configuration: structuredClone(DEFAULT_CLIENT_CONFIGURATION),
 				path,
-				status: "legacy-unprovisioned",
+				status: "legacy",
+				cloudSyncConsentBlockedByRetiredOrigin: true,
 			};
 		}
 		return {
 			configuration: parsed.configuration,
 			path,
 			status: seeded ? "seeded" : "loaded",
+			cloudSyncConsentBlockedByRetiredOrigin:
+				parsed.cloudSyncConsentBlockedByRetiredOrigin,
 		};
 	} catch {
 		return defaultConfiguration(path, "invalid");
 	}
 }
 
-/**
- * Writes a validated literal-key configuration atomically with owner-only
- * permissions. It is used by the interactive owner provisioning command;
- * application startup intentionally never writes or repairs a user file.
- */
-export function writeProvisionedClientConfiguration(
-	options: WriteProvisionedClientConfigurationOptions,
-): void {
-	const normalized = normalizeClientConfiguration(options.configuration);
-	if (isUnprovisionedKey(normalized.agent.apikey)) {
-		throw new Error(
-			"Provisioned client configuration requires a literal personal relay key.",
-		);
-	}
-	const destination = options.path;
-	const directory = dirname(destination);
-	mkdirSync(directory, { recursive: true, mode: 0o700 });
-	hardenPath(directory, 0o700);
-	if (existsSync(destination)) {
-		const stat = lstatSync(destination);
-		if (stat.isSymbolicLink() || !stat.isFile()) {
-			throw new Error(
-				"Client configuration destination must be a regular file.",
-			);
-		}
-	}
-	const temporary = join(directory, `.config.${randomUUID()}.tmp`);
-	try {
-		writeFileSync(temporary, serializeConfiguration(normalized), {
-			encoding: "utf8",
-			mode: 0o600,
-			flag: "wx",
-		});
-		chmodSync(temporary, 0o600);
-		renameSync(temporary, destination);
-		chmodSync(destination, 0o600);
-	} catch (error) {
-		try {
-			unlinkSync(temporary);
-		} catch {}
-		throw error;
-	}
-}
-
-/** Returns null until the personal relay key is provisioned literally. */
+/** Returns the code-owned DataCenter runtime configuration for this role. */
 export function agentModelConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
-): ModelRuntimeConfiguration | null {
-	return runtimeConfiguration(configuration.agent);
+): ModelRuntimeConfiguration {
+	return {
+		name: configuration.agent.name,
+		baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+	};
 }
 
 /**
@@ -214,8 +155,7 @@ export function agentModelConfigurationFromConfiguration(
  */
 export function activityReflectionConfigurationFromConfiguration(
 	configuration: ClientConfiguration,
-): ActivityReflectionRuntimeConfiguration | null {
-	if (!agentModelConfigurationFromConfiguration(configuration)) return null;
+): ActivityReflectionRuntimeConfiguration {
 	return {
 		modelName: configuration.reflection.name,
 		scoreThreshold: 1,
@@ -230,6 +170,7 @@ function defaultConfiguration(
 		configuration: structuredClone(DEFAULT_CLIENT_CONFIGURATION),
 		path,
 		status,
+		cloudSyncConsentBlockedByRetiredOrigin: true,
 	};
 }
 
@@ -267,17 +208,16 @@ function readRegularFile(path: string): string {
 	return readFileSync(path, "utf8");
 }
 
-function parseConfiguration(
-	source: string,
-):
-	| { kind: "current"; configuration: ClientConfiguration }
+function parseConfiguration(source: string):
+	| {
+			kind: "current";
+			configuration: ClientConfiguration;
+			cloudSyncConsentBlockedByRetiredOrigin: boolean;
+	  }
 	| { kind: "legacy" } {
 	const value = Bun.YAML.parse(source);
 	if (isLegacyConfiguration(value)) return { kind: "legacy" };
-	return {
-		kind: "current",
-		configuration: normalizeClientConfiguration(value),
-	};
+	return { kind: "current", ...normalizeClientConfiguration(value) };
 }
 
 function isLegacyConfiguration(value: unknown): boolean {
@@ -288,7 +228,10 @@ function isLegacyConfiguration(value: unknown): boolean {
 	);
 }
 
-function normalizeClientConfiguration(value: unknown): ClientConfiguration {
+function normalizeClientConfiguration(value: unknown): {
+	configuration: ClientConfiguration;
+	cloudSyncConsentBlockedByRetiredOrigin: boolean;
+} {
 	if (
 		!isRecord(value) ||
 		!(
@@ -298,84 +241,65 @@ function normalizeClientConfiguration(value: unknown): ClientConfiguration {
 	) {
 		throw new Error("Client configuration root is invalid.");
 	}
+	const reflection = normalizeModelConfiguration(
+		value.reflection,
+		"reflection",
+	);
 	const agent = normalizeModelConfiguration(value.agent, "agent");
+	const cloudSyncConsentBlockedByRetiredOrigin = legacyAgentOriginChanged(
+		value.agent,
+	);
 	return {
-		reflection: normalizeModelConfiguration(
-			value.reflection,
-			"reflection",
-			agent.baseurl,
-		),
-		agent,
-		cloudSync:
-			value.cloudSync === undefined
+		configuration: {
+			reflection,
+			agent,
+			cloudSync: cloudSyncConsentBlockedByRetiredOrigin
 				? structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync)
-				: normalizeCloudSyncConfiguration(value.cloudSync),
+				: value.cloudSync === undefined
+					? structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync)
+					: normalizeCloudSyncConfiguration(value.cloudSync),
+		},
+		cloudSyncConsentBlockedByRetiredOrigin,
 	};
+}
+
+function legacyAgentOriginChanged(value: unknown): boolean {
+	if (!isRecord(value) || value.baseurl === undefined) return false;
+	if (typeof value.baseurl !== "string") return true;
+	try {
+		const endpoint = new URL(value.baseurl.trim());
+		return !(
+			endpoint.origin === WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL &&
+			(endpoint.pathname === "" || endpoint.pathname === "/") &&
+			endpoint.username === "" &&
+			endpoint.password === "" &&
+			endpoint.search === "" &&
+			endpoint.hash === ""
+		);
+	} catch {
+		return true;
+	}
 }
 
 function normalizeModelConfiguration(
 	value: unknown,
 	role: "reflection" | "agent",
-	agentBaseUrl?: string,
 ): ModelConfiguration {
 	if (
 		!isRecord(value) ||
-		!hasExactKeys(value, ["name", "baseurl", "apikey"]) ||
+		!hasRequiredAndOptionalKeys(value, ["name"], ["baseurl", "apikey"]) ||
 		typeof value.name !== "string" ||
-		typeof value.baseurl !== "string" ||
-		typeof value.apikey !== "string"
+		(value.baseurl !== undefined && !isBoundedLegacyString(value.baseurl)) ||
+		(value.apikey !== undefined && !isBoundedLegacyString(value.apikey))
 	) {
 		throw new Error(`${role} model configuration is invalid.`);
 	}
 	if (value.name.trim() !== WHALEHALL_RELAY_MODEL) {
 		throw new Error(`${role} model name is not approved.`);
 	}
-	const baseurl = normalizeRelayBaseUrl(value.baseurl, role, agentBaseUrl);
 	return {
 		name: WHALEHALL_RELAY_MODEL,
-		baseurl,
-		apikey: normalizeLiteralApiKey(value.apikey, role),
 	};
-}
-
-function normalizeRelayBaseUrl(
-	value: string,
-	role: "reflection" | "agent",
-	agentBaseUrl?: string,
-): string {
-	const endpoint = parseRemoteHttpsUrl(value, role);
-	if (endpoint.pathname !== "/" && endpoint.pathname !== "") {
-		throw new Error(`${role} model baseurl must be the relay origin.`);
-	}
-	if (role === "reflection") {
-		if (
-			endpoint.origin !== WHALEHALL_RELAY_BASE_URL &&
-			endpoint.origin !== WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL &&
-			endpoint.origin !== WHALEHALL_DATA_CENTER_STAGING_BASE_URL
-		) {
-			throw new Error(
-				"reflection model baseurl is not an approved legacy or DataCenter origin.",
-			);
-		}
-		// Old owner files remain parseable, but runtime reflection is always bound
-		// to the authenticated DataCenter origin selected by the agent role.
-		if (!agentBaseUrl) {
-			throw new Error("reflection model requires the normalized agent origin.");
-		}
-		return agentBaseUrl;
-	}
-	if (endpoint.origin === WHALEHALL_RELAY_BASE_URL) {
-		// Existing owner files used the model origin for both roles. Preserve the
-		// literal personal key while moving every authenticated model call to DataCenter.
-		return WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL;
-	}
-	if (
-		endpoint.origin !== WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL &&
-		endpoint.origin !== WHALEHALL_DATA_CENTER_STAGING_BASE_URL
-	) {
-		throw new Error("agent baseurl is not an approved DataCenter origin.");
-	}
-	return endpoint.origin;
 }
 
 function normalizeCloudSyncConfiguration(
@@ -409,88 +333,10 @@ function normalizeConsentLevel(value: unknown): CloudSyncConsentLevel {
 	return value;
 }
 
-function parseRemoteHttpsUrl(value: string, role: string): URL {
-	let endpoint: URL;
-	try {
-		endpoint = new URL(value.trim());
-	} catch {
-		throw new Error(`${role} model baseurl is invalid.`);
-	}
-	if (
-		endpoint.protocol !== "https:" ||
-		isLoopbackHostname(endpoint.hostname) ||
-		endpoint.username !== "" ||
-		endpoint.password !== "" ||
-		endpoint.search !== "" ||
-		endpoint.hash !== ""
-	) {
-		throw new Error(`${role} model baseurl must be a remote HTTPS URL.`);
-	}
-	return endpoint;
-}
-
-function normalizeLiteralApiKey(value: string, role: string): string {
-	const apikey = value.trim();
-	if (
-		apikey.length < (role === "agent" ? 16 : 1) ||
-		apikey.length >
-			(role === "agent"
-				? MAXIMUM_PERSONAL_RELAY_KEY_LENGTH
-				: MAXIMUM_REFLECTION_RELAY_KEY_LENGTH) ||
-		/[\p{Cc}\s]/u.test(apikey) ||
-		apikey.includes("${")
-	) {
-		throw new Error(`${role} model apikey must be a literal non-empty key.`);
-	}
-	return apikey;
-}
-
-function runtimeConfiguration(
-	model: ModelConfiguration,
-): ModelRuntimeConfiguration | null {
-	if (isUnprovisionedKey(model.apikey)) return null;
-	return structuredClone(model);
-}
-
-function isUnprovisionedKey(value: string): boolean {
+function isBoundedLegacyString(value: unknown): value is string {
 	return (
-		value === UNPROVISIONED_REFLECTION_RELAY_KEY ||
-		value === UNPROVISIONED_AGENT_RELAY_KEY
-	);
-}
-
-function serializeConfiguration(configuration: ClientConfiguration): string {
-	return [
-		"reflection:",
-		`  name: ${JSON.stringify(configuration.reflection.name)}`,
-		`  baseurl: ${JSON.stringify(configuration.reflection.baseurl)}`,
-		`  apikey: ${JSON.stringify(configuration.reflection.apikey)}`,
-		"",
-		"agent:",
-		`  name: ${JSON.stringify(configuration.agent.name)}`,
-		`  baseurl: ${JSON.stringify(configuration.agent.baseurl)}`,
-		`  apikey: ${JSON.stringify(configuration.agent.apikey)}`,
-		"",
-		"cloudSync:",
-		`  enabled: ${configuration.cloudSync.enabled}`,
-		`  contentEncryptionEnabled: ${configuration.cloudSync.contentEncryptionEnabled}`,
-		"  consents:",
-		`    activity: ${JSON.stringify(configuration.cloudSync.consents.activity)}`,
-		`    browser: ${JSON.stringify(configuration.cloudSync.consents.browser)}`,
-		`    presence: ${JSON.stringify(configuration.cloudSync.consents.presence)}`,
-		"",
-	].join("\n");
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-	const normalized = hostname
-		.toLowerCase()
-		.replace(/^\[/u, "")
-		.replace(/\]$/u, "");
-	return (
-		normalized === "127.0.0.1" ||
-		normalized === "localhost" ||
-		normalized === "::1"
+		typeof value === "string" &&
+		value.length <= MAXIMUM_IGNORED_LEGACY_FIELD_LENGTH
 	);
 }
 
@@ -504,6 +350,18 @@ function hasExactKeys(
 ): boolean {
 	const actual = Object.keys(value);
 	return actual.length === keys.length && keys.every((key) => key in value);
+}
+
+function hasRequiredAndOptionalKeys(
+	value: Record<string, unknown>,
+	required: readonly string[],
+	optional: readonly string[],
+): boolean {
+	const allowed = new Set([...required, ...optional]);
+	return (
+		required.every((key) => key in value) &&
+		Object.keys(value).every((key) => allowed.has(key))
+	);
 }
 
 function hardenPath(path: string, mode: number): void {

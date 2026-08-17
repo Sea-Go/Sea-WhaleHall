@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
 	AuditExportControl,
+	type AuditExportService,
 	auditExportStatusMessage,
 	privateTrainingExportStatusMessage,
 	recentCompleteFiveMinuteStart,
-	type AuditExportService,
 } from "../src/views/client/features/audit-export/public";
 
 describe("audit export UI", () => {
@@ -51,7 +51,7 @@ describe("audit export UI", () => {
 		expect(markup).toContain("生产分析仍只来自按 64 条/5 分钟或边界自然封窗");
 		expect(markup).toContain("audit-only 确定性投影");
 		expect(markup).toContain("不会写回生产时间线");
-		expect(markup).toContain("不会调用 Qwen");
+		expect(markup).toContain("不会调用模型服务");
 		expect(markup).toContain('type="checkbox"');
 		expect(markup).not.toContain("checked");
 		expect(markup).not.toContain("/Users/");

@@ -12,6 +12,8 @@ import {
 } from "../src/views/client/features/app-update/public";
 import type { AuditExportService } from "../src/views/client/features/audit-export/public";
 import { CalendarPage } from "../src/views/client/features/calendar/CalendarPage";
+import { ConversationController } from "../src/views/client/features/conversation/ConversationController";
+import type { ConversationService } from "../src/views/client/features/conversation/conversation-service";
 import {
 	MonitoringController,
 	type MonitoringService,
@@ -57,6 +59,36 @@ const emptyPlanningService: PlanningService = {
 	retryPendingAnalysis: async () => {},
 };
 const planningController = new PlanningController(emptyPlanningService);
+const emptyConversationService: ConversationService = {
+	loadActiveConversation: async () => null,
+	startTurn: async (input) => ({
+		runId: "not-used",
+		requestId: input.requestId,
+		revision: 1,
+		acceptedAtMs: 1,
+	}),
+	cancelRun: async (input) => ({
+		runId: input.runId,
+		requestId: input.requestId,
+		revision: input.expectedRevision + 1,
+		acceptedAtMs: 1,
+	}),
+	decideToolApproval: async (input) => ({
+		runId: input.runId,
+		requestId: input.requestId,
+		revision: input.expectedRevision + 1,
+		acceptedAtMs: 1,
+	}),
+	getRunSnapshot: async () => {
+		throw new Error("not used");
+	},
+	listRestorableRuns: async () => [],
+	subscribe: () => () => {},
+};
+const conversationController = new ConversationController(
+	emptyConversationService,
+);
+await conversationController.load();
 const planningPageProps = {
 	controller: planningController,
 	onNotify: notify,
@@ -204,6 +236,7 @@ const auditExportService: AuditExportService = {
 describe("client app shell", () => {
 	test("defines the stable product destinations including settings", () => {
 		expect(PAGE_IDS).toEqual([
+			"conversation",
 			"planning",
 			"calendar",
 			"history",
@@ -211,6 +244,7 @@ describe("client app shell", () => {
 			"settings",
 		]);
 		expect(PAGE_LABELS).toEqual({
+			conversation: "对话",
 			planning: "计划",
 			calendar: "日程",
 			history: "历史记录",
@@ -219,7 +253,7 @@ describe("client app shell", () => {
 		});
 		expect(isPageId("calendar")).toBe(true);
 		expect(isPageId("history")).toBe(true);
-		expect(isPageId("conversation")).toBe(false);
+		expect(isPageId("conversation")).toBe(true);
 		expect(isPageId("settings")).toBe(true);
 	});
 
@@ -229,6 +263,7 @@ describe("client app shell", () => {
 				user={shellUser}
 				onLogout={() => {}}
 				calendarService={calendarService}
+				conversationController={conversationController}
 				planningController={planningController}
 				reportController={reportController}
 				preferencesController={preferencesController}
@@ -242,6 +277,7 @@ describe("client app shell", () => {
 
 		expect(markup).toContain("WhaleHall");
 		expect(markup).toContain("工作空间");
+		expect(markup).toContain("对话");
 		expect(markup).toContain("计划");
 		expect(markup).toContain("日程");
 		expect(markup).toContain("历史记录");
@@ -255,12 +291,13 @@ describe("client app shell", () => {
 		expect(markup).not.toContain("Local tool control room");
 	});
 
-	test("history replaces the conversation destination without a composer", () => {
+	test("history stays separate from the conversation composer", () => {
 		const markup = renderToStaticMarkup(
 			<AppShell
 				user={shellUser}
 				onLogout={() => {}}
 				calendarService={calendarService}
+				conversationController={conversationController}
 				planningController={planningController}
 				reportController={reportController}
 				preferencesController={preferencesController}
@@ -276,6 +313,28 @@ describe("client app shell", () => {
 		expect(markup).toContain("正在读取历史记录");
 		expect(markup).not.toContain("发送消息");
 		expect(markup).not.toContain("conversation-draft");
+	});
+
+	test("connects the conversation controller to the production shell", () => {
+		const markup = renderToStaticMarkup(
+			<AppShell
+				user={shellUser}
+				onLogout={() => {}}
+				calendarService={calendarService}
+				conversationController={conversationController}
+				planningController={planningController}
+				reportController={reportController}
+				preferencesController={preferencesController}
+				petBridge={petBridge}
+				monitoringController={monitoringController}
+				auditExportService={auditExportService}
+				proactiveFeedbackHistoryController={proactiveFeedbackHistoryController}
+				initialPage="conversation"
+			/>,
+		);
+
+		expect(markup).toContain("从一个问题开始");
+		expect(markup).toContain("新建对话");
 	});
 });
 

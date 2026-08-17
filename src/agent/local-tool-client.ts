@@ -1,4 +1,5 @@
 import {
+	compareLocalUtf8Binary,
 	isDesktopEvent,
 	isLocalAuditFiveMinutesResult,
 	isLocalMonitoringConfigure,
@@ -16,6 +17,7 @@ import {
 	LOCAL_CONTROL_TIMEOUT_MS,
 	LOCAL_KEY_MIGRATION_TIMEOUT_MS,
 	LOCAL_PERMISSION_REFRESH_TIMEOUT_MS,
+	LOCAL_PLANNING_CALENDAR_PAGE_LIMIT,
 	LOCAL_TOOL_TIMEOUT_MS,
 	type LocalAuditFiveMinutesQuery,
 	type LocalAuditFiveMinutesResult,
@@ -951,9 +953,19 @@ export class LocalToolClient implements LocalToolProcess {
 	): Promise<LocalPlanningCalendarListResult> {
 		const result = await this.request<unknown>("calendar.list", { ...query });
 		if (
-			!isExactLocalRecord(result, ["events"]) ||
+			!isExactLocalRecord(result, ["events", "nextCursor"]) ||
 			!Array.isArray(result.events) ||
-			!result.events.every(isLocalPlanningCalendarEvent)
+			result.events.length >
+				(query.limit ?? LOCAL_PLANNING_CALENDAR_PAGE_LIMIT) ||
+			!result.events.every(isLocalPlanningCalendarEvent) ||
+			!(
+				result.nextCursor === null ||
+				boundedLocalString(result.nextCursor, 1_024)
+			) ||
+			!validPlanningCalendarPage(
+				result as LocalPlanningCalendarListResult,
+				query.cursor ?? null,
+			)
 		) {
 			throw this.protocolFailure("calendar.list returned an invalid result.");
 		}
@@ -1546,6 +1558,22 @@ function isExactLocalRecord(
 	if (!isRecord(value)) return false;
 	const actual = Object.keys(value);
 	return actual.length === keys.length && keys.every((key) => key in value);
+}
+
+function validPlanningCalendarPage(
+	value: LocalPlanningCalendarListResult,
+	requestCursor: string | null,
+): boolean {
+	let previousEventId: string | null = null;
+	for (const event of value.events) {
+		if (
+			previousEventId !== null &&
+			compareLocalUtf8Binary(event.eventId, previousEventId) <= 0
+		)
+			return false;
+		previousEventId = event.eventId;
+	}
+	return value.nextCursor === null || value.nextCursor !== requestCursor;
 }
 
 function boundedLocalString(value: unknown, maximum: number): value is string {

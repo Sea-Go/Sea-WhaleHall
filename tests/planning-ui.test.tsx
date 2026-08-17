@@ -476,7 +476,7 @@ describe("dynamic planning UI", () => {
 		await controller.initialize();
 		await controller.sendMessage("请重新评估每周投入");
 		const markup = render(controller);
-		expect(markup).toContain("本地模型暂时不可用");
+		expect(markup).toContain("计划分析服务暂时不可用");
 		expect(markup).toContain("请重新评估每周投入");
 		expect(markup).toContain("待分析");
 		expect(markup).toContain("重试分析");

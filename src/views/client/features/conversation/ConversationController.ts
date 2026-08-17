@@ -1,3 +1,9 @@
+import {
+	type ConversationRunEventEnvelope,
+	type ConversationRunSnapshot,
+	type ConversationService,
+	ConversationServiceError,
+} from "./conversation-service";
 import type {
 	ConversationDraft,
 	ConversationMessage,
@@ -5,12 +11,6 @@ import type {
 	ConversationThread,
 	CreateConversationInput,
 } from "./domain";
-import {
-	ConversationServiceError,
-	type ConversationRunEventEnvelope,
-	type ConversationRunSnapshot,
-	type ConversationService,
-} from "./conversation-service";
 
 export type ConversationTurnState =
 	| { status: "idle" }
@@ -57,18 +57,29 @@ export type ConversationPageState =
 			turn?: ConversationTurnState;
 	  };
 
+const MAX_BUFFERED_LOADING_EVENTS = 512;
+
+interface BufferedRunEvents {
+	requestSequence: number;
+	events: ConversationRunEventEnvelope[];
+	overflowed: boolean;
+}
+
+interface ResumeAttempt {
+	runId: string;
+	requestSequence: number;
+}
+
 export class ConversationController {
 	private state: ConversationPageState = { status: "loading" };
 	private readonly listeners = new Set<() => void>();
-	private readonly unsubscribeFromService: () => void;
-	private readonly recoveringRuns = new Set<string>();
+	private unsubscribeFromService: (() => void) | null = null;
 	private requestSequence = 0;
+	private loadingEventBuffer: BufferedRunEvents | null = null;
+	private readonly recoveryEventBuffers = new Map<string, BufferedRunEvents>();
+	private resumeAttempt: ResumeAttempt | null = null;
 
-	constructor(private readonly service: ConversationService) {
-		this.unsubscribeFromService = service.subscribe((event) => {
-			this.handleRunEvent(event);
-		});
-	}
+	constructor(private readonly service: ConversationService) {}
 
 	getSnapshot = (): ConversationPageState => this.state;
 	getServerSnapshot = (): ConversationPageState => this.state;
@@ -79,12 +90,25 @@ export class ConversationController {
 	};
 
 	dispose(): void {
-		this.unsubscribeFromService();
+		this.unsubscribeFromService?.();
+		this.unsubscribeFromService = null;
+		this.requestSequence += 1;
+		this.loadingEventBuffer = null;
+		this.recoveryEventBuffers.clear();
+		this.resumeAttempt = null;
 		this.listeners.clear();
 	}
 
 	async load(): Promise<void> {
+		this.ensureServiceSubscription();
 		const requestSequence = ++this.requestSequence;
+		this.recoveryEventBuffers.clear();
+		this.resumeAttempt = null;
+		this.loadingEventBuffer = {
+			requestSequence,
+			events: [],
+			overflowed: false,
+		};
 		this.setState({ status: "loading" });
 		let thread: ConversationThread | null = null;
 		try {
@@ -98,25 +122,35 @@ export class ConversationController {
 			if (latest) {
 				const snapshot = await this.service.getRunSnapshot(latest.runId);
 				if (requestSequence !== this.requestSequence) return;
-				this.setState(stateFromSnapshot(snapshot));
+				this.commitLoadedState(requestSequence, stateFromSnapshot(snapshot));
 				return;
 			}
-			this.setState(
+			// The run may complete between the first thread read and the
+			// restorable-run query. Read the durable thread again before
+			// publishing an idle surface so its terminal messages are not lost.
+			thread = await this.service.loadActiveConversation();
+			if (requestSequence !== this.requestSequence) return;
+			this.commitLoadedState(
+				requestSequence,
 				thread
 					? { status: "ready", thread, turn: { status: "idle" } }
 					: {
 							status: "empty",
 							message: "新建一段对话，告诉 WhaleHall 你想讨论什么。",
-					  },
+						},
 			);
 		} catch (reason) {
 			if (requestSequence !== this.requestSequence) return;
+			this.loadingEventBuffer = null;
 			this.setLoadFailure(reason, thread);
 		}
 	}
 
 	async createConversation(input: CreateConversationInput = {}): Promise<void> {
 		++this.requestSequence;
+		this.loadingEventBuffer = null;
+		this.recoveryEventBuffers.clear();
+		this.resumeAttempt = null;
 		const now = Date.now();
 		this.setState({
 			status: "ready",
@@ -184,7 +218,9 @@ export class ConversationController {
 			const currentRun = surface.turn.run;
 			const run: ConversationRun = {
 				...currentRun,
-				id: currentRun.id.startsWith("pending-") ? accepted.runId : currentRun.id,
+				id: currentRun.id.startsWith("pending-")
+					? accepted.runId
+					: currentRun.id,
 				revision: Math.max(currentRun.revision, accepted.revision),
 				startedAtMs: Math.min(currentRun.startedAtMs, accepted.acceptedAtMs),
 				updatedAtMs: Math.max(currentRun.updatedAtMs, accepted.acceptedAtMs),
@@ -255,10 +291,20 @@ export class ConversationController {
 	}
 
 	async restoreRun(runId: string): Promise<void> {
-		if (this.recoveringRuns.has(runId)) return;
-		this.recoveringRuns.add(runId);
+		if (this.recoveryEventBuffers.has(runId)) return;
+		const requestSequence = this.requestSequence;
+		const buffer: BufferedRunEvents = {
+			requestSequence,
+			events: [],
+			overflowed: false,
+		};
+		this.recoveryEventBuffers.set(runId, buffer);
 		const surface = readySurface(this.state);
-		if (surface && surface.turn.status !== "idle" && surface.turn.run.id === runId) {
+		if (
+			surface &&
+			surface.turn.status !== "idle" &&
+			surface.turn.run.id === runId
+		) {
 			this.setState({
 				status: "ready",
 				thread: surface.thread,
@@ -271,39 +317,100 @@ export class ConversationController {
 		}
 		try {
 			const snapshot = await this.service.getRunSnapshot(runId);
+			if (
+				requestSequence !== this.requestSequence ||
+				this.recoveryEventBuffers.get(runId) !== buffer
+			)
+				return;
 			this.setState(stateFromSnapshot(snapshot));
+			let needsAnotherRestore = buffer.overflowed;
+			for (const event of buffer.events) {
+				needsAnotherRestore = this.handleRunEvent(event) || needsAnotherRestore;
+			}
+			this.recoveryEventBuffers.delete(runId);
+			if (needsAnotherRestore && requestSequence === this.requestSequence) {
+				void this.restoreRun(runId);
+			}
 		} catch (reason) {
+			if (
+				requestSequence !== this.requestSequence ||
+				this.recoveryEventBuffers.get(runId) !== buffer
+			)
+				return;
 			const current = readySurface(this.state);
 			if (current && current.turn.status !== "idle") {
-				this.setOperationFailure(
-					reason,
-					current.thread,
-					{
-						status: "interrupted",
-						run: { ...current.turn.run, status: "interrupted" },
-						message: serviceMessage(reason, "未能恢复这次运行，请稍后重试。"),
-						restorable: isRetryable(reason),
-					},
-				);
+				this.setOperationFailure(reason, current.thread, {
+					status: "interrupted",
+					run: { ...current.turn.run, status: "interrupted" },
+					message: serviceMessage(reason, "未能恢复这次运行，请稍后重试。"),
+					restorable: isRetryable(reason),
+				});
 			} else {
 				this.setLoadFailure(reason, threadForState(this.state));
 			}
 		} finally {
-			this.recoveringRuns.delete(runId);
+			if (this.recoveryEventBuffers.get(runId) === buffer) {
+				this.recoveryEventBuffers.delete(runId);
+			}
 		}
 	}
 
 	async resumeInterruptedRun(runId: string): Promise<void> {
-		const snapshot = await this.service.getRunSnapshot(runId);
+		if (this.resumeAttempt) return;
+		const requestSequence = ++this.requestSequence;
+		const attempt: ResumeAttempt = { runId, requestSequence };
+		this.resumeAttempt = attempt;
+		this.loadingEventBuffer = null;
+		this.recoveryEventBuffers.clear();
+		const initialSurface = readySurface(this.state);
+		if (
+			initialSurface &&
+			initialSurface.turn.status === "interrupted" &&
+			initialSurface.turn.run.id === runId
+		) {
+			this.setState({
+				status: "ready",
+				thread: initialSurface.thread,
+				turn: {
+					status: "recovering",
+					run: initialSurface.turn.run,
+					message: "正在准备恢复这次运行…",
+				},
+			});
+		}
+		let snapshot: ConversationRunSnapshot;
+		try {
+			snapshot = await this.service.getRunSnapshot(runId);
+		} catch (reason) {
+			if (!this.isCurrentResumeAttempt(attempt)) return;
+			const surface = readySurface(this.state);
+			if (surface && surface.turn.status !== "idle") {
+				this.setOperationFailure(
+					reason,
+					surface.thread,
+					initialSurface?.turn.status === "interrupted"
+						? initialSurface.turn
+						: surface.turn,
+				);
+			} else {
+				this.setLoadFailure(reason, threadForState(this.state));
+			}
+			this.finishResumeAttempt(attempt);
+			return;
+		}
+		if (!this.isCurrentResumeAttempt(attempt)) return;
 		if (snapshot.run.status !== "interrupted") {
 			this.setState(stateFromSnapshot(snapshot));
+			this.finishResumeAttempt(attempt);
 			return;
 		}
 		const userMessage = snapshot.conversation.messages.find(
-			(message) => message.role === "user" && message.id === snapshot.clientMessageId,
+			(message) =>
+				message.role === "user" && message.id === snapshot.clientMessageId,
 		);
 		if (!userMessage) {
 			this.setState(stateFromSnapshot(snapshot));
+			this.finishResumeAttempt(attempt);
 			return;
 		}
 		const requestId = createRequestId();
@@ -334,8 +441,14 @@ export class ConversationController {
 				clientMessageId: snapshot.clientMessageId,
 				text: userMessage.content,
 			});
+			if (!this.isCurrentResumeAttempt(attempt)) return;
 			const surface = readySurface(this.state);
-			if (!surface || surface.turn.status === "idle" || surface.turn.run.requestId !== requestId) return;
+			if (
+				!surface ||
+				surface.turn.status === "idle" ||
+				surface.turn.run.requestId !== requestId
+			)
+				return;
 			this.setState({
 				status: "ready",
 				thread: surface.thread,
@@ -347,21 +460,85 @@ export class ConversationController {
 				}),
 			});
 		} catch (reason) {
-			this.setOperationFailure(
-				reason,
-				snapshot.conversation,
-				{
-					status: "interrupted",
-					run: snapshot.run,
-					message: serviceMessage(reason, "恢复运行失败，请稍后重试。"),
-					restorable: isRetryable(reason),
-				},
-			);
+			if (!this.isCurrentResumeAttempt(attempt)) return;
+			this.setOperationFailure(reason, snapshot.conversation, {
+				status: "interrupted",
+				run: snapshot.run,
+				message: serviceMessage(reason, "恢复运行失败，请稍后重试。"),
+				restorable: isRetryable(reason),
+			});
+		} finally {
+			this.finishResumeAttempt(attempt);
 		}
 	}
 
 	retry(): Promise<void> {
 		return this.load();
+	}
+
+	private ensureServiceSubscription(): void {
+		if (this.unsubscribeFromService) return;
+		this.unsubscribeFromService = this.service.subscribe((event) => {
+			const recoveryBuffer = this.recoveryEventBuffers.get(event.runId);
+			if (
+				recoveryBuffer &&
+				recoveryBuffer.requestSequence === this.requestSequence
+			) {
+				this.bufferRunEvent(recoveryBuffer, event);
+				return;
+			}
+			const buffer = this.loadingEventBuffer;
+			if (
+				buffer &&
+				buffer.requestSequence === this.requestSequence &&
+				this.state.status === "loading"
+			) {
+				this.bufferRunEvent(buffer, event);
+				return;
+			}
+			this.handleRunEvent(event);
+		});
+	}
+
+	private bufferRunEvent(
+		buffer: BufferedRunEvents,
+		event: ConversationRunEventEnvelope,
+	): void {
+		if (buffer.events.length < MAX_BUFFERED_LOADING_EVENTS) {
+			buffer.events.push(event);
+			return;
+		}
+		buffer.overflowed = true;
+	}
+
+	private isCurrentResumeAttempt(attempt: ResumeAttempt): boolean {
+		return (
+			this.resumeAttempt === attempt &&
+			attempt.requestSequence === this.requestSequence
+		);
+	}
+
+	private finishResumeAttempt(attempt: ResumeAttempt): void {
+		if (this.resumeAttempt === attempt) this.resumeAttempt = null;
+	}
+
+	private commitLoadedState(
+		requestSequence: number,
+		state: ConversationPageState,
+	): void {
+		if (requestSequence !== this.requestSequence) return;
+		const buffer = this.loadingEventBuffer;
+		this.loadingEventBuffer = null;
+		this.setState(state);
+		if (!buffer || buffer.requestSequence !== requestSequence) return;
+		for (const event of buffer.events) this.handleRunEvent(event);
+		if (!buffer.overflowed) return;
+		const surface = readySurface(this.state);
+		if (surface && surface.turn.status !== "idle") {
+			void this.restoreRun(surface.turn.run.id);
+			return;
+		}
+		void this.load();
 	}
 
 	private async decideToolApproval(
@@ -405,21 +582,24 @@ export class ConversationController {
 		}
 	}
 
-	private handleRunEvent(envelope: ConversationRunEventEnvelope): void {
+	private handleRunEvent(envelope: ConversationRunEventEnvelope): boolean {
 		const surface = readySurface(this.state);
-		if (!surface || surface.turn.status === "idle") return;
+		if (!surface || surface.turn.status === "idle") return false;
 		const currentRun = surface.turn.run;
 		if (
 			currentRun.id !== envelope.runId &&
 			currentRun.requestId !== envelope.requestId
-		) return;
-		if (envelope.sequence <= currentRun.lastSequence) return;
+		)
+			return false;
+		if (envelope.sequence <= currentRun.lastSequence) {
+			return this.reconcileRepeatedContentEvent(surface, envelope);
+		}
 		if (
 			envelope.sequence !== currentRun.lastSequence + 1 ||
 			envelope.revision < currentRun.revision
 		) {
 			void this.restoreRun(envelope.runId);
-			return;
+			return true;
 		}
 
 		const run: ConversationRun = {
@@ -431,12 +611,77 @@ export class ConversationController {
 			commandError: undefined,
 		};
 		const applied = applyEvent(surface.thread, surface.turn, run, envelope);
+		if (!applied) {
+			void this.restoreRun(envelope.runId);
+			return true;
+		}
 		this.setState({ status: "ready", ...applied });
+		return false;
+	}
+
+	private reconcileRepeatedContentEvent(
+		surface: { thread: ConversationThread; turn: ConversationTurnState },
+		envelope: ConversationRunEventEnvelope,
+	): boolean {
+		const event = envelope.event;
+		let thread: ConversationThread | null = null;
+		switch (event.type) {
+			case "message.started":
+				thread = withConversationId(
+					ensureAssistantMessageStarted(surface.thread, {
+						id: event.messageId,
+						role: "assistant",
+						content: "",
+						createdAtMs: event.createdAtMs,
+						state: "streaming",
+					}),
+					event.conversationId,
+				);
+				break;
+			case "message.delta": {
+				const updated = updateAssistantDelta(
+					surface.thread,
+					event.messageId,
+					event.startOffset,
+					event.delta,
+					envelope.emittedAtMs,
+				);
+				if (!updated) {
+					void this.restoreRun(envelope.runId);
+					return true;
+				}
+				thread = withConversationId(updated, event.conversationId);
+				break;
+			}
+			case "message.completed":
+				thread = withConversationId(
+					upsertAssistantMessage(surface.thread, {
+						id: event.messageId,
+						role: "assistant",
+						content: event.content,
+						createdAtMs: event.createdAtMs,
+						state: "complete",
+					}),
+					event.conversationId,
+				);
+				break;
+			default:
+				return false;
+		}
+		if (thread !== surface.thread) {
+			this.setState({ status: "ready", thread, turn: surface.turn });
+		}
+		return false;
 	}
 
 	private updateCommandRevision(runId: string, revision: number): void {
 		const surface = readySurface(this.state);
-		if (!surface || surface.turn.status === "idle" || surface.turn.run.id !== runId) return;
+		if (
+			!surface ||
+			surface.turn.status === "idle" ||
+			surface.turn.run.id !== runId
+		)
+			return;
 		this.setState({
 			status: "ready",
 			thread: surface.thread,
@@ -466,10 +711,17 @@ export class ConversationController {
 		});
 	}
 
-	private setLoadFailure(reason: unknown, cachedThread: ConversationThread | null): void {
+	private setLoadFailure(
+		reason: unknown,
+		cachedThread: ConversationThread | null,
+	): void {
 		if (reason instanceof ConversationServiceError) {
 			if (reason.kind === "offline") {
-				this.setState({ status: "offline", message: reason.message, cachedThread });
+				this.setState({
+					status: "offline",
+					message: reason.message,
+					cachedThread,
+				});
 				return;
 			}
 			if (reason.kind === "unavailable") {
@@ -502,12 +754,23 @@ export class ConversationController {
 		turn: ConversationTurnState,
 	): void {
 		const message = serviceMessage(reason, "对话服务暂时不可用。");
-		if (reason instanceof ConversationServiceError && reason.kind === "offline") {
+		if (
+			reason instanceof ConversationServiceError &&
+			reason.kind === "offline"
+		) {
 			this.setState({ status: "offline", message, cachedThread: thread, turn });
 			return;
 		}
-		if (reason instanceof ConversationServiceError && reason.kind === "unavailable") {
-			this.setState({ status: "unavailable", message, cachedThread: thread, turn });
+		if (
+			reason instanceof ConversationServiceError &&
+			reason.kind === "unavailable"
+		) {
+			this.setState({
+				status: "unavailable",
+				message,
+				cachedThread: thread,
+				turn,
+			});
 			return;
 		}
 		this.setState({
@@ -530,7 +793,7 @@ function applyEvent(
 	previousTurn: Exclude<ConversationTurnState, { status: "idle" }>,
 	run: ConversationRun,
 	envelope: ConversationRunEventEnvelope,
-): { thread: ConversationThread; turn: ConversationTurnState } {
+): { thread: ConversationThread; turn: ConversationTurnState } | null {
 	const event = envelope.event;
 	switch (event.type) {
 		case "run.started":
@@ -556,7 +819,7 @@ function applyEvent(
 			};
 		case "message.started": {
 			const nextThread = withConversationId(
-				upsertAssistantMessage(thread, {
+				ensureAssistantMessageStarted(thread, {
 					id: event.messageId,
 					role: "assistant",
 					content: "",
@@ -571,8 +834,16 @@ function applyEvent(
 			};
 		}
 		case "message.delta": {
+			const updatedThread = updateAssistantDelta(
+				thread,
+				event.messageId,
+				event.startOffset,
+				event.delta,
+				envelope.emittedAtMs,
+			);
+			if (!updatedThread) return null;
 			const nextThread = withConversationId(
-				updateAssistantDelta(thread, event.messageId, event.delta, envelope.emittedAtMs),
+				updatedThread,
 				event.conversationId,
 			);
 			return {
@@ -665,7 +936,9 @@ function applyEvent(
 			};
 		case "run.interrupted":
 			return {
-				thread: event.restorable ? thread : markTransientMessages(thread, "failed"),
+				thread: event.restorable
+					? thread
+					: markTransientMessages(thread, "failed"),
 				turn: {
 					status: "interrupted",
 					run: { ...run, status: "interrupted" },
@@ -686,11 +959,17 @@ function applyEvent(
 	}
 }
 
-function stateFromSnapshot(snapshot: ConversationRunSnapshot): ConversationPageState {
+function stateFromSnapshot(
+	snapshot: ConversationRunSnapshot,
+): ConversationPageState {
 	const { run, conversation } = snapshot;
 	switch (run.status) {
 		case "completed":
-			return { status: "ready", thread: conversation, turn: { status: "idle" } };
+			return {
+				status: "ready",
+				thread: conversation,
+				turn: { status: "idle" },
+			};
 		case "cancelled":
 			return {
 				status: "ready",
@@ -708,7 +987,8 @@ function stateFromSnapshot(snapshot: ConversationRunSnapshot): ConversationPageS
 				turn: {
 					status: "interrupted",
 					run,
-					message: snapshot.failure?.message || "这次运行已中断，可以尝试恢复。",
+					message:
+						snapshot.failure?.message || "这次运行已中断，可以尝试恢复。",
 					restorable: true,
 				},
 			};
@@ -724,13 +1004,29 @@ function stateFromSnapshot(snapshot: ConversationRunSnapshot): ConversationPageS
 				},
 			};
 		case "starting":
-			return { status: "ready", thread: conversation, turn: { status: "starting", run } };
+			return {
+				status: "ready",
+				thread: conversation,
+				turn: { status: "starting", run },
+			};
 		case "running":
-			return { status: "ready", thread: conversation, turn: { status: "running", run } };
+			return {
+				status: "ready",
+				thread: conversation,
+				turn: { status: "running", run },
+			};
 		case "suspended":
-			return { status: "ready", thread: conversation, turn: { status: "suspended", run } };
+			return {
+				status: "ready",
+				thread: conversation,
+				turn: { status: "suspended", run },
+			};
 		case "cancelling":
-			return { status: "ready", thread: conversation, turn: { status: "cancelling", run } };
+			return {
+				status: "ready",
+				thread: conversation,
+				turn: { status: "cancelling", run },
+			};
 	}
 }
 
@@ -740,7 +1036,9 @@ function readySurface(
 	return state.status === "ready" ? state : null;
 }
 
-function threadForState(state: ConversationPageState): ConversationThread | null {
+function threadForState(
+	state: ConversationPageState,
+): ConversationThread | null {
 	switch (state.status) {
 		case "ready":
 			return state.thread;
@@ -756,7 +1054,11 @@ function threadForState(state: ConversationPageState): ConversationThread | null
 }
 
 function canStartTurn(turn: ConversationTurnState): boolean {
-	return turn.status === "idle" || turn.status === "cancelled" || turn.status === "failed";
+	return (
+		turn.status === "idle" ||
+		turn.status === "cancelled" ||
+		turn.status === "failed"
+	);
 }
 
 function isActiveTurn(
@@ -765,9 +1067,13 @@ function isActiveTurn(
 	ConversationTurnState,
 	{ status: "idle" | "cancelled" | "failed" | "interrupted" }
 > {
-	return ["starting", "running", "suspended", "cancelling", "recovering"].includes(
-		turn.status,
-	);
+	return [
+		"starting",
+		"running",
+		"suspended",
+		"cancelling",
+		"recovering",
+	].includes(turn.status);
 }
 
 function withRun(
@@ -795,19 +1101,33 @@ function upsertAssistantMessage(
 		...thread,
 		updatedAtMs: Math.max(thread.updatedAtMs, message.createdAtMs),
 		messages: exists
-			? thread.messages.map((current) => (current.id === message.id ? message : current))
+			? thread.messages.map((current) =>
+					current.id === message.id ? message : current,
+				)
 			: [...thread.messages, message],
 	};
+}
+
+function ensureAssistantMessageStarted(
+	thread: ConversationThread,
+	message: ConversationMessage,
+): ConversationThread {
+	return thread.messages.some((current) => current.id === message.id)
+		? thread
+		: upsertAssistantMessage(thread, message);
 }
 
 function updateAssistantDelta(
 	thread: ConversationThread,
 	messageId: string,
+	startOffset: number,
 	delta: string,
 	createdAtMs: number,
-): ConversationThread {
+): ConversationThread | null {
+	if (!Number.isSafeInteger(startOffset) || startOffset < 0) return null;
 	const existing = thread.messages.find((message) => message.id === messageId);
 	if (!existing) {
+		if (startOffset !== 0) return null;
 		return upsertAssistantMessage(thread, {
 			id: messageId,
 			role: "assistant",
@@ -816,9 +1136,22 @@ function updateAssistantDelta(
 			state: "streaming",
 		});
 	}
+	const endOffset = startOffset + delta.length;
+	if (!Number.isSafeInteger(endOffset)) return null;
+	if (existing.content.length > startOffset) {
+		return existing.content.length >= endOffset &&
+			existing.content.slice(startOffset, endOffset) === delta
+			? thread
+			: null;
+	}
+	if (existing.content.length !== startOffset) return null;
 	return mapMessages(thread, (message) =>
 		message.id === messageId
-			? { ...message, content: `${message.content}${delta}`, state: "streaming" }
+			? {
+					...message,
+					content: `${message.content}${delta}`,
+					state: "streaming",
+				}
 			: message,
 	);
 }
@@ -828,7 +1161,9 @@ function upsertToolCall(
 	toolCall: ConversationRun["toolCalls"][number],
 ): readonly ConversationRun["toolCalls"][number][] {
 	return toolCalls.some((current) => current.id === toolCall.id)
-		? toolCalls.map((current) => (current.id === toolCall.id ? { ...current, ...toolCall } : current))
+		? toolCalls.map((current) =>
+				current.id === toolCall.id ? { ...current, ...toolCall } : current,
+			)
 		: [...toolCalls, toolCall];
 }
 
@@ -863,7 +1198,8 @@ function markTransientMessages(
 function markCancelledMessages(thread: ConversationThread): ConversationThread {
 	return mapMessages(thread, (message) => {
 		if (message.state === "queued") return { ...message, state: "complete" };
-		if (message.state === "streaming") return { ...message, state: "cancelled" };
+		if (message.state === "streaming")
+			return { ...message, state: "cancelled" };
 		return message;
 	});
 }
@@ -877,7 +1213,9 @@ function isRetryable(reason: unknown): boolean {
 }
 
 function isRevisionConflict(reason: unknown): boolean {
-	return reason instanceof ConversationServiceError && reason.kind === "conflict";
+	return (
+		reason instanceof ConversationServiceError && reason.kind === "conflict"
+	);
 }
 
 function createRequestId(): string {

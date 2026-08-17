@@ -6,8 +6,7 @@ import {
 } from "../src/bun/remote-auth-session";
 import type { ProactiveFeedbackPolicy } from "../src/shared/proactive-feedback";
 
-const personalRelayKey = ["whk", "proactive-auth", "fixture"].join("_");
-const refreshTokenKey = "auth.refresh-token.current";
+const refreshTokenKey = "auth.refresh-token.production.v1";
 
 class MemoryCredentials implements SecureCredentialStore {
 	readonly values = new Map<string, string>();
@@ -103,7 +102,7 @@ describe("optional proactive feedback auth lifecycle", () => {
 			capabilityAvailable: true,
 		},
 		{
-			name: "personal relay capability is absent",
+			name: "model relay capability is absent",
 			policy: { enabled: true, retention: 30 } as ProactiveFeedbackPolicy,
 			capabilityAvailable: false,
 		},
@@ -231,7 +230,6 @@ function createAuthFixture(options?: {
 	});
 	manager = new RemoteAuthSessionManager(credentials, {
 		baseUrl: "https://relay.example.test",
-		agentKey: personalRelayKey,
 		onBeforeSessionActivate: (identity) =>
 			runtime.prepareSessionActivationForAuth(identity),
 		onSessionActivated: (identity) => runtime.sessionReadyForAuth(identity),

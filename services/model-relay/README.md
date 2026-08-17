@@ -8,20 +8,21 @@ This native Node 22 service is intentionally not an Agent. It exposes only:
 - `GET /v1/auth/me`
 - `POST /v1/chat/completions`
 
-The chat endpoint requires both a short-lived bearer token and
-`X-WhaleHall-Agent-Key`. It resolves the bearer subject first and verifies the
-personal key against that exact user's `agentKeyHash` with the existing scrypt
-format. Neither desktop bearer/relay keys nor upstream Qwen credentials are
-forwarded upstream or returned in an API response.
+The chat endpoint requires a short-lived bearer token and the code-owned
+`X-WhaleHall-Model-Purpose: agent|activity|planning` header. It resolves the account only
+from the bearer subject. Historical `X-WhaleHall-Agent-Key` input is ignored
+for compatibility, never authenticated, forwarded, logged, or stored. Neither
+the desktop bearer nor upstream Qwen credentials are forwarded upstream or
+returned in an API response.
 
 The former bearer-less `/v1/activity/completions` route is retired. Activity
 reflection now uses authenticated DataCenter `/v1/chat/completions` with the
-current user's bearer + personal key and a host-owned purpose header. This
-service must not be used as an activity fallback.
+current user's bearer and a host-owned purpose header. This service must not be
+used as an activity fallback.
 
 It enforces an exact `qwen3:1.7b` allowlist, size/rate/idempotency limits, and
-byte-preserving OpenAI-compatible forwarding. Legacy chat relay records are retained
-for 30 days. It has no prompt injection,
+byte-preserving OpenAI-compatible forwarding. Authenticated model relay records
+retain their code-owned purpose for 30 days. It has no prompt injection,
 conversation/history, Tool, planning, or activity-analysis policy endpoint;
 the latter is a local encrypted desktop workflow.
 
@@ -35,7 +36,7 @@ options. It always:
 - forwards only to CPU-only Ollama
   `http://127.0.0.1:11437/v1/chat/completions`;
 - allows only `qwen3:1.7b`;
-- records only its legacy chat requests/responses for 30 days.
+- records authenticated agent/activity/planning requests and responses for 30 days.
 
 Required environment values are intentionally limited to local file paths:
 
@@ -48,11 +49,11 @@ Required environment values are intentionally limited to local file paths:
 rejects all alternate HTTP endpoints, including GPU/Ollama paths.
 
 The users file is an array (or `{ "users": [...] }`) containing `id`, `email`,
-`displayName`, `initials`, `passwordHash`, `agentKeyHash`, and optional
-`disabled`. Generate it using `bun run provision:relay-owner`; plaintext
-passwords and personal relay keys must never be written to this file. Retired
-reflection credential fields in an older file are ignored and are not loaded
-into the runtime user model.
+`displayName`, `initials`, `passwordHash`, and optional `disabled`. Generate it
+using `bun run provision:relay-owner`; plaintext passwords must never be written
+to this file. A historical `agentKeyHash` or retired reflection credential field
+in an older file is accepted only as compatibility input, discarded during
+parsing, and never loaded into the runtime user model.
 
 Deployment assets, CPU preflight, exact Caddy routes, and rollback steps are in
 [`deploy/home-cloud/model-relay/README.md`](../../deploy/home-cloud/model-relay/README.md).

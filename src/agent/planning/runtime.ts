@@ -1,6 +1,7 @@
-import { OllamaClientError } from "../model/ollama-json-client";
 import {
 	assertPlanningModelOutputForRequest,
+	PlanningModelInvocationError,
+	type PlanningModelNeedsClarification,
 	type PlanningModelOutput,
 	PlanningModelOutputError,
 	type PlanningModelPort,
@@ -969,7 +970,9 @@ export class PlanningRuntime {
 				observationEvidence: plan.observationEvidence,
 				calendarEvents,
 			};
-			output = await this.model.analyze(analysisRequest);
+			output = await this.model.analyze(analysisRequest, {
+				requestId: `planning-analysis:${operationId}`,
+			});
 			assertPlanningModelOutputForRequest(output, analysisRequest);
 		} catch (error) {
 			return this.persistAnalysisFailure(
@@ -996,7 +999,7 @@ export class PlanningRuntime {
 							plan.id,
 							"assistant",
 							prefixedAssistantMessage(
-								output.assistantMessage,
+								clarificationAssistantMessage(output),
 								options.messagePrefix,
 							),
 							operationId,
@@ -2155,15 +2158,13 @@ function diagnosticForAnalysisFailure(
 			recordedAt,
 		};
 	}
-	if (error instanceof OllamaClientError) {
+	if (error instanceof PlanningModelInvocationError) {
 		return {
 			source: "planning-model",
 			code:
-				error.code === "request_timeout"
+				error.code === "request-timeout"
 					? "request-timeout"
-					: error.code === "schema_mismatch" ||
-							error.code === "invalid_json" ||
-							error.code === "invalid_response_envelope"
+					: error.code === "invalid-output"
 						? "invalid-output"
 						: "model-unavailable",
 			retryable: error.retryable,
@@ -2245,6 +2246,24 @@ function assistantMessageForOutput(output: PlanningModelOutput): string {
 		return `沿用已确认的排程偏好，可随时修改。${output.assistantMessage}`;
 	}
 	return output.assistantMessage;
+}
+
+function clarificationAssistantMessage(
+	output: PlanningModelNeedsClarification,
+): string {
+	const message = output.assistantMessage.trim();
+	const seen = new Set<string>();
+	const missingQuestions = output.clarificationQuestions
+		.map((question) => question.trim())
+		.filter((question) => {
+			if (!question || seen.has(question)) return false;
+			seen.add(question);
+			return !message.includes(question);
+		});
+	if (missingQuestions.length === 0) return message;
+	return `${message}\n\n需要你确认：\n${missingQuestions
+		.map((question, index) => `${index + 1}. ${question}`)
+		.join("\n")}`;
 }
 
 function prefixedAssistantMessage(message: string, prefix?: string): string {

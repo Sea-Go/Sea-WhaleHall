@@ -5,6 +5,7 @@ import {
 	publicUser,
 	type RateLimiter,
 	type RelayClock,
+	type RelayModelPurpose,
 	type RelayPublicUser,
 	type RelayRecordStore,
 	type RelayUser,
@@ -47,6 +48,9 @@ const SELF_REPORTED_IDENTITY_FIELDS = [
 	"refreshToken",
 	"apiKey",
 	"api_key",
+	"purpose",
+	"modelPurpose",
+	"model_purpose",
 ] as const;
 
 export interface ModelRelayServerConfig {
@@ -230,12 +234,12 @@ export function createModelRelayHandler(
 
 	async function relayChatCompletion(request: Request): Promise<Response> {
 		const auth = await authenticate(request);
+		const purpose = modelPurpose(request.headers);
 		const rate = await chatRateLimiter.consume(
 			`chat:${auth.session.subject}`,
 			clock.now(),
 		);
 		if (!rate.allowed) throw rateLimitError(rate.retryAfterSeconds);
-		await authenticateAgentKey(request, auth.user);
 		requireJson(request);
 
 		const rawBody = await readBoundedBody(request, config.maxRequestBytes);
@@ -271,6 +275,7 @@ export function createModelRelayHandler(
 		const claim = await dependencies.records.claim({
 			recordId: randomUUID(),
 			subject: auth.session.subject,
+			purpose,
 			idempotencyKey,
 			requestHash: digestBytes(rawBody),
 			model,
@@ -501,18 +506,6 @@ export function createModelRelayHandler(
 		const user = await dependencies.users.findById(session.subject);
 		if (!user || user.disabled) throw unauthorized();
 		return { accessDigest, session, user };
-	}
-
-	async function authenticateAgentKey(
-		request: Request,
-		user: RelayUser,
-	): Promise<void> {
-		const key = request.headers.get("x-whalehall-agent-key") ?? "";
-		const valid = await verifyPassword(
-			isPersonalRelayKey(key) ? key : "",
-			user.agentKeyHash || dummyScryptPasswordHash(),
-		);
-		if (!valid) throw unauthorized();
 	}
 
 	async function issueSession(
@@ -857,12 +850,6 @@ function bearerToken(headers: Headers): string {
 	return match[1];
 }
 
-function isPersonalRelayKey(value: string): boolean {
-	return (
-		value.length >= 16 && value.length <= 1_024 && !/[^\x21-\x7e]/u.test(value)
-	);
-}
-
 function rejectIdentityHeaders(headers: Headers): void {
 	for (const name of IDENTITY_HEADERS) {
 		if (headers.has(name)) {
@@ -873,6 +860,18 @@ function rejectIdentityHeaders(headers: Headers): void {
 			);
 		}
 	}
+}
+
+function modelPurpose(headers: Headers): RelayModelPurpose {
+	const value = headers.get("x-whalehall-model-purpose");
+	if (value !== "agent" && value !== "activity" && value !== "planning") {
+		throw new HttpError(
+			400,
+			"invalid-model-purpose",
+			"A valid X-WhaleHall-Model-Purpose header is required.",
+		);
+	}
+	return value;
 }
 
 function rejectSelfReportedIdentity(body: Record<string, unknown>): void {

@@ -69,6 +69,7 @@ export type ConversationRunEvent =
 			type: "message.delta";
 			conversationId: string;
 			messageId: string;
+			startOffset: number;
 			delta: string;
 	  }
 	| {
@@ -112,18 +113,24 @@ export interface ConversationRunEventEnvelope {
 	event: ConversationRunEvent;
 }
 
-export type ConversationRunListener = (event: ConversationRunEventEnvelope) => void;
+export type ConversationRunListener = (
+	event: ConversationRunEventEnvelope,
+) => void;
 
 /** Renderer-facing integration seam. No provider or Mastra types cross it. */
 export interface ConversationService {
 	loadActiveConversation(): Promise<ConversationThread | null>;
 	startTurn(input: ConversationStartInput): Promise<ConversationRunAccepted>;
-	cancelRun(input: CancelConversationRunInput): Promise<ConversationCommandAccepted>;
+	cancelRun(
+		input: CancelConversationRunInput,
+	): Promise<ConversationCommandAccepted>;
 	decideToolApproval(
 		input: DecideConversationToolApprovalInput,
 	): Promise<ConversationCommandAccepted>;
 	getRunSnapshot(runId: string): Promise<ConversationRunSnapshot>;
-	listRestorableRuns(conversationId?: string): Promise<readonly ConversationRestorableRun[]>;
+	listRestorableRuns(
+		conversationId?: string,
+	): Promise<readonly ConversationRestorableRun[]>;
 	subscribe(listener: ConversationRunListener): () => void;
 }
 

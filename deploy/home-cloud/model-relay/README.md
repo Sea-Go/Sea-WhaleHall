@@ -29,18 +29,14 @@ interactive terminal:
 
 ```sh
 bun run provision:relay-owner -- \
-  --config /absolute/local/WhaleHall-user-data/config.yaml \
   --users /absolute/local/model-relay-users.json
 ```
 
-This writes the personal relay key only to the local owner-only `config.yaml`
-and writes the complete user record (`id`, `email`, `displayName`, `initials`,
+This writes the complete user record (`id`, `email`, `displayName`, `initials`,
 optional `disabled`) to `model-relay-users.json`; credential material is stored
-only as `passwordHash` and `agentKeyHash`. The compatibility-only reflection
-config entry is an ignored placeholder, not a credential. Copy only the users
-file to the server; never copy the desktop `config.yaml` or print the personal
-key. Existing users require the explicit `--replace` flag to avoid accidental
-overwrite.
+only as `passwordHash`. It does not read or modify the desktop `config.yaml` and
+does not generate a second model credential. Existing users require the
+explicit `--replace` flag to avoid accidental overwrite.
 
 ## Install after merge
 
@@ -73,7 +69,8 @@ sudo systemctl reload caddy
 ```
 
 The relay binds only to `127.0.0.1:8787`; Caddy is the public TLS boundary.
-It retains encrypted-on-disk legacy chat request/response records for 30 days.
+It retains owner-only on-disk authenticated model request/response records and
+their code-owned purpose for 30 days.
 
 ## Verification and rollback
 

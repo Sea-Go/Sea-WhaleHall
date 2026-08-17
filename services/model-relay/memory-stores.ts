@@ -109,7 +109,10 @@ export class InMemoryRelayRecordStore implements RelayRecordStore {
 		const existingId = this.byKey.get(scope);
 		const existing = existingId ? this.byId.get(existingId) : undefined;
 		if (existing && existing.expiresAtMs > claim.createdAtMs) {
-			if (existing.requestHash !== claim.requestHash) {
+			if (
+				existing.requestHash !== claim.requestHash ||
+				existing.purpose !== claim.purpose
+			) {
 				return { kind: "conflict", recordId: existing.recordId };
 			}
 			if (existing.state === "inflight") {
@@ -171,6 +174,7 @@ export class InMemoryRelayRecordStore implements RelayRecordStore {
 	snapshot(): ReadonlyArray<{
 		recordId: string;
 		subject: string;
+		purpose: RelayRecordClaim["purpose"];
 		requestBody: Uint8Array;
 		responseBody: Uint8Array;
 		state: string;
@@ -178,6 +182,7 @@ export class InMemoryRelayRecordStore implements RelayRecordStore {
 		return [...this.byId.values()].map((record) => ({
 			recordId: record.recordId,
 			subject: record.subject,
+			purpose: record.purpose,
 			requestBody: record.requestBody.slice(),
 			responseBody: concatenate(record.responseChunks),
 			state: record.state,

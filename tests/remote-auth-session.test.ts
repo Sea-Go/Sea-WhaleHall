@@ -4,8 +4,6 @@ import {
 	type SecureCredentialStore,
 } from "../src/bun/remote-auth-session";
 
-const personalRelayKey = ["whk", "remote-auth", "fixture"].join("_");
-
 class MemoryCredentials implements SecureCredentialStore {
 	readonly values = new Map<string, string>();
 	reads = 0;
@@ -47,7 +45,6 @@ describe("RemoteAuthSessionManager", () => {
 		}> = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
 				seen.push({
 					url: String(input),
@@ -76,7 +73,7 @@ describe("RemoteAuthSessionManager", () => {
 		});
 		expect(seen[0]?.headers.get("x-whalehall-agent-key")).toBeNull();
 		expect(seen[0]?.redirect).toBe("error");
-		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+		expect(credentials.values.get("auth.refresh-token.production.v1")).toBe(
 			"refresh-token-signed-in-0123456789",
 		);
 	});
@@ -84,7 +81,7 @@ describe("RemoteAuthSessionManager", () => {
 	test("preserves initial restore behavior when there is no live session", async () => {
 		const credentials = new MemoryCredentials();
 		credentials.values.set(
-			"auth.refresh-token.current",
+			"auth.refresh-token.production.v1",
 			"refresh-token-persisted-0123456789",
 		);
 		const cleared: Array<string | null> = [];
@@ -92,7 +89,6 @@ describe("RemoteAuthSessionManager", () => {
 		let refreshBody: unknown = null;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				cleared.push(accountId);
 			},
@@ -121,7 +117,6 @@ describe("RemoteAuthSessionManager", () => {
 		let refreshCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			fetch: (async (input: RequestInfo | URL) => {
 				if (new URL(String(input)).pathname === "/v1/auth/sessions") {
 					return Response.json(sessionPayload("active"));
@@ -155,7 +150,6 @@ describe("RemoteAuthSessionManager", () => {
 		const order: string[] = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionActivate: async (identity) => {
 				order.push(`owner:${identity.accountId}`);
 				markActivationStarted();
@@ -172,7 +166,9 @@ describe("RemoteAuthSessionManager", () => {
 		await activationStarted;
 		expect(manager.getSession()).toBeNull();
 		expect(manager.captureCurrentSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 
 		releaseActivation();
 		await signingIn;
@@ -185,7 +181,6 @@ describe("RemoteAuthSessionManager", () => {
 		const cleared: Array<string | null> = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionActivate: async () => {
 				throw new Error("injected durable owner failure");
 			},
@@ -203,7 +198,9 @@ describe("RemoteAuthSessionManager", () => {
 		).rejects.toThrow("injected durable owner failure");
 		expect(cleared).toEqual(["account-1"]);
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 	});
 
 	test("does not emit an expiry event when an initial post-activation callback fails", async () => {
@@ -211,7 +208,6 @@ describe("RemoteAuthSessionManager", () => {
 		const lifecycle: string[] = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onSessionActivated: async () => {
 				throw new Error("injected initial session-ready failure");
 			},
@@ -229,11 +225,13 @@ describe("RemoteAuthSessionManager", () => {
 			manager.signIn({ email: "test@example.com", password: "password" }),
 		).rejects.toThrow("injected initial session-ready failure");
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(lifecycle).toEqual(["clear:account-1"]);
 	});
 
-	test("adds the personal relay key only to authenticated model requests and binds identity generations", async () => {
+	test("uses bearer-only model requests, strips legacy keys, and binds identity generations", async () => {
 		const credentials = new MemoryCredentials();
 		const observed = {
 			modelHeaders: null as Headers | null,
@@ -242,7 +240,6 @@ describe("RemoteAuthSessionManager", () => {
 		};
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (new URL(String(input)).pathname === "/v1/auth/sessions") {
 					return Response.json(sessionPayload("active"));
@@ -262,18 +259,24 @@ describe("RemoteAuthSessionManager", () => {
 		if (!identity) throw new Error("Expected a current session.");
 		await manager.authorizedFetch(
 			"/v1/chat/completions",
-			{ method: "POST" },
-			"activity",
+			{
+				method: "POST",
+				headers: { "X-WhaleHall-Agent-Key": "retired-desktop-key" },
+			},
+			"planning",
 		);
-		await manager.bearerFetch("/v1/agent/register", { method: "POST" });
+		await manager.bearerFetch("/v1/agent/register", {
+			method: "POST",
+			headers: { "X-WhaleHall-Agent-Key": "retired-desktop-key" },
+		});
 
 		const headers = observed.modelHeaders;
 		if (!headers)
 			throw new Error("Expected authenticated model request headers.");
-		expect(headers.get("x-whalehall-agent-key")).toBe(personalRelayKey);
+		expect(headers.get("x-whalehall-agent-key")).toBeNull();
 		expect(headers.get("authorization")).toStartWith("Bearer ");
 		expect(headers.get("x-session-generation")).toBe("1");
-		expect(headers.get("x-whalehall-model-purpose")).toBe("activity");
+		expect(headers.get("x-whalehall-model-purpose")).toBe("planning");
 		expect(observed.bearerHeaders?.get("authorization")).toStartWith("Bearer ");
 		expect(observed.bearerHeaders?.get("x-whalehall-agent-key")).toBeNull();
 		expect(observed.modelRedirect).toBe("error");
@@ -287,7 +290,6 @@ describe("RemoteAuthSessionManager", () => {
 		let modelCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			fetch: (async (input: RequestInfo | URL) => {
 				if (new URL(String(input)).pathname === "/v1/auth/sessions") {
 					return Response.json(sessionPayload("active"));
@@ -311,10 +313,10 @@ describe("RemoteAuthSessionManager", () => {
 	test("keeps the host-owned purpose across a 401 refresh retry", async () => {
 		const credentials = new MemoryCredentials();
 		const modelPurposes: Array<string | null> = [];
+		const retiredKeyHeaders: Array<string | null> = [];
 		let modelCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
 				const path = new URL(String(input)).pathname;
 				if (path === "/v1/auth/sessions") {
@@ -327,6 +329,9 @@ describe("RemoteAuthSessionManager", () => {
 				modelPurposes.push(
 					new Headers(init?.headers).get("x-whalehall-model-purpose"),
 				);
+				retiredKeyHeaders.push(
+					new Headers(init?.headers).get("x-whalehall-agent-key"),
+				);
 				return modelCalls === 1
 					? new Response(null, { status: 401 })
 					: Response.json({ id: "completed" });
@@ -336,12 +341,16 @@ describe("RemoteAuthSessionManager", () => {
 
 		const response = await manager.authorizedFetch(
 			"/v1/chat/completions",
-			{ method: "POST" },
+			{
+				method: "POST",
+				headers: { "X-WhaleHall-Agent-Key": "retired-desktop-key" },
+			},
 			"activity",
 		);
 
 		expect(response.ok).toBeTrue();
 		expect(modelPurposes).toEqual(["activity", "activity"]);
+		expect(retiredKeyHeaders).toEqual([null, null]);
 	});
 
 	test("runs the post-activation callback after an authorized request refresh", async () => {
@@ -350,7 +359,6 @@ describe("RemoteAuthSessionManager", () => {
 		let modelCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onSessionActivated: async (identity) => {
 				activated.push(identity.sessionId);
 			},
@@ -388,7 +396,6 @@ describe("RemoteAuthSessionManager", () => {
 		let modelCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				lifecycle.push(`clear:${String(accountId)}`);
 			},
@@ -421,7 +428,9 @@ describe("RemoteAuthSessionManager", () => {
 		).rejects.toThrow("injected session-ready failure");
 		expect(manager.getSession()).toBeNull();
 		expect(manager.captureCurrentSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(lifecycle).toEqual(["clear:account-1", "expired"]);
 		expect(modelCalls).toBe(1);
 	});
@@ -445,7 +454,6 @@ describe("RemoteAuthSessionManager", () => {
 		const credentials = new BlockingCredentials();
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			fetch: (async () =>
 				Response.json(sessionPayload("racing"))) as unknown as typeof fetch,
 		});
@@ -461,7 +469,9 @@ describe("RemoteAuthSessionManager", () => {
 		await expect(signingIn).rejects.toMatchObject({ kind: "expired" });
 		await signingOut;
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBe(false);
+		expect(credentials.values.has("auth.refresh-token.production.v1")).toBe(
+			false,
+		);
 	});
 
 	test("does not let an account A refresh reactivate after account B signs in", async () => {
@@ -479,7 +489,6 @@ describe("RemoteAuthSessionManager", () => {
 		const activations: string[] = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionActivate: async (identity) => {
 				activations.push(identity.accountId);
 			},
@@ -521,7 +530,7 @@ describe("RemoteAuthSessionManager", () => {
 		expect(await staleRequest).toMatchObject({ kind: "expired" });
 		expect(manager.accountId).toBe("account-b");
 		expect(manager.getSession()?.id).toBe("session-account-b");
-		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+		expect(credentials.values.get("auth.refresh-token.production.v1")).toBe(
 			"refresh-token-account-b-0123456789",
 		);
 		expect(activations).toEqual(["account-a", "account-b"]);
@@ -533,7 +542,6 @@ describe("RemoteAuthSessionManager", () => {
 		const activations: string[] = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionActivate: async (identity) => {
 				activations.push(identity.accountId);
 			},
@@ -553,7 +561,9 @@ describe("RemoteAuthSessionManager", () => {
 		});
 
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(activations).toEqual(["account-a"]);
 	});
 
@@ -572,7 +582,6 @@ describe("RemoteAuthSessionManager", () => {
 		let sessionCount = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionActivate: async (identity) => {
 				activationCount += 1;
 				events.push(`activate:${identity.sessionId}`);
@@ -606,7 +615,7 @@ describe("RemoteAuthSessionManager", () => {
 		await expect(first).rejects.toMatchObject({ kind: "expired" });
 		await expect(second).resolves.toMatchObject({ id: "session-overlap-2" });
 		expect(manager.getSession()?.id).toBe("session-overlap-2");
-		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+		expect(credentials.values.get("auth.refresh-token.production.v1")).toBe(
 			"refresh-token-overlap-2-0123456789",
 		);
 		const winningActivation = events.lastIndexOf("activate:session-overlap-2");
@@ -624,7 +633,6 @@ describe("RemoteAuthSessionManager", () => {
 		let signIns = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				barriers.push(`clear:${String(accountId)}`);
 			},
@@ -651,9 +659,9 @@ describe("RemoteAuthSessionManager", () => {
 			"activate:account-2",
 		]);
 		expect(manager.accountId).toBe("account-2");
-		expect(credentials.values.get("auth.refresh-token.current")).toContain(
-			"switch-2",
-		);
+		expect(
+			credentials.values.get("auth.refresh-token.production.v1"),
+		).toContain("switch-2");
 	});
 
 	test("clears the live owner before a replacement sign-in waits on the network", async () => {
@@ -670,7 +678,6 @@ describe("RemoteAuthSessionManager", () => {
 		let signIns = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				barriers.push(`clear:${String(accountId)}`);
 			},
@@ -697,7 +704,9 @@ describe("RemoteAuthSessionManager", () => {
 
 		expect(manager.captureCurrentSession()).toBeNull();
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(barriers).toEqual(["activate:account-a", "clear:account-a"]);
 
 		releaseReplacement();
@@ -714,7 +723,6 @@ describe("RemoteAuthSessionManager", () => {
 		let refreshCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				barriers.push(`clear:${String(accountId)}`);
 			},
@@ -729,7 +737,7 @@ describe("RemoteAuthSessionManager", () => {
 		});
 
 		await manager.signIn({ email: "a@example.com", password: "password" });
-		credentials.values.delete("auth.refresh-token.current");
+		credentials.values.delete("auth.refresh-token.production.v1");
 		await expect(manager.restoreSession()).resolves.toBeNull();
 
 		expect(manager.getSession()).toBeNull();
@@ -751,7 +759,6 @@ describe("RemoteAuthSessionManager", () => {
 		});
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				barriers.push(`clear:${String(accountId)}`);
 			},
@@ -772,7 +779,9 @@ describe("RemoteAuthSessionManager", () => {
 
 		expect(manager.getSession()).toBeNull();
 		expect(manager.captureCurrentSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBeFalse();
+		expect(
+			credentials.values.has("auth.refresh-token.production.v1"),
+		).toBeFalse();
 		expect(barriers).toEqual(["clear:account-a"]);
 
 		releaseRefresh();
@@ -795,7 +804,6 @@ describe("RemoteAuthSessionManager", () => {
 		let signInCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				events.push(`clear:${String(accountId)}`);
 			},
@@ -833,7 +841,7 @@ describe("RemoteAuthSessionManager", () => {
 		expect(await staleRestore).toMatchObject({ kind: "expired" });
 		expect(manager.accountId).toBe("account-b");
 		expect(manager.getSession()?.id).toBe("session-account-b");
-		expect(credentials.values.get("auth.refresh-token.current")).toBe(
+		expect(credentials.values.get("auth.refresh-token.production.v1")).toBe(
 			"refresh-token-account-b-0123456789",
 		);
 		expect(events).toEqual([
@@ -848,7 +856,6 @@ describe("RemoteAuthSessionManager", () => {
 		const order: string[] = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async () => {
 				order.push("barrier");
 			},
@@ -865,7 +872,9 @@ describe("RemoteAuthSessionManager", () => {
 		await Promise.resolve();
 
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBe(false);
+		expect(credentials.values.has("auth.refresh-token.production.v1")).toBe(
+			false,
+		);
 		expect(order[0]).toBe("barrier");
 	});
 
@@ -877,7 +886,6 @@ describe("RemoteAuthSessionManager", () => {
 		});
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			fetch: (async (input: RequestInfo | URL) => {
 				if (String(input).endsWith("/v1/auth/sessions")) {
 					return Response.json(sessionPayload("active"));
@@ -906,7 +914,6 @@ describe("RemoteAuthSessionManager", () => {
 		const order: string[] = [];
 		const manager = new RemoteAuthSessionManager(credentials, {
 			baseUrl: "https://relay.example.test",
-			agentKey: personalRelayKey,
 			onBeforeSessionClear: async (accountId) => {
 				order.push(`barrier:${accountId}`);
 			},
@@ -926,7 +933,9 @@ describe("RemoteAuthSessionManager", () => {
 			kind: "expired",
 		});
 		expect(manager.getSession()).toBeNull();
-		expect(credentials.values.has("auth.refresh-token.current")).toBe(false);
+		expect(credentials.values.has("auth.refresh-token.production.v1")).toBe(
+			false,
+		);
 		expect(order).toEqual(["barrier:account-1", "expired"]);
 	});
 });

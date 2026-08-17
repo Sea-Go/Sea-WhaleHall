@@ -81,10 +81,14 @@ import {
 	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
-	WHALEHALL_RELAY_MODEL,
+	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
 import { DataCenterContentCrypto } from "./data-center-crypto";
+import {
+	DataCenterProductionOriginCutoverCredentialError,
+	runDataCenterProductionOriginCutover,
+} from "./data-center-origin-cutover";
 import {
 	DataCenterSyncService,
 	dataCenterSyncDiagnosticCode,
@@ -111,6 +115,7 @@ import { loadOrCreateInstallationId } from "./installation-id";
 import { WhaleHallAgentToolExecutor } from "./local-agent-tool-executor";
 import { MastraActivityReflectionAnalyzer } from "./mastra-activity-reflection";
 import { LocalAgentHostServices } from "./mastra-host-services";
+import { MastraPlanningModel } from "./mastra-planning-model";
 import { MastraSidecarClient } from "./mastra-sidecar-client";
 import { ModelRelayTransport } from "./model-relay-transport";
 import { monitoringPermissionSettingsUrl } from "./monitoring-permission-settings";
@@ -137,7 +142,6 @@ import {
 	RemoteAuthSessionManager,
 } from "./remote-auth-session";
 import { SidecarModelRelayBridge } from "./sidecar-model-relay-bridge";
-import { loadTimelineModernBertConfiguration } from "./timeline-modernbert-config";
 import {
 	resumeTimelineRuntimeForAvailableVault,
 	TimelineRuntimeLifecycle,
@@ -179,6 +183,11 @@ if (clientConfiguration.status === "invalid") {
 		"WhaleHall client config.yaml is invalid; safe defaults remain active.",
 	);
 }
+if (clientConfiguration.cloudSyncConsentBlockedByRetiredOrigin) {
+	console.warn(
+		"WhaleHall cloud sync consent was disabled because its production origin could not be verified; grant production consent explicitly.",
+	);
+}
 const runtimeIdentity = loadOrCreateReflectionIdentity(
 	join(localDataPath, "reflection-identity.v1.json"),
 );
@@ -188,22 +197,6 @@ const localRuntimeEnvironment: Record<string, string> = {
 	WHALEHALL_SESSION_ID: runtimeIdentity.sessionId,
 	...nativeRuntimeSecurityEnvironment(runtimeChannel),
 };
-const timelineModernBertConfiguration = loadTimelineModernBertConfiguration(
-	process.env,
-	{
-		manifestDirectory: join(
-			PATHS.RESOURCES_FOLDER,
-			"app",
-			"models",
-			"timeline-modernbert",
-		),
-	},
-);
-if (timelineModernBertConfiguration.code === "invalid_config") {
-	console.warn(
-		"WhaleHall Timeline v2 ModernBERT configuration is incomplete or invalid; deterministic cold-start remains active.",
-	);
-}
 const agentDataPath = join(Utils.paths.userData, "agent");
 const installationId = await loadOrCreateInstallationId(agentDataPath);
 const credentialStore = new CredentialHelperClient(credentialHelperPath, {
@@ -214,6 +207,20 @@ const agentRepository = new EncryptedAgentRepository({
 	installationId,
 	keyStore: credentialStore,
 });
+const productionOriginCutover = await runDataCenterProductionOriginCutover({
+	repository: agentRepository,
+	credentials: credentialStore,
+}).catch((error: unknown) => {
+	if (error instanceof DataCenterProductionOriginCutoverCredentialError) {
+		console.error(error.message);
+	}
+	throw error;
+});
+if (productionOriginCutover === "completed") {
+	console.warn(
+		"WhaleHall initialized the fixed production credential boundary; sign-in is required.",
+	);
+}
 const calendarRepository = new CalendarRepository(agentRepository, {
 	timeZone: () =>
 		Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
@@ -225,23 +232,9 @@ const activityReflectionConfiguration =
 const agentModelConfiguration = agentModelConfigurationFromConfiguration(
 	clientConfiguration.configuration,
 );
-if (activityReflectionConfiguration === null) {
-	console.warn(
-		"WhaleHall cloud reflection is inactive until the authenticated personal relay capability is provisioned.",
-	);
-}
-if (agentModelConfiguration === null) {
-	console.warn(
-		"WhaleHall Agent relay is inactive until the literal personal relay key is provisioned.",
-	);
-}
-const configuredModelId =
-	agentModelConfiguration?.name ??
-	activityReflectionConfiguration?.modelName ??
-	WHALEHALL_RELAY_MODEL;
-const reflectionModelId =
-	activityReflectionConfiguration?.modelName ?? WHALEHALL_RELAY_MODEL;
-const dataCenterModelApiBaseUrl = `${clientConfiguration.configuration.agent.baseurl}/v1`;
+const configuredModelId = agentModelConfiguration.name;
+const reflectionModelId = activityReflectionConfiguration.modelName;
+const dataCenterModelApiBaseUrl = `${WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL}/v1`;
 const agentModelRelayProvider = "whalehall-relay";
 const reflectionModelRelayProvider = "whalehall-activity-reflection";
 let activeGoalStore!: AccountScopedActiveGoalStore;
@@ -249,7 +242,9 @@ let coordinator!: AgentRunCoordinator;
 let hostServices!: LocalAgentHostServices;
 let relayBridge!: SidecarModelRelayBridge;
 let activityAgentRelayBridge!: SidecarModelRelayBridge;
+let planningRelayBridge!: SidecarModelRelayBridge;
 let activityReflectionRelayBridge: SidecarModelRelayBridge | null = null;
+let dynamicPlanningModel: MastraPlanningModel | null = null;
 let activityAnalysisDispatcher: ActivityAnalysisDispatcher | null = null;
 let activityReflectionAnalyzer: MastraActivityReflectionAnalyzer | null = null;
 let petActivityFeedbackDelivery: PetActivityFeedbackDelivery | null = null;
@@ -308,8 +303,7 @@ async function publishReflectionRuntime(
 }
 
 const authSession = new RemoteAuthSessionManager(credentialStore, {
-	baseUrl: clientConfiguration.configuration.agent.baseurl,
-	agentKey: agentModelConfiguration?.apikey,
+	baseUrl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 	onBeforeSessionActivate: (identity) =>
 		proactiveFeedbackRuntime.prepareSessionActivationForAuth(identity),
 	onSessionActivated: (identity) =>
@@ -330,6 +324,12 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 		} catch {
 			// Account ownership is revoked even if the activity Agent relay is failing.
 		}
+		try {
+			dynamicPlanningModel?.cancelPending();
+			planningRelayBridge?.abortAll();
+		} catch {
+			// Account ownership is revoked even if dynamic Planning is failing.
+		}
 		activeGoalStore?.invalidateSynchronously();
 		clientRPC.send.authSessionExpired({});
 	},
@@ -348,6 +348,12 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 			activityAgentRelayBridge?.abortAll();
 		} catch {
 			// Account transitions remain fail-closed for background Agent calls.
+		}
+		try {
+			dynamicPlanningModel?.cancelPending();
+			planningRelayBridge?.abortAll();
+		} catch {
+			// Account transitions remain fail-closed for dynamic Planning calls.
 		}
 		activeGoalStore?.invalidateSynchronously();
 		const cleanupFailures: unknown[] = [];
@@ -398,9 +404,7 @@ proactiveFeedbackRuntime = new ProactiveFeedbackRuntime({
 	repository: agentRepository,
 	currentSession: () => authSession.captureCurrentSession(),
 	isCurrentSession: (identity) => authSession.isCurrentSession(identity),
-	isCapabilityAvailable: () =>
-		activityReflectionConfiguration !== null &&
-		agentModelConfiguration !== null,
+	isCapabilityAvailable: () => true,
 	cutoverCloudOwner: (accountId) => cutoverReflectionCloudOwner(accountId),
 	startDelivery: async () => {
 		const runtime = reflectionRuntime;
@@ -452,6 +456,9 @@ const modelRelay = new ModelRelayTransport(authSession, { purpose: "agent" });
 const activityAgentModelRelay = new ModelRelayTransport(authSession, {
 	purpose: "activity",
 });
+const planningModelRelay = new ModelRelayTransport(authSession, {
+	purpose: "planning",
+});
 const activityReflectionModelRelay = activityReflectionConfiguration
 	? new ModelRelayTransport(authSession, { purpose: "activity" })
 	: null;
@@ -496,6 +503,9 @@ const sidecar = new MastraSidecarClient({
 			if (params.provider !== agentModelRelayProvider) {
 				throw new Error("Model relay provider is not approved.");
 			}
+			if (dynamicPlanningModel?.hasPendingInvocation(ownerRunId)) {
+				return planningRelayBridge.open(call.requestId, params);
+			}
 			const bridge =
 				coordinator.modelPurposeForRun(ownerRunId) === "activity"
 					? activityAgentRelayBridge
@@ -513,6 +523,9 @@ const sidecar = new MastraSidecarClient({
 			}
 			const params = { ...call.params };
 			delete params.ownerRunId;
+			if (dynamicPlanningModel?.hasPendingInvocation(ownerRunId)) {
+				return planningRelayBridge.abort(params);
+			}
 			// Abort frames intentionally contain only the relay/run IDs. Pending
 			// reflection invocation ownership is therefore the capability check.
 			if (activityReflectionAnalyzer?.hasPendingInvocation(ownerRunId)) {
@@ -533,6 +546,7 @@ const sidecar = new MastraSidecarClient({
 	onInterrupted: async (runIds, reason) => {
 		relayBridge.abortAll();
 		activityAgentRelayBridge.abortAll();
+		planningRelayBridge.abortAll();
 		activityReflectionRelayBridge?.abortAll();
 		await coordinator.interruptRuns(runIds, reason);
 	},
@@ -546,6 +560,18 @@ activityAgentRelayBridge = new SidecarModelRelayBridge({
 	transport: activityAgentModelRelay,
 	modelId: configuredModelId,
 	send: (event) => sidecar.sendRelayEvent(event),
+});
+planningRelayBridge = new SidecarModelRelayBridge({
+	transport: planningModelRelay,
+	modelId: configuredModelId,
+	send: (event) => sidecar.sendRelayEvent(event),
+});
+dynamicPlanningModel = new MastraPlanningModel({
+	sidecar,
+	modelVersion: `relay/${configuredModelId}`,
+	onInvocationAbort: (invocationId) => {
+		planningRelayBridge.abortRun(invocationId);
+	},
 });
 if (activityReflectionModelRelay !== null) {
 	activityReflectionRelayBridge = new SidecarModelRelayBridge({
@@ -623,7 +649,7 @@ const agent = new AgentRuntime(
 	{ requireStartupGoalPreparation: true },
 );
 dataCenterSync = new DataCenterSyncService({
-	baseUrl: clientConfiguration.configuration.agent.baseurl,
+	baseUrl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 	configuration: clientConfiguration.configuration.cloudSync,
 	repository: agentRepository,
 	events: agent,
@@ -799,7 +825,6 @@ const timelineLifecycle = new TimelineRuntimeLifecycle<TimelineV2Runtime>({
 			dataDirectory: localDataPath,
 			initialGoal: reflection.service.getActiveGoalContext(),
 			rawAuditSource,
-			modernBert: timelineModernBertConfiguration.modernBert,
 		});
 	},
 	retryDelaysMs: STARTUP_RETRY_DELAYS_MS,
@@ -1148,7 +1173,7 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	loadPlanningCalendar: async () => {
-		const events = (await agent.listPlanningCalendar()).events;
+		const events = await agent.listAllPlanningCalendar();
 		const redactedTaskTitles = await planningCalendarTaskTitles(events);
 		return {
 			events: events.map((event) =>
@@ -1879,6 +1904,7 @@ petWindow.webview.loadURL(await viewUrl("pet"));
 function shutdown(): Promise<void> {
 	reflectionRuntime?.beginShutdown();
 	timelineLifecycle.beginShutdown();
+	dynamicPlanningModel?.close();
 	deferredReflectionOperations.close();
 	activityWindowDeliveryLifecycle.close();
 	shutdownRequested = true;
@@ -1936,6 +1962,7 @@ function shutdown(): Promise<void> {
 			await Promise.all([
 				relayBridge.abortAllAndDrain(),
 				activityAgentRelayBridge.abortAllAndDrain(),
+				planningRelayBridge.abortAllAndDrain(),
 				activityReflectionRelayBridge?.abortAllAndDrain() ?? Promise.resolve(),
 			]);
 		});
@@ -2259,10 +2286,6 @@ startupPromise = (async () => {
 					if (delivery === null || shutdownRequested) return;
 					return delivery.enqueueWindow(window);
 				},
-				environment: {
-					...process.env,
-					WHALEHALL_MODERNBERT_ALLOWED_ORIGINS: undefined,
-				},
 			});
 			if (shutdownRequested) {
 				await candidate.close();
@@ -2296,12 +2319,12 @@ startupPromise = (async () => {
 					},
 				},
 				() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+				requireDynamicPlanningModel(),
 			);
 			await reconcileExecutingPlanningGoal();
 			startPlanningMaintenance();
-			let timeline: TimelineV2Runtime;
 			try {
-				timeline = await timelineLifecycle.ensureStarted({
+				await timelineLifecycle.ensureStarted({
 					retryOnFailure: true,
 				});
 			} catch (error) {
@@ -2331,9 +2354,7 @@ startupPromise = (async () => {
 				return;
 			}
 			console.log(
-				`WhaleHall Timeline v2 ready; Qwen hypothesis lock: ${
-					timeline.teacherVerified ? "verified" : "deterministic fallback"
-				}`,
+				"WhaleHall Timeline v2 ready; deterministic classification and cited hypotheses active.",
 			);
 			return;
 		} catch (error) {
@@ -2405,12 +2426,7 @@ async function startActivityWindowDelivery(
 	const owner = authSession.captureCurrentSession();
 	const configuration = activityReflectionConfiguration;
 	const reflectionBridge = activityReflectionRelayBridge;
-	if (
-		configuration === null ||
-		reflectionBridge === null ||
-		owner === null ||
-		shutdownRequested
-	) {
+	if (reflectionBridge === null || owner === null || shutdownRequested) {
 		return;
 	}
 	if (
@@ -2730,6 +2746,13 @@ async function requirePlanningRuntime(): Promise<WhaleHallPlanningRuntime> {
 	return planningRuntime;
 }
 
+function requireDynamicPlanningModel(): MastraPlanningModel {
+	if (dynamicPlanningModel === null) {
+		throw new Error("Dynamic Planning model bridge is not initialized.");
+	}
+	return dynamicPlanningModel;
+}
+
 function throwIfPlanningAnalysisUnavailable(plan: {
 	analysisDiagnostic: unknown;
 }): void {
@@ -2998,7 +3021,7 @@ async function reconcileExecutingPlanningGoal(): Promise<void> {
 	const reflection = reflectionRuntime;
 	if (!planning || !reflection) return;
 	const now = Date.now();
-	const events = (await agent.listPlanningCalendar()).events
+	const events = (await agent.listAllPlanningCalendar())
 		.filter(
 			(event) =>
 				event.kind === "plan" &&

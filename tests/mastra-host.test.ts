@@ -221,6 +221,55 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
+	test("runs Dynamic Planning through the live strict planning.analyze entry", async () => {
+		const host = new FakeHost();
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+
+		const response = await harness.request("planning.analyze", {
+			invocationId: "dynamic-planning-invocation",
+			requestId: "planning-analysis:operation-1",
+			analysis: {
+				planId: "plan-1",
+				analysisMode: "manual-proposal",
+				currentGoal: "验证一个长期收入方向",
+				currentType: null,
+				trigger: "initial-analysis",
+				effectiveWindow: {
+					startDate: "2026-08-14",
+					endDateExclusive: "2026-08-21",
+					timeZone: "Asia/Shanghai",
+				},
+				messages: [],
+				currentTasks: [],
+				currentEstimate: null,
+				currentSchedulingPreferences: null,
+				observationEvidence: [],
+				calendarEvents: [],
+			},
+		});
+
+		expect(response).toMatchObject({
+			ok: true,
+			result: {
+				outcome: "proposal",
+				recommendedType: "fuzzy",
+				confidence: 0.4,
+			},
+		});
+		expect(host.modelOrigins).toEqual(["planning-analysis:operation-1"]);
+		expect(host.calls).toContain("model/relay.open");
+		const body = host.modelBodies[0];
+		expect(body?.tools).toBeUndefined();
+		expect(body?.response_format).toBeUndefined();
+		const serializedMessages = JSON.stringify(body?.messages);
+		expect(serializedMessages).toContain('\\"outcome\\"');
+		expect(serializedMessages).not.toContain('\\"pattern\\"');
+		await harness.shutdown();
+	}, 30_000);
+
 	test("uses the conversation Agent for proactive feedback without memory or local Tools", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
@@ -310,6 +359,54 @@ describe("Mastra Node sidecar", () => {
 		});
 		const terminal = await harness.waitForRunTerminal(
 			"activity-run-tool-violation",
+		);
+		expect(terminal.event).toMatchObject({
+			kind: "run.failed",
+			error: {
+				code: "ACTIVITY_OUTPUT_INVALID",
+				retryable: false,
+			},
+		});
+		await harness.shutdown();
+	}, 30_000);
+
+	test("rejects split raw Tool markup from activity analysis", async () => {
+		const host = new FakeHost({
+			rawToolMarkupChunks: [
+				"Worker summary <to",
+				'ol>{"name":"planning_get_active_plan","arguments":{}}</tool>',
+			],
+		});
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("activity.start", {
+			runId: "activity-run-raw-tool-markup",
+			activityJobId: "activity-job-raw-tool-markup",
+			consumedScore: 1,
+			analyses: [
+				{
+					request_id: "worker-request-raw-tool-markup",
+					score: 1,
+					score_reason: "goal-relevant activity",
+					events: [
+						{
+							source_event_ids: ["sealed-window-raw-tool-markup"],
+							activity: "development",
+							goal_relevance: "direct",
+							confidence: 0.9,
+							reason_codes: ["worker"],
+							evidence: ["Worker summary only"],
+							started_at_ms: 1,
+							ended_at_ms: 2,
+						},
+					],
+				},
+			],
+		});
+		const terminal = await harness.waitForRunTerminal(
+			"activity-run-raw-tool-markup",
 		);
 		expect(terminal.event).toMatchObject({
 			kind: "run.failed",
@@ -530,214 +627,97 @@ describe("Mastra Node sidecar", () => {
 		await secondHarness.shutdown();
 	}, 30_000);
 
-	test("proposes an approval-bound write Tool before executing it and resumes the same run", async () => {
+	test("keeps interactive conversation Tool-free and rejects provider tool calls", async () => {
 		const host = new FakeHost({ toolApprovalScenario: true });
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request(
-			"conversation.start",
-			{
-				runId: "tool-run-1",
-				conversationId: "tool-conversation-1",
-				resourceId: "installation-1",
-				message: "请创建一个明天上午的日程。",
-				expectedVersion: 0,
-			},
-			"tool-run-origin",
-		);
-
-		const approvalEvent = (await harness.waitFor(
-			(message) =>
-				isRunEvent(message) &&
-				message.runId === "tool-run-1" &&
-				message.event.kind === "agent.tool.approval.required",
-		)) as AgentRunEventFrame;
-		expect(approvalEvent.event).toMatchObject({
-			kind: "agent.tool.approval.required",
-			toolCallId: "tool-call-1",
-			toolName: "calendar.create_event",
-			runVersion: 41,
-			approval: {
-				approvalId: "approval-1",
-				inputDigest: "digest-1",
-			},
-		});
-		expect(approvalEvent.event).not.toHaveProperty("arguments");
-		await harness.waitForRunSuspended("tool-run-1");
-		expect(host.calls).toContain("tool/propose");
-		expect(host.calls).not.toContain("tool/call");
-		expect(
-			host.calls.filter((method) => method === "memory/append"),
-		).toHaveLength(0);
-		expect(
-			host.workflowSnapshotCalls.some(
-				(call) =>
-					call.method === "workflow/snapshot.persist" &&
-					call.params.workflowName === "agentic-loop" &&
-					call.params.runId === "tool-run-1" &&
-					isRecord(call.params.snapshot) &&
-					call.params.snapshot.status === "suspended",
-			),
-		).toBe(true);
-		const bypass = await harness.request("run.resume", {
-			runId: "tool-run-1",
-			originatingRequestId: "tool-run-origin",
-			resumeData: { approved: true },
-		});
-		expect(bypass).toMatchObject({
-			ok: false,
-			error: { code: "RUN_NOT_RESUMABLE" },
-		});
-		const mismatchedOrigin = await harness.request("agent.approveTool", {
-			runId: "tool-run-1",
-			originatingRequestId: "tool-run-random-approval-command",
-			toolCallId: "tool-call-1",
-		});
-		expect(mismatchedOrigin).toMatchObject({
-			ok: false,
-			error: { code: "RUN_CONFLICT" },
-		});
-
-		await harness.request("agent.approveTool", {
-			runId: "tool-run-1",
-			originatingRequestId: "tool-run-origin",
-			toolCallId: "tool-call-1",
-		});
-		const terminal = await harness.waitForRunTerminal("tool-run-1");
-		expect(terminal.terminalState).toBe("completed");
-		expect(terminal.event).toMatchObject({
-			kind: "run.completed",
-			result: {
-				message: { content: "我来处理。日程已经按你的要求创建。" },
-			},
-		});
-		expect(
-			host.modelOrigins.every((value) => value === "tool-run-origin"),
-		).toBe(true);
-		expect(host.calls).toContain("tool/call");
-		expect(
-			host.workflowSnapshotCalls.some(
-				(call) =>
-					call.method === "workflow/snapshot.load" &&
-					call.params.workflowName === "agentic-loop" &&
-					call.params.runId === "tool-run-1",
-			),
-		).toBe(true);
-		expect(host.lastToolCall).toMatchObject({
-			runId: "tool-run-1",
-			toolCallId: "tool-call-1",
-			name: "calendar.create_event",
-			runVersion: 41,
-			approvalId: "approval-1",
-			inputDigest: "digest-1",
-		});
-		const toolEvents = harness.runEvents("tool-run-1");
-		expect(toolEvents.map((event) => event.sequence)).toEqual(
-			toolEvents.map((_, index) => index + 1),
-		);
-		expect(
-			toolEvents
-				.filter((event) => event.event.kind === "agent.tool.result")
-				.every((event) => !("result" in event.event)),
-		).toBe(true);
-		await harness.shutdown();
-	}, 30_000);
-
-	test("auto-executes an allowlisted read Tool without proposing approval", async () => {
-		const host = new FakeHost({ readToolScenario: true });
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
 		);
 		await harness.initialize();
 		await harness.request("conversation.start", {
-			runId: "read-tool-run",
-			conversationId: "read-tool-conversation",
+			runId: "forbidden-tool-run",
+			conversationId: "forbidden-tool-conversation",
 			resourceId: "installation-1",
-			message: "当前目标是什么？",
+			message: "请创建一个明天上午的日程。",
 			expectedVersion: 0,
 		});
-		const terminal = await harness.waitForRunTerminal("read-tool-run");
-		expect(terminal.terminalState).toBe("completed");
-		expect(host.calls).toContain("tool/call");
-		expect(host.calls).not.toContain("tool/propose");
-		expect(host.lastToolCall).toMatchObject({
-			runId: "read-tool-run",
-			toolCallId: "read-tool-call-1",
-			name: "planning.get_active_goal",
-			arguments: {},
+		const terminal = await harness.waitForRunTerminal("forbidden-tool-run");
+		expect(terminal.terminalState).toBe("failed");
+		expect(terminal.event).toMatchObject({
+			kind: "run.failed",
+			error: { code: "MODEL_RELAY_ERROR", retryable: true },
 		});
-		expect(host.lastToolCall).not.toHaveProperty("approvalId");
+		expect(host.modelBodies[0]?.tools).toBeUndefined();
+		expect(host.calls).not.toContain("tool/call");
+		expect(host.calls).not.toContain("tool/propose");
+		expect(host.calls).not.toContain("memory/append");
 		expect(
 			harness
-				.runEvents("read-tool-run")
-				.some((event) => event.event.kind === "run.suspended"),
+				.runEvents("forbidden-tool-run")
+				.some((event) => event.event.kind === "agent.tool.call"),
 		).toBe(false);
-		const firstModelBody = host.modelBodies[0];
-		const toolNames = Array.isArray(firstModelBody?.tools)
-			? firstModelBody.tools
-					.map((tool) =>
-						isRecord(tool) &&
-						isRecord(tool.function) &&
-						typeof tool.function.name === "string"
-							? tool.function.name
-							: null,
-					)
-					.filter((name): name is string => name !== null)
-					.sort()
-			: [];
-		expect(toolNames).toEqual(
-			[
-				"calendar_commit_plan_schedule",
-				"calendar_create_event",
-				"calendar_delete_event",
-				"calendar_list_events",
-				"calendar_update_event",
-				"planning_get_active_goal",
-				"planning_get_active_plan",
-				"planning_save_draft",
-			].sort(),
-		);
 		await harness.shutdown();
 	}, 30_000);
 
-	test("declines an approval-bound write Tool without executing it", async () => {
-		const host = new FakeHost({ toolApprovalScenario: true });
+	test("rejects split raw Tool markup without displaying or persisting it", async () => {
+		const host = new FakeHost({
+			rawToolMarkupChunks: [
+				"<to",
+				'ol>{"name":"planning_get_active_plan","arguments":{}}</tool>',
+			],
+		});
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
 		);
 		await harness.initialize();
-		await harness.request(
-			"conversation.start",
-			{
-				runId: "decline-tool-run",
-				conversationId: "decline-tool-conversation",
-				resourceId: "installation-1",
-				message: "请创建一个明天上午的日程。",
-				expectedVersion: 0,
-			},
-			"decline-tool-origin",
-		);
-		await harness.waitForRunSuspended("decline-tool-run");
-		await harness.request("agent.declineTool", {
-			runId: "decline-tool-run",
-			originatingRequestId: "decline-tool-origin",
-			toolCallId: "tool-call-1",
-			reason: "用户拒绝",
+		await harness.request("conversation.start", {
+			runId: "raw-tool-markup-run",
+			conversationId: "raw-tool-markup-conversation",
+			resourceId: "installation-1",
+			message: "请说明当前计划。",
+			expectedVersion: 0,
 		});
-		const terminal = await harness.waitForRunTerminal("decline-tool-run");
-		expect(terminal.terminalState).toBe("completed");
+		const terminal = await harness.waitForRunTerminal("raw-tool-markup-run");
+		expect(terminal.terminalState).toBe("failed");
+		expect(terminal.event).toMatchObject({
+			kind: "run.failed",
+			error: {
+				code: "MODEL_RELAY_ERROR",
+				message: "The model provider returned unsupported tool-call markup.",
+			},
+		});
 		expect(host.calls).not.toContain("tool/call");
+		expect(host.calls).not.toContain("tool/propose");
+		expect(host.calls).not.toContain("memory/append");
 		expect(
 			harness
-				.runEvents("decline-tool-run")
-				.some(
-					(event) =>
-						event.event.kind === "run.resumed" &&
-						event.event.decision === "decline",
-				),
-		).toBe(true);
+				.runEvents("raw-tool-markup-run")
+				.some((event) => event.event.kind === "conversation.text.delta"),
+		).toBe(false);
+		await harness.shutdown();
+	}, 30_000);
+
+	test("allows ordinary text that only shares the Tool tag prefix", async () => {
+		const host = new FakeHost({
+			rawToolMarkupChunks: ["可以使用 <tool", "tip> 展示帮助。"],
+		});
+		const harness = new SidecarHarness(sidecarPath, (request) =>
+			host.handle(request, (message) => harness.send(message)),
+		);
+		await harness.initialize();
+		await harness.request("conversation.start", {
+			runId: "safe-tool-prefix-run",
+			conversationId: "safe-tool-prefix-conversation",
+			resourceId: "installation-1",
+			message: "请说明 tooltip。",
+			expectedVersion: 0,
+		});
+		const terminal = await harness.waitForRunTerminal("safe-tool-prefix-run");
+		expect(terminal.event).toMatchObject({
+			kind: "run.completed",
+			result: {
+				message: { content: "可以使用 <tooltip> 展示帮助。" },
+			},
+		});
 		await harness.shutdown();
 	}, 30_000);
 
@@ -901,6 +881,7 @@ class SidecarHarness {
 					methods: expect.arrayContaining([
 						"conversation.start",
 						"planning.start",
+						"planning.analyze",
 						"activity.start",
 						"planning.answer",
 						"agent.approveTool",
@@ -1089,6 +1070,7 @@ class FakeHost {
 			reflectionSensorOnlyAction?: boolean;
 			toolApprovalScenario?: boolean;
 			readToolScenario?: boolean;
+			rawToolMarkupChunks?: readonly string[];
 			planningConflictScenario?: boolean;
 			memoryMessages?: readonly {
 				role: "user" | "assistant";
@@ -1393,6 +1375,37 @@ class FakeHost {
 			);
 			return;
 		}
+		if (params.originatingRequestId === "planning-analysis:operation-1") {
+			await send(
+				successResponse(request.requestId, {
+					relayId: params.relayId,
+					status: 200,
+					headers: { "content-type": "application/json" },
+					completed: true,
+					bodyBase64: Buffer.from(
+						JSON.stringify({
+							id: "chatcmpl-dynamic-planning",
+							object: "chat.completion",
+							created: 1,
+							model: params.modelId,
+							choices: [
+								{
+									index: 0,
+									message: {
+										role: "assistant",
+										content: JSON.stringify(
+											dynamicPlanningProviderProposalFixture(),
+										),
+									},
+									finish_reason: "stop",
+								},
+							],
+						}),
+					).toString("base64"),
+				}),
+			);
+			return;
+		}
 		await send(
 			successResponse(request.requestId, {
 				relayId: params.relayId,
@@ -1419,6 +1432,15 @@ class FakeHost {
 		}
 
 		const structured = body.response_format !== undefined;
+		if (this.options.rawToolMarkupChunks && !structured) {
+			await this.streamRelay(
+				request,
+				params,
+				openAiDeltaSse(this.options.rawToolMarkupChunks),
+				send,
+			);
+			return;
+		}
 		if (
 			(this.options.toolApprovalScenario || this.options.readToolScenario) &&
 			!structured
@@ -1514,14 +1536,80 @@ class FakeHost {
 	}
 }
 
+function dynamicPlanningProposalFixture(): Record<string, unknown> {
+	return {
+		outcome: "proposal",
+		recommendedType: "fuzzy",
+		rationaleSummary: "路径需要先验证。",
+		assumptions: [],
+		clarificationQuestions: [],
+		assistantMessage: "先执行七天验证任务，再动态修正预计日期。",
+		goal: "验证一个长期收入方向",
+		estimatedCompletionDate: "2036-08-13",
+		confidence: 0.4,
+		estimateBasis: "当前只有方向性证据。",
+		schedulingPreferenceSource: "user-provided",
+		schedulingPreferences: {
+			weeklyCapacityMinutes: 120,
+			sessionMinutes: 60,
+			availableWindows: [
+				{ dayOfWeek: 6, startTime: "09:00", endTime: "11:00" },
+			],
+		},
+		tasks: [
+			{
+				taskKey: "validate-market",
+				purpose: "validation",
+				title: "验证需求",
+				description: "完成一次小规模访谈。",
+				estimatedMinutes: 60,
+				dependencyKeys: [],
+			},
+			{
+				taskKey: "review-market",
+				purpose: "review",
+				title: "复盘验证结果",
+				description: "决定是否继续当前方向。",
+				estimatedMinutes: 60,
+				dependencyKeys: ["validate-market"],
+			},
+		],
+	};
+}
+
+function dynamicPlanningProviderProposalFixture(): Record<string, unknown> {
+	const output = dynamicPlanningProposalFixture();
+	return {
+		outcome: output.outcome,
+		recommendedType: output.recommendedType,
+		rationaleSummary: output.rationaleSummary,
+		assumptions: output.assumptions,
+		clarificationQuestions: output.clarificationQuestions,
+		assistantMessage: output.assistantMessage,
+		proposal: {
+			goal: output.goal,
+			estimatedCompletionDate: output.estimatedCompletionDate,
+			confidence: output.confidence,
+			estimateBasis: output.estimateBasis,
+			schedulingPreferenceSource: output.schedulingPreferenceSource,
+			schedulingPreferences: output.schedulingPreferences,
+			tasks: output.tasks,
+		},
+	};
+}
+
 function openAiSse(content: string): Uint8Array {
+	return openAiDeltaSse([content]);
+}
+
+function openAiDeltaSse(contents: readonly string[]): Uint8Array {
 	const chunks = [
-		{
+		...contents.map((content) => ({
 			id: "chatcmpl-test",
 			created: 1,
 			model: "test-chat-model",
 			choices: [{ delta: { role: "assistant", content }, finish_reason: null }],
-		},
+		})),
 		{
 			id: "chatcmpl-test",
 			created: 1,

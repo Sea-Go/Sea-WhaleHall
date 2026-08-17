@@ -4,9 +4,10 @@ import type {
 	AuthSessionIdentity,
 	DesktopAuthSessionManager,
 } from "./auth-session";
+import { AUTH_REFRESH_TOKEN_CREDENTIAL } from "./credential-helper-client";
 import type { ModelRelayPurpose } from "./model-relay-transport";
 
-const REFRESH_TOKEN_KEY = "auth.refresh-token.current";
+const REFRESH_TOKEN_KEY = AUTH_REFRESH_TOKEN_CREDENTIAL;
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 export interface SecureCredentialStore {
@@ -54,8 +55,6 @@ export class RemoteAuthError extends Error {
 
 export interface RemoteAuthSessionManagerOptions {
 	baseUrl?: string;
-	/** Personal relay capability; never leaves the Bun main process except as a header. */
-	agentKey?: string;
 	fetch?: typeof fetch;
 	requestTimeoutMs?: number;
 	onBeforeSessionClear?: (accountId: string | null) => Promise<void>;
@@ -72,7 +71,6 @@ export interface RemoteAuthSessionManagerOptions {
  */
 export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 	private readonly baseUrl: URL | null;
-	private readonly agentKey: string | null;
 	private readonly fetchImpl: typeof fetch;
 	private readonly requestTimeoutMs: number;
 	private readonly onBeforeSessionClear: (
@@ -106,9 +104,6 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		this.baseUrl = options.baseUrl
 			? validateRemoteBaseUrl(options.baseUrl)
 			: null;
-		this.agentKey = options.agentKey
-			? normalizeAgentKey(options.agentKey)
-			: null;
 		this.fetchImpl = options.fetch ?? fetch;
 		this.requestTimeoutMs =
 			options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -132,11 +127,12 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			const transition = this.transitionTail;
 			const refresh = this.refreshPromise?.operation ?? null;
 			const remoteSettlements = [...this.remoteSettlements];
-			await Promise.allSettled(
-				refresh === null
-					? [transition, ...remoteSettlements]
-					: [transition, refresh, ...remoteSettlements],
-			);
+			const settlements: Promise<unknown>[] = [
+				transition,
+				...remoteSettlements,
+			];
+			if (refresh !== null) settlements.push(refresh);
+			await Promise.allSettled(settlements);
 			if (
 				this.transitionTail === transition &&
 				(this.refreshPromise?.operation ?? null) === refresh &&
@@ -304,10 +300,14 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		if (path !== "/v1/chat/completions") {
 			throw new RemoteAuthError(
 				"unexpected",
-				"个人 Agent relay key 只能发送到固定聊天入口。",
+				"模型 Bearer 凭据只能发送到固定聊天入口。",
 			);
 		}
-		if (purpose !== "agent" && purpose !== "activity") {
+		if (
+			purpose !== "agent" &&
+			purpose !== "activity" &&
+			purpose !== "planning"
+		) {
 			throw new RemoteAuthError(
 				"unexpected",
 				"模型请求用途不是 WhaleHall 允许的固定用途。",
@@ -321,11 +321,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 			);
 		}
 		headers.set("x-whalehall-model-purpose", purpose);
-		return this.authorizedRequest(
-			path,
-			{ ...init, headers },
-			this.requireAgentKey(),
-		);
+		return this.authorizedRequest(path, { ...init, headers });
 	}
 
 	/** Sends a bearer-only request to a code-owned DataCenter path. */
@@ -342,32 +338,22 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				"Bearer 凭据只能发送到固定 DataCenter 注册与授权入口。",
 			);
 		}
-		return this.authorizedRequest(path, init, null);
+		return this.authorizedRequest(path, init);
 	}
 
 	private async authorizedRequest(
 		path: string,
 		init: RequestInit,
-		agentKey: string | null,
 	): Promise<Response> {
 		const current = await this.getValidAuthorization();
-		const headers = new Headers(init.headers);
-		headers.set("authorization", `Bearer ${current.accessToken}`);
-		if (agentKey) headers.set("x-whalehall-agent-key", agentKey);
-		headers.set("x-session-generation", String(current.identity.generation));
+		const headers = authorizationHeaders(init.headers, current);
 		const first = await this.request(path, { ...init, headers });
 		await this.assertResponseSession(first, current.identity);
 		if (first.status !== 401) return first;
 
 		await this.refreshSessionFor(current.identity);
 		const refreshed = this.requireCurrentAuthorization();
-		const nextHeaders = new Headers(init.headers);
-		nextHeaders.set("authorization", `Bearer ${refreshed.accessToken}`);
-		if (agentKey) nextHeaders.set("x-whalehall-agent-key", agentKey);
-		nextHeaders.set(
-			"x-session-generation",
-			String(refreshed.identity.generation),
-		);
+		const nextHeaders = authorizationHeaders(init.headers, refreshed);
 		const second = await this.request(path, { ...init, headers: nextHeaders });
 		await this.assertResponseSession(second, refreshed.identity);
 		if (second.status === 401) {
@@ -793,16 +779,25 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		}
 		return this.baseUrl;
 	}
+}
 
-	private requireAgentKey(): string {
-		if (!this.agentKey) {
-			throw new RemoteAuthError(
-				"service-unavailable",
-				"尚未配置个人 Agent relay key。",
-			);
-		}
-		return this.agentKey;
-	}
+function authorizationHeaders(
+	input: HeadersInit | undefined,
+	authorization: {
+		accessToken: string;
+		identity: AuthSessionIdentity;
+	},
+): Headers {
+	const headers = new Headers(input);
+	// Compatibility-only callers may still provide the retired header. It is
+	// discarded before every first attempt and refresh retry and is never logged.
+	headers.delete("x-whalehall-agent-key");
+	headers.set("authorization", `Bearer ${authorization.accessToken}`);
+	headers.set(
+		"x-session-generation",
+		String(authorization.identity.generation),
+	);
+	return headers;
 }
 
 function validateRemoteBaseUrl(value: string): URL {
@@ -829,14 +824,6 @@ function validateRemoteBaseUrl(value: string): URL {
 	}
 	url.pathname = "/";
 	return url;
-}
-
-function normalizeAgentKey(value: string): string {
-	const key = value.trim();
-	if (key.length < 1 || key.length > 1_024 || /[\p{Cc}\s]/u.test(key)) {
-		throw new Error("Personal Agent relay key is invalid.");
-	}
-	return key;
 }
 
 function parseSessionResponse(value: unknown): SessionResponse {

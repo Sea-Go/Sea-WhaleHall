@@ -6,6 +6,7 @@ import {
 	History,
 	Info,
 	LogOut,
+	MessageCircle,
 	Palette,
 	Settings,
 	ShieldCheck,
@@ -14,7 +15,14 @@ import {
 	Waves,
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
 import {
 	AppUpdateAttentionMark,
 	type AppUpdateController,
@@ -26,6 +34,10 @@ import {
 	CalendarPage,
 	type CalendarService,
 } from "../features/calendar/public";
+import {
+	type ConversationController,
+	ConversationPage,
+} from "../features/conversation/public";
 import {
 	type MonitoringController,
 	MonitoringStatusControl,
@@ -63,6 +75,12 @@ type MenuAction =
 	| "logout";
 
 const navigationItems = [
+	{
+		id: "conversation",
+		label: PAGE_LABELS.conversation,
+		icon: MessageCircle,
+		disabled: false,
+	},
 	{
 		id: "planning",
 		label: PAGE_LABELS.planning,
@@ -106,6 +124,7 @@ export interface AppShellProps {
 	onLogout: () => void;
 	calendarService: CalendarService;
 	calendarController?: CalendarController;
+	conversationController: ConversationController;
 	planningController: PlanningController;
 	reportController: ReportController;
 	preferencesController: PreferencesController;
@@ -125,6 +144,7 @@ export function AppShell({
 	onLogout,
 	calendarService,
 	calendarController,
+	conversationController,
 	planningController,
 	reportController,
 	preferencesController,
@@ -427,6 +447,9 @@ export function AppShell({
 			</aside>
 
 			<main className="app-shell__main" id="main-content">
+				{activePage === "conversation" ? (
+					<ConversationDestination controller={conversationController} />
+				) : null}
 				{activePage === "planning" ? (
 					<PlanningPage
 						controller={planningController}
@@ -497,5 +520,36 @@ export function AppShell({
 				/>
 			) : null}
 		</div>
+	);
+}
+
+function ConversationDestination({
+	controller,
+}: {
+	controller: ConversationController;
+}) {
+	const state = useSyncExternalStore(
+		controller.subscribe,
+		controller.getSnapshot,
+		controller.getServerSnapshot,
+	);
+
+	useEffect(() => {
+		if (state.status === "loading") void controller.load();
+	}, [controller, state.status]);
+
+	return (
+		<ConversationPage
+			state={state}
+			actions={{
+				onCreateConversation: () => void controller.createConversation(),
+				onSendMessage: (draft) => void controller.sendMessage(draft),
+				onRetry: () => void controller.retry(),
+				onStopRun: () => void controller.stopRun(),
+				onApproveTool: () => void controller.approveTool(),
+				onDeclineTool: () => void controller.declineTool(),
+				onRestoreRun: (runId) => void controller.resumeInterruptedRun(runId),
+			}}
+		/>
 	);
 }

@@ -11,6 +11,9 @@ import type {
 	LocalEventTailCursorResult,
 	LocalMonitoringConfigure,
 	LocalMonitoringStatus,
+	LocalPlanningCalendarEvent,
+	LocalPlanningCalendarList,
+	LocalPlanningCalendarListResult,
 	LocalRuntimeHealth,
 	LocalSemanticCommitResult,
 	LocalSemanticQuery,
@@ -47,6 +50,8 @@ class FakeLocalProcess implements LocalToolProcess {
 	prepareGate: Promise<void> | null = null;
 	readonly preparedStartupGoalChanges: Array<LocalEventGoalChange | null> = [];
 	readonly appendedGoalChanges: LocalEventGoalChange[] = [];
+	readonly calendarQueries: LocalPlanningCalendarList[] = [];
+	readonly calendarPages = new Map<string, LocalPlanningCalendarListResult>();
 	startupGoalAcknowledgements = 0;
 	private readonly eventListeners = new Set<(event: LocalToolEvent) => void>();
 	private readonly desktopEventListeners = new Set<
@@ -252,6 +257,18 @@ class FakeLocalProcess implements LocalToolProcess {
 			migrated: false,
 			status: await this.getVaultKeyStatus(),
 		};
+	}
+
+	async listPlanningCalendar(
+		query: LocalPlanningCalendarList = {},
+	): Promise<LocalPlanningCalendarListResult> {
+		this.calendarQueries.push(structuredClone(query));
+		return structuredClone(
+			this.calendarPages.get(query.cursor ?? "") ?? {
+				events: [],
+				nextCursor: null,
+			},
+		);
 	}
 
 	async stop(): Promise<void> {
@@ -616,6 +633,70 @@ describe("AgentRuntime", () => {
 		expect(runtime.getLocalStatus().state).toBe("ready");
 	});
 
+	test("aggregates every byte-bounded calendar page across filtered empty pages", async () => {
+		const local = new FakeLocalProcess();
+		local.calendarPages.set("", {
+			events: [localCalendarEvent("event-a")],
+			nextCursor: "scan-a",
+		});
+		local.calendarPages.set("scan-a", {
+			events: [],
+			nextCursor: "scan-b",
+		});
+		local.calendarPages.set("scan-b", {
+			events: [localCalendarEvent("event-c")],
+			nextCursor: null,
+		});
+		const runtime = new AgentRuntime(local);
+
+		await expect(
+			runtime.listAllPlanningCalendar({
+				fromDate: "2026-08-13",
+				toDateExclusive: "2026-08-22",
+			}),
+		).resolves.toEqual([
+			localCalendarEvent("event-a"),
+			localCalendarEvent("event-c"),
+		]);
+		expect(local.calendarQueries).toEqual([
+			{
+				fromDate: "2026-08-13",
+				toDateExclusive: "2026-08-22",
+				limit: 100,
+			},
+			{
+				fromDate: "2026-08-13",
+				toDateExclusive: "2026-08-22",
+				cursor: "scan-a",
+				limit: 100,
+			},
+			{
+				fromDate: "2026-08-13",
+				toDateExclusive: "2026-08-22",
+				cursor: "scan-b",
+				limit: 100,
+			},
+		]);
+	});
+
+	test("aggregates calendar pages in SQLite UTF-8 BINARY event order", async () => {
+		const local = new FakeLocalProcess();
+		local.calendarPages.set("", {
+			events: [localCalendarEvent("event-\u{e000}")],
+			nextCursor: "scan-unicode",
+		});
+		local.calendarPages.set("scan-unicode", {
+			events: [localCalendarEvent("event-\u{10000}")],
+			nextCursor: null,
+		});
+		const runtime = new AgentRuntime(local);
+
+		await expect(runtime.listAllPlanningCalendar()).resolves.toEqual([
+			localCalendarEvent("event-\u{e000}"),
+			localCalendarEvent("event-\u{10000}"),
+		]);
+	});
+
 	test("tracks active tool events without moving tool logic into TypeScript", async () => {
 		const local = new FakeLocalProcess();
 		const runtime = new AgentRuntime(local);
@@ -682,5 +763,31 @@ function desktopEvent(): DesktopEventV1 {
 			scrollDelta: 0,
 			mouseDistance: 0,
 		},
+	};
+}
+
+function localCalendarEvent(eventId: string): LocalPlanningCalendarEvent {
+	return {
+		schemaVersion: "calendar.v1",
+		eventId,
+		title: "外部日程",
+		sealedContentRef: null,
+		redactedContent: false,
+		kind: "external",
+		state: "committed",
+		schedule: {
+			allDay: false,
+			start: "2026-08-14T01:00:00Z",
+			end: "2026-08-14T02:00:00Z",
+			timeZone: "Asia/Shanghai",
+		},
+		recurrence: null,
+		occurrenceId: null,
+		sourcePlanId: null,
+		sourceTaskId: null,
+		scheduleOrigin: null,
+		userLocked: false,
+		editable: false,
+		version: 1,
 	};
 }

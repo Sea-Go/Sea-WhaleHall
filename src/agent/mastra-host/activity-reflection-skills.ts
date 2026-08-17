@@ -52,8 +52,8 @@ export interface ActivityReflectionSkillCatalog {
 }
 
 /**
- * Loads the two project Skills locally through Mastra before a CPU model call.
- * Qwen 1.7B on the current Ollama endpoint does not reliably honor OpenAI
+ * Loads the two project Skills locally through Mastra before a remote model call.
+ * The current OpenAI-compatible provider does not reliably honor native
  * tool_choice for Skill meta-tools, so a model-driven loading turn would make
  * a valid reflection depend on an unsupported capability. This remains the
  * framework's native Skill source of truth; only the deterministic loading

@@ -4,7 +4,6 @@ import type {
 	GoalRelevanceLabel,
 	ReflectionTriggerReason,
 } from "../reflection/types";
-import type { OllamaClientErrorCode } from "../model/ollama-json-client";
 
 export const SEMANTIC_EVENT_V2_SCHEMA_VERSION = "semantic-event.v2" as const;
 export const TIMELINE_COLLECTOR_SCHEMA_VERSION =
@@ -175,6 +174,7 @@ export type EvidenceFactV2 = {
 };
 
 export type TimelineInferenceDiagnosticV2 = {
+	/** Legacy persisted diagnostic shape; production no longer emits it. */
 	source: "qwen3:4b";
 	stage: "model_lock" | "readiness_probe" | "pack_selection" | "generation";
 	code:
@@ -183,7 +183,15 @@ export type TimelineInferenceDiagnosticV2 = {
 		| "pack_limit"
 		| "input_unavailable"
 		| "unexpected_failure"
-		| `ollama.${OllamaClientErrorCode}`;
+		| `ollama.${
+				| "invalid_request"
+				| "http_error"
+				| "request_cancelled"
+				| "request_timeout"
+				| "transport_error"
+				| "invalid_response_envelope"
+				| "invalid_json"
+				| "schema_mismatch"}`;
 	retryable: boolean;
 	httpStatus: number | null;
 	/**

@@ -3,6 +3,7 @@ import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
 import { Memory } from "@mastra/memory";
 import { ACTIVITY_REFLECTION_SYSTEM_PROMPT } from "../activity-reflection-prompt";
+import { PLANNING_MODEL_SYSTEM_PROMPT } from "../planning/model";
 import { activityReflectionNativeSkillPaths } from "./activity-reflection-skills";
 import {
 	type ActivityReflectionWorkflow,
@@ -16,12 +17,13 @@ import {
 	type PlanningWorkflowDriver,
 	type TaskPlanningWorkflow,
 } from "./planning-workflow";
-import { type AgentToolExecutor, createWhaleHallAgentTools } from "./tools";
+import type { AgentToolExecutor } from "./tools";
 
 export interface MastraAgentSet {
 	mastra: Mastra;
 	conversation: Agent<"whalehall-conversation">;
 	planning: Agent<"whalehall-planning">;
+	planningAnalysis: Agent<"whalehall-planning-analysis">;
 	activityReflectionSkillCatalog: Agent<"whalehall-activity-reflection-skills">;
 	activityReflection: Agent<"whalehall-activity-reflection">;
 	planningWorkflow: TaskPlanningWorkflow;
@@ -64,7 +66,6 @@ export function createMastraAgentSet(
 	const reflectionModel = reflectionProvider.chatModel(
 		options.reflectionModelId,
 	);
-	const tools = createWhaleHallAgentTools(options.executeTool);
 	const memory = new Memory({
 		storage: options.storage.composite,
 		options: {
@@ -81,13 +82,15 @@ export function createMastraAgentSet(
 		instructions: [
 			"你是 WhaleHall 桌面助手。使用清楚、自然、简洁的中文回答。",
 			"延续提供的会话上下文；不虚构本地数据、工具结果或已经执行的操作。",
-			"需要读取日历、当前计划或目标时，使用已注册的只读 Tool；不要猜测本地状态。",
-			"需要保存计划或改动日历时，使用已注册的写入 Tool，并等待用户审批；审批前不得声称操作已经完成。",
-			"未注册的本地能力不可调用，也不可用相近 Tool 冒充。",
+			"当前对话模式只提供文本回答；不得调用、伪造或输出任何 Tool、函数调用或工具标记。",
+			"问题若依赖本地日历、计划或目标，请明确提示用户前往对应页面，不要猜测本地状态。",
 		].join("\n"),
 		model,
 		memory,
-		tools,
+		// The production model does not yet conform to OpenAI tool-call output.
+		// Keep interactive chat text-only until that exact provider passes a
+		// dedicated conformance gate; raw provider markup is never executable.
+		tools: {},
 		maxRetries: 0,
 	});
 	const planning = new Agent({
@@ -102,6 +105,15 @@ export function createMastraAgentSet(
 			"日期使用 YYYY-MM-DD，分钟估算使用正整数。不要在 JSON 外添加文字。",
 		].join("\n"),
 		model,
+		maxRetries: 0,
+	});
+	const planningAnalysis = new Agent({
+		id: "whalehall-planning-analysis",
+		name: "WhaleHall 动态计划分析器",
+		description: "为本地 PlanningRuntime 返回严格结构化的语义分析。",
+		instructions: PLANNING_MODEL_SYSTEM_PROMPT,
+		model,
+		tools: {},
 		maxRetries: 0,
 	});
 	const activityReflectionSkillCatalog = new Agent({
@@ -134,11 +146,11 @@ export function createMastraAgentSet(
 	);
 	const mastra = new Mastra({
 		storage: options.storage.composite,
-		// The reflection Agent deliberately remains unregistered. Mastra 1.55
-		// makes registered Agents durable and persists their internal agent-loop
-		// snapshots even when the enclosing Workflow opts out. A standalone Agent
-		// uses Mastra's ephemeral in-memory host, which keeps this raw-window
-		// prompt/output out of the desktop database and reverse storage protocol.
+		// Reflection and dynamic Planning analysis deliberately remain unregistered.
+		// Registered Agents are durable and may persist internal agent-loop snapshots
+		// even when an enclosing Workflow opts out. Standalone Agents use Mastra's
+		// ephemeral in-memory host, keeping these live inputs/outputs out of the
+		// desktop database and reverse storage protocol.
 		agents: { conversation, planning },
 		workflows: {
 			planning: planningWorkflow,
@@ -150,6 +162,7 @@ export function createMastraAgentSet(
 		mastra,
 		conversation,
 		planning,
+		planningAnalysis,
 		activityReflectionSkillCatalog,
 		activityReflection,
 		planningWorkflow,

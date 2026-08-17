@@ -9,6 +9,7 @@ import type {
 	LocalEventTailCursorResult,
 	LocalMonitoringConfigure,
 	LocalMonitoringStatus,
+	LocalPlanningCalendarEvent,
 	LocalPlanningCalendarList,
 	LocalPlanningCalendarListResult,
 	LocalPlanningCalendarMutate,
@@ -43,6 +44,10 @@ import type {
 	LocalVaultOpenBatchResult,
 	LocalVaultSealBatch,
 	LocalVaultSealBatchResult,
+} from "./local-protocol";
+import {
+	compareLocalUtf8Binary,
+	LOCAL_PLANNING_CALENDAR_PAGE_LIMIT,
 } from "./local-protocol";
 import type { LocalClientError, LocalToolProcess } from "./local-tool-client";
 import type { DesktopEventV1 } from "./reflection/types";
@@ -385,6 +390,44 @@ export class AgentRuntime {
 		const method = this.local.listPlanningCalendar;
 		if (!method) throw new Error("Native planning calendar is unavailable.");
 		return method.call(this.local, query);
+	}
+
+	/** Reads every byte-bounded calendar page without imposing a scheduling cap. */
+	async listAllPlanningCalendar(
+		query: Omit<LocalPlanningCalendarList, "cursor" | "limit"> = {},
+	): Promise<LocalPlanningCalendarEvent[]> {
+		const events: LocalPlanningCalendarEvent[] = [];
+		const eventIds = new Set<string>();
+		const pageCursors = new Set<string>();
+		let cursor: string | undefined;
+		let lastEventId: string | null = null;
+		for (;;) {
+			const page = await this.listPlanningCalendar({
+				...query,
+				...(cursor === undefined ? {} : { cursor }),
+				limit: LOCAL_PLANNING_CALENDAR_PAGE_LIMIT,
+			});
+			for (const event of page.events) {
+				if (
+					eventIds.has(event.eventId) ||
+					(lastEventId !== null &&
+						compareLocalUtf8Binary(event.eventId, lastEventId) <= 0)
+				) {
+					throw new Error(
+						"Native planning calendar repeated or reordered an event page.",
+					);
+				}
+				eventIds.add(event.eventId);
+				events.push(event);
+				lastEventId = event.eventId;
+			}
+			if (page.nextCursor === null) return events;
+			if (pageCursors.has(page.nextCursor)) {
+				throw new Error("Native planning calendar cursor repeated.");
+			}
+			pageCursors.add(page.nextCursor);
+			cursor = page.nextCursor;
+		}
 	}
 
 	async mutatePlanningCalendar(

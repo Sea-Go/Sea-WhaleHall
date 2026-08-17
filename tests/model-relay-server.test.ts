@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
 	InMemoryRelayRecordStore,
 	InMemorySessionStore,
 	InMemoryUserStore,
+	JsonFileUserStore,
 	type ModelRelayDependencies,
 	type ModelRelayHandler,
 	type ModelRelayServerConfig,
@@ -21,9 +22,8 @@ import {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const personalRelayKey = ["whk", "fixture", "relay"].join("_");
+const legacyAgentKey = ["whk", "fixture", "retired-relay"].join("_");
 let passwordHash = "";
-let agentKeyHash = "";
 
 beforeAll(async () => {
 	passwordHash = await createScryptPasswordHash(
@@ -32,9 +32,6 @@ beforeAll(async () => {
 			salt: new Uint8Array(16).fill(7),
 		},
 	);
-	agentKeyHash = await createScryptPasswordHash(personalRelayKey, {
-		salt: new Uint8Array(16).fill(9),
-	});
 });
 
 class MutableClock implements RelayClock {
@@ -70,7 +67,6 @@ function createFixture(
 			displayName: "测试用户",
 			initials: "测试",
 			passwordHash,
-			agentKeyHash,
 		},
 	]);
 	const sessions = new InMemorySessionStore();
@@ -116,7 +112,8 @@ function chatRequest(
 		method: "POST",
 		headers: {
 			authorization: `Bearer ${accessToken}`,
-			"x-whalehall-agent-key": personalRelayKey,
+			"x-whalehall-agent-key": legacyAgentKey,
+			"x-whalehall-model-purpose": "agent",
 			"content-type": "application/json",
 			"idempotency-key": idempotencyKey,
 			...extraHeaders,
@@ -247,72 +244,68 @@ describe("model relay authentication", () => {
 });
 
 describe("model relay forwarding", () => {
-	test("requires a matching personal relay key before forwarding a chat request", async () => {
+	test("authorizes chat by bearer and ignores the retired personal key header", async () => {
 		let upstreamCalls = 0;
-		const secondRelayKey = ["whk", "fixture", "second-account"].join("_");
-		const secondAgentKeyHash = await createScryptPasswordHash(secondRelayKey, {
-			salt: new Uint8Array(16).fill(11),
-		});
-		const users = new InMemoryUserStore([
-			{
-				id: "account-1",
-				email: "test@example.com",
-				displayName: "测试用户",
-				initials: "测试",
-				passwordHash,
-				agentKeyHash,
-			},
-			{
-				id: "account-2",
-				email: "second@example.com",
-				displayName: "第二用户",
-				initials: "二",
-				passwordHash,
-				agentKeyHash: secondAgentKeyHash,
-			},
-		]);
-		const handler = createModelRelayHandler(baseConfig(), {
-			users,
-			sessions: new InMemorySessionStore(),
-			records: new InMemoryRelayRecordStore(),
+		const fixture = createFixture({
 			fetch: (async () => {
 				upstreamCalls += 1;
 				return Response.json({ ok: true });
 			}) as unknown as typeof fetch,
 		});
-		const login = await signIn(handler);
+		const login = await signIn(fixture.handler);
 		const accessToken = String(login.payload.accessToken);
 		const body = JSON.stringify({ model: "approved-model", messages: [] });
-		const missing = await handler(
+		const missingBearer = await fixture.handler(
+			new Request("https://relay.example.test/v1/chat/completions", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"idempotency-key": "missing-bearer",
+					"x-whalehall-model-purpose": "agent",
+				},
+				body,
+			}),
+		);
+		const withoutLegacyKey = await fixture.handler(
 			new Request("https://relay.example.test/v1/chat/completions", {
 				method: "POST",
 				headers: {
 					authorization: `Bearer ${accessToken}`,
 					"content-type": "application/json",
-					"idempotency-key": "missing-personal-key",
+					"idempotency-key": "no-legacy-key",
+					"x-whalehall-model-purpose": "agent",
 				},
 				body,
 			}),
 		);
-		const crossAccount = await handler(
-			chatRequest(accessToken, body, "cross-account-key", {
-				"x-whalehall-agent-key": secondRelayKey,
+		const arbitraryLegacyKey = await fixture.handler(
+			chatRequest(accessToken, body, "arbitrary-legacy-key", {
+				"x-whalehall-agent-key": "not-a-valid-retired-key",
 			}),
 		);
-		const authorized = await handler(
-			chatRequest(accessToken, body, "matching-personal-key"),
-		);
-		const overlong = await handler(
+		const overlongLegacyKey = await fixture.handler(
 			chatRequest(accessToken, body, "overlong-personal-key", {
 				"x-whalehall-agent-key": "a".repeat(1_025),
 			}),
 		);
+		const planning = await fixture.handler(
+			chatRequest(accessToken, body, "planning-request", {
+				"x-whalehall-model-purpose": "planning",
+			}),
+		);
 
-		expect(missing.status).toBe(401);
-		expect(crossAccount.status).toBe(401);
-		expect(authorized.status).toBe(200);
-		expect(overlong.status).toBe(401);
-		expect(upstreamCalls).toBe(1);
+		expect(missingBearer.status).toBe(401);
+		expect(withoutLegacyKey.status).toBe(200);
+		expect(arbitraryLegacyKey.status).toBe(200);
+		expect(overlongLegacyKey.status).toBe(200);
+		expect(planning.status).toBe(200);
+		expect(upstreamCalls).toBe(4);
+		expect(fixture.records.snapshot().map((record) => record.purpose)).toEqual([
+			"agent",
+			"agent",
+			"agent",
+			"planning",
+		]);
 	});
 
 	test("forwards exact request bytes, tool schemas, and SSE bytes without leaking desktop credentials upstream", async () => {
@@ -357,10 +350,13 @@ describe("model relay forwarding", () => {
 		);
 		expect(seen.headers?.get("authorization")).not.toContain(accessToken);
 		expect(seen.headers?.has("x-user-id")).toBe(false);
+		expect(seen.headers?.has("x-whalehall-agent-key")).toBe(false);
+		expect(seen.headers?.has("x-whalehall-model-purpose")).toBe(false);
 		const records = fixture.records.snapshot();
 		expect(decoder.decode(records[0]?.requestBody)).toBe(raw);
 		expect(records[0]?.responseBody).toEqual(received);
 		expect(records[0]?.subject).toBe("account-1");
+		expect(records[0]?.purpose).toBe("agent");
 		expect(records[0]?.state).toBe("completed");
 	});
 
@@ -425,7 +421,7 @@ describe("model relay forwarding", () => {
 		);
 		const agentKey = await fixture.handler(
 			reflectionRequest(body, "reflection-with-agent-key", {
-				"x-whalehall-agent-key": personalRelayKey,
+				"x-whalehall-agent-key": legacyAgentKey,
 			}),
 		);
 		const streaming = await fixture.handler(
@@ -714,6 +710,39 @@ describe("model relay forwarding", () => {
 			),
 		);
 		expect(providerKey.status).toBe(400);
+		const forgedPurpose = await fixture.handler(
+			chatRequest(
+				token,
+				JSON.stringify({
+					model: "approved-model",
+					messages: [],
+					purpose: "activity",
+				}),
+				"purpose-body",
+			),
+		);
+		expect(forgedPurpose.status).toBe(400);
+		const missingPurpose = await fixture.handler(
+			new Request("https://relay.example.test/v1/chat/completions", {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${token}`,
+					"content-type": "application/json",
+					"idempotency-key": "missing-purpose",
+				},
+				body: JSON.stringify({ model: "approved-model", messages: [] }),
+			}),
+		);
+		expect(missingPurpose.status).toBe(400);
+		const invalidPurpose = await fixture.handler(
+			chatRequest(
+				token,
+				JSON.stringify({ model: "approved-model", messages: [] }),
+				"invalid-purpose",
+				{ "x-whalehall-model-purpose": "user-controlled" },
+			),
+		);
+		expect(invalidPurpose.status).toBe(400);
 		const model = await fixture.handler(
 			chatRequest(
 				token,
@@ -778,6 +807,45 @@ describe("model relay forwarding", () => {
 });
 
 describe("model relay configuration", () => {
+	test("loads current users and discards even a malformed legacy agent key hash", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "whalehall-relay-users-"));
+		try {
+			const usersPath = join(directory, "users.json");
+			await writeFile(
+				usersPath,
+				JSON.stringify({
+					users: [
+						{
+							id: "account-current",
+							email: "current@example.com",
+							displayName: "Current",
+							initials: "C",
+							passwordHash,
+						},
+						{
+							id: "account-legacy",
+							email: "legacy@example.com",
+							displayName: "Legacy",
+							initials: "L",
+							passwordHash,
+							agentKeyHash: { malformed: true },
+						},
+					],
+				}),
+				{ mode: 0o600 },
+			);
+			const users = await JsonFileUserStore.open(usersPath);
+			expect(await users.findById("account-current")).not.toHaveProperty(
+				"agentKeyHash",
+			);
+			expect(await users.findById("account-legacy")).not.toHaveProperty(
+				"agentKeyHash",
+			);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	test("fails closed without a credential, exact allowlist, or secure provider URL", () => {
 		const users = new InMemoryUserStore([]);
 		const sessions = new InMemorySessionStore();
@@ -878,6 +946,7 @@ describe("model relay configuration", () => {
 			const firstClaim = await records.claim({
 				recordId: randomUUID(),
 				subject: "account-1",
+				purpose: "agent",
 				idempotencyKey: "persisted-key",
 				requestHash,
 				model: "approved-model",
@@ -895,11 +964,26 @@ describe("model relay configuration", () => {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
+			const metadataPath = join(
+				recordsDirectory,
+				`${createHash("sha256")
+					.update("account-1")
+					.update("\0")
+					.update("persisted-key")
+					.digest("hex")}.json`,
+			);
+			const legacyMetadata = JSON.parse(
+				await readFile(metadataPath, "utf8"),
+			) as Record<string, unknown>;
+			expect(legacyMetadata.purpose).toBe("agent");
+			delete legacyMetadata.purpose;
+			await writeFile(metadataPath, JSON.stringify(legacyMetadata));
 
 			const restarted = new FileRelayRecordStore(recordsDirectory);
 			const replay = await restarted.claim({
 				recordId: randomUUID(),
 				subject: "account-1",
+				purpose: "agent",
 				idempotencyKey: "persisted-key",
 				requestHash,
 				model: "approved-model",
@@ -912,6 +996,19 @@ describe("model relay configuration", () => {
 			if (replay.kind !== "replay")
 				throw new Error("Expected persisted replay.");
 			expect(decoder.decode(replay.response.body)).toBe('{"answer":true}');
+			const mismatchedPurpose = await restarted.claim({
+				recordId: randomUUID(),
+				subject: "account-1",
+				purpose: "activity",
+				idempotencyKey: "persisted-key",
+				requestHash,
+				model: "approved-model",
+				stream: false,
+				requestBody,
+				createdAtMs: 2_001,
+				expiresAtMs: 11_001,
+			});
+			expect(mismatchedPurpose.kind).toBe("conflict");
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}

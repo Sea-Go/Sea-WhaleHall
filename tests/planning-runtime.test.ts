@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { OllamaClientError } from "../src/agent/model/ollama-json-client";
 import {
 	InMemoryPlanningCalendar,
 	InMemoryPlanningObservations,
@@ -7,6 +6,7 @@ import {
 	isPlanningPlan,
 	type PlanningClock,
 	type PlanningModelAnalysisRequest,
+	PlanningModelInvocationError,
 	type PlanningModelOutput,
 	type PlanningModelPort,
 	type PlanningModelProposal,
@@ -259,7 +259,7 @@ describe("PlanningRuntime creation and confirmation", () => {
 
 	test("persists the user message and remains awaiting analysis when the model is unavailable", async () => {
 		const { runtime } = harness([
-			new OllamaClientError("unavailable", true, "transport_error"),
+			new PlanningModelInvocationError("model-unavailable", true),
 		]);
 		const plan = await runtime.createPlanDraft({
 			input: { goal: "构建可靠计划运行时", startToday: false },
@@ -296,6 +296,9 @@ describe("PlanningRuntime creation and confirmation", () => {
 		expect(plan.analysisState).toBe("awaiting-user");
 		expect(plan.revisions).toEqual([]);
 		expect(plan.messages.at(-1)?.content).toContain("每周容量");
+		expect(plan.messages.at(-1)?.content).toContain(
+			"1. 你每周可以投入多少分钟？",
+		);
 	});
 
 	test("replays a stable operation without a second model call and rejects stale versions", async () => {
@@ -615,7 +618,7 @@ describe("PlanningRuntime adjustment rules", () => {
 		const app = await createAndConfirm("short-term", {
 			outputs: [
 				proposal("short-term"),
-				new OllamaClientError("offline", true, "transport_error"),
+				new PlanningModelInvocationError("model-unavailable", true),
 				proposal("short-term"),
 			],
 		});
@@ -648,9 +651,9 @@ describe("PlanningRuntime adjustment rules", () => {
 		const app = await createAndConfirm("short-term", {
 			outputs: [
 				proposal("short-term", { taskCount: 3 }),
-				new OllamaClientError("offline-1", true, "transport_error"),
-				new OllamaClientError("offline-2", true, "transport_error"),
-				new OllamaClientError("offline-3", true, "transport_error"),
+				new PlanningModelInvocationError("model-unavailable", true),
+				new PlanningModelInvocationError("model-unavailable", true),
+				new PlanningModelInvocationError("model-unavailable", true),
 			],
 		});
 		await expect(

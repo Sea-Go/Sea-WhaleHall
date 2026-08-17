@@ -1,10 +1,4 @@
-import {
-	Clock3,
-	Download,
-	FileLock2,
-	RefreshCw,
-	X,
-} from "lucide-react";
+import { Clock3, Download, FileLock2, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type {
 	FiveMinuteAuditCaptureStatus,
@@ -13,9 +7,9 @@ import type {
 } from "../../../../shared/contracts";
 import { Button } from "../../shared/ui/Button";
 import {
+	type AuditExportService,
 	auditExportStatusMessage,
 	privateTrainingExportStatusMessage,
-	type AuditExportService,
 } from "./audit-export-service";
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
@@ -38,8 +32,9 @@ export function AuditExportControl({
 }: AuditExportControlProps) {
 	const [includeDecryptedContent, setIncludeDecryptedContent] = useState(false);
 	const [state, setState] = useState<ExportState>({ status: "idle" });
-	const [capture, setCapture] =
-		useState<FiveMinuteAuditCaptureStatus | null>(null);
+	const [capture, setCapture] = useState<FiveMinuteAuditCaptureStatus | null>(
+		null,
+	);
 	const [captureBusy, setCaptureBusy] = useState(false);
 	const [captureMessage, setCaptureMessage] = useState<string | null>(null);
 	const [trainingScope, setTrainingScope] =
@@ -126,7 +121,7 @@ export function AuditExportControl({
 			mounted = false;
 			globalThis.clearInterval(intervalId);
 		};
-	}, [service, trainingStatus?.state]);
+	}, [service, trainingStatus]);
 
 	async function exportFiveMinutes(fromMs: number) {
 		if (state.status === "exporting") return;
@@ -243,8 +238,9 @@ export function AuditExportControl({
 					</div>
 				</div>
 				<p>
-					生产分析仍只来自按 64 条/5 分钟或边界自然封窗的窗口。导出时，尚未封窗的有效语义事件会生成明确标记的
-					audit-only 确定性投影；它不会写回生产时间线，也不会调用 Qwen。
+					生产分析仍只来自按 64 条/5
+					分钟或边界自然封窗的窗口。导出时，尚未封窗的有效语义事件会生成明确标记的
+					audit-only 确定性投影；它不会写回生产时间线，也不会调用模型服务。
 				</p>
 				<div className="audit-export-control__capture-actions">
 					<Button
@@ -322,9 +318,7 @@ export function AuditExportControl({
 						void exportFiveMinutes(recentCompleteFiveMinuteStart(nowMs()))
 					}
 				>
-					{state.status === "exporting"
-						? "正在准备…"
-						: "导出过去五分钟"}
+					{state.status === "exporting" ? "正在准备…" : "导出过去五分钟"}
 				</Button>
 			</div>
 			{state.status !== "idle" && state.status !== "exporting" ? (
@@ -339,7 +333,8 @@ export function AuditExportControl({
 				<div>
 					<strong>导出用于本地训练</strong>
 					<p>
-						导出已完成窗口及其 raw→event→fact→episode 血缘，包含仍可解密的可见文本和网址。只写入你选择的本机文件夹，不会上传；点击后只需一次原生确认，再选择一次文件夹。
+						导出已完成窗口及其 raw→event→fact→episode
+						血缘，包含仍可解密的可见文本和网址。只写入你选择的本机文件夹，不会上传；点击后只需一次原生确认，再选择一次文件夹。
 					</p>
 				</div>
 				<label>
@@ -352,8 +347,7 @@ export function AuditExportControl({
 						}
 						onChange={(event) =>
 							setTrainingScope(
-								event.currentTarget
-									.value as PrivateTrainingWindowExportScope,
+								event.currentTarget.value as PrivateTrainingWindowExportScope,
 							)
 						}
 					>

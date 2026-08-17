@@ -1,24 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { ModernBertHttpClient } from "../src/agent/reflection/inference";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-describe("WhaleHall reflection runtime endpoint policy", () => {
-	test("keeps model input on loopback by default", () => {
-		expect(() => new ModernBertHttpClient()).not.toThrow();
-	});
-
-	test("requires an exact HTTPS allowlist entry for a remote deployment", () => {
-		expect(
-			() =>
-				new ModernBertHttpClient({
-					endpoint: "https://models.example.test/v1/reflections:infer",
-				}),
-		).toThrow("allowlisted");
-		expect(
-			() =>
-				new ModernBertHttpClient({
-					endpoint: "https://models.example.test/v1/reflections:infer",
-					allowedOrigins: ["https://models.example.test"],
-				}),
-		).not.toThrow();
+describe("WhaleHall reflection production composition", () => {
+	test("has no endpoint or local-model configuration surface", () => {
+		const source = readFileSync(
+			resolve(import.meta.dir, "../src/bun/reflection-runtime.ts"),
+			"utf8",
+		);
+		expect(source).toContain("new DeterministicReflectionInference()");
+		expect(source).not.toContain("MODERNBERT_ENDPOINT");
+		expect(source).not.toContain("OllamaJsonClient");
+		expect(source).not.toContain("teacherBaseUrl");
 	});
 });
