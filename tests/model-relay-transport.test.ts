@@ -178,6 +178,33 @@ describe("ModelRelayTransport", () => {
 		]);
 	});
 
+	test("uses an independent host-owned purpose for sealed-window reflection", async () => {
+		const captured: Array<{ path: string; purpose: string }> = [];
+		const transport = new ModelRelayTransport(
+			{
+				authorizedFetch: async (path, _init, purpose) => {
+					captured.push({ path, purpose });
+					return Response.json({ ok: true });
+				},
+			},
+			{ purpose: "reflection" },
+		);
+		await transport.open(
+			{
+				runId: "reflection-invocation-1",
+				body: {
+					model: "reflection",
+					messages: [{ role: "user", content: "sealed reflection prompt" }],
+				},
+			},
+			{ onResponse() {}, onChunk() {} },
+		);
+
+		expect(captured).toEqual([
+			{ path: "/v1/chat/completions", purpose: "reflection" },
+		]);
+	});
+
 	test("polls a durable in-flight operation with the same exact request", async () => {
 		const requests: Array<{ body: string; key: string }> = [];
 		const waits: number[] = [];

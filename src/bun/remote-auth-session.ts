@@ -306,7 +306,8 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		if (
 			purpose !== "agent" &&
 			purpose !== "activity" &&
-			purpose !== "planning"
+			purpose !== "planning" &&
+			purpose !== "reflection"
 		) {
 			throw new RemoteAuthError(
 				"unexpected",

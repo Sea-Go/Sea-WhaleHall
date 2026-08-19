@@ -14,8 +14,11 @@ import {
 	agentModelConfigurationFromConfiguration,
 	DEFAULT_CLIENT_CONFIGURATION,
 	loadOrCreateClientConfiguration,
+	planningModelConfigurationFromConfiguration,
+	WHALEHALL_AGENT_MODEL,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-	WHALEHALL_RELAY_MODEL,
+	WHALEHALL_PLANNING_MODEL,
+	WHALEHALL_REFLECTION_MODEL,
 } from "../src/bun/client-config";
 
 const directories: string[] = [];
@@ -35,10 +38,13 @@ function temporaryDirectory(): string {
 function currentConfiguration(): string {
 	return [
 		"reflection:",
-		`  name: "${WHALEHALL_RELAY_MODEL}"`,
+		`  name: "${WHALEHALL_REFLECTION_MODEL}"`,
+		"",
+		"planning:",
+		`  name: "${WHALEHALL_PLANNING_MODEL}"`,
 		"",
 		"agent:",
-		`  name: "${WHALEHALL_RELAY_MODEL}"`,
+		`  name: "${WHALEHALL_AGENT_MODEL}"`,
 		"",
 		"cloudSync:",
 		"  enabled: false",
@@ -54,12 +60,12 @@ function currentConfiguration(): string {
 function legacyKeyConfiguration(): string {
 	return [
 		"reflection:",
-		`  name: "${WHALEHALL_RELAY_MODEL}"`,
+		'  name: "qwen3:1.7b"',
 		'  baseurl: "https://retired-model.example.test"',
 		'  apikey: "retired-reflection-secret"',
 		"",
 		"agent:",
-		`  name: "${WHALEHALL_RELAY_MODEL}"`,
+		'  name: "qwen3:1.7b"',
 		'  baseurl: "https://retired-staging.example.test"',
 		'  apikey: "retired-personal-relay-secret"',
 		"",
@@ -110,12 +116,18 @@ describe("WhaleHall client config.yaml", () => {
 		expect(
 			agentModelConfigurationFromConfiguration(result.configuration),
 		).toEqual({
-			name: WHALEHALL_RELAY_MODEL,
+			name: WHALEHALL_AGENT_MODEL,
+			baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+		});
+		expect(
+			planningModelConfigurationFromConfiguration(result.configuration),
+		).toEqual({
+			name: WHALEHALL_PLANNING_MODEL,
 			baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 		});
 		expect(
 			activityReflectionConfigurationFromConfiguration(result.configuration),
-		).toEqual({ modelName: WHALEHALL_RELAY_MODEL, scoreThreshold: 1 });
+		).toEqual({ modelName: WHALEHALL_REFLECTION_MODEL, scoreThreshold: 1 });
 		expectOwnerOnlyMode(result.path);
 	});
 
@@ -210,9 +222,9 @@ describe("WhaleHall client config.yaml", () => {
 		const path = join(userDataDirectory, "config.yaml");
 		const source = [
 			"reflection:",
-			`  name: "${WHALEHALL_RELAY_MODEL}"`,
+			'  name: "qwen3:1.7b"',
 			"agent:",
-			`  name: "${WHALEHALL_RELAY_MODEL}"`,
+			'  name: "qwen3:1.7b"',
 			"",
 		].join("\n");
 		mkdirSync(userDataDirectory, { mode: 0o700 });
@@ -261,10 +273,10 @@ describe("WhaleHall client config.yaml", () => {
 
 	test("leaves invalid files untouched and applies code-owned defaults in memory", () => {
 		for (const source of [
-			currentConfiguration().replace(WHALEHALL_RELAY_MODEL, "qwen3:other"),
+			currentConfiguration().replace(WHALEHALL_AGENT_MODEL, "qwen3:other"),
 			`${currentConfiguration()}unexpected: true\n`,
 			currentConfiguration().replace(
-				`name: "${WHALEHALL_RELAY_MODEL}"`,
+				`name: "${WHALEHALL_REFLECTION_MODEL}"`,
 				"name: 42",
 			),
 			legacyKeyConfiguration().replace(

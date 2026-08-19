@@ -52,15 +52,16 @@ repository 管理。Mastra 首版不会把 browser、accessibility、activity、
 macOS 的签名 Observer 和不可变 `whalehall-vault-broker-v2` 安全链保持不变。
 Vault Broker 负责敏感 observation content；新增的 credential helper 只负责
 固定 WhaleHall namespace 下的账号凭据和 Agent 数据密钥，二者不能互相替代。
-可编辑 `config.yaml` 只保存 `reflection` 与 `agent` 两个固定配置角色；Dynamic
-Planning 复用 Agent model allowlist，但 relay 审计用途固定为 `planning`。DataCenter
+可编辑 `config.yaml` 保存 `agent`、`planning` 与 `reflection` 三个固定逻辑角色；真实
+Provider 模型由 DataCenter 私有 YAML 映射。对话和后台 activity 使用 `agent`，任务规划
+与 Dynamic Planning 使用 `planning`，sealed-window reflection 使用 `reflection`。DataCenter
 origin 固定在代码中；Timeline 与 Reflection journal 不从配置接受模型地址。
 
 ## 不可跨越的边界
 
 - React 不导入 Mastra、AI SDK、数据库、Rust 协议或 native API；Renderer 不提交 `userId`。
 - Sidecar 不接触 access token、refresh token、厂商 API Key或 OS 凭据库，不监听 HTTP 端口，也不启用 Mastra Server、Studio、Cloud 或遥测。
-- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。所有远端模型调用要求当前认证会话，并由 Bun 添加代码所有的 `agent|activity|planning` purpose；不存在可绕过 session 的独立模型 route。
+- Bun 从当前主进程会话推导账号，拥有加密数据库、权威日历、授权和审批；Renderer 不能提交或覆盖账号 ID。所有远端模型调用要求当前认证会话，并由 Bun 添加代码所有的 `agent|activity|planning|reflection` purpose；不存在可绕过 session 的独立模型 route。
 - `reflection.analyze` 协议包含由 Bun 生成的完整 `userPrompt` 和 opaque invocation ID；它只在本地 Bun/Sidecar 内存中流转。原始窗口、模型输出、事件和分数都不得回传 Renderer 或 Agent Tool。
 - DataCenter 不添加 system prompt、不聚合事件、不格式化时间/action、不计算分数，也不执行 Tool。内测版会按认证 user 保存 exact request/response，并提供开发成员的受控查询；这是 internal-only 审计能力。
 - Rust Local Tool Host 继续拥有传感器和本地能力。首版 Mastra Agent 不注册 browser、accessibility、activity、cleanup 或完整 Rust Tool catalogue。
@@ -93,8 +94,9 @@ access token 只停留在 Bun 主进程。密码提交后立即从 React
 state 清除，不写入数据库、日志、argv 或环境变量。refresh、退出与会话过期会先关闭
 AuthGate、递增 generation、终止模型流并清理旧账号的本地运行，再允许新账号开始。
 
-`config.yaml` 的 `agent` 角色固定为 `qwen3:1.7b`；DataCenter origin 固定在代码中。每个
-聊天请求附带当前 session bearer 与代码所有的 purpose；relay 从 bearer 确定账户后转发。
+`config.yaml` 使用固定逻辑角色 `agent`、`planning` 与 `reflection`；DataCenter origin 固定在
+代码中。每个聊天请求附带当前 session bearer 与代码所有的 purpose；relay 从 bearer 确定账户，
+并由 DataCenter 私有配置选择物理上游模型。
 
 ## 对话与保留的 Tool 审批基础设施
 
@@ -163,8 +165,9 @@ versioned Vault Broker，并继续执行既有 post-wrap/post-package 签名和�
 在 macOS 授予 monitoring 权限前，先按 README 使用
 `bun run setup:macos-signing -- --create` 建立固定本地开发身份。
 
-远端服务使用 `services/model-relay/main.ts`；其监听地址与上游 provider 是 DataCenter
-部署配置，不属于桌面运行时，也不能由客户端覆盖。完整门禁：
+桌面生产远端服务是 DataCenter。`services/model-relay/main.ts` 仅保留为历史独立的
+loopback-Ollama 联调/回归资产，不参与桌面打包或生产调用，也不能作为 DataCenter 的回退。
+完整门禁：
 
 ```bash
 bun run typecheck

@@ -8,7 +8,11 @@ export interface ModelRelayAuthorization {
 	): Promise<Response>;
 }
 
-export type ModelRelayPurpose = "agent" | "activity" | "planning";
+export type ModelRelayPurpose =
+	| "agent"
+	| "activity"
+	| "planning"
+	| "reflection";
 
 const MAX_RELAY_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_STREAM_CHUNK_BYTES = 64 * 1024;
@@ -78,7 +82,8 @@ export class ModelRelayTransport {
 		if (
 			this.purpose !== "agent" &&
 			this.purpose !== "activity" &&
-			this.purpose !== "planning"
+			this.purpose !== "planning" &&
+			this.purpose !== "reflection"
 		) {
 			throw new Error("Model relay purpose is not approved.");
 		}

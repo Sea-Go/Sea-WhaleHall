@@ -421,6 +421,10 @@ function createHarness(
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
 			client: { name: "sidecar-client-test", version: "1" },
 			model: { provider: "test", modelId: "test-model" },
+			planningModel: {
+				provider: "test-planning",
+				modelId: "test-planning-model",
+			},
 			reflectionModel: {
 				provider: "test-reflection",
 				modelId: "test-reflection-model",

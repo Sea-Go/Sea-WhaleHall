@@ -1,7 +1,7 @@
 import type { ActivityAnalysisWorkerResult } from "../../shared/activity-analysis-contract";
 import type { PlanningModelAnalysisRequest } from "../planning/model";
 
-export const AGENT_HOST_PROTOCOL_VERSION = 1 as const;
+export const AGENT_HOST_PROTOCOL_VERSION = 2 as const;
 export const AGENT_HOST_SERVICE = "whalehall-agent-host" as const;
 export const MAX_MODEL_RELAY_CHUNK_BYTES = 64 * 1024;
 
@@ -45,6 +45,8 @@ export interface RuntimeInitializeParams {
 		version: string;
 	};
 	model: RuntimeModelConfiguration;
+	/** Separate logical provider for task-planning and dynamic-planning calls. */
+	planningModel: RuntimeModelConfiguration;
 	/**
 	 * Separate logical provider for the sealed-window reflection role. Its key
 	 * remains in Bun; the Sidecar only creates the already-complete model body.

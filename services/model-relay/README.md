@@ -1,5 +1,9 @@
 # WhaleHall model relay
 
+> **状态：遗留独立资产。** 打包后的 WhaleHall 桌面端不会启动或调用此服务；当前生产
+> 模型路径是桌面 → DataCenter `/v1/chat/completions`。本目录保留给历史 loopback-Ollama
+> 部署资料和回归测试，不能作为 DataCenter 的替代或回退。
+
 This native Node 22 service is intentionally not an Agent. It exposes only:
 
 - `POST /v1/auth/sessions`

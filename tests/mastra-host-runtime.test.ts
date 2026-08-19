@@ -35,6 +35,10 @@ describe("AgentHostRuntime activity analysis", () => {
 			params: {
 				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
 				model: { provider: "test", modelId: "test-model" },
+				planningModel: {
+					provider: "test-planning",
+					modelId: "test-planning-model",
+				},
 				reflectionModel: {
 					provider: "test-reflection",
 					modelId: "test-reflection-model",
@@ -166,6 +170,10 @@ async function planningRuntime(
 		params: {
 			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
 			model: { provider: "test", modelId: "test-model" },
+			planningModel: {
+				provider: "test-planning",
+				modelId: "test-planning-model",
+			},
 			reflectionModel: {
 				provider: "test-reflection",
 				modelId: "test-reflection-model",
@@ -173,7 +181,7 @@ async function planningRuntime(
 		},
 	});
 	Reflect.set(runtime, "agents", { planningAnalysis: { generate } });
-	Reflect.set(runtime, "relay", {
+	Reflect.set(runtime, "planningRelay", {
 		runInContext: async <TResult>(
 			_context: unknown,
 			operation: () => Promise<TResult>,

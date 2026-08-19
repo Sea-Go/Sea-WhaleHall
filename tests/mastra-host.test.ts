@@ -183,6 +183,20 @@ describe("Mastra Node sidecar", () => {
 			host.calls.filter((method) => method === "planning/save"),
 		).toHaveLength(2);
 		expect(host.modelBodies.every((body) => body.stream === true)).toBe(true);
+		expect(host.modelCalls).toEqual(
+			expect.arrayContaining([
+				{
+					provider: "whalehall-test",
+					modelId: "test-chat-model",
+					runId: "conversation-run-1",
+				},
+				{
+					provider: "whalehall-planning",
+					modelId: "test-planning-model",
+					runId: "planning-run-1",
+				},
+			]),
+		);
 
 		await harness.shutdown();
 	}, 30_000);
@@ -207,6 +221,13 @@ describe("Mastra Node sidecar", () => {
 			result: { score: 0.7 },
 		});
 		expect(host.modelBodies).toHaveLength(1);
+		expect(host.modelCalls).toEqual([
+			{
+				provider: "whalehall-activity-reflection",
+				modelId: "test-reflection-model",
+				runId: "activity-reflection-without-skills",
+			},
+		]);
 		const body = host.modelBodies[0];
 		expect(JSON.stringify(body?.messages)).toContain(
 			"# 已加载的活动反思分析 Skill",
@@ -261,6 +282,13 @@ describe("Mastra Node sidecar", () => {
 		});
 		expect(host.modelOrigins).toEqual(["planning-analysis:operation-1"]);
 		expect(host.calls).toContain("model/relay.open");
+		expect(host.modelCalls).toEqual([
+			{
+				provider: "whalehall-planning",
+				modelId: "test-planning-model",
+				runId: "dynamic-planning-invocation",
+			},
+		]);
 		const body = host.modelBodies[0];
 		expect(body?.tools).toBeUndefined();
 		expect(body?.response_format).toBeUndefined();
@@ -309,6 +337,13 @@ describe("Mastra Node sidecar", () => {
 			},
 		});
 		expect(host.calls).toContain("model/relay.open");
+		expect(host.modelCalls).toEqual([
+			{
+				provider: "whalehall-test",
+				modelId: "test-chat-model",
+				runId: "activity-run-1",
+			},
+		]);
 		expect(
 			host.calls.some(
 				(method) =>
@@ -443,6 +478,13 @@ describe("Mastra Node sidecar", () => {
 		expect(host.calls).toContain("model/relay.open");
 		const reflectionBodies = host.modelBodies;
 		expect(reflectionBodies).toHaveLength(1);
+		expect(host.modelCalls).toEqual([
+			{
+				provider: "whalehall-activity-reflection",
+				modelId: "test-reflection-model",
+				runId: "activity-reflection-window-1",
+			},
+		]);
 		const reflectionBody = reflectionBodies[0];
 		expect(JSON.stringify(reflectionBody?.messages)).toContain(
 			"private raw activity",
@@ -864,6 +906,11 @@ class SidecarHarness {
 				modelId: "test-chat-model",
 				supportsStructuredOutputs: true,
 			},
+			planningModel: {
+				provider: "whalehall-planning",
+				modelId: "test-planning-model",
+				supportsStructuredOutputs: true,
+			},
 			reflectionModel: {
 				provider: "whalehall-activity-reflection",
 				modelId: "test-reflection-model",
@@ -1038,6 +1085,9 @@ class SidecarHarness {
 class FakeHost {
 	readonly calls: string[] = [];
 	readonly modelBodies: Array<Record<string, unknown>> = [];
+	readonly modelCalls: Array<
+		Pick<ModelRelayOpenParams, "provider" | "modelId" | "runId">
+	> = [];
 	readonly modelOrigins: string[] = [];
 	readonly workflowSnapshotCalls: Array<{
 		method: string;
@@ -1325,6 +1375,11 @@ class FakeHost {
 		send: (message: ProtocolMessage) => Promise<void>,
 	): Promise<void> {
 		const params = request.params as ModelRelayOpenParams;
+		this.modelCalls.push({
+			provider: params.provider,
+			modelId: params.modelId,
+			runId: params.runId,
+		});
 		this.modelOrigins.push(params.originatingRequestId);
 		const body = JSON.parse(
 			Buffer.from(params.request.bodyBase64 ?? "", "base64").toString("utf8"),

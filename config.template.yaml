@@ -2,10 +2,13 @@
 # DataCenter origin is fixed in application code; this file contains no model
 # credential or endpoint.
 reflection:
-  name: "qwen3:1.7b"
+  name: "reflection"
+
+planning:
+  name: "planning"
 
 agent:
-  name: "qwen3:1.7b"
+  name: "agent"
 
 # Cloud synchronization is opt-in. Content uses a DataCenter-issued X25519
 # context and client-envelope.v1 only when this flag and the domain consent are

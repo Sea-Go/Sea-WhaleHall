@@ -1661,9 +1661,11 @@ export class AgentRunCoordinator
 	}
 
 	/** Host-owned model classification for the exact authenticated run. */
-	modelPurposeForRun(ownerRunId: string): "agent" | "activity" {
+	modelPurposeForRun(ownerRunId: string): "agent" | "activity" | "planning" {
 		const run = this.requireHostRun(ownerRunId);
-		return run.snapshot.kind === "activity-analysis" ? "activity" : "agent";
+		if (run.snapshot.kind === "activity-analysis") return "activity";
+		if (run.snapshot.kind === "task-planning") return "planning";
+		return "agent";
 	}
 
 	async load(

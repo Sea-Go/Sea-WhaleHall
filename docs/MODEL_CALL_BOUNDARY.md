@@ -6,15 +6,16 @@ WhaleHall 桌面端的所有模型调用必须经过 `src/agent/mastra-host` 的
 或 Workflow。Renderer 不得导入 Mastra、AI SDK 或直接发起模型请求；Bun 不得创建
 通用 HTTP/LLM 客户端，也不得连接用户电脑上的模型服务。
 
-当前只有三个代码所有的 relay 用途：
+当前只有四个代码所有的 relay 用途：
 
 | 用途 | Mastra 入口 | 职责与远端边界 |
 | --- | --- | --- |
-| `agent` | text-only conversation、task-planning Agent/Workflow | Sidecar 构造 OpenAI-compatible 请求；Bun 使用当前账号的短期 bearer 经固定 DataCenter 网关发送。当前 conversation 不注册产品 Tool。 |
-| `activity` | `reflection.analyze` → no-persistence activity-reflection Workflow | Bun 生成完整的 sealed-window prompt；Sidecar 只做一次严格结构化调用。后台 activity Agent 也使用该用途。 |
-| `planning` | `planning.analyze` → live-only planning-analysis Agent | 只返回 Dynamic Planning 的严格语义结果。持久化、幂等、七日排程、ETA、proposal/confirm、重试和取消仍由 Bun `PlanningRuntime` 所有。 |
+| `agent` | text-only conversation、后台 activity Agent | 请求逻辑模型 `agent`；Sidecar 构造 OpenAI-compatible 请求，Bun 使用当前账号的短期 bearer 经固定 DataCenter 网关发送。当前 conversation 不注册产品 Tool。 |
+| `activity` | 后台 activity Agent 的审计分类 | 与 `agent` 模型角色配套，用于区分后台调用；不会改变其逻辑模型。 |
+| `planning` | task-planning Agent/Workflow、`planning.analyze` → live-only planning-analysis Agent | 请求逻辑模型 `planning`。只返回 Dynamic Planning 的严格语义结果；持久化、幂等、七日排程、ETA、proposal/confirm、重试和取消仍由 Bun `PlanningRuntime` 所有。 |
+| `reflection` | `reflection.analyze` → no-persistence activity-reflection Workflow | 请求逻辑模型 `reflection`。Bun 生成完整的 sealed-window prompt；Sidecar 只做一次严格结构化调用。 |
 
-三个用途都请求固定 `POST /v1/chat/completions`。Bun 的
+四个用途都请求固定 `POST /v1/chat/completions`。Bun 的
 `RemoteAuthSessionManager` 注入认证信息，并由代码设置
 `X-WhaleHall-Model-Purpose`；Sidecar、请求 body 与 Renderer 不能提供或覆盖用途、
 token、key 或用户身份。Dynamic Planning 使用稳定的

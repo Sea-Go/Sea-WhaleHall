@@ -81,6 +81,7 @@ import {
 	activityReflectionConfigurationFromConfiguration,
 	agentModelConfigurationFromConfiguration,
 	loadOrCreateClientConfiguration,
+	planningModelConfigurationFromConfiguration,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 } from "./client-config";
 import { CredentialHelperClient } from "./credential-helper-client";
@@ -117,6 +118,7 @@ import { MastraActivityReflectionAnalyzer } from "./mastra-activity-reflection";
 import { LocalAgentHostServices } from "./mastra-host-services";
 import { MastraPlanningModel } from "./mastra-planning-model";
 import { MastraSidecarClient } from "./mastra-sidecar-client";
+import { authorizeRunBoundModelRelay } from "./model-relay-authorization";
 import { ModelRelayTransport } from "./model-relay-transport";
 import { monitoringPermissionSettingsUrl } from "./monitoring-permission-settings";
 import {
@@ -232,10 +234,15 @@ const activityReflectionConfiguration =
 const agentModelConfiguration = agentModelConfigurationFromConfiguration(
 	clientConfiguration.configuration,
 );
+const planningModelConfiguration = planningModelConfigurationFromConfiguration(
+	clientConfiguration.configuration,
+);
 const configuredModelId = agentModelConfiguration.name;
+const planningModelId = planningModelConfiguration.name;
 const reflectionModelId = activityReflectionConfiguration.modelName;
 const dataCenterModelApiBaseUrl = `${WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL}/v1`;
 const agentModelRelayProvider = "whalehall-relay";
+const planningModelRelayProvider = "whalehall-planning";
 const reflectionModelRelayProvider = "whalehall-activity-reflection";
 let activeGoalStore!: AccountScopedActiveGoalStore;
 let coordinator!: AgentRunCoordinator;
@@ -460,7 +467,7 @@ const planningModelRelay = new ModelRelayTransport(authSession, {
 	purpose: "planning",
 });
 const activityReflectionModelRelay = activityReflectionConfiguration
-	? new ModelRelayTransport(authSession, { purpose: "activity" })
+	? new ModelRelayTransport(authSession, { purpose: "reflection" })
 	: null;
 const sidecar = new MastraSidecarClient({
 	nodePath,
@@ -471,6 +478,12 @@ const sidecar = new MastraSidecarClient({
 		model: {
 			provider: agentModelRelayProvider,
 			modelId: configuredModelId,
+			supportsStructuredOutputs: true,
+		},
+		planningModel: {
+			provider: planningModelRelayProvider,
+			modelId: planningModelId,
+			baseUrl: dataCenterModelApiBaseUrl,
 			supportsStructuredOutputs: true,
 		},
 		reflectionModel: {
@@ -490,7 +503,11 @@ const sidecar = new MastraSidecarClient({
 			}
 			const params = { ...call.params };
 			delete params.ownerRunId;
-			if (params.provider === reflectionModelRelayProvider) {
+			if (typeof params.provider !== "string") {
+				throw new Error("Model relay provider is invalid.");
+			}
+			const provider = params.provider;
+			if (provider === reflectionModelRelayProvider) {
 				const analyzer = activityReflectionAnalyzer;
 				const bridge = activityReflectionRelayBridge;
 				if (!analyzer?.hasPendingInvocation(ownerRunId) || !bridge) {
@@ -500,19 +517,34 @@ const sidecar = new MastraSidecarClient({
 				}
 				return bridge.open(call.requestId, params);
 			}
-			if (params.provider !== agentModelRelayProvider) {
-				throw new Error("Model relay provider is not approved.");
-			}
-			if (dynamicPlanningModel?.hasPendingInvocation(ownerRunId)) {
+			const dynamicPlanningPending =
+				dynamicPlanningModel?.hasPendingInvocation(ownerRunId) ?? false;
+			if (dynamicPlanningPending) {
+				authorizeRunBoundModelRelay({
+					provider,
+					agentProvider: agentModelRelayProvider,
+					planningProvider: planningModelRelayProvider,
+					runPurpose: null,
+					dynamicPlanningPending,
+				});
 				return planningRelayBridge.open(call.requestId, params);
 			}
-			const bridge =
-				coordinator.modelPurposeForRun(ownerRunId) === "activity"
+			return coordinator.runBoundHostCall(ownerRunId, () => {
+				const bridge = authorizeRunBoundModelRelay({
+					provider,
+					agentProvider: agentModelRelayProvider,
+					planningProvider: planningModelRelayProvider,
+					runPurpose: coordinator.modelPurposeForRun(ownerRunId),
+					dynamicPlanningPending,
+				});
+				if (bridge === "planning") {
+					return planningRelayBridge.open(call.requestId, params);
+				}
+				return (bridge === "activity"
 					? activityAgentRelayBridge
-					: relayBridge;
-			return coordinator.runBoundHostCall(ownerRunId, () =>
-				bridge.open(call.requestId, params),
-			);
+					: relayBridge
+				).open(call.requestId, params);
+			});
 		}
 		if (call.method === "model/relay.abort") {
 			const ownerRunId = call.params.ownerRunId;
@@ -533,12 +565,16 @@ const sidecar = new MastraSidecarClient({
 					activityReflectionRelayBridge?.abort(params) ?? { aborted: false }
 				);
 			}
-			return coordinator.runBoundHostCall(ownerRunId, async () =>
-				(coordinator.modelPurposeForRun(ownerRunId) === "activity"
-					? activityAgentRelayBridge
-					: relayBridge
-				).abort(params),
-			);
+			return coordinator.runBoundHostCall(ownerRunId, async () => {
+				switch (coordinator.modelPurposeForRun(ownerRunId)) {
+					case "planning":
+						return planningRelayBridge.abort(params);
+					case "activity":
+						return activityAgentRelayBridge.abort(params);
+					default:
+						return relayBridge.abort(params);
+				}
+			});
 		}
 		return hostServices.handle(call.method, call.params);
 	},
@@ -563,12 +599,12 @@ activityAgentRelayBridge = new SidecarModelRelayBridge({
 });
 planningRelayBridge = new SidecarModelRelayBridge({
 	transport: planningModelRelay,
-	modelId: configuredModelId,
+	modelId: planningModelId,
 	send: (event) => sidecar.sendRelayEvent(event),
 });
 dynamicPlanningModel = new MastraPlanningModel({
 	sidecar,
-	modelVersion: `relay/${configuredModelId}`,
+	modelVersion: `relay/${planningModelId}`,
 	onInvocationAbort: (invocationId) => {
 		planningRelayBridge.abortRun(invocationId);
 	},
@@ -591,7 +627,9 @@ coordinator = new AgentRunCoordinator({
 	repository: agentRepository,
 	sidecar,
 	abortModelRelay: (runId) =>
-		relayBridge.abortRun(runId) || activityAgentRelayBridge.abortRun(runId),
+		relayBridge.abortRun(runId) ||
+		activityAgentRelayBridge.abortRun(runId) ||
+		planningRelayBridge.abortRun(runId),
 	toolPolicy: agentToolPolicy,
 	toolExecutor: agentToolExecutor,
 	onEvent: (event) => {
@@ -1810,6 +1848,7 @@ const clientLifecycle = new BackgroundAppLifecycle<BrowserWindow>({
 		authSession.beginShutdown();
 		relayBridge.beginShutdown();
 		activityAgentRelayBridge.beginShutdown();
+		planningRelayBridge.beginShutdown();
 		activityReflectionRelayBridge?.beginShutdown();
 		shutdownRequested = true;
 		agent.beginShutdown();
