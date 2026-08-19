@@ -1,5 +1,9 @@
 # Home-cloud native relay deployment
 
+> **状态：遗留部署资料。** 当前打包桌面端只通过 DataCenter
+> `/v1/chat/completions` 调用模型；不要为 SiliconFlow/DataCenter 迁移安装、启用或恢复
+> 这个 loopback-Ollama relay。本文仅保留作历史回归与下线参考。
+
 This directory is deployment material only. Do not deploy it until the
 corresponding PR is merged into `main`. It intentionally contains no Docker,
 FRP, Cloudflare, GPU, activity-Worker, or other-project changes.

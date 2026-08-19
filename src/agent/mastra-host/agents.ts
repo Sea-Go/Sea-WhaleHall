@@ -35,12 +35,17 @@ export interface MastraAgentSetOptions {
 	modelId: string;
 	baseUrl: string;
 	supportsStructuredOutputs: boolean;
+	planningProvider: string;
+	planningModelId: string;
+	planningBaseUrl: string;
+	planningSupportsStructuredOutputs: boolean;
 	reflectionProvider: string;
 	reflectionModelId: string;
 	reflectionBaseUrl: string;
 	reflectionSupportsStructuredOutputs: boolean;
 	storage: HostMastraStorage;
 	relay: ModelRelay;
+	planningRelay: ModelRelay;
 	reflectionRelay: ModelRelay;
 	executeTool: AgentToolExecutor;
 	executePlanningWorkflow: PlanningWorkflowDriver;
@@ -57,6 +62,13 @@ export function createMastraAgentSet(
 		supportsStructuredOutputs: options.supportsStructuredOutputs,
 	});
 	const model = provider.chatModel(options.modelId);
+	const planningProvider = createOpenAICompatible({
+		name: options.planningProvider,
+		baseURL: normalizeBaseUrl(options.planningBaseUrl),
+		fetch: options.planningRelay.fetch,
+		supportsStructuredOutputs: options.planningSupportsStructuredOutputs,
+	});
+	const planningModel = planningProvider.chatModel(options.planningModelId);
 	const reflectionProvider = createOpenAICompatible({
 		name: options.reflectionProvider,
 		baseURL: normalizeBaseUrl(options.reflectionBaseUrl),
@@ -104,7 +116,7 @@ export function createMastraAgentSet(
 			"draft 必须原样带回 calendarRevision，并根据提供的完整日历快照给出 exact schedule；每项包含 taskId、带 UTC offset 的 start/end 与原 IANA timeZone。无法排入的任务放入 unscheduledTaskIds。",
 			"日期使用 YYYY-MM-DD，分钟估算使用正整数。不要在 JSON 外添加文字。",
 		].join("\n"),
-		model,
+		model: planningModel,
 		maxRetries: 0,
 	});
 	const planningAnalysis = new Agent({
@@ -112,7 +124,7 @@ export function createMastraAgentSet(
 		name: "WhaleHall 动态计划分析器",
 		description: "为本地 PlanningRuntime 返回严格结构化的语义分析。",
 		instructions: PLANNING_MODEL_SYSTEM_PROMPT,
-		model,
+		model: planningModel,
 		tools: {},
 		maxRetries: 0,
 	});

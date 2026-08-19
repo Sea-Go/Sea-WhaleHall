@@ -102,6 +102,8 @@ import {
 } from "./transport";
 
 const defaultRelayBaseUrl = "https://model-relay.whalehall.invalid/v1";
+const defaultPlanningRelayBaseUrl =
+	"https://planning-relay.whalehall.invalid/v1";
 const defaultReflectionRelayBaseUrl =
 	"https://activity-relay.whalehall.invalid/v1";
 const maxConversationCharacters = 64 * 1024;
@@ -157,6 +159,7 @@ export class AgentHostRuntime {
 	private readonly onBackgroundError: (error: Error) => void;
 	private readonly dynamicPlanningAnalysisTimeoutMs: number;
 	private relay: ModelRelay | null = null;
+	private planningRelay: ModelRelay | null = null;
 	private reflectionRelay: ModelRelay | null = null;
 	private storage: HostMastraStorage | null = null;
 	private agents: MastraAgentSet | null = null;
@@ -287,6 +290,18 @@ export class AgentHostRuntime {
 		const baseUrl = params.model.baseUrl ?? defaultRelayBaseUrl;
 		const supportsStructuredOutputs =
 			params.model.supportsStructuredOutputs ?? true;
+		const planningProvider = requiredString(
+			params.planningModel?.provider,
+			"planningModel.provider",
+		);
+		const planningModelId = requiredString(
+			params.planningModel?.modelId,
+			"planningModel.modelId",
+		);
+		const planningBaseUrl =
+			params.planningModel.baseUrl ?? defaultPlanningRelayBaseUrl;
+		const planningSupportsStructuredOutputs =
+			params.planningModel.supportsStructuredOutputs ?? true;
 		const reflectionProvider = requiredString(
 			params.reflectionModel?.provider,
 			"reflectionModel.provider",
@@ -304,6 +319,10 @@ export class AgentHostRuntime {
 			modelId,
 			baseUrl,
 			supportsStructuredOutputs,
+			planningProvider,
+			planningModelId,
+			planningBaseUrl,
+			planningSupportsStructuredOutputs,
 			reflectionProvider,
 			reflectionModelId,
 			reflectionBaseUrl,
@@ -320,6 +339,11 @@ export class AgentHostRuntime {
 		}
 
 		this.relay = new ModelRelay(this.runBoundPeer, provider, modelId);
+		this.planningRelay = new ModelRelay(
+			this.runBoundPeer,
+			planningProvider,
+			planningModelId,
+		);
 		this.reflectionRelay = new ModelRelay(
 			this.runBoundPeer,
 			reflectionProvider,
@@ -331,12 +355,17 @@ export class AgentHostRuntime {
 			modelId,
 			baseUrl,
 			supportsStructuredOutputs,
+			planningProvider,
+			planningModelId,
+			planningBaseUrl,
+			planningSupportsStructuredOutputs,
 			reflectionProvider,
 			reflectionModelId,
 			reflectionBaseUrl,
 			reflectionSupportsStructuredOutputs,
 			storage: this.storage,
 			relay: this.relay,
+			planningRelay: this.planningRelay,
 			reflectionRelay: this.reflectionRelay,
 			executeTool: (input) => this.executeTool(input),
 			executePlanningWorkflow: (input) =>
@@ -472,7 +501,7 @@ export class AgentHostRuntime {
 		}
 		const analysis = parsedInput.data as PlanningModelAnalysisRequest;
 		const agents = this.requireAgents();
-		const relay = this.requireRelay();
+		const relay = this.requirePlanningRelay();
 		try {
 			return await relay.runInContext(
 				{ runId: invocationId, originatingRequestId: requestId },
@@ -1280,7 +1309,7 @@ export class AgentHostRuntime {
 		const planning = record.planning;
 		if (!planning) throw new Error("Planning run context is missing.");
 		const agents = this.requireAgents();
-		const relay = this.requireRelay();
+		const relay = this.requirePlanningRelay();
 		const abortSignal = AbortSignal.any([
 			record.controller.signal,
 			workflowAbortSignal,
@@ -1652,6 +1681,7 @@ export class AgentHostRuntime {
 			!this.initialized ||
 			!this.agents ||
 			!this.relay ||
+			!this.planningRelay ||
 			!this.reflectionRelay
 		) {
 			throw runtimeError(
@@ -1678,6 +1708,11 @@ export class AgentHostRuntime {
 	private requireReflectionRelay(): ModelRelay {
 		this.ensureReady();
 		return this.reflectionRelay as ModelRelay;
+	}
+
+	private requirePlanningRelay(): ModelRelay {
+		this.ensureReady();
+		return this.planningRelay as ModelRelay;
 	}
 
 	private requireStorage(): HostMastraStorage {

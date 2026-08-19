@@ -1716,6 +1716,9 @@ describe("AgentRunCoordinator", () => {
 		});
 		if (started.kind !== "success")
 			throw new Error("planning run was not accepted");
+		expect(harness.coordinator.modelPurposeForRun(started.data.runId)).toBe(
+			"planning",
+		);
 		const sidecarStart = harness.sidecar.calls.find(
 			(call) => call.method === "planning.start",
 		);

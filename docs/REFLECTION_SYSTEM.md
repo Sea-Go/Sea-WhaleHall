@@ -184,15 +184,18 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 
 家里云配置以仓库根目录的
 [`config.example.yaml`](../config.example.yaml) 为模板，并阅读
-[远端模型配置说明](REMOTE_MODEL_CONFIGURATION.md)。它有两个固定模型角色和一个默认关闭的
+[远端模型配置说明](REMOTE_MODEL_CONFIGURATION.md)。它有三个固定逻辑模型角色和一个默认关闭的
 `cloudSync` 策略：
 
 ```yaml
 reflection:
-  name: "qwen3:1.7b"
+  name: "reflection"
+
+planning:
+  name: "planning"
 
 agent:
-  name: "qwen3:1.7b"
+  name: "agent"
 
 cloudSync:
   enabled: false
@@ -203,7 +206,8 @@ cloudSync:
     presence: "off"
 ```
 
-运行时两个角色都使用代码固定的 production DataCenter origin。旧文件中的 `baseurl` 和
+运行时三个角色都使用代码固定的 production DataCenter origin；实际 Provider 模型由
+DataCenter 私有 YAML 路由。旧文件中的 `baseurl` 和
 `apikey` 只为兼容解析，其值在配置边界被丢弃，既不会发送或记录，也不会触发自动重写。
 无效、部分、symlink 或超大的配置会回退到安全默认值，且不会覆盖用户原文件。
 
@@ -241,7 +245,7 @@ DataCenter 验证当前 user、模型 allowlist、大小、限流与转发；它
 可证明的账号 owner。封窗与 owner-aware enqueue 之间的极小崩溃窗口在 P0 选择不上传，避免错误归属。
 累计值达到固定阈值 `1` 后，账本会将全部尚未消费的回执合并为一个串行后台 Agent job；只有该 job 成功后才
 扣除它精确的 `consumedScore`，失败、退出、断电或账号不匹配均不扣分且可恢复。模型和投递器都不会自行调用
-未定义的 Agent。reflection 与 `agent` 角色共用当前账号认证能力，但分别使用代码所有的 activity/agent
+未定义的 Agent。reflection 与 `agent` 角色共用当前账号认证能力，但分别使用代码所有的 reflection/agent
 purpose。未登录窗口不进入云 outbox；A 的 outbox、receipt、score/job ledger 与 B 隔离。网络、超时或服务端暂不可用时
 窗口停留在出站库并按退避重试，不会阻塞 Reflection 的 native cursor。Bearer 绝不交给 Rust 传感器、
 SQLite 收据、日志、Sidecar 或 Renderer，只保留在 Bun 的安全会话边界。

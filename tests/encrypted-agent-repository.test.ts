@@ -516,6 +516,8 @@ describe("EncryptedAgentRepository", () => {
 		repository.close();
 	});
 
+	// This deliberately performs 1,001 serial encrypted SQLite writes; keep CI
+	// headroom above Bun's five-second default without masking a stalled suite.
 	test("prunes DataCenter consumer audits by age and count per owning account", async () => {
 		const retentionMs = 31 * 24 * 60 * 60 * 1_000;
 		let nowMs = 0;
@@ -569,7 +571,7 @@ describe("EncryptedAgentRepository", () => {
 			repository.listDataCenterConsumerAudits("account-b"),
 		).resolves.toEqual([freshB]);
 		repository.close();
-	});
+	}, 30_000);
 
 	test("enforces client-message idempotency and preserves partial message state", async () => {
 		const { repository } = createRepository(new MemoryKeyStore());

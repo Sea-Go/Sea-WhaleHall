@@ -12,14 +12,27 @@ import { dirname, join } from "node:path";
 /** Every desktop model and sync request uses this code-owned DataCenter origin. */
 export const WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL =
 	"https://data.sea-ridethewindbreakthewaves.xyz";
-export const WHALEHALL_RELAY_MODEL = "qwen3:1.7b";
+/**
+ * Stable logical aliases understood by the DataCenter model gateway. The
+ * gateway's private config maps these roles to its actual provider model IDs;
+ * a desktop build never embeds a provider endpoint, key, or model catalog.
+ */
+export const WHALEHALL_AGENT_MODEL = "agent";
+export const WHALEHALL_PLANNING_MODEL = "planning";
+export const WHALEHALL_REFLECTION_MODEL = "reflection";
+const LEGACY_WHALEHALL_RELAY_MODEL = "qwen3:1.7b";
+
+export type WhaleHallRelayModel =
+	| typeof WHALEHALL_AGENT_MODEL
+	| typeof WHALEHALL_PLANNING_MODEL
+	| typeof WHALEHALL_REFLECTION_MODEL;
 
 const LEGACY_CONFIGURATION_SCHEMA_VERSION = "whalehall-client-config.v1";
 const MAXIMUM_CONFIGURATION_BYTES = 64 * 1024;
 const MAXIMUM_IGNORED_LEGACY_FIELD_LENGTH = 16_384;
 
 export type ModelConfiguration = {
-	name: typeof WHALEHALL_RELAY_MODEL;
+	name: WhaleHallRelayModel;
 };
 
 export type CloudSyncConsentLevel = "off" | "metadata" | "content";
@@ -45,16 +58,20 @@ export type CloudSyncConfiguration = {
  */
 export type ClientConfiguration = {
 	reflection: ModelConfiguration;
+	planning: ModelConfiguration;
 	agent: ModelConfiguration;
 	cloudSync: CloudSyncConfiguration;
 };
 
 export const DEFAULT_CLIENT_CONFIGURATION: ClientConfiguration = {
 	reflection: {
-		name: WHALEHALL_RELAY_MODEL,
+		name: WHALEHALL_REFLECTION_MODEL,
+	},
+	planning: {
+		name: WHALEHALL_PLANNING_MODEL,
 	},
 	agent: {
-		name: WHALEHALL_RELAY_MODEL,
+		name: WHALEHALL_AGENT_MODEL,
 	},
 	cloudSync: {
 		enabled: false,
@@ -88,12 +105,12 @@ export type LoadOrCreateClientConfigurationOptions = {
 };
 
 export type ModelRuntimeConfiguration = {
-	name: typeof WHALEHALL_RELAY_MODEL;
+	name: WhaleHallRelayModel;
 	baseurl: string;
 };
 
 export type ActivityReflectionRuntimeConfiguration = {
-	modelName: typeof WHALEHALL_RELAY_MODEL;
+	modelName: WhaleHallRelayModel;
 	scoreThreshold: number;
 };
 
@@ -143,6 +160,16 @@ export function agentModelConfigurationFromConfiguration(
 ): ModelRuntimeConfiguration {
 	return {
 		name: configuration.agent.name,
+		baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
+	};
+}
+
+/** Returns the DataCenter-backed model configuration for Planning workflows. */
+export function planningModelConfigurationFromConfiguration(
+	configuration: ClientConfiguration,
+): ModelRuntimeConfiguration {
+	return {
+		name: configuration.planning.name,
 		baseurl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 	};
 }
@@ -236,22 +263,35 @@ function normalizeClientConfiguration(value: unknown): {
 		!isRecord(value) ||
 		!(
 			hasExactKeys(value, ["reflection", "agent"]) ||
-			hasExactKeys(value, ["reflection", "agent", "cloudSync"])
+			hasExactKeys(value, ["reflection", "agent", "cloudSync"]) ||
+			hasExactKeys(value, ["reflection", "planning", "agent"]) ||
+			hasExactKeys(value, ["reflection", "planning", "agent", "cloudSync"])
 		)
 	) {
 		throw new Error("Client configuration root is invalid.");
 	}
+	const legacyTwoRoleConfiguration = value.planning === undefined;
 	const reflection = normalizeModelConfiguration(
 		value.reflection,
 		"reflection",
+		legacyTwoRoleConfiguration,
 	);
-	const agent = normalizeModelConfiguration(value.agent, "agent");
+	const planning =
+		value.planning === undefined
+			? structuredClone(DEFAULT_CLIENT_CONFIGURATION.planning)
+			: normalizeModelConfiguration(value.planning, "planning", false);
+	const agent = normalizeModelConfiguration(
+		value.agent,
+		"agent",
+		legacyTwoRoleConfiguration,
+	);
 	const cloudSyncConsentBlockedByRetiredOrigin = legacyAgentOriginChanged(
 		value.agent,
 	);
 	return {
 		configuration: {
 			reflection,
+			planning,
 			agent,
 			cloudSync: cloudSyncConsentBlockedByRetiredOrigin
 				? structuredClone(DEFAULT_CLIENT_CONFIGURATION.cloudSync)
@@ -283,7 +323,8 @@ function legacyAgentOriginChanged(value: unknown): boolean {
 
 function normalizeModelConfiguration(
 	value: unknown,
-	role: "reflection" | "agent",
+	role: WhaleHallRelayModel,
+	allowLegacyModelName: boolean,
 ): ModelConfiguration {
 	if (
 		!isRecord(value) ||
@@ -294,11 +335,15 @@ function normalizeModelConfiguration(
 	) {
 		throw new Error(`${role} model configuration is invalid.`);
 	}
-	if (value.name.trim() !== WHALEHALL_RELAY_MODEL) {
+	const name = value.name.trim();
+	if (
+		name !== role &&
+		(!allowLegacyModelName || name !== LEGACY_WHALEHALL_RELAY_MODEL)
+	) {
 		throw new Error(`${role} model name is not approved.`);
 	}
 	return {
-		name: WHALEHALL_RELAY_MODEL,
+		name: role,
 	};
 }
 

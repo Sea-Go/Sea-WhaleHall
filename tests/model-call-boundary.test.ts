@@ -36,19 +36,25 @@ describe("desktop model-call boundary", () => {
 		const sources = await sourceFiles();
 		const relayTransport =
 			sources.get("src/bun/model-relay-transport.ts") ?? "";
-		expect(relayTransport).toContain('"agent" | "activity" | "planning"');
+		expect(relayTransport).toContain('"planning"');
+		expect(relayTransport).toContain('"reflection"');
 		expect(relayTransport).toContain('"/v1/chat/completions"');
 		expect(relayTransport).not.toContain('"/v1/activity/completions"');
 
 		const main = sources.get("src/bun/index.ts") ?? "";
 		expect(main).toContain('purpose: "planning"');
+		expect(main).toContain('purpose: "reflection"');
 		expect(main).toContain("planningRelayBridge.open");
 		expect(main).toContain("hasPendingInvocation(ownerRunId)");
+		expect(main).toMatch(
+			/activityAgentRelayBridge\.beginShutdown\(\);\s+planningRelayBridge\.beginShutdown\(\);/u,
+		);
 		expect(
 			main.match(/dynamicPlanningModel\?\.cancelPending\(\)/gu),
 		).toHaveLength(2);
 		const auth = sources.get("src/bun/remote-auth-session.ts") ?? "";
 		expect(auth).toContain('purpose !== "planning"');
+		expect(auth).toContain('purpose !== "reflection"');
 		expect(auth).toContain('headers.set("x-whalehall-model-purpose", purpose)');
 	});
 

@@ -415,6 +415,8 @@ describe("ActivityWindowDeliveryService", () => {
 		}
 	});
 
+	// This fixture opens a legacy SQLite schema and executes every in-place
+	// migration; coverage CI needs bounded headroom above Bun's five-second default.
 	test("disable cleanup erases every unowned legacy copy while cutover stays pending", () => {
 		const directory = temporaryDirectory();
 		const databasePath = join(directory, "activity-window-worker.sqlite3");
@@ -530,7 +532,7 @@ describe("ActivityWindowDeliveryService", () => {
 		} finally {
 			store.close();
 		}
-	});
+	}, 30_000);
 
 	test("upgrades legacy receipts and a running job behind a crash-safe policy cutover", () => {
 		const directory = temporaryDirectory();

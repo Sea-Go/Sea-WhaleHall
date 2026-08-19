@@ -9,17 +9,20 @@ POST https://data.sea-ridethewindbreakthewaves.xyz/v1/chat/completions
 
 每个请求要求当前原生会话的 bearer、由 run ID 与 exact body 派生的
 `Idempotency-Key`，以及 Bun 主进程添加的
-`X-WhaleHall-Model-Purpose: agent|activity|planning`。DataCenter 只从认证 session 确定 user；
+`X-WhaleHall-Model-Purpose: agent|activity|planning|reflection`。DataCenter 只从认证 session 确定 user；
 Renderer、Sidecar 和 JSON body 都不能提供或覆盖 user/purpose/token。
 
 ## 配置
 
 ```yaml
 reflection:
-  name: "qwen3:1.7b"
+  name: "reflection"
+
+planning:
+  name: "planning"
 
 agent:
-  name: "qwen3:1.7b"
+  name: "agent"
 
 cloudSync:
   enabled: false
@@ -30,8 +33,13 @@ cloudSync:
     presence: "off"
 ```
 
-新配置的两个角色只允许选择固定模型名。DataCenter production origin 是代码所有常量，
-不能由安装包、环境变量或用户配置覆盖。旧文件中的 `reflection.baseurl`、
+三个名称是固定的逻辑角色，而不是真实的 Provider 模型 ID：`agent` 供对话和后台
+activity Agent 使用，`planning` 供任务规划和 Dynamic Planning 分析使用，`reflection`
+供 sealed-window activity reflection 使用。真实的上游模型、URL 和 API key 只由
+DataCenter 的私有 `config.yaml` 映射；桌面端不得保存、发送或推测它们。DataCenter
+production origin 是代码所有常量，不能由安装包、环境变量或用户配置覆盖。旧的双角色
+`qwen3:1.7b` 文件可在内存中迁移到三个逻辑角色，但新三角色配置不接受真实 Provider
+模型名。旧文件中的 `reflection.baseurl`、
 `reflection.apikey`、`agent.baseurl` 和 `agent.apikey` 仍可兼容解析，但其值在配置边界即被
 丢弃：不会发送、记录、返回给运行时，也不会触发自动重写。
 

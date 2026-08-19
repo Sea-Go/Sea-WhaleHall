@@ -2,10 +2,13 @@
 # DataCenter origin is fixed in application code; this file contains no model
 # credential or endpoint.
 reflection:
-  name: "qwen3:1.7b"
+  name: "reflection"
+
+planning:
+  name: "planning"
 
 agent:
-  name: "qwen3:1.7b"
+  name: "agent"
 
 # Content encryption is implemented but remains separately opt-in. Enabling it
 # also requires a per-domain "content" consent below.
