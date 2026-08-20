@@ -46,7 +46,28 @@ describe("AgentHostRuntime activity analysis", () => {
 			},
 		});
 		Reflect.set(runtime, "agents", {
-			conversation: {
+			activitySupportSupervisor: {
+				generate: async () => ({
+					object: {
+						route: "momentum",
+						certainty: "medium",
+						situation: "近期有目标相关推进",
+						userNeed: "保护当前推进节奏",
+					},
+				}),
+			},
+			activitySupportSpecialists: {
+				momentumCoach: {
+					generate: async () => ({
+						object: {
+							acknowledgement: "你似乎正在向目标靠近",
+							suggestion: "可以先完成眼前最小的一步",
+							question: null,
+						},
+					}),
+				},
+			},
+			activitySupportVoice: {
 				stream: async () => ({
 					fullStream: emptyAsyncIterable(),
 					finishReason: Promise.resolve("stop"),
@@ -70,26 +91,19 @@ describe("AgentHostRuntime activity analysis", () => {
 			params: {
 				runId: "activity-run",
 				activityJobId: "activity-job",
-				consumedScore: 0.75,
-				analyses: [
-					{
-						request_id: "worker-request",
-						events: [
-							{
-								source_event_ids: ["sealed-window"],
-								activity: "development",
-								goal_relevance: "direct",
-								confidence: 0.9,
-								reason_codes: ["worker"],
-								evidence: ["bounded worker evidence"],
-								started_at_ms: 1,
-								ended_at_ms: 2,
-							},
-						],
-						score: 0.75,
-						score_reason: "goal-relevant activity",
-					},
-				],
+				supportContext: {
+					schemaVersion: "activity-support-context.v1",
+					activeGoal: "完成当前功能",
+					recentApproaches: [],
+					observations: [
+						{
+							activity: "development",
+							goalRelation: "direct",
+							evidenceStrength: "strong",
+							signals: ["goal_progress"],
+						},
+					],
+				},
 			},
 		});
 
@@ -102,6 +116,119 @@ describe("AgentHostRuntime activity analysis", () => {
 				retryable: false,
 			},
 		});
+	});
+
+	test("downgrades an unsupported blocker claim and replaces unsafe voice text", async () => {
+		const messages: ProtocolMessage[] = [];
+		const peer: HostRequestPeer = {
+			async requestHost<TResult = unknown>(): Promise<TResult> {
+				throw new Error("The support fallback test must not issue host calls.");
+			},
+			subscribeRelay: () => () => {},
+		};
+		const writer: ProtocolWriter = {
+			async write(message) {
+				messages.push(message);
+			},
+		};
+		const runtime = new AgentHostRuntime(peer, writer, { now: () => 1_000 });
+		await runtime.dispatch({
+			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+			type: "request",
+			requestId: "initialize-fallback",
+			method: "runtime.initialize",
+			params: {
+				protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				model: { provider: "test", modelId: "test-model" },
+				planningModel: {
+					provider: "test-planning",
+					modelId: "test-planning-model",
+				},
+				reflectionModel: {
+					provider: "test-reflection",
+					modelId: "test-reflection-model",
+				},
+			},
+		});
+		let checkInCalls = 0;
+		Reflect.set(runtime, "agents", {
+			activitySupportSupervisor: {
+				generate: async () => ({
+					object: {
+						route: "possible_blocker",
+						certainty: "high",
+						situation: "模型武断地声称用户卡住",
+						userNeed: "模型建议拆解卡点",
+					},
+				}),
+			},
+			activitySupportSpecialists: {
+				checkInCompanion: {
+					generate: async () => {
+						checkInCalls += 1;
+						return {
+							object: {
+								acknowledgement: "我还不能确定你此刻的状态",
+								suggestion: "可以按自己的节奏选择下一步",
+								question: "你想继续、拆小问题，还是先休息？",
+							},
+						};
+					},
+				},
+			},
+			activitySupportVoice: {
+				stream: async () => ({
+					fullStream: emptyAsyncIterable(),
+					finishReason: Promise.resolve("stop"),
+					status: "completed",
+					text: Promise.resolve("你的得分是 0.9，继续加油。"),
+				}),
+			},
+		});
+		Reflect.set(runtime, "relay", {
+			runInContext: async <TResult>(
+				_context: unknown,
+				operation: () => Promise<TResult>,
+			): Promise<TResult> => operation(),
+		});
+
+		await runtime.dispatch({
+			protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+			type: "request",
+			requestId: "activity-request-fallback",
+			method: "activity.start",
+			params: {
+				runId: "activity-run-fallback",
+				activityJobId: "activity-job-fallback",
+				supportContext: {
+					schemaVersion: "activity-support-context.v1",
+					activeGoal: "完成当前功能",
+					recentApproaches: [],
+					observations: [
+						{
+							activity: "development",
+							goalRelation: "direct",
+							evidenceStrength: "strong",
+							signals: ["goal_progress"],
+						},
+					],
+				},
+			},
+		});
+
+		const terminal = await waitForTerminal(messages, "activity-run-fallback");
+		expect(checkInCalls).toBe(1);
+		expect(terminal.event).toEqual({
+			kind: "run.completed",
+			result: {
+				activityJobId: "activity-job-fallback",
+				summary:
+					"我还不太确定你现在更需要哪种帮助。你可以按自己的节奏选择继续、拆小问题或先休息。你更想从哪一种开始？",
+			},
+		});
+		expect(JSON.stringify(terminal.event)).not.toMatch(
+			/(?:分数|评分|得分|0\.9)/u,
+		);
 	});
 });
 

@@ -44,6 +44,7 @@ describe("AgentRunCoordinator", () => {
 			score_reason: "goal-relevant activity",
 			events: [
 				{
+					action: "确定：联系张三并处理账号 ABC123",
 					source_event_ids: ["sealed-window-only"],
 					activity: "development",
 					goal_relevance: "direct",
@@ -62,6 +63,10 @@ describe("AgentRunCoordinator", () => {
 			windowStartedAtMs: 1,
 			windowEndedAtMs: 2,
 			analysis,
+			supportPersonalization: {
+				activeGoal: "完成主动反馈隐私边界",
+				recentApproaches: ["small_step", "problem_breakdown"],
+			},
 			archivedAtMs: harness.clock(),
 			consumedAtMs: null,
 			consumedRunId: null,
@@ -73,12 +78,55 @@ describe("AgentRunCoordinator", () => {
 			consumedScore: 0,
 			analyses: [analysis],
 		});
-		expect(harness.sidecar.calls).toEqual([
-			expect.objectContaining({ method: "activity.start" }),
-		]);
-		expect(JSON.stringify(harness.sidecar.calls[0]?.params)).not.toContain(
-			"raw_event",
+		const sidecarStart = harness.sidecar.calls.find(
+			(call) => call.method === "activity.start",
 		);
+		expect(sidecarStart?.params).toEqual({
+			runId,
+			activityJobId: "activity-job-private",
+			supportContext: {
+				schemaVersion: "activity-support-context.v1",
+				activeGoal: "完成主动反馈隐私边界",
+				recentApproaches: ["small_step", "problem_breakdown"],
+				observations: [
+					{
+						activity: "development",
+						goalRelation: "direct",
+						evidenceStrength: "strong",
+						signals: ["goal_progress"],
+					},
+				],
+			},
+		});
+		expect(Object.keys(sidecarStart?.params ?? {}).sort()).toEqual([
+			"activityJobId",
+			"runId",
+			"supportContext",
+		]);
+		const sourceEventId = analysis.events.at(0)?.source_event_ids.at(0);
+		const activityAction = analysis.events.at(0)?.action;
+		if (!sourceEventId || !activityAction) {
+			throw new Error(
+				"Expected private Worker fields in the analysis fixture.",
+			);
+		}
+		const sidecarPayload = JSON.stringify(sidecarStart?.params);
+		for (const disallowed of [
+			"raw_event",
+			"score",
+			"score_reason",
+			"consumedScore",
+			"request_id",
+			"source_event_ids",
+			analysis.request_id,
+			sourceEventId,
+			activityAction,
+			"张三",
+			"ABC123",
+			analysis.score_reason,
+		]) {
+			expect(sidecarPayload).not.toContain(disallowed);
+		}
 		expect(harness.coordinator.modelPurposeForRun(runId)).toBe("activity");
 
 		harness.coordinator.acceptSidecarEvent(
@@ -105,6 +153,7 @@ describe("AgentRunCoordinator", () => {
 			expect.objectContaining({
 				kind: "activity-analysis",
 				consumedScore: 0,
+				analyses: [analysis],
 			}),
 		);
 		expect(JSON.stringify(persisted?.input)).not.toContain("raw_event");
@@ -126,6 +175,57 @@ describe("AgentRunCoordinator", () => {
 				status: "completed",
 			}),
 		]);
+	});
+
+	test("does not dispatch support context after the activity session changes during archive loading", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-support-context-session-race";
+		const analysis = activityAnalysisResult(
+			"worker-request-support-context-session-race",
+			"sealed-support-context-session-race",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-support-context-session-race",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		const archiveReadStarted = deferred();
+		const releaseArchiveRead = deferred();
+		const getArchive = harness.repository.getProactiveFeedbackEventStream.bind(
+			harness.repository,
+		);
+		harness.repository.getProactiveFeedbackEventStream = async (...args) => {
+			archiveReadStarted.resolve();
+			await releaseArchiveRead.promise;
+			return getArchive(...args);
+		};
+
+		const starting = harness.coordinator.startActivityAnalysis({
+			jobId: "activity-job-support-context-session-race",
+			runId,
+			requestId: "activity-request-support-context-session-race",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		await archiveReadStarted.promise;
+		harness.account.current = null;
+		harness.account.generation += 1;
+		releaseArchiveRead.resolve();
+
+		await expect(starting).rejects.toThrow("登录会话");
+		expect(
+			harness.sidecar.calls.filter((call) => call.method === "activity.start"),
+		).toEqual([]);
+		expect(harness.sidecar.tracked.has(runId)).toBeFalse();
+		await expect(
+			harness.repository.getRun("account-a", runId),
+		).resolves.toBeNull();
 	});
 
 	test("does not dispatch an activity model request after a durable clear marker wins the final handoff", async () => {

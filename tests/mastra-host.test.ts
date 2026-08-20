@@ -298,7 +298,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("uses the conversation Agent for proactive feedback without memory or local Tools", async () => {
+	test("runs activity support through supervisor, specialist, and voice without Tools or Memory", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -307,42 +307,22 @@ describe("Mastra Node sidecar", () => {
 		await harness.request("activity.start", {
 			runId: "activity-run-1",
 			activityJobId: "activity-job-1",
-			consumedScore: 0,
-			analyses: [
-				{
-					request_id: "worker-request-1",
-					score: 0.8,
-					score_reason: "goal-relevant activity",
-					events: [
-						{
-							source_event_ids: ["sealed-window-id"],
-							activity: "development",
-							goal_relevance: "direct",
-							confidence: 0.9,
-							reason_codes: ["worker"],
-							evidence: ["Worker-produced evidence"],
-							started_at_ms: 1,
-							ended_at_ms: 2,
-						},
-					],
-				},
-			],
+			supportContext: activitySupportContextFixture(),
 		});
 		const terminal = await harness.waitForRunTerminal("activity-run-1");
 		expect(terminal.event).toMatchObject({
 			kind: "run.completed",
 			result: {
 				activityJobId: "activity-job-1",
-				summary: "今天先完成最重要的一件事。",
+				summary: "你似乎正在稳步推进。若愿意，可以先完成眼前这一小步。",
 			},
 		});
 		expect(host.calls).toContain("model/relay.open");
-		expect(host.modelCalls).toEqual([
-			{
-				provider: "whalehall-test",
-				modelId: "test-chat-model",
-				runId: "activity-run-1",
-			},
+		expect(host.modelBodies).toHaveLength(3);
+		expect(host.activitySupportStages).toEqual([
+			"supervisor",
+			"specialist",
+			"voice",
 		]);
 		expect(
 			host.calls.some(
@@ -353,12 +333,30 @@ describe("Mastra Node sidecar", () => {
 					method.startsWith("planning/"),
 			),
 		).toBeFalse();
-		const modelInput = JSON.stringify(host.modelBodies[0]?.messages);
-		expect(modelInput).toContain("WhaleHall 桌面助手");
-		expect(modelInput).toContain("以 WhaleHall 对话助手一致的人格");
-		expect(modelInput).toContain("Worker-produced evidence");
-		expect(modelInput).not.toContain("raw_event");
-		expect(host.modelBodies[0]?.tools).toBeUndefined();
+		expect(host.modelBodies.every((body) => body.tools === undefined)).toBe(
+			true,
+		);
+		const modelInput = host.modelBodies
+			.map((body) => JSON.stringify(body.messages))
+			.join("\n");
+		expect(modelInput).toContain("ACTIVE_SUPPORT_CONTEXT_JSON");
+		expect(modelInput).toContain("ASSESSMENT_JSON");
+		expect(modelInput).toContain("SUPPORT_BRIEF_JSON");
+		for (const forbidden of [
+			"score",
+			"score_reason",
+			"consumedScore",
+			"worker-request-1",
+			"sealed-window-id",
+			"activity-run-1",
+			"activity-job-1",
+			"raw_event",
+		]) {
+			expect(modelInput).not.toContain(forbidden);
+		}
+		expect(JSON.stringify(terminal.event)).not.toMatch(
+			/(?:score|评分|分数|得分|百分比)/iu,
+		);
 		await harness.shutdown();
 	}, 30_000);
 
@@ -371,26 +369,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.request("activity.start", {
 			runId: "activity-run-tool-violation",
 			activityJobId: "activity-job-tool-violation",
-			consumedScore: 1,
-			analyses: [
-				{
-					request_id: "worker-request-tool-violation",
-					score: 1,
-					score_reason: "goal-relevant activity",
-					events: [
-						{
-							source_event_ids: ["sealed-window-tool-violation"],
-							activity: "development",
-							goal_relevance: "direct",
-							confidence: 0.9,
-							reason_codes: ["worker"],
-							evidence: ["Worker summary only"],
-							started_at_ms: 1,
-							ended_at_ms: 2,
-						},
-					],
-				},
-			],
+			supportContext: activitySupportContextFixture(),
 		});
 		const terminal = await harness.waitForRunTerminal(
 			"activity-run-tool-violation",
@@ -402,6 +381,13 @@ describe("Mastra Node sidecar", () => {
 				retryable: false,
 			},
 		});
+		expect(host.modelBodies).toHaveLength(3);
+		expect(host.activitySupportStages).toEqual([
+			"supervisor",
+			"specialist",
+			"voice",
+		]);
+		expect(host.calls.some((method) => method.startsWith("tool/"))).toBe(false);
 		await harness.shutdown();
 	}, 30_000);
 
@@ -419,26 +405,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.request("activity.start", {
 			runId: "activity-run-raw-tool-markup",
 			activityJobId: "activity-job-raw-tool-markup",
-			consumedScore: 1,
-			analyses: [
-				{
-					request_id: "worker-request-raw-tool-markup",
-					score: 1,
-					score_reason: "goal-relevant activity",
-					events: [
-						{
-							source_event_ids: ["sealed-window-raw-tool-markup"],
-							activity: "development",
-							goal_relevance: "direct",
-							confidence: 0.9,
-							reason_codes: ["worker"],
-							evidence: ["Worker summary only"],
-							started_at_ms: 1,
-							ended_at_ms: 2,
-						},
-					],
-				},
-			],
+			supportContext: activitySupportContextFixture(),
 		});
 		const terminal = await harness.waitForRunTerminal(
 			"activity-run-raw-tool-markup",
@@ -1089,6 +1056,8 @@ class FakeHost {
 		Pick<ModelRelayOpenParams, "provider" | "modelId" | "runId">
 	> = [];
 	readonly modelOrigins: string[] = [];
+	readonly activitySupportStages: Array<"supervisor" | "specialist" | "voice"> =
+		[];
 	readonly workflowSnapshotCalls: Array<{
 		method: string;
 		params: Record<string, unknown>;
@@ -1461,6 +1430,37 @@ class FakeHost {
 			);
 			return;
 		}
+		const activitySupportStage = activitySupportStageForModelBody(body);
+		if (activitySupportStage) {
+			this.activitySupportStages.push(activitySupportStage);
+			if (activitySupportStage === "supervisor") {
+				await this.completeModelRelay(
+					request,
+					params,
+					JSON.stringify({
+						route: "momentum",
+						certainty: "medium",
+						situation: "用户似乎正在稳步推进当前目标。",
+						userNeed: "一个不打扰的下一步建议。",
+					}),
+					send,
+				);
+				return;
+			}
+			if (activitySupportStage === "specialist") {
+				await this.completeModelRelay(
+					request,
+					params,
+					JSON.stringify({
+						acknowledgement: "你已经投入了一段时间。",
+						suggestion: "如果愿意，可以先完成眼前这一小步。",
+						question: null,
+					}),
+					send,
+				);
+				return;
+			}
+		}
 		await send(
 			successResponse(request.requestId, {
 				relayId: params.relayId,
@@ -1471,7 +1471,7 @@ class FakeHost {
 		if (this.options.holdModelOpen) return;
 		if (
 			this.options.activityToolViolation &&
-			params.runId === "activity-run-tool-violation"
+			activitySupportStage === "voice"
 		) {
 			await this.streamRelay(
 				request,
@@ -1481,6 +1481,15 @@ class FakeHost {
 					"calendar_create_event",
 					{},
 				),
+				send,
+			);
+			return;
+		}
+		if (activitySupportStage === "voice" && !this.options.rawToolMarkupChunks) {
+			await this.streamRelay(
+				request,
+				params,
+				openAiSse("你似乎正在稳步推进。若愿意，可以先完成眼前这一小步。"),
 				send,
 			);
 			return;
@@ -1556,6 +1565,37 @@ class FakeHost {
 		await this.streamRelay(request, params, openAiSse(content), send);
 	}
 
+	private async completeModelRelay(
+		request: Extract<SidecarHostRequest, { method: "model/relay.open" }>,
+		params: ModelRelayOpenParams,
+		content: string,
+		send: (message: ProtocolMessage) => Promise<void>,
+	): Promise<void> {
+		await send(
+			successResponse(request.requestId, {
+				relayId: params.relayId,
+				status: 200,
+				headers: { "content-type": "application/json" },
+				completed: true,
+				bodyBase64: Buffer.from(
+					JSON.stringify({
+						id: "chatcmpl-activity-support",
+						object: "chat.completion",
+						created: 1,
+						model: params.modelId,
+						choices: [
+							{
+								index: 0,
+								message: { role: "assistant", content },
+								finish_reason: "stop",
+							},
+						],
+					}),
+				).toString("base64"),
+			}),
+		);
+	}
+
 	private async streamRelay(
 		request: Extract<SidecarHostRequest, { method: "model/relay.open" }>,
 		params: ModelRelayOpenParams,
@@ -1589,6 +1629,32 @@ class FakeHost {
 			event: { kind: "model/relay.end" },
 		});
 	}
+}
+
+function activitySupportStageForModelBody(
+	body: Record<string, unknown>,
+): "supervisor" | "specialist" | "voice" | null {
+	const messages = JSON.stringify(body.messages);
+	if (messages.includes("SUPPORT_BRIEF_JSON=")) return "voice";
+	if (messages.includes("ASSESSMENT_JSON=")) return "specialist";
+	if (messages.includes("ACTIVE_SUPPORT_CONTEXT_JSON=")) return "supervisor";
+	return null;
+}
+
+function activitySupportContextFixture() {
+	return {
+		schemaVersion: "activity-support-context.v1",
+		activeGoal: "完成 WhaleHall Beta",
+		recentApproaches: [],
+		observations: [
+			{
+				activity: "development",
+				goalRelation: "direct",
+				evidenceStrength: "strong",
+				signals: ["goal_progress"],
+			},
+		],
+	};
 }
 
 function dynamicPlanningProposalFixture(): Record<string, unknown> {
