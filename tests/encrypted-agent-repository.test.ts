@@ -21,6 +21,7 @@ import {
 	AgentPermissionRevisionConflictError,
 	CalendarRevisionConflictError,
 	EncryptedAgentRepository,
+	type ProactiveFeedbackEventStreamArchive,
 	ProactiveFeedbackPolicyDisabledError,
 	ProactiveFeedbackPolicyRevisionConflictError,
 } from "../src/bun/encrypted-agent-repository";
@@ -1146,10 +1147,14 @@ describe("EncryptedAgentRepository", () => {
 			windowStartedAtMs: 1_000,
 			windowEndedAtMs: 2_000,
 			analysis,
+			supportPersonalization: {
+				activeGoal: "完成不可变归档回放",
+				recentApproaches: ["small_step"],
+			},
 			archivedAtMs: 3_000,
 			consumedAtMs: null,
 			consumedRunId: null,
-		};
+		} satisfies ProactiveFeedbackEventStreamArchive;
 		await repository.archiveProactiveFeedbackEventStream(archive);
 		await expect(
 			repository.isProactiveFeedbackClearPending("account-a"),
@@ -1607,10 +1612,14 @@ describe("EncryptedAgentRepository", () => {
 			windowStartedAtMs: 1_000,
 			windowEndedAtMs: 2_000,
 			analysis,
+			supportPersonalization: {
+				activeGoal: "完成不可变归档回放",
+				recentApproaches: ["small_step"],
+			},
 			archivedAtMs: 3_000,
 			consumedAtMs: null,
 			consumedRunId: null,
-		};
+		} satisfies ProactiveFeedbackEventStreamArchive;
 		await expect(
 			repository.archiveProactiveFeedbackEventStream(first),
 		).resolves.toEqual(first);
@@ -1635,6 +1644,55 @@ describe("EncryptedAgentRepository", () => {
 				archivedAtMs: 20_000,
 			}),
 		).rejects.toEqual(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+		await expect(
+			recovered.archiveProactiveFeedbackEventStream({
+				...first,
+				supportPersonalization: {
+					activeGoal: "重试时改变的目标不得覆盖原快照",
+					recentApproaches: ["small_step"],
+				},
+				archivedAtMs: 20_000,
+			}),
+		).rejects.toEqual(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+		recovered.close();
+	});
+
+	test("replays a legacy archive without support personalization when a current snapshot is available", async () => {
+		const keys = new MemoryKeyStore();
+		const { path, repository } = createRepository(keys, () => 10_000);
+		const analysis = activityAnalysisFixture("stream-legacy-support-replay");
+		const legacy = {
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "window-legacy-support-replay",
+			windowStartedAtMs: 1_000,
+			windowEndedAtMs: 2_000,
+			analysis,
+			archivedAtMs: 3_000,
+			consumedAtMs: null,
+			consumedRunId: null,
+		} satisfies ProactiveFeedbackEventStreamArchive;
+		await expect(
+			repository.archiveProactiveFeedbackEventStream(legacy),
+		).resolves.toEqual(legacy);
+		repository.close();
+
+		const recovered = new EncryptedAgentRepository({
+			databasePath: path,
+			installationId: "install-1",
+			keyStore: keys,
+			now: () => 20_000,
+		});
+		await expect(
+			recovered.archiveProactiveFeedbackEventStream({
+				...legacy,
+				supportPersonalization: {
+					activeGoal: "旧归档不能被新的目标覆盖",
+					recentApproaches: ["small_step"],
+				},
+				archivedAtMs: 20_000,
+			}),
+		).resolves.toEqual(legacy);
 		recovered.close();
 	});
 

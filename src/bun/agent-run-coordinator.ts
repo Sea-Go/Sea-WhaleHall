@@ -10,6 +10,7 @@ import {
 	MAXIMUM_ACTIVITY_ANALYSIS_RESULTS,
 	serializedActivityAnalysisLength,
 } from "../shared/activity-analysis-contract";
+import { createActivitySupportContextFromPersonalization } from "../shared/activity-support";
 import {
 	AGENT_RUN_EVENT_SCHEMA_VERSION,
 	AGENT_RUN_SNAPSHOT_SCHEMA_VERSION,
@@ -934,6 +935,33 @@ export class AgentRunCoordinator
 					"Activity analysis run id already exists for this account.",
 				);
 			}
+			const latestAnalysis = input.analyses.at(-1);
+			if (!latestAnalysis) {
+				throw new Error("Activity support analysis is required.");
+			}
+			const latestArchive = await this.inSession(identity, () =>
+				this.repository.getProactiveFeedbackEventStream(
+					identity.accountId,
+					latestAnalysis.request_id,
+				),
+			);
+			if (
+				latestArchive === null ||
+				JSON.stringify(latestArchive.analysis) !==
+					JSON.stringify(latestAnalysis)
+			) {
+				throw new Error(
+					"Activity support context archive identity is invalid.",
+				);
+			}
+			const supportContext = createActivitySupportContextFromPersonalization(
+				latestArchive.supportPersonalization ?? {
+					activeGoal: null,
+					recentApproaches: [],
+				},
+				input.analyses,
+			);
+			this.assertSession(identity);
 			const now = this.now();
 			const snapshot: AgentRunSnapshot = {
 				schemaVersion: AGENT_RUN_SNAPSHOT_SCHEMA_VERSION,
@@ -998,8 +1026,7 @@ export class AgentRunCoordinator
 					{
 						runId: input.runId,
 						activityJobId: input.jobId,
-						consumedScore: input.consumedScore,
-						analyses: structuredClone(input.analyses),
+						supportContext: structuredClone(supportContext),
 					},
 					{ requestId: input.requestId },
 				)

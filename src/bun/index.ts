@@ -30,6 +30,7 @@ import {
 	createTimelineV2Runtime,
 	type TimelineV2Runtime,
 } from "../agent/timeline-v2/runtime";
+import { createActivitySupportPersonalization } from "../shared/activity-support";
 import type {
 	AgentRunEventEnvelope,
 	InternalAgentRunEventEnvelope,
@@ -2572,6 +2573,20 @@ async function startActivityWindowDelivery(
 						"Activity archive session changed before persistence.",
 					);
 				}
+				const recentFeedback = await agentRepository.listProactiveFeedback(
+					archiveOwner.accountId,
+					{ limit: 2 },
+				);
+				if (
+					!isAttemptCurrent() ||
+					!authSession.isCurrentSession(archiveOwner) ||
+					proactiveFeedbackRuntime.cloudOwnerAccountId() !==
+						archiveOwner.accountId
+				) {
+					throw new Error(
+						"Activity archive session changed while snapshotting support context.",
+					);
+				}
 				await agentRepository.archiveProactiveFeedbackEventStream({
 					accountId: archiveOwner.accountId,
 					id: requestId,
@@ -2579,6 +2594,10 @@ async function startActivityWindowDelivery(
 					windowStartedAtMs: sourceWindow.startedAtMs,
 					windowEndedAtMs: sourceWindow.endedAtMs,
 					analysis,
+					supportPersonalization: createActivitySupportPersonalization({
+						activeGoal: sourceWindow.goal,
+						recentFeedback: recentFeedback.items,
+					}),
 					archivedAtMs,
 					consumedAtMs: null,
 					consumedRunId: null,

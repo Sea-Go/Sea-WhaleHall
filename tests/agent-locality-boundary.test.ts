@@ -16,6 +16,9 @@ describe("local Agent production boundary", () => {
 		const dispatcher = source("src/bun/activity-analysis-dispatcher.ts");
 		const activityAgent = source("src/agent/mastra-host/agents.ts");
 		const activityRuntime = source("src/agent/mastra-host/runtime.ts");
+		const activitySupport = source(
+			"src/agent/mastra-host/activity-support-team.ts",
+		);
 
 		expect(bunComposition).toContain("ActivityWindowDeliveryService");
 		expect(clientConfiguration).toContain(
@@ -52,8 +55,18 @@ describe("local Agent production boundary", () => {
 			"loadActivityReflectionNativeSkillContext",
 		);
 		expect(activityRuntime).toContain('toolChoice: "none"');
-		expect(activityRuntime).toContain("不得要求、猜测或复述原始桌面内容");
+		expect(activityAgent).toContain(
+			'id: "whalehall-activity-support-supervisor"',
+		);
+		expect(activityAgent).toContain('id: "whalehall-activity-support-voice"');
+		expect(activitySupport).toContain("不要复述桌面内容");
+		expect(activitySupport).toContain("不得输出分数");
+		expect(activityRuntime).toContain(
+			"agents.activitySupportSupervisor.generate(",
+		);
+		expect(activityRuntime).toContain("agents.activitySupportVoice.stream(");
 		expect(activityRuntime).toContain("agents.conversation.stream(");
+		expect(activityRuntime).not.toContain("activityConversationPrompt");
 		expect(activityRuntime).not.toContain("agents.activity.stream(");
 	});
 

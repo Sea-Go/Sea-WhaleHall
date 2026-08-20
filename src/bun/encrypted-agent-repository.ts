@@ -7,6 +7,10 @@ import {
 	isActivityAnalysisWorkerResult,
 } from "../shared/activity-analysis-contract";
 import {
+	type ActivitySupportPersonalization,
+	isActivitySupportPersonalization,
+} from "../shared/activity-support";
+import {
 	AGENT_READ_PERMISSION_IDS,
 	type AgentReadPermissionsSnapshot,
 } from "../shared/agent-permissions";
@@ -143,6 +147,8 @@ export interface ProactiveFeedbackEventStreamArchive {
 	windowStartedAtMs: number;
 	windowEndedAtMs: number;
 	analysis: ActivityAnalysisWorkerResult;
+	/** Missing only on encrypted archives written before personalization v1. */
+	supportPersonalization?: ActivitySupportPersonalization;
 	archivedAtMs: number;
 	consumedAtMs: number | null;
 	consumedRunId: string | null;
@@ -2275,6 +2281,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			"archive",
 			row,
 		);
+		const supportPersonalization =
+			isRecord(payload) && payload.supportPersonalization !== undefined
+				? (payload.supportPersonalization as ActivitySupportPersonalization)
+				: undefined;
 		const record: ProactiveFeedbackEventStreamArchive = {
 			accountId,
 			id: row.stream_id,
@@ -2284,6 +2294,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			analysis: isRecord(payload)
 				? (payload.analysis as ActivityAnalysisWorkerResult)
 				: (null as never),
+			...(supportPersonalization === undefined
+				? {}
+				: { supportPersonalization }),
 			archivedAtMs: row.archived_at_ms,
 			consumedAtMs: row.consumed_at_ms,
 			consumedRunId: row.consumed_run_id,
@@ -2294,7 +2307,9 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			payload.windowStartedAtMs !== row.window_started_at_ms ||
 			payload.windowEndedAtMs !== row.window_ended_at_ms ||
 			!isActivityAnalysisWorkerResult(payload.analysis) ||
-			payload.analysis.request_id !== streamId
+			payload.analysis.request_id !== streamId ||
+			(payload.supportPersonalization !== undefined &&
+				!isActivitySupportPersonalization(payload.supportPersonalization))
 		) {
 			throw decryptionFailure();
 		}
@@ -4639,12 +4654,20 @@ function proactiveFeedbackArchivePayload(
 	windowStartedAtMs: number;
 	windowEndedAtMs: number;
 	analysis: ActivityAnalysisWorkerResult;
+	supportPersonalization?: ActivitySupportPersonalization;
 } {
 	return {
 		sourceWindowId: record.sourceWindowId,
 		windowStartedAtMs: record.windowStartedAtMs,
 		windowEndedAtMs: record.windowEndedAtMs,
 		analysis: structuredClone(record.analysis),
+		...(record.supportPersonalization === undefined
+			? {}
+			: {
+					supportPersonalization: structuredClone(
+						record.supportPersonalization,
+					),
+				}),
 	};
 }
 
@@ -4658,7 +4681,13 @@ function sameProactiveFeedbackArchive(
 		left.sourceWindowId === right.sourceWindowId &&
 		left.windowStartedAtMs === right.windowStartedAtMs &&
 		left.windowEndedAtMs === right.windowEndedAtMs &&
-		JSON.stringify(left.analysis) === JSON.stringify(right.analysis)
+		JSON.stringify(left.analysis) === JSON.stringify(right.analysis) &&
+		// Archives written before support personalization remain immutable
+		// compatible replay records. They intentionally use the empty
+		// personalization fallback at dispatch time rather than being rewritten.
+		(left.supportPersonalization === undefined ||
+			JSON.stringify(left.supportPersonalization) ===
+				JSON.stringify(right.supportPersonalization))
 	);
 }
 
@@ -4680,6 +4709,14 @@ function validateProactiveFeedbackEventStream(
 	) {
 		throw invalidArgument(
 			"Proactive feedback event stream analysis is invalid.",
+		);
+	}
+	if (
+		record.supportPersonalization !== undefined &&
+		!isActivitySupportPersonalization(record.supportPersonalization)
+	) {
+		throw invalidArgument(
+			"Proactive feedback support personalization is invalid.",
 		);
 	}
 	if ((record.consumedAtMs === null) !== (record.consumedRunId === null)) {

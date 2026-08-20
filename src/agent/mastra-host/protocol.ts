@@ -1,4 +1,4 @@
-import type { ActivityAnalysisWorkerResult } from "../../shared/activity-analysis-contract";
+import type { ActivitySupportContext } from "../../shared/activity-support";
 import type { PlanningModelAnalysisRequest } from "../planning/model";
 
 export const AGENT_HOST_PROTOCOL_VERSION = 2 as const;
@@ -145,13 +145,10 @@ export interface PlanningAnalyzeParams {
 	analysis: PlanningModelAnalysisRequest;
 }
 
-export type { ActivityAnalysisWorkerResult } from "../../shared/activity-analysis-contract";
-
 export interface ActivityAnalysisStartParams {
 	runId: string;
 	activityJobId: string;
-	consumedScore: number;
-	analyses: readonly ActivityAnalysisWorkerResult[];
+	supportContext: ActivitySupportContext;
 }
 
 /** A local, no-persistence model invocation for one sealed activity window. */

@@ -2,12 +2,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent } from "@mastra/core/agent";
 import { RequestContext } from "@mastra/core/request-context";
 import type { MastraModelOutput } from "@mastra/core/stream";
+import { MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS } from "../../shared/activity-analysis-contract";
 import {
-	isActivityAnalysisWorkerResult,
-	MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS,
-	MAXIMUM_ACTIVITY_ANALYSIS_RESULTS,
-	serializedActivityAnalysisLength,
-} from "../../shared/activity-analysis-contract";
+	type ActivitySupportContext,
+	isActivitySupportContext,
+} from "../../shared/activity-support";
 import {
 	activityReflectionModelOutputSchema,
 	createActivityReflectionProviderOutputSchema,
@@ -27,6 +26,19 @@ import {
 	activityReflectionWorkflowInputSchema,
 	activityReflectionWorkflowOutcomeSchema,
 } from "./activity-reflection-workflow";
+import {
+	activitySupportAssessmentPrompt,
+	activitySupportAssessmentSchema,
+	activitySupportBriefSchema,
+	activitySupportSpecialistPrompt,
+	activitySupportVoicePrompt,
+	fallbackActivitySupportBrief,
+	fallbackActivitySupportMessage,
+	guardActivitySupportAssessment,
+	isSafeActivitySupportBrief,
+	isSafeActivitySupportMessage,
+	specialistKeyForRoute,
+} from "./activity-support-team";
 import { createMastraAgentSet, type MastraAgentSet } from "./agents";
 import {
 	type CalendarSnapshot,
@@ -58,7 +70,6 @@ import {
 } from "./planning-workflow";
 import {
 	type ActivityAnalysisStartParams,
-	type ActivityAnalysisWorkerResult,
 	type ActivityReflectionAnalyzeParams,
 	AGENT_HOST_METHODS,
 	AGENT_HOST_PROTOCOL_VERSION,
@@ -128,8 +139,7 @@ interface PlanningRunContext {
 
 interface ActivityAnalysisRunContext {
 	activityJobId: string;
-	consumedScore: number;
-	analyses: readonly ActivityAnalysisWorkerResult[];
+	supportContext: ActivitySupportContext;
 }
 
 interface RunRecord {
@@ -466,16 +476,13 @@ export class AgentHostRuntime {
 		this.ensureReady();
 		const runId = requiredString(params.runId, "runId");
 		const activityJobId = requiredString(params.activityJobId, "activityJobId");
-		const consumedScore = requiredNonNegativeFiniteNumber(
-			params.consumedScore,
-			"consumedScore",
+		const supportContext = validateActivitySupportContext(
+			params.supportContext,
 		);
-		const analyses = validateActivityAnalysisWorkerResults(params.analyses);
 		const record = this.createRun(requestId, runId, "activity");
 		record.activity = {
 			activityJobId,
-			consumedScore,
-			analyses,
+			supportContext,
 		};
 		record.snapshot.activityJobId = activityJobId;
 		this.schedule(record, () => this.executeActivityAnalysis(record));
@@ -937,18 +944,74 @@ export class AgentHostRuntime {
 					originatingRequestId: record.snapshot.requestId,
 				},
 				async () => {
-					const stream = await agents.conversation.stream(
-						activityConversationPrompt(activity),
+					const assessmentResult =
+						await agents.activitySupportSupervisor.generate(
+							activitySupportAssessmentPrompt(activity.supportContext),
+							{
+								runId: activitySupportAgentRunId(record, "triage"),
+								abortSignal: record.controller.signal,
+								requestContext: this.createRequestContext(record),
+								activeTools: [],
+								toolChoice: "none",
+								maxSteps: 1,
+								modelSettings: { temperature: 0 },
+								structuredOutput: {
+									schema: activitySupportAssessmentSchema,
+									errorStrategy: "strict",
+								},
+							},
+						);
+					const assessment = activitySupportAssessmentSchema.safeParse(
+						assessmentResult.object,
+					);
+					if (!assessment.success) {
+						throw runtimeError(
+							"ACTIVITY_OUTPUT_INVALID",
+							"Activity support supervisor returned invalid output.",
+						);
+					}
+					const guardedAssessment = guardActivitySupportAssessment(
+						activity.supportContext,
+						assessment.data,
+					);
+					const specialistKey = specialistKeyForRoute(guardedAssessment.route);
+					const specialist = agents.activitySupportSpecialists[specialistKey];
+					const briefResult = await specialist.generate(
+						activitySupportSpecialistPrompt(
+							activity.supportContext,
+							guardedAssessment,
+						),
 						{
-							runId: record.snapshot.runId,
+							runId: activitySupportAgentRunId(record, specialistKey),
 							abortSignal: record.controller.signal,
 							requestContext: this.createRequestContext(record),
-							// Proactive feedback uses the same assistant identity and
-							// instructions as an interactive conversation, but it must not
-							// read/write chat memory or execute tools in the background.
 							activeTools: [],
 							toolChoice: "none",
 							maxSteps: 1,
+							modelSettings: { temperature: 0 },
+							structuredOutput: {
+								schema: activitySupportBriefSchema,
+								errorStrategy: "strict",
+							},
+						},
+					);
+					const parsedBrief = activitySupportBriefSchema.safeParse(
+						briefResult.object,
+					);
+					const brief =
+						parsedBrief.success && isSafeActivitySupportBrief(parsedBrief.data)
+							? parsedBrief.data
+							: fallbackActivitySupportBrief(guardedAssessment.route);
+					const stream = await agents.activitySupportVoice.stream(
+						activitySupportVoicePrompt(brief),
+						{
+							runId: activitySupportAgentRunId(record, "voice"),
+							abortSignal: record.controller.signal,
+							requestContext: this.createRequestContext(record),
+							activeTools: [],
+							toolChoice: "none",
+							maxSteps: 1,
+							modelSettings: { temperature: 0 },
 						},
 					);
 					let text = "";
@@ -970,7 +1033,9 @@ export class AgentHostRuntime {
 							try {
 								appendText(textGuard.push(chunk.payload.text));
 							} catch (error) {
-								agents.conversation.abortRunStream(record.snapshot.runId);
+								agents.activitySupportVoice.abortRunStream(
+									activitySupportAgentRunId(record, "voice"),
+								);
 								throw error;
 							}
 							continue;
@@ -980,7 +1045,9 @@ export class AgentHostRuntime {
 							chunk.type === "tool-call-approval" ||
 							chunk.type === "tool-result"
 						) {
-							agents.conversation.abortRunStream(record.snapshot.runId);
+							agents.activitySupportVoice.abortRunStream(
+								activitySupportAgentRunId(record, "voice"),
+							);
 							throw activityToolProtocolError();
 						}
 					}
@@ -993,14 +1060,13 @@ export class AgentHostRuntime {
 						);
 					}
 					const finalText = await stream.text;
-					if (!receivedTextDelta && finalText)
+					if (!receivedTextDelta && finalText) {
 						appendText(textGuard.push(finalText));
+					}
 					appendText(textGuard.finish());
-					if (!text.trim()) {
-						throw runtimeError(
-							"ACTIVITY_OUTPUT_INVALID",
-							"Activity analysis Agent returned an empty summary.",
-						);
+					text = text.trim();
+					if (!isSafeActivitySupportMessage(text)) {
+						text = fallbackActivitySupportMessage(guardedAssessment.route);
 					}
 					await this.complete(record, {
 						activityJobId: activity.activityJobId,
@@ -1893,61 +1959,30 @@ function answersMatchTail(
 	});
 }
 
-function activityConversationPrompt(
-	context: ActivityAnalysisRunContext,
-): string {
-	const serializedAnalyses = JSON.stringify(context.analyses);
-	if (serializedAnalyses.length > MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS) {
-		throw runtimeError(
-			"INVALID_REQUEST",
-			"Activity analysis exceeds the prompt safety limit.",
-		);
-	}
-	return [
-		"这是由 WhaleHall 主动发起的一次桌宠反馈，不是用户发送的普通聊天消息。",
-		"以下是已经由活动 Worker 整理过的事件和分数，不是原始活动窗口。",
-		"请以 WhaleHall 对话助手一致的人格向用户表达，但只能根据这些 Worker 结果生成反馈。",
-		"不得要求、猜测或复述原始桌面内容，不得调用任何工具，也不得声称已经执行了操作。",
-		`可消费总分：${context.consumedScore}`,
-		"Worker 结果：",
-		serializedAnalyses,
-		"请用简洁中文输出：事件主题、分数含义、以及一个谨慎的下一步建议。",
-		"允许使用简单 Markdown 的加粗、斜体和列表；不要输出 HTML、链接、图片或代码围栏。",
-	].join("\n");
+function activitySupportAgentRunId(record: RunRecord, stage: string): string {
+	return [record.snapshot.runId, "support", stage].join(":");
 }
 
-function validateActivityAnalysisWorkerResults(
+function validateActivitySupportContext(
 	value: unknown,
-): readonly ActivityAnalysisWorkerResult[] {
-	if (
-		!Array.isArray(value) ||
-		value.length < 1 ||
-		value.length > MAXIMUM_ACTIVITY_ANALYSIS_RESULTS
-	) {
+): ActivitySupportContext {
+	if (!isActivitySupportContext(value)) {
 		throw runtimeError(
 			"INVALID_REQUEST",
-			"Activity analysis must contain Worker results.",
+			"Activity support context is invalid.",
 		);
 	}
-	const analyses = value.map((analysis) => {
-		if (!isActivityAnalysisWorkerResult(analysis)) {
-			throw runtimeError(
-				"INVALID_REQUEST",
-				"Activity analysis may contain Worker results only.",
-			);
-		}
-		return structuredClone(analysis);
-	});
+	const context = structuredClone(value);
 	if (
-		serializedActivityAnalysisLength(analyses) >
+		new TextEncoder().encode(JSON.stringify(context)).byteLength >
 		MAXIMUM_ACTIVITY_ANALYSIS_PROMPT_CHARACTERS
 	) {
 		throw runtimeError(
 			"INVALID_REQUEST",
-			"Activity analysis exceeds the prompt safety limit.",
+			"Activity support context exceeds the prompt safety limit.",
 		);
 	}
-	return analyses;
+	return context;
 }
 
 function validateConversationMessage(value: unknown): ConversationInputMessage {
@@ -2027,21 +2062,6 @@ function requiredString(value: unknown, name: string, max = 256): string {
 		throw runtimeError(
 			"INVALID_REQUEST",
 			`${name} must be a non-empty string up to ${max} characters.`,
-		);
-	}
-	return value;
-}
-
-function requiredNonNegativeFiniteNumber(value: unknown, name: string): number {
-	if (
-		typeof value !== "number" ||
-		!Number.isFinite(value) ||
-		value < 0 ||
-		value > 10_000
-	) {
-		throw runtimeError(
-			"INVALID_REQUEST",
-			`${name} must be a non-negative finite number.`,
 		);
 	}
 	return value;
