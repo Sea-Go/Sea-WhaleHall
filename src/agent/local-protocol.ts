@@ -1177,6 +1177,7 @@ const DESKTOP_EVENT_KINDS = new Set<DesktopEventKind>([
 	"goal.contextChanged",
 	"authorization.revoked",
 	"authorization.granted",
+	"authorization.changed",
 	"reflection.completed",
 	"reflection.failed",
 	"tool.started",
@@ -1185,6 +1186,7 @@ const DESKTOP_EVENT_KINDS = new Set<DesktopEventKind>([
 	"tool.failed",
 	"tool.cancelled",
 	"system.heartbeat",
+	"system.cursorCheckpoint",
 ]);
 
 export function isDesktopEvent(value: unknown): value is DesktopEventV1 {
@@ -1361,27 +1363,40 @@ function isDesktopEventPayload(
 			return isDocumentChangePayload(payload, sensitivity, false);
 		case "editor.documentChanged":
 			return isDocumentChangePayload(payload, sensitivity, true);
-		case "input.activityAggregated":
+		case "input.activityAggregated": {
+			const coalescedBucketCount =
+				payload.coalescedBucketCount === undefined
+					? 1
+					: payload.coalescedBucketCount;
 			return (
 				sensitivity === "metadata" &&
-				hasExactKeys(payload, [
-					"bucketStartedAtMs",
-					"bucketEndedAtMs",
-					"keyCount",
-					"clickCount",
-					"scrollDelta",
-					"mouseDistance",
-				]) &&
+				hasRequiredAndOptionalKeys(
+					payload,
+					[
+						"bucketStartedAtMs",
+						"bucketEndedAtMs",
+						"keyCount",
+						"clickCount",
+						"scrollDelta",
+						"mouseDistance",
+					],
+					["coalescedBucketCount"],
+				) &&
 				isNonNegativeSafeInteger(payload.bucketStartedAtMs) &&
 				isNonNegativeSafeInteger(payload.bucketEndedAtMs) &&
+				(payload.coalescedBucketCount === undefined ||
+					(isNonNegativeSafeInteger(payload.coalescedBucketCount) &&
+						(payload.coalescedBucketCount as number) >= 2 &&
+						(payload.coalescedBucketCount as number) <= 256)) &&
 				(payload.bucketEndedAtMs as number) -
 					(payload.bucketStartedAtMs as number) ===
-					5_000 &&
+					(coalescedBucketCount as number) * 5_000 &&
 				isNonNegativeSafeInteger(payload.keyCount) &&
 				isNonNegativeSafeInteger(payload.clickCount) &&
 				isBoundedFiniteNumber(payload.scrollDelta, -1e12, 1e12) &&
 				isBoundedFiniteNumber(payload.mouseDistance, 0, 1e12)
 			);
+		}
 		case "presence.afkStarted":
 		case "presence.afkEnded":
 			return (
@@ -1409,6 +1424,9 @@ function isDesktopEventPayload(
 				hasExactKeys(payload, ["permissions"]) &&
 				isPermissionList(payload.permissions)
 			);
+		case "authorization.changed":
+		case "system.cursorCheckpoint":
+			return sensitivity === "metadata" && hasExactKeys(payload, []);
 		case "reflection.completed":
 			return (
 				sensitivity === "metadata" &&
@@ -1492,7 +1510,7 @@ function isDocumentChangePayload(
 		: ["appId", "insertedChars", "deletedChars"];
 	const optional = editor
 		? ["relativePath", "language", "text"]
-		: ["documentId", "text"];
+		: ["documentId", "text", "textChangeObserved"];
 	if (
 		!hasRequiredAndOptionalKeys(payload, required, optional) ||
 		!isNonNegativeSafeInteger(payload.insertedChars) ||
@@ -1521,7 +1539,9 @@ function isDocumentChangePayload(
 	} else if (
 		!isBoundedString(payload.appId, 512) ||
 		(payload.documentId !== undefined &&
-			!isBoundedString(payload.documentId, 512))
+			!isBoundedString(payload.documentId, 512)) ||
+		(payload.textChangeObserved !== undefined &&
+			typeof payload.textChangeObserved !== "boolean")
 	) {
 		return false;
 	}

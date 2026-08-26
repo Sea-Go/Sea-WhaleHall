@@ -361,7 +361,7 @@ describeDataCenterContract("DataCenter cross-repository cloud contract", () => {
 	test("projects every shared event kind and encrypts only the content allowlist", async () => {
 		const corpus = fixture<EventCorpus>("events.json");
 		expect(corpus.schemaVersion).toBe("datacenter-desktop-event-kinds.v1");
-		expect(corpus.cases).toHaveLength(27);
+		expect(corpus.cases).toHaveLength(29);
 		let previousCursorSequence = 0n;
 		for (const [index, candidate] of corpus.cases.entries()) {
 			const event = corpusEvent(candidate, index);

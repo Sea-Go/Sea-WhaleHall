@@ -793,6 +793,9 @@ function metadataPayloadForEvent(
 					: {}),
 				insertedChars: event.payload.insertedChars,
 				deletedChars: event.payload.deletedChars,
+				...(event.payload.textChangeObserved
+					? { textChangeObserved: true }
+					: {}),
 			};
 		case "editor.documentChanged":
 			return {
@@ -812,6 +815,9 @@ function metadataPayloadForEvent(
 				clickCount: event.payload.clickCount,
 				scrollDelta: event.payload.scrollDelta,
 				mouseDistance: event.payload.mouseDistance,
+				...(event.payload.coalescedBucketCount === undefined
+					? {}
+					: { coalescedBucketCount: event.payload.coalescedBucketCount }),
 			};
 		case "presence.afkStarted":
 		case "presence.afkEnded":
@@ -821,6 +827,8 @@ function metadataPayloadForEvent(
 		case "presence.sleep":
 		case "presence.wake":
 		case "system.heartbeat":
+		case "system.cursorCheckpoint":
+		case "authorization.changed":
 			return {};
 		case "goal.contextChanged":
 			return null;
@@ -863,7 +871,8 @@ function dataCenterEventDomain(kind: DesktopEventKind): DataCenterEventDomain {
 	if (
 		kind.startsWith("authorization.") ||
 		kind.startsWith("tool.") ||
-		kind === "system.heartbeat"
+		kind === "system.heartbeat" ||
+		kind === "system.cursorCheckpoint"
 	) {
 		return "system";
 	}
