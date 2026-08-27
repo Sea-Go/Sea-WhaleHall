@@ -62,6 +62,8 @@ export type DesktopEventPayloadByKind = {
 		documentId?: string;
 		insertedChars: number;
 		deletedChars: number;
+		/** A text control emitted a value-change signal without retaining text. */
+		textChangeObserved?: boolean;
 		text?: string;
 	};
 	"editor.documentChanged": {
@@ -82,6 +84,8 @@ export type DesktopEventPayloadByKind = {
 		clickCount: number;
 		scrollDelta: number;
 		mouseDistance: number;
+		/** Present only when native coalesced adjacent five-second buckets. */
+		coalescedBucketCount?: number;
 	};
 	"presence.afkStarted": { idleForMs: number };
 	"presence.afkEnded": { idleForMs: number };
@@ -99,6 +103,18 @@ export type DesktopEventPayloadByKind = {
 	"authorization.granted": {
 		permissions: string[];
 	};
+	/**
+	 * A metadata-only semantic authorization boundary. It resets any open
+	 * reflection evidence without translating v2's richer state matrix into
+	 * the legacy permanent permission gate.
+	 */
+	"authorization.changed": Record<string, never>;
+	/**
+	 * Internal durable-cursor marker used when a new semantic consumer begins
+	 * from live activity. It persists the starting cursor without fabricating a
+	 * user activity or putting a historical event into a reflection window.
+	 */
+	"system.cursorCheckpoint": Record<string, never>;
 	"reflection.completed": { windowId: string };
 	"reflection.failed": { windowId: string; code: string };
 	"tool.started": { callId: string; name?: string };
@@ -132,9 +148,11 @@ export type DesktopEventV1 = {
 
 export type CountedDesktopEventKind = Exclude<
 	DesktopEventKind,
+	| "application.processObservedBatch"
 	| "goal.contextChanged"
 	| "authorization.revoked"
 	| "authorization.granted"
+	| "authorization.changed"
 	| "presence.afkStarted"
 	| "presence.afkEnded"
 	| "presence.locked"
@@ -149,6 +167,7 @@ export type CountedDesktopEventKind = Exclude<
 	| "tool.failed"
 	| "tool.cancelled"
 	| "system.heartbeat"
+	| "system.cursorCheckpoint"
 >;
 
 export type ReflectionTriggerReason =
@@ -317,8 +336,10 @@ export function isCountedSemanticEvent(
 ): event is Extract<DesktopEventV1, { kind: CountedDesktopEventKind }> {
 	switch (event.kind) {
 		case "goal.contextChanged":
+		case "application.processObservedBatch":
 		case "authorization.revoked":
 		case "authorization.granted":
+		case "authorization.changed":
 		case "presence.afkStarted":
 		case "presence.afkEnded":
 		case "presence.locked":
@@ -333,6 +354,7 @@ export function isCountedSemanticEvent(
 		case "tool.failed":
 		case "tool.cancelled":
 		case "system.heartbeat":
+		case "system.cursorCheckpoint":
 			return false;
 		default:
 			return true;
