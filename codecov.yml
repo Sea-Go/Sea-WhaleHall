@@ -20,9 +20,9 @@ flags:
       - src/
   rust:
     paths:
-      - whalehall-local/core/src/
-      - whalehall-local/protocol/src/
-      - whalehall-local/server/src/
+      - native/local-host/core/src/
+      - native/local-host/protocol/src/
+      - native/local-host/server/src/
 
 ignore:
   - tests/
@@ -31,7 +31,7 @@ ignore:
   - build/
   - artifacts/
   - coverage/
-  - whalehall-local/target/
+  - native/**/target/
 
 github_checks:
   annotations: true

@@ -219,7 +219,7 @@ goalVersion    = current WhaleHall goal version at ingestion
 
 The implemented persistence, quarantine, permissions, recovery, payload, and
 status contracts are documented in
-[`../../whalehall-local/VSCODE_EDIT_BRIDGE_SENSOR.md`](../../whalehall-local/VSCODE_EDIT_BRIDGE_SENSOR.md).
+[`../../native/local-host/VSCODE_EDIT_BRIDGE_SENSOR.md`](../../native/local-host/VSCODE_EDIT_BRIDGE_SENSOR.md).
 
 If the Rust bridge is unavailable, the extension remains local and bounded; it
 does not fall back to a network transport.

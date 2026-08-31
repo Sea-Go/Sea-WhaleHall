@@ -1550,7 +1550,7 @@ mod tests {
     #[test]
     fn shared_success_fixture_matches_protocol() {
         let messages = parse_lines(include_str!(
-            "../../../tests/fixtures/local-protocol/success.jsonl"
+            "../../../../tests/fixtures/local-protocol/success.jsonl"
         ));
         assert!(matches!(
             messages.as_slice(),
@@ -1561,7 +1561,7 @@ mod tests {
     #[test]
     fn shared_failure_fixture_matches_protocol() {
         let messages = parse_lines(include_str!(
-            "../../../tests/fixtures/local-protocol/failure.jsonl"
+            "../../../../tests/fixtures/local-protocol/failure.jsonl"
         ));
         assert!(matches!(
             messages.as_slice(),
@@ -1572,7 +1572,7 @@ mod tests {
     #[test]
     fn shared_event_fixture_matches_protocol() {
         let messages = parse_lines(include_str!(
-            "../../../tests/fixtures/local-protocol/events.jsonl"
+            "../../../../tests/fixtures/local-protocol/events.jsonl"
         ));
         assert_eq!(messages.len(), 5);
         assert!(
@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn shared_semantic_event_fixture_matches_protocol() {
         let messages = parse_lines(include_str!(
-            "../../../tests/fixtures/local-protocol/semantic-event.jsonl"
+            "../../../../tests/fixtures/local-protocol/semantic-event.jsonl"
         ));
         assert!(matches!(
             messages.as_slice(),

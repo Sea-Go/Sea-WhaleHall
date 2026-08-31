@@ -20,10 +20,10 @@
 		"test": "bun test",
 		"lint:changed": "biome check --changed --since=origin/main --no-errors-on-unmatched --reporter=github",
 		"test:sensors:ci": "bun test tests/native-integration.test.ts",
-		"test:credential-helper": "cargo test --locked --manifest-path whalehall-credential-helper/Cargo.toml --all-targets",
-		"test:rust": "cargo test --locked --manifest-path whalehall-local/Cargo.toml --workspace && bun run test:credential-helper",
-		"check:credential-helper": "cargo fmt --all --check --manifest-path whalehall-credential-helper/Cargo.toml && cargo clippy --locked --manifest-path whalehall-credential-helper/Cargo.toml --all-targets -- -D warnings && bun run test:credential-helper",
-		"check:rust": "cargo fmt --all --check --manifest-path whalehall-local/Cargo.toml && cargo clippy --locked --manifest-path whalehall-local/Cargo.toml --workspace --all-targets -- -D warnings && cargo test --locked --manifest-path whalehall-local/Cargo.toml --workspace && bun run check:credential-helper",
+		"test:credential-helper": "cargo test --locked --manifest-path native/credential-helper/Cargo.toml --all-targets",
+		"test:rust": "cargo test --locked --manifest-path native/local-host/Cargo.toml --workspace && bun run test:credential-helper",
+		"check:credential-helper": "cargo fmt --all --check --manifest-path native/credential-helper/Cargo.toml && cargo clippy --locked --manifest-path native/credential-helper/Cargo.toml --all-targets -- -D warnings && bun run test:credential-helper",
+		"check:rust": "cargo fmt --all --check --manifest-path native/local-host/Cargo.toml && cargo clippy --locked --manifest-path native/local-host/Cargo.toml --workspace --all-targets -- -D warnings && cargo test --locked --manifest-path native/local-host/Cargo.toml --workspace && bun run check:credential-helper",
 		"check": "bun run typecheck && bun run check:rust && bun test"
 	},
 	"dependencies": {

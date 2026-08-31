@@ -15,7 +15,10 @@ import { join, resolve } from "node:path";
 import type { LocalMessage } from "../src/agent/local-protocol";
 
 const projectRoot = resolve(import.meta.dir, "..");
-const sensorDirectory = resolve(projectRoot, "whalehall-local/core/src/sensors");
+const sensorDirectory = resolve(
+	projectRoot,
+	"native/local-host/core/src/sensors",
+);
 const nativeResponseTimeoutMs = 15_000;
 const nativeStartupTimeoutMs = 30_000;
 
@@ -492,7 +495,7 @@ test("every public Rust sensor has exactly one native CI probe", () => {
 });
 
 test("whalehall-local lists, calls, streams, and cancels tools over JSONL", async () => {
-	const manifest = resolve(projectRoot, "whalehall-local/Cargo.toml");
+	const manifest = resolve(projectRoot, "native/local-host/Cargo.toml");
 	const build = Bun.spawnSync(
 		[
 			"cargo",
@@ -509,7 +512,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 
 	const binary = resolve(
 		projectRoot,
-		"whalehall-local/target/debug",
+		"native/local-host/target/debug",
 		process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local",
 	);
 	const dataDirectory = mkdtempSync(join(tmpdir(), "whalehall-activity-integration-"));
