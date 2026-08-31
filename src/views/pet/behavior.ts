@@ -1,4 +1,8 @@
 import type { PetActionId } from "../../shared/pet-actions";
+import {
+	PetActionDirector,
+	type PetAutonomousRoutine,
+} from "./action-director";
 
 export interface PetEnvironment {
 	weather?: "clear" | "cloudy" | "rain" | "snow";
@@ -12,6 +16,11 @@ export interface PetBehaviorControllerOptions {
 	play: (action: PetActionId) => void;
 	now?: () => Date;
 	idleAfterMs?: number;
+	ambientDelayMs?: readonly [minimum: number, maximum: number];
+	sleepAfterMs?: number;
+	sleepDurationMs?: number;
+	random?: () => number;
+	routines?: readonly PetAutonomousRoutine[];
 	overworkAfterMs?: number;
 	welcomeBackAfterMs?: number;
 	tickIntervalMs?: number;
@@ -40,7 +49,10 @@ export function environmentActionFor(
 	if (environment.temperatureC !== undefined && environment.temperatureC <= 8) {
 		return "winterShiver";
 	}
-	if (environment.temperatureC !== undefined && environment.temperatureC >= 30) {
+	if (
+		environment.temperatureC !== undefined &&
+		environment.temperatureC >= 30
+	) {
 		return "summerFan";
 	}
 	return null;
@@ -51,33 +63,49 @@ export function environmentActionFor(
  * contains no rendering or model logic, so the same rules drive every pet.
  */
 export class PetBehaviorController {
-	private readonly play: (action: PetActionId) => void;
 	private readonly now: () => Date;
-	private readonly idleAfterMs: number;
 	private readonly overworkAfterMs: number;
 	private readonly welcomeBackAfterMs: number;
 	private readonly tickIntervalMs: number;
+	private readonly actionDirector: PetActionDirector;
 	private timer: ReturnType<typeof setInterval> | null = null;
-	private lastInteractionAt: number;
 	private workStartedAt: number;
 	private awayStartedAt: number | null = null;
-	private idleActionPlayed = false;
 	private overworkActionPlayed = false;
 	private environment: PetEnvironment = {};
 	private lastTimeAction: PetActionId;
 	private enabled = true;
 
 	constructor(options: PetBehaviorControllerOptions) {
-		this.play = options.play;
 		this.now = options.now ?? (() => new Date());
-		this.idleAfterMs = Math.max(1_000, options.idleAfterMs ?? 45_000);
-		this.overworkAfterMs = Math.max(60_000, options.overworkAfterMs ?? 50 * 60_000);
-		this.welcomeBackAfterMs = Math.max(1_000, options.welcomeBackAfterMs ?? 30_000);
+		this.overworkAfterMs = Math.max(
+			60_000,
+			options.overworkAfterMs ?? 50 * 60_000,
+		);
+		this.welcomeBackAfterMs = Math.max(
+			1_000,
+			options.welcomeBackAfterMs ?? 30_000,
+		);
 		this.tickIntervalMs = Math.max(250, options.tickIntervalMs ?? 1_000);
 		const timestamp = this.now().getTime();
-		this.lastInteractionAt = timestamp;
 		this.workStartedAt = timestamp;
 		this.lastTimeAction = timeActionFor(new Date(timestamp));
+		this.actionDirector = new PetActionDirector({
+			play: options.play,
+			initialNowMs: timestamp,
+			firstRoutineAfterMs: Math.max(1_000, options.idleAfterMs ?? 12_000),
+			...(options.ambientDelayMs
+				? { ambientDelayMs: options.ambientDelayMs }
+				: {}),
+			...(options.sleepAfterMs !== undefined
+				? { sleepAfterMs: options.sleepAfterMs }
+				: {}),
+			...(options.sleepDurationMs !== undefined
+				? { sleepDurationMs: options.sleepDurationMs }
+				: {}),
+			...(options.random ? { random: options.random } : {}),
+			...(options.routines ? { routines: options.routines } : {}),
+		});
 	}
 
 	start(playContextAction = true): void {
@@ -85,51 +113,59 @@ export class PetBehaviorController {
 		if (playContextAction && this.enabled) {
 			const now = this.now();
 			this.lastTimeAction = timeActionFor(now);
-			this.play(environmentActionFor(this.environment, now) ?? this.lastTimeAction);
+			const contextAction =
+				environmentActionFor(this.environment, now) ?? this.lastTimeAction;
+			if (contextAction !== "idle") {
+				this.actionDirector.presentAction(contextAction, now.getTime());
+			}
 		}
 		this.timer = setInterval(() => this.tick(), this.tickIntervalMs);
 	}
 
 	markInteraction(): void {
-		this.lastInteractionAt = this.now().getTime();
-		this.idleActionPlayed = false;
+		this.actionDirector.markInteraction(this.now().getTime());
+	}
+
+	setEngaged(engaged: boolean): void {
+		this.actionDirector.setEngaged(engaged, this.now().getTime());
 	}
 
 	setEnabled(enabled: boolean): void {
 		if (this.enabled === enabled) return;
 		this.enabled = enabled;
 		const now = this.now();
-		this.lastInteractionAt = now.getTime();
+		this.actionDirector.setEnabled(enabled, now.getTime());
 		this.lastTimeAction = timeActionFor(now);
-		if (enabled) {
-			this.workStartedAt = now.getTime();
-			this.idleActionPlayed = false;
-			this.overworkActionPlayed = false;
-		}
 	}
 
 	setPresent(present: boolean): void {
 		const timestamp = this.now().getTime();
 		if (!present) {
 			this.awayStartedAt ??= timestamp;
+			this.actionDirector.setPresent(false, timestamp);
 			return;
 		}
+		this.actionDirector.setPresent(true, timestamp);
 		if (
 			this.enabled &&
 			this.awayStartedAt !== null &&
 			timestamp - this.awayStartedAt >= this.welcomeBackAfterMs
 		) {
-			this.play("welcomeUserBack");
+			this.actionDirector.presentAction("welcomeUserBack", timestamp);
 		}
 		this.awayStartedAt = null;
-		this.markInteraction();
 	}
 
 	setEnvironment(environment: Readonly<PetEnvironment>, announce = true): void {
+		const unchanged =
+			this.environment.weather === environment.weather &&
+			this.environment.temperatureC === environment.temperatureC &&
+			this.environment.holiday === environment.holiday &&
+			this.environment.birthday === environment.birthday;
 		this.environment = { ...environment };
-		if (!announce || !this.enabled) return;
+		if (unchanged || !announce || !this.enabled) return;
 		const action = environmentActionFor(this.environment, this.now());
-		if (action) this.play(action);
+		if (action) this.actionDirector.presentAction(action, this.now().getTime());
 	}
 
 	tick(): void {
@@ -139,20 +175,23 @@ export class PetBehaviorController {
 		const nextTimeAction = timeActionFor(now);
 		if (nextTimeAction !== this.lastTimeAction) {
 			this.lastTimeAction = nextTimeAction;
-			if (!environmentActionFor(this.environment, now) && nextTimeAction !== "idle") {
-				this.play(nextTimeAction);
+			if (
+				!environmentActionFor(this.environment, now) &&
+				nextTimeAction !== "idle"
+			) {
+				this.actionDirector.presentAction(nextTimeAction, timestamp);
 				return;
 			}
 		}
-		if (!this.overworkActionPlayed && timestamp - this.workStartedAt >= this.overworkAfterMs) {
+		if (
+			!this.overworkActionPlayed &&
+			timestamp - this.workStartedAt >= this.overworkAfterMs
+		) {
 			this.overworkActionPlayed = true;
-			this.play("overworkRestReminder");
+			this.actionDirector.presentAction("overworkRestReminder", timestamp);
 			return;
 		}
-		if (!this.idleActionPlayed && timestamp - this.lastInteractionAt >= this.idleAfterMs) {
-			this.idleActionPlayed = true;
-			this.play("idleSelfEntertainment");
-		}
+		this.actionDirector.tick(timestamp, now.getHours());
 	}
 
 	resetWorkSession(): void {

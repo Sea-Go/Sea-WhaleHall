@@ -15,6 +15,20 @@ export function PetApp() {
 			model: "whale",
 			onInteract: (event) => {
 				behavior.markInteraction();
+				if (
+					event.kind === "hover" ||
+					event.kind === "pet" ||
+					(event.kind === "petEnd" && event.action === "hoverLookAtPointer") ||
+					event.kind === "dragStart"
+				) {
+					behavior.setEngaged(true);
+				} else if (
+					event.kind === "hoverEnd" ||
+					(event.kind === "petEnd" && event.action !== "hoverLookAtPointer") ||
+					event.kind === "dragEnd"
+				) {
+					behavior.setEngaged(false);
+				}
 				petApi.interacted(event);
 			},
 		});
@@ -25,7 +39,10 @@ export function PetApp() {
 		renderer.mount(canvas);
 		const unsubscribeState = petApi.onState((state) => {
 			renderer.setState(state);
-			behavior.setEnabled(state.mood === "idle");
+			const stateAction = state.action ?? state.animation;
+			behavior.setEnabled(
+				state.mood === "idle" && (!stateAction || stateAction === "idle"),
+			);
 			if (state.environment) behavior.setEnvironment(state.environment);
 		});
 		const unsubscribeNativeDrag = petApi.onNativeDrag((state) => {

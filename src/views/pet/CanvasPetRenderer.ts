@@ -482,6 +482,9 @@ export class CanvasPetRenderer implements PetRenderer {
     } else if (this.petting) {
       this.play('idle');
       this.emit('petEnd', 'idle', this.pressedZone, pointerId);
+    } else if (this.hoverZone || this.pressedZone) {
+      if (this.hasActiveHoverAction()) this.applyStateAnimation(this.state);
+      this.emit('hoverEnd', 'idle', this.hoverZone ?? this.pressedZone, pointerId);
     }
     this.releasePointer(pointerId);
     this.hoverZone = null;
