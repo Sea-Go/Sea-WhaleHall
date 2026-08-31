@@ -324,7 +324,6 @@ Tool descriptors expose `name`, `description`, JSON `inputSchema`, `risk`, `requ
 - `input.status` reports whether the explicitly enabled five-second key/click/scroll/movement aggregator is running, degraded, or revoked; it never returns key values, pointer coordinates, or raw input samples.
 - `browser.status` and `browser.tabs` expose current tab title, URL, domain, nullable audio state, and session boundaries.
 - `browser.history`, `browser.searches`, and `browser.downloads` query the local `browser.sqlite3` import. All browser Tools require the high-impact `browser.read` permission.
-- `editor.status` reports explicit VS Code bridge enablement, spool health, quarantine state, open edit bursts, and durable outbox backlog without returning document content. It requires `editor.metadata`.
 
 Timeline v2 always classifies with `deterministic-cold-start.v2` and produces
 grounded `deterministic-template.v2` hypotheses from cited facts. Reflection

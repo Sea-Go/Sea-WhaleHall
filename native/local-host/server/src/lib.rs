@@ -40,9 +40,6 @@ use whalehall_local_core::sensors::input_activity::{
 use whalehall_local_core::sensors::presence::{
     PresenceConfig, PresenceService, SystemPresenceProvider,
 };
-use whalehall_local_core::sensors::vscode_edit_bridge::{
-    VscodeEditBridgeConfig, VscodeEditBridgeService,
-};
 use whalehall_local_protocol::{
     AuditQueryFiveMinutesParams, AuditQueryFiveMinutesResult, CalendarGetParams,
     CalendarListParams, CalendarMutateParams, DesktopEventFrame, DesktopEventFrameKind,
@@ -77,7 +74,6 @@ where
         InputActivityConfig::from_environment().map_err(io::Error::other)?;
     let browser_config = BrowserActivityConfig::from_environment().map_err(io::Error::other)?;
     let accessibility_config = AccessibilityConfig::from_environment().map_err(io::Error::other)?;
-    let editor_config = VscodeEditBridgeConfig::from_environment().map_err(io::Error::other)?;
     let event_journal = EventJournal::open(config.database_path.with_file_name("events.sqlite3"))
         .map_err(io::Error::other)?;
     let observation_journal = ObservationJournal::open(
@@ -161,18 +157,6 @@ where
             return Err(io::Error::other(error));
         }
     };
-    let editor = match VscodeEditBridgeService::start(editor_config, event_journal.clone()) {
-        Ok(editor) => editor,
-        Err(error) => {
-            input_activity.shutdown().await;
-            accessibility.shutdown().await;
-            browser.shutdown().await;
-            presence.shutdown().await;
-            inventory.shutdown().await;
-            activity.shutdown().await;
-            return Err(io::Error::other(error));
-        }
-    };
     eprintln!("activity database: {}", activity.database_path().display());
     eprintln!(
         "application inventory database: {}",
@@ -192,10 +176,6 @@ where
         "observation journal database: {}",
         observation_journal.database_path().display()
     );
-    eprintln!(
-        "editor bridge database: {}",
-        editor.database_path().display()
-    );
     serve_with_all_services_and_events(
         reader,
         writer,
@@ -206,7 +186,6 @@ where
             browser,
             accessibility,
             input_activity,
-            editor,
             event_journal,
             observation_journal,
         },
@@ -400,7 +379,6 @@ where
             browser: Some(browser),
             accessibility: None,
             input_activity: None,
-            editor: None,
         },
         event_journal,
         observation_journal,
@@ -440,19 +418,6 @@ where
         event_journal.clone(),
     )
     .map_err(io::Error::other)?;
-    let editor_config = VscodeEditBridgeConfig::from_environment().map_err(io::Error::other)?;
-    let editor = match VscodeEditBridgeService::start(editor_config, event_journal.clone()) {
-        Ok(editor) => editor,
-        Err(error) => {
-            input_activity.shutdown().await;
-            accessibility.shutdown().await;
-            browser.shutdown().await;
-            presence.shutdown().await;
-            inventory.shutdown().await;
-            activity.shutdown().await;
-            return Err(io::Error::other(error));
-        }
-    };
     serve_with_all_services_and_events(
         reader,
         writer,
@@ -463,7 +428,6 @@ where
             browser,
             accessibility,
             input_activity,
-            editor,
             event_journal,
             observation_journal,
         },
@@ -487,7 +451,6 @@ where
         browser,
         accessibility,
         input_activity,
-        editor,
         event_journal,
         observation_journal,
     } = services;
@@ -498,7 +461,6 @@ where
         browser.clone(),
         accessibility.clone(),
         input_activity.clone(),
-        editor.clone(),
     ));
     serve_session(
         reader,
@@ -511,7 +473,6 @@ where
             browser: Some(browser),
             accessibility: Some(accessibility),
             input_activity: Some(input_activity),
-            editor: Some(editor),
         },
         event_journal,
         observation_journal,
@@ -526,7 +487,6 @@ struct AllServicesWithEvents {
     browser: BrowserActivityService,
     accessibility: AccessibilityService,
     input_activity: InputActivityService,
-    editor: VscodeEditBridgeService,
     event_journal: EventJournal,
     observation_journal: ObservationJournal,
 }
@@ -538,7 +498,6 @@ struct ResidentServices {
     browser: Option<BrowserActivityService>,
     accessibility: Option<AccessibilityService>,
     input_activity: Option<InputActivityService>,
-    editor: Option<VscodeEditBridgeService>,
 }
 
 #[derive(Clone)]
@@ -557,14 +516,10 @@ impl ResidentServices {
             browser: None,
             accessibility: None,
             input_activity: None,
-            editor: None,
         }
     }
 
     async fn shutdown(self) {
-        if let Some(editor) = self.editor {
-            editor.shutdown().await;
-        }
         if let Some(input_activity) = self.input_activity {
             input_activity.shutdown().await;
         }

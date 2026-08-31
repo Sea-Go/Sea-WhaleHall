@@ -1,12 +1,10 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
-	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -32,7 +30,6 @@ type SensorCiProbe = {
 
 type SensorCiContext = {
 	dataDirectory: string;
-	vscodeBridgeRoot: string;
 	displayMode: "auto" | "degraded" | "required";
 	foregroundMode: "auto" | "degraded" | "required";
 	presenceMode: "auto" | "complete" | "degraded" | "idle";
@@ -40,7 +37,6 @@ type SensorCiContext = {
 
 const sensorCiContext: SensorCiContext = {
 	dataDirectory: "",
-	vscodeBridgeRoot: "",
 	displayMode: expectation("WHALEHALL_CI_DISPLAY_MODE", ["auto", "degraded", "required"]),
 	foregroundMode: expectation("WHALEHALL_CI_FOREGROUND_MODE", ["auto", "degraded", "required"]),
 	presenceMode: expectation("WHALEHALL_CI_PRESENCE_MODE", [
@@ -359,60 +355,6 @@ const sensorCiProbes: SensorCiProbe[] = [
 		},
 	},
 	{
-		sourceFile: "vscode_edit_bridge.rs",
-		callId: "sensor-editor",
-		toolName: "editor.status",
-		arguments: {},
-		verify: (output, context) => {
-			const status = output as {
-				state: string;
-				enabled: boolean;
-				bridgeRoot: string | null;
-				spoolDirectory: string | null;
-				databasePath: string;
-				pollIntervalMs: number;
-				pendingSegments: number;
-				rejectedSegments: number;
-				openBursts: number;
-				pendingBursts: number;
-				lastImportedAtMs: number | null;
-				lastPublishedAtMs: number | null;
-				warnings: string[];
-				lastError: string | null;
-			};
-			console.info(
-				[
-					`[sensor-ci] editor state=${status.state}`,
-					`enabled=${status.enabled}`,
-					`segments=${status.pendingSegments}`,
-					`bursts=${status.openBursts}/${status.pendingBursts}`,
-				].join(" "),
-			);
-			expect(status).toMatchObject({
-				state: "running",
-				enabled: true,
-				databasePath: join(context.dataDirectory, "editor-bridge", "editor.sqlite3"),
-				pollIntervalMs: 250,
-				pendingSegments: 0,
-				rejectedSegments: 0,
-				openBursts: 0,
-				pendingBursts: 0,
-				warnings: [],
-				lastError: null,
-			});
-			expect(normalizeCanonicalWindowsPath(status.bridgeRoot)).toBe(
-				normalizeCanonicalWindowsPath(context.vscodeBridgeRoot),
-			);
-			expect(normalizeCanonicalWindowsPath(status.spoolDirectory)).toBe(
-				normalizeCanonicalWindowsPath(
-					resolve(context.vscodeBridgeRoot, ".whalehall-vscode-spool-v1"),
-				),
-			);
-			expect(typeof status.lastImportedAtMs).toBe("number");
-			expect(typeof status.lastPublishedAtMs).toBe("number");
-		},
-	},
-	{
 		sourceFile: "presence.rs",
 		callId: "sensor-presence",
 		toolName: "presence.status",
@@ -518,8 +460,7 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	const dataDirectory = mkdtempSync(join(tmpdir(), "whalehall-activity-integration-"));
 	const browserProfileRoot = createBrowserFixture(dataDirectory);
 	createAccessibilityFixture(dataDirectory);
-	const vscodeBridgeRoot = createVscodeBridgeFixtureRoot(dataDirectory);
-	const context = { ...sensorCiContext, dataDirectory, vscodeBridgeRoot };
+	const context = { ...sensorCiContext, dataDirectory };
 	const nativeEnvironment = { ...process.env };
 	const child = Bun.spawn({
 		cmd: [binary],
@@ -546,7 +487,6 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 			WHALEHALL_ACCESSIBILITY_BRIDGE_MAX_AGE_MS: "60000",
 			WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED: "true",
 			WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED: "true",
-			WHALEHALL_VSCODE_BRIDGE_DIRECTORY: vscodeBridgeRoot,
 			// Native CI must never inherit a developer shell opt-in and start a
 			// global event tap while exercising the protocol.
 			WHALEHALL_INPUT_MONITORING_ENABLED: "false",
@@ -558,7 +498,9 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 	const serverDatabasesInitialized = deferred();
 	const runtimeReady = deferred();
 	const stderrComplete = collectServerStderr(child.stderr, (line) => {
-		if (line.startsWith("editor bridge database:")) serverDatabasesInitialized.resolve();
+		if (line.startsWith("observation journal database:")) {
+			serverDatabasesInitialized.resolve();
+		}
 	});
 	const messages: LocalMessage[] = [];
 	const queryCallIds = [
@@ -629,7 +571,6 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		outputComplete,
 		nativeStartupTimeoutMs,
 	);
-	publishVscodeEditFixture(vscodeBridgeRoot);
 	// Database-path diagnostics are emitted before serve_session initializes the
 	// retention tasks, Observer supervisor, stdout writer, and stdin request
 	// loop. Use the protocol itself as the authoritative readiness boundary so
@@ -801,35 +742,6 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 				);
 			}
 		}
-		if (probe.sourceFile === "vscode_edit_bridge.rs") {
-			let readinessOutput: unknown;
-			let readinessReached = false;
-			for (let attempt = 0; attempt < 40; attempt += 1) {
-				const readinessCallId = `sensor-editor-readiness-${attempt}`;
-				const readinessCompleted = deferred();
-				sensorCompleted.set(readinessCallId, readinessCompleted);
-				child.stdin.write(
-					`${JSON.stringify({
-						id: readinessCallId,
-						method: "tool.call",
-						params: { name: probe.toolName, arguments: probe.arguments },
-					})}\n`,
-				);
-				await child.stdin.flush();
-				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
-				readinessOutput = successfulToolOutput(messages, readinessCallId);
-				if (editorSensorReady(readinessOutput)) {
-					readinessReached = true;
-					break;
-				}
-				await Bun.sleep(250);
-			}
-			if (!readinessReached) {
-				throw new Error(
-					`Editor sensor did not publish its native fixture: ${JSON.stringify(readinessOutput)}`,
-				);
-			}
-		}
 		child.stdin.write(
 			`${JSON.stringify({
 				id: probe.callId,
@@ -921,7 +833,6 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		"browser.tabs",
 		"demo.wait",
 		"device.environment",
-		"editor.status",
 		"input.status",
 		"presence.events",
 		"presence.status",
@@ -1118,29 +1029,6 @@ test("whalehall-local lists, calls, streams, and cancels tools over JSONL", asyn
 		ok: false,
 		error: { code: "CANCELLED" },
 	});
-	const editorEvent = messages.find(
-		(message) =>
-			"event" in message &&
-			message.event === "desktop.event" &&
-			message.data.kind === "editor.documentChanged",
-	);
-	expect(editorEvent).toMatchObject({
-		event: "desktop.event",
-		data: {
-			kind: "editor.documentChanged",
-			source: "vscode.extension",
-			sensitivity: "content",
-			payload: {
-				relativePath: "src/native-probe.ts",
-				language: "typescript",
-				insertedChars: 5,
-				deletedChars: 0,
-				text: "probe",
-				burstStartedAtMs: expect.any(Number),
-				burstEndedAtMs: expect.any(Number),
-			},
-		},
-	});
 	expect(existsSync(join(dataDirectory, "usage.sqlite3"))).toBe(true);
 	expect(existsSync(join(dataDirectory, "applications.sqlite3"))).toBe(true);
 	expect(existsSync(join(dataDirectory, "presence.sqlite3"))).toBe(true);
@@ -1239,31 +1127,6 @@ function browserSensorReady(output: unknown): boolean {
 	);
 }
 
-function editorSensorReady(output: unknown): boolean {
-	const status = output as {
-		state: string;
-		enabled: boolean;
-		pendingSegments: number;
-		rejectedSegments: number;
-		openBursts: number;
-		pendingBursts: number;
-		lastImportedAtMs: number | null;
-		lastPublishedAtMs: number | null;
-		lastError: string | null;
-	};
-	return (
-		status.state === "running" &&
-		status.enabled &&
-		status.pendingSegments === 0 &&
-		status.rejectedSegments === 0 &&
-		status.openBursts === 0 &&
-		status.pendingBursts === 0 &&
-		typeof status.lastImportedAtMs === "number" &&
-		typeof status.lastPublishedAtMs === "number" &&
-		status.lastError === null
-	);
-}
-
 function accessibilitySensorReady(output: unknown): boolean {
 	const status = output as {
 		state: string;
@@ -1358,49 +1221,6 @@ function createBrowserFixture(dataDirectory: string): string {
 		}),
 	);
 	return root;
-}
-
-function createVscodeBridgeFixtureRoot(dataDirectory: string): string {
-	const configuredRoot = join(dataDirectory, "ci-vscode-bridge");
-	const spool = join(configuredRoot, ".whalehall-vscode-spool-v1");
-	mkdirSync(spool, { recursive: true });
-	return realpathSync(configuredRoot);
-}
-
-function publishVscodeEditFixture(root: string): void {
-	const spool = join(root, ".whalehall-vscode-spool-v1");
-	const occurredAtMs = Date.now();
-	const record = {
-		schemaVersion: "whalehall-vscode-edit.v1",
-		eventId: "vse1_00000000000000000000000000000001",
-		kind: "editor.documentChanged",
-		source: "vscode.extension",
-		occurredAtMs,
-		observedAtMs: occurredAtMs,
-		sensitivity: "content",
-		payload: {
-			workspaceId: "wsp1_0123456789abcdef0123456789abcdef",
-			document: {
-				relativePath: "src/native-probe.ts",
-				languageId: "typescript",
-				version: 1,
-			},
-			changeCount: 1,
-			emittedChangeCount: 1,
-			changesTruncated: false,
-			changes: [
-				{
-					rangeOffset: 0,
-					deletedChars: 0,
-					insertedChars: 5,
-					insertedText: "probe",
-				},
-			],
-		},
-	};
-	const data = `${JSON.stringify(record)}\n`;
-	const digest = createHash("sha256").update(data).digest("hex").slice(0, 32);
-	writeFileSync(join(spool, `segment-${occurredAtMs}-${digest}.jsonl`), data);
 }
 
 function createAccessibilityFixture(dataDirectory: string): void {
@@ -1562,14 +1382,6 @@ async function withNativeRuntimeStartup(
 			throw new Error(`Timed out waiting for ${label}`);
 		}),
 	]);
-}
-
-function normalizeCanonicalWindowsPath(value: string | null): string | null {
-	if (value === null) return null;
-	const withoutDevicePrefix = process.platform === "win32" && value.startsWith("\\\\?\\")
-		? value.slice(4)
-		: value;
-	return realpathSync.native(resolve(withoutDevicePrefix));
 }
 
 async function collectMessages(
