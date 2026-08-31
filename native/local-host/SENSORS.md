@@ -11,7 +11,6 @@ Every client sensor has exactly one public entry file under `core/src/sensors/`:
 | `device_environment.rs` | On-demand device snapshot | `device.environment` |
 | `input_activity.rs` | Resident privacy-safe keyboard/pointer aggregate monitor | `input.status` |
 | `presence.rs` | Resident idle, AFK, lock, and sleep/wake monitor | `presence.status`, `presence.events` |
-| `vscode_edit_bridge.rs` | Explicit-consent VS Code spool consumer and durable edit-burst monitor | `editor.status` |
 
 `sensors/mod.rs` is only the registry. A new sensor is added as one sibling `.rs` file and exported there. Tool protocol adaptation stays under `core/src/tools/`, so sensor APIs remain usable directly from Rust without JSON.
 
@@ -137,22 +136,6 @@ between revoke and grant. Initial authorization without a preceding durable
 revocation does not emit a synthetic grant. Conversely, if enabled startup
 finds permission already missing after an offline revoke, it immediately
 persists one revoke boundary unless the EventJournal already records it.
-
-## VS Code edit bridge
-
-`vscode_edit_bridge.rs` is disabled unless
-`WHALEHALL_VSCODE_BRIDGE_DIRECTORY` explicitly names a local absolute bridge
-root. It claims only sealed v1 JSONL segments, validates the complete segment,
-and durably coalesces per-document edit deltas. Two seconds of silence or ten
-seconds of continuous editing seals one `editor.documentChanged` event.
-
-Raw deltas never enter the Desktop EventJournal. Active raw source rows live
-only in private `0700`/`0600` editor storage and are deleted atomically when
-the immutable burst outbox is created. Filename digest validation,
-event-ID tombstones, claimed-file recovery, cross-segment ordering, and
-EventJournal deduplication make restart replay idempotent. Full enablement,
-schema, atomicity, privacy, status, and CI details are in
-[`VSCODE_EDIT_BRIDGE_SENSOR.md`](VSCODE_EDIT_BRIDGE_SENSOR.md).
 
 ## Mandatory CI/CD gate
 

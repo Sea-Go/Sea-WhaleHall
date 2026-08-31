@@ -10,9 +10,6 @@ import {
 
 export const DESKTOP_OBSERVATION_SCHEMA_VERSION = "desktop-observation.v1" as const;
 export const DEFAULT_INPUT_BUCKET_MS = 5_000;
-export const DEFAULT_EDIT_SILENCE_MS = 2_000;
-export const DEFAULT_EDIT_MAX_BURST_MS = 10_000;
-export const DEFAULT_EDIT_TEXT_LIMIT = 4_096;
 
 type ObservationBase<K extends string, P> = {
 	schemaVersion: typeof DESKTOP_OBSERVATION_SCHEMA_VERSION;
@@ -38,19 +35,6 @@ export type InputActivityObservationV1 = ObservationBase<
 	}
 >;
 
-export type EditorDocumentDeltaObservationV1 = ObservationBase<
-	"editor.documentDelta",
-	{
-		editorId: string;
-		documentId: string;
-		relativePath?: string;
-		language?: string;
-		insertedChars: number;
-		deletedChars: number;
-		text?: string;
-	}
->;
-
 export type ProcessScanObservationV1 = ObservationBase<
 	"application.processScan",
 	{
@@ -61,7 +45,6 @@ export type ProcessScanObservationV1 = ObservationBase<
 
 export type DesktopObservationV1 =
 	| InputActivityObservationV1
-	| EditorDocumentDeltaObservationV1
 	| ProcessScanObservationV1;
 
 export type EventIdentity = {
@@ -99,9 +82,6 @@ export class MonotonicEventIdentityFactory implements EventIdentityFactory {
 export type SemanticEventCoalescerOptions = {
 	identityFactory: EventIdentityFactory;
 	inputBucketMs?: number;
-	editSilenceMs?: number;
-	editMaxBurstMs?: number;
-	editTextLimit?: number;
 };
 
 export type PreparedDesktopEvent = {
@@ -124,25 +104,6 @@ type InputBucket = {
 	mouseDistance: number;
 };
 
-type EditBurst = {
-	deviceId: string;
-	sessionId: string;
-	source: string;
-	goalVersion: number | null;
-	sensitivity: EventSensitivity;
-	editorId: string;
-	documentId: string;
-	relativePath?: string;
-	language?: string;
-	startedAtMs: number;
-	lastChangedAtMs: number;
-	latestObservedAtMs: number;
-	observationIds: string[];
-	insertedChars: number;
-	deletedChars: number;
-	text?: string;
-};
-
 /**
  * Deterministic normalization shared by online collection and dataset
  * generation. It performs only local temporal merging and exact repeat
@@ -151,19 +112,12 @@ type EditBurst = {
 export class SemanticEventCoalescer {
 	private readonly identityFactory: EventIdentityFactory;
 	private readonly inputBucketMs: number;
-	private readonly editSilenceMs: number;
-	private readonly editMaxBurstMs: number;
-	private readonly editTextLimit: number;
 	private readonly inputBuckets = new Map<string, InputBucket>();
-	private readonly editBursts = new Map<string, EditBurst>();
 	private readonly lastSignatures = new Map<string, string>();
 
 	constructor(options: SemanticEventCoalescerOptions) {
 		this.identityFactory = options.identityFactory;
 		this.inputBucketMs = options.inputBucketMs ?? DEFAULT_INPUT_BUCKET_MS;
-		this.editSilenceMs = options.editSilenceMs ?? DEFAULT_EDIT_SILENCE_MS;
-		this.editMaxBurstMs = options.editMaxBurstMs ?? DEFAULT_EDIT_MAX_BURST_MS;
-		this.editTextLimit = options.editTextLimit ?? DEFAULT_EDIT_TEXT_LIMIT;
 	}
 
 	push(input: DesktopObservationV1 | DesktopEventV1): DesktopEventV1[] {
@@ -177,9 +131,6 @@ export class SemanticEventCoalescer {
 		switch (input.kind) {
 			case "input.activitySample":
 				this.accumulateInput(input);
-				return matured;
-			case "editor.documentDelta":
-				this.accumulateEdit(input);
 				return matured;
 			case "application.processScan": {
 				const event = this.processScanEvent(input);
@@ -223,19 +174,6 @@ export class SemanticEventCoalescer {
 			if (!force && bucket.bucketStartedAtMs + this.inputBucketMs > atMs) continue;
 			this.inputBuckets.delete(key);
 			output.push(this.inputBucketEvent(bucket));
-		}
-
-		const editEntries = Array.from(this.editBursts.entries()).sort(([left], [right]) =>
-			left.localeCompare(right),
-		);
-		for (const [key, burst] of editEntries) {
-			const deadlineAtMs = Math.min(
-				burst.lastChangedAtMs + this.editSilenceMs,
-				burst.startedAtMs + this.editMaxBurstMs,
-			);
-			if (!force && deadlineAtMs > atMs) continue;
-			this.editBursts.delete(key);
-			output.push(this.editBurstEvent(burst, force ? burst.lastChangedAtMs : deadlineAtMs));
 		}
 
 		return output.sort(
@@ -286,62 +224,6 @@ export class SemanticEventCoalescer {
 		});
 	}
 
-	private accumulateEdit(observation: EditorDocumentDeltaObservationV1): void {
-		const key = [
-			observation.deviceId,
-			observation.sessionId,
-			observation.goalVersion ?? "none",
-			observation.payload.editorId,
-			observation.payload.documentId,
-		].join("|");
-		const existing = this.editBursts.get(key);
-		if (existing) {
-			existing.lastChangedAtMs = observation.occurredAtMs;
-			existing.latestObservedAtMs = Math.max(
-				existing.latestObservedAtMs,
-				observation.observedAtMs,
-			);
-			existing.observationIds.push(observation.observationId);
-			existing.insertedChars += nonNegative(observation.payload.insertedChars);
-			existing.deletedChars += nonNegative(observation.payload.deletedChars);
-			existing.relativePath = observation.payload.relativePath ?? existing.relativePath;
-			existing.language = observation.payload.language ?? existing.language;
-			existing.sensitivity =
-				existing.sensitivity === "content" || observation.sensitivity === "content"
-					? "content"
-					: "metadata";
-			if (observation.sensitivity === "content") {
-				existing.text = appendBoundedText(
-					existing.text,
-					observation.payload.text,
-					this.editTextLimit,
-				);
-			}
-			return;
-		}
-		this.editBursts.set(key, {
-			deviceId: observation.deviceId,
-			sessionId: observation.sessionId,
-			source: observation.source,
-			goalVersion: observation.goalVersion,
-			sensitivity: observation.sensitivity,
-			editorId: observation.payload.editorId,
-			documentId: observation.payload.documentId,
-			relativePath: observation.payload.relativePath,
-			language: observation.payload.language,
-			startedAtMs: observation.occurredAtMs,
-			lastChangedAtMs: observation.occurredAtMs,
-			latestObservedAtMs: observation.observedAtMs,
-			observationIds: [observation.observationId],
-			insertedChars: nonNegative(observation.payload.insertedChars),
-			deletedChars: nonNegative(observation.payload.deletedChars),
-			text:
-				observation.sensitivity === "content"
-					? observation.payload.text?.slice(0, this.editTextLimit)
-					: undefined,
-		});
-	}
-
 	private inputBucketEvent(bucket: InputBucket): DesktopEventV1 {
 		return this.makeEvent(
 			"input.activityAggregated",
@@ -357,27 +239,6 @@ export class SemanticEventCoalescer {
 			"metadata",
 			bucket.latestOccurredAtMs,
 			bucket.latestObservedAtMs,
-		);
-	}
-
-	private editBurstEvent(burst: EditBurst, burstEndedAtMs: number): DesktopEventV1 {
-		return this.makeEvent(
-			"editor.documentChanged",
-			{
-				editorId: burst.editorId,
-				documentId: burst.documentId,
-				...(burst.relativePath ? { relativePath: burst.relativePath } : {}),
-				...(burst.language ? { language: burst.language } : {}),
-				insertedChars: burst.insertedChars,
-				deletedChars: burst.deletedChars,
-				...(burst.text ? { text: burst.text } : {}),
-				burstStartedAtMs: burst.startedAtMs,
-				burstEndedAtMs,
-			},
-			burst,
-			burst.sensitivity,
-			burstEndedAtMs,
-			burst.latestObservedAtMs,
 		);
 	}
 
@@ -496,15 +357,6 @@ function browserTabDedupeKey(
 	>,
 ): string {
 	return `browser|${event.deviceId}|${event.sessionId}|${event.payload.browserId}|${event.payload.tabId}`;
-}
-
-function appendBoundedText(
-	current: string | undefined,
-	next: string | undefined,
-	limit: number,
-): string | undefined {
-	if (!next) return current;
-	return `${current ?? ""}${next}`.slice(0, limit);
 }
 
 function nonNegative(value: number): number {

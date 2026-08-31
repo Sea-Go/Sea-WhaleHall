@@ -25,14 +25,12 @@ use sensors::browser_activity::BrowserActivityService;
 use sensors::device_environment::DeviceEnvironmentSensor;
 use sensors::input_activity::InputActivityService;
 use sensors::presence::PresenceService;
-use sensors::vscode_edit_bridge::VscodeEditBridgeService;
 use tools::{
     AccessibilityStatusTool, AccessibilityTreeTool, ActivityCleanupTool, ActivitySessionsTool,
     ActivityStatusTool, ApplicationInventoryStatusTool, ApplicationProcessesTool,
     BrowserDownloadsTool, BrowserHistoryTool, BrowserSearchesTool, BrowserStatusTool,
-    BrowserTabsTool, DemoWaitTool, DeviceEnvironmentTool, EditorStatusTool,
-    InputActivityStatusTool, InstalledApplicationsTool, PresenceEventsTool, PresenceStatusTool,
-    SystemInfoTool,
+    BrowserTabsTool, DemoWaitTool, DeviceEnvironmentTool, InputActivityStatusTool,
+    InstalledApplicationsTool, PresenceEventsTool, PresenceStatusTool, SystemInfoTool,
 };
 
 pub const MAX_CONCURRENT_TOOLS: usize = 4;
@@ -158,13 +156,11 @@ impl ToolHost {
         browser: BrowserActivityService,
         accessibility: AccessibilityService,
         input_activity: InputActivityService,
-        editor: VscodeEditBridgeService,
     ) -> Self {
         let tools: Vec<Arc<dyn LocalTool>> = vec![
             Arc::new(SystemInfoTool),
             Arc::new(DemoWaitTool),
             Arc::new(DeviceEnvironmentTool::new(DeviceEnvironmentSensor)),
-            Arc::new(EditorStatusTool::new(editor)),
             Arc::new(AccessibilityStatusTool::new(accessibility.clone())),
             Arc::new(AccessibilityTreeTool::new(accessibility)),
             Arc::new(ActivityCleanupTool::new(activity.clone())),

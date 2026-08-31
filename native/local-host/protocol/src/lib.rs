@@ -51,6 +51,7 @@ pub mod desktop_event_kinds {
     pub const ACCESSIBILITY_FOCUS_CHANGED: &str = "accessibility.focusChanged";
     pub const ACCESSIBILITY_VALUE_CHANGED: &str = "accessibility.valueChanged";
     pub const ACCESSIBILITY_DOCUMENT_CHANGED: &str = "accessibility.documentChanged";
+    // Retained so journals created by the retired VS Code bridge remain readable.
     pub const EDITOR_DOCUMENT_CHANGED: &str = "editor.documentChanged";
     pub const INPUT_ACTIVITY_AGGREGATED: &str = "input.activityAggregated";
     pub const GOAL_CONTEXT_CHANGED: &str = "goal.contextChanged";
