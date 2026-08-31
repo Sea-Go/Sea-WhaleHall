@@ -96,6 +96,14 @@ describe("desktop pet pointer state machine", () => {
 		dragging.internals.handlePointerCancel(pointerEvent(4));
 		expect(dragging.played).toEqual(["drop"]);
 		expect(dragging.events.map(({ kind }) => kind)).toEqual(["dragEnd"]);
+
+		const pressing = makeHarness("head");
+		pressing.internals.activePointerId = 5;
+		pressing.internals.pressedZone = "head";
+		pressing.internals.hoverZone = "head";
+		pressing.internals.handlePointerCancel(pointerEvent(5));
+		expect(pressing.events.map(({ kind }) => kind)).toEqual(["hoverEnd"]);
+		expect(pressing.internals.activePointerId).toBeNull();
 	});
 
 	test("classifies double and rapid clicks inside their timing windows", () => {

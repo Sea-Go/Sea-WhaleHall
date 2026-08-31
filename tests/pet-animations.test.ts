@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   PET_ACTION_CATALOG,
   PET_ACTION_IDS,
+  type PetActionId,
 } from '../src/shared/pet-actions';
 import {
   PET_ANIMATION_CONFIG,
@@ -115,6 +116,31 @@ describe('canonical semantic animation contract', () => {
       'squash', 'lean',
     ]);
   });
+
+  test('authors distinct daily-life poses instead of one generic prop motion', () => {
+    const frameFor = (action: PetActionId, elapsedMs: number, time: number) => {
+      const animator = new PetAnimator();
+      animator.start(0);
+      animator.play(action, 1);
+      return animator.update(buildContext({ time }), 1 + elapsedMs);
+    };
+
+    const toy = frameFor('playToy', 400, 0.25);
+    const book = frameFor('readBook', 750, 0.25);
+    const phone = frameFor('usePhone', 600, 0.25);
+    const music = frameFor('listenMusic', 475, 0.25);
+
+    expect(toy.pose.crouch).toBeGreaterThan(0.2);
+    expect(Math.abs(toy.root.x)).toBeGreaterThan(4);
+    expect(book.pose.sit).toBe(1);
+    expect(book.root.y).toBe(14);
+    expect(book.props[0]?.scale).toBeGreaterThan(1.1);
+    expect(phone.pose.sit).toBeGreaterThan(0.7);
+    expect(phone.expression.look.y).toBeGreaterThan(0.5);
+    expect(phone.props[0]?.scale).toBeGreaterThan(1.05);
+    expect(music.expression.eyes).toBe('happy');
+    expect(Math.abs(music.pose.tailSwing)).toBeGreaterThan(0.8);
+  });
 });
 
 describe('PetAnimator lifecycle and transitions', () => {
@@ -189,6 +215,26 @@ describe('PetAnimator lifecycle and transitions', () => {
     animator.play('blink', 2_000);
     animator.play('walkRight', 2_010);
     expect(animator.getCurrentAction()).toBe('walkRight');
+  });
+
+  test('keeps longer idle variations alive for boundary random values and never sleeps', () => {
+    for (const random of [() => 0, () => 0.999_999]) {
+      const animator = new PetAnimator(false, random);
+      animator.start(0);
+      const seen = new Set<PetActionId>();
+
+      for (let now = 0; now <= 60_000; now += 100) {
+        animator.update(buildContext({ time: now / 1_000, deltaSeconds: 0.1 }), now);
+        seen.add(animator.getCurrentAction());
+      }
+
+      expect(seen.has('lookAround')).toBe(true);
+      expect(seen.has('stretch')).toBe(true);
+      expect(seen.has('yawn')).toBe(true);
+      expect(seen.has('sleepy')).toBe(false);
+      expect(seen.has('sleepIn')).toBe(false);
+      expect(seen.has('sleepLoop')).toBe(false);
+    }
   });
 });
 

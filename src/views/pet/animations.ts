@@ -212,8 +212,12 @@ function easeIn(value: number): number {
   return t ** 3;
 }
 
-function randomBetween(min: number, max: number): number {
-  return min + Math.random() * (max - min);
+function randomBetween(min: number, max: number, random: () => number): number {
+  const sampled = random();
+  const bounded = Number.isFinite(sampled)
+    ? Math.min(0.999_999, Math.max(0, sampled))
+    : 0;
+  return min + bounded * (max - min);
 }
 
 function intensityValue(definition: PetActionDefinition<PetActionId>): number {
@@ -402,13 +406,20 @@ function buildProps(
 ): PetProp[] {
   if (!definition.channels.includes('prop')) return [];
   const kind = PROP_BY_ACTION[definition.id] ?? 'mystery';
+  const baseScale = kind === 'book'
+    ? 1.08
+    : kind === 'phone' || kind === 'headphones'
+      ? 1.03
+      : kind === 'toy'
+        ? 1
+        : 0.92;
   return [{
     kind,
     anchor: kind === 'outfit' ? 'back' : kind === 'sign' ? 'primaryGrip' : 'secondaryGrip',
     ...(kind === 'sign' && context.message ? { text: context.message } : {}),
     progress,
     opacity: 1,
-    scale: 0.92 + Math.sin(progress * Math.PI) * 0.08,
+    scale: baseScale + Math.sin(progress * Math.PI) * 0.08,
     rotation: Math.sin(progress * Math.PI * 2) * 0.05,
     offset: { x: 0, y: 0 },
   }];
@@ -833,6 +844,40 @@ function applyMotionTemplate(
       frame.pose.secondaryLimb = 0.38 - wave * 0.1;
       frame.expression.look = { x: 0.18 * direction, y: 0.35 };
       frame.pose.headTilt = wave * 0.08;
+      if (definition.id === 'playToy') {
+        frame.pose.crouch = 0.22 + Math.abs(wave) * 0.2;
+        frame.root.x = wave * 5;
+        frame.expression.look = { x: wave * 0.45, y: 0.45 };
+        frame.pose.tailSwing = Math.sin(time * 7) * 0.8;
+      } else if (definition.id === 'readBook') {
+        frame.pose.sit = 1;
+        frame.root.y = 14;
+        frame.pose.primaryLimb = 0.46 + wave * 0.04;
+        frame.pose.secondaryLimb = 0.46 - wave * 0.04;
+        frame.expression.look = { x: 0.08 * direction, y: 0.62 };
+        frame.expression.eyeOpen = 0.78;
+        frame.pose.headTilt = 0.1;
+      } else if (definition.id === 'usePhone') {
+        frame.pose.sit = 0.78;
+        frame.root.y = 11;
+        frame.expression.look = { x: 0.14 * direction, y: 0.55 };
+        frame.expression.eyeOpen = 0.68 + wave * 0.08;
+        frame.pose.headTilt = 0.14;
+      } else if (definition.id === 'listenMusic') {
+        frame.pose.sit = 0.38;
+        frame.root.y = -Math.abs(Math.sin(time * 4)) * 4;
+        frame.pose.headTilt = Math.sin(time * 3) * 0.18;
+        frame.pose.tailSwing = Math.sin(time * 6) * 0.9;
+        frame.expression.eyes = 'happy';
+        frame.expression.eyeOpen = 0.72;
+      } else if (definition.id === 'holdSign') {
+        frame.pose.primaryLimb = 0.92;
+        frame.pose.secondaryLimb = 0.82;
+        frame.expression.look = { x: 0, y: -0.18 };
+      } else if (definition.id === 'unwrapGift') {
+        frame.pose.crouch = Math.sin(p * Math.PI) * 0.38;
+        frame.root.y = -Math.abs(Math.sin(p * Math.PI * 3)) * 5;
+      }
       break;
     case 'exercise':
       frame.root.y = -Math.abs(wave) * 11;
@@ -1047,14 +1092,14 @@ export class PetAnimator {
   private startedAt = 0;
   private petX = 0;
   private facing: PetFacing = 1;
-  private lastInteractionAt = 0;
   private autoBlinkAt = 0;
   private autoVariationAt = 0;
   private variationIndex = 0;
-  private readonly sleepDelayMs = 20_000;
-  private readonly sleepInDelayMs = 24_000;
 
-  constructor(private readonly reducedMotion = false) {}
+  constructor(
+    private readonly reducedMotion = false,
+    private readonly random: () => number = Math.random,
+  ) {}
 
   start(now: number): void {
     const safeNow = finite(now);
@@ -1063,9 +1108,8 @@ export class PetAnimator {
     this.startedAt = safeNow;
     this.petX = 0;
     this.facing = 1;
-    this.lastInteractionAt = safeNow;
-    this.autoBlinkAt = safeNow + randomBetween(2_000, 5_000);
-    this.autoVariationAt = safeNow + randomBetween(8_000, 15_000);
+    this.autoBlinkAt = safeNow + randomBetween(2_000, 5_000, this.random);
+    this.autoVariationAt = safeNow + randomBetween(8_000, 15_000, this.random);
   }
 
   play(id: PetAnimationId, now: number): void {
@@ -1097,7 +1141,6 @@ export class PetAnimator {
   }
 
   notifyInteraction(now: number): void {
-    this.lastInteractionAt = finite(now);
     if (SLEEP_ACTIONS.has(this.actionId)) this.play('wake', now);
   }
 
@@ -1126,10 +1169,6 @@ export class PetAnimator {
       this.petX = 0;
       this.facing = 1;
     }
-    if (id === 'idle') {
-      this.autoBlinkAt = this.startedAt + randomBetween(2_000, 5_000);
-      this.autoVariationAt = this.startedAt + randomBetween(8_000, 15_000);
-    }
   }
 
   private advanceCompletedActions(now: number): void {
@@ -1148,7 +1187,7 @@ export class PetAnimator {
   private scheduleIdle(now: number): void {
     if (this.actionId === 'idle' && now >= this.autoBlinkAt) {
       this.setAction('blink', now);
-      this.autoBlinkAt = now + randomBetween(2_000, 5_000);
+      this.autoBlinkAt = now + randomBetween(2_000, 5_000, this.random);
       return;
     }
     if (this.actionId === 'idle' && now >= this.autoVariationAt) {
@@ -1156,15 +1195,8 @@ export class PetAnimator {
       const selected = variations[this.variationIndex % variations.length] ?? 'lookAround';
       this.variationIndex += 1;
       this.setAction(selected, now);
-      this.autoVariationAt = now + randomBetween(8_000, 15_000);
+      this.autoVariationAt = now + randomBetween(8_000, 15_000, this.random);
       return;
-    }
-    if (this.actionId === 'idle' && now - this.lastInteractionAt > this.sleepDelayMs) {
-      this.setAction('sleepy', now);
-      return;
-    }
-    if (this.actionId === 'sleepy' && now - this.lastInteractionAt > this.sleepInDelayMs) {
-      this.play('sleepIn', now);
     }
   }
 
