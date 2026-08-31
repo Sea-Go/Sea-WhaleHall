@@ -28,7 +28,9 @@ describe("desktop model-call boundary", () => {
 		expect(protocol).toContain("interface PlanningAnalyzeParams");
 		expect(protocol).toContain('"planning.analyze"');
 		const agents = sources.get("src/agent/mastra-host/agents.ts") ?? "";
-		expect(agents).toContain('id: "whalehall-planning-analysis"');
+		const agentCatalog =
+			sources.get("src/agent/mastra-host/model-agent-catalog.ts") ?? "";
+		expect(agentCatalog).toContain('id: "whalehall-planning-analysis"');
 		expect(agents).not.toMatch(/agents:\s*\{[^}]*planningAnalysis/s);
 	});
 
@@ -56,6 +58,18 @@ describe("desktop model-call boundary", () => {
 		expect(auth).toContain('purpose !== "planning"');
 		expect(auth).toContain('purpose !== "reflection"');
 		expect(auth).toContain('headers.set("x-whalehall-model-purpose", purpose)');
+		expect(auth).toContain('headers.set("x-whalehall-model-agent", agentId)');
+		const transport = sources.get("src/bun/model-relay-transport.ts") ?? "";
+		for (const key of [
+			"agentId",
+			"agent_id",
+			"agentKey",
+			"agent_key",
+			"modelAgent",
+			"model_agent",
+		]) {
+			expect(transport).toContain(`"${key}" in request.body`);
+		}
 	});
 
 	test("has no desktop local-model client, lock, probe, or loopback dependency", async () => {

@@ -1,18 +1,21 @@
 import { createHash } from "node:crypto";
+import {
+	isModelAgentId,
+	type ModelAgentId,
+	type ModelPurpose,
+	modelAgentPurpose,
+} from "../agent/mastra-host/model-agent-catalog";
 
 export interface ModelRelayAuthorization {
 	authorizedFetch(
 		path: string,
 		init: RequestInit,
 		purpose: ModelRelayPurpose,
+		agentId: ModelAgentId,
 	): Promise<Response>;
 }
 
-export type ModelRelayPurpose =
-	| "agent"
-	| "activity"
-	| "planning"
-	| "reflection";
+export type ModelRelayPurpose = ModelPurpose;
 
 const MAX_RELAY_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_STREAM_CHUNK_BYTES = 64 * 1024;
@@ -23,6 +26,7 @@ const DEFAULT_INFLIGHT_RETRY_DELAYS_MS = [
 
 export interface ModelRelayRequest {
 	runId: string;
+	agentId: ModelAgentId;
 	body: Record<string, unknown>;
 	idempotencyKey?: string;
 }
@@ -95,6 +99,12 @@ export class ModelRelayTransport {
 
 	async open(request: ModelRelayRequest, sink: ModelRelaySink): Promise<void> {
 		assertRelayRequest(request);
+		if (modelAgentPurpose(request.agentId) !== this.purpose) {
+			throw new ModelRelayError(
+				"invalid-request",
+				"模型 Agent 与 WhaleHall 固定调用用途不匹配。",
+			);
+		}
 		if (this.closed) {
 			return Promise.reject(
 				new ModelRelayError("cancelled", "模型转发正在关闭。"),
@@ -197,6 +207,7 @@ export class ModelRelayTransport {
 					signal,
 				},
 				this.purpose,
+				request.agentId,
 			);
 			if (!(await isRequestInProgress(response))) return response;
 			await response.body?.cancel().catch(() => undefined);
@@ -241,7 +252,11 @@ export class ModelRelayTransport {
 }
 
 function assertRelayRequest(request: ModelRelayRequest): void {
-	if (!isBoundedId(request.runId) || !isRecord(request.body)) {
+	if (
+		!isBoundedId(request.runId) ||
+		!isModelAgentId(request.agentId) ||
+		!isRecord(request.body)
+	) {
 		throw new ModelRelayError(
 			"invalid-request",
 			"模型请求缺少有效的 runId 或 body。",
@@ -254,6 +269,12 @@ function assertRelayRequest(request: ModelRelayRequest): void {
 		"accessToken" in request.body ||
 		"apiKey" in request.body ||
 		"purpose" in request.body ||
+		"agentId" in request.body ||
+		"agent_id" in request.body ||
+		"agentKey" in request.body ||
+		"agent_key" in request.body ||
+		"modelAgent" in request.body ||
+		"model_agent" in request.body ||
 		"modelPurpose" in request.body ||
 		"model_purpose" in request.body ||
 		"token" in request.body ||

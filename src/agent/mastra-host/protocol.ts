@@ -1,7 +1,10 @@
 import type { ActivitySupportContext } from "../../shared/activity-support";
 import type { PlanningModelAnalysisRequest } from "../planning/model";
+import type { ModelAgentId } from "./model-agent-catalog";
 
-export const AGENT_HOST_PROTOCOL_VERSION = 2 as const;
+/** v3 makes `model/relay.open.agentId` required. Bump this value for every
+ * breaking Bun/Sidecar wire-contract change so mixed binaries fail closed. */
+export const AGENT_HOST_PROTOCOL_VERSION = 3 as const;
 export const AGENT_HOST_SERVICE = "whalehall-agent-host" as const;
 export const MAX_MODEL_RELAY_CHUNK_BYTES = 64 * 1024;
 
@@ -292,6 +295,7 @@ export interface ModelRelayOpenParams {
 	relayId: string;
 	runId: string | null;
 	originatingRequestId: string;
+	agentId: ModelAgentId;
 	provider: string;
 	modelId: string;
 	request: {

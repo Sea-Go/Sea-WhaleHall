@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+	MODEL_AGENT_IDS,
+	type ModelAgentId,
+} from "../src/agent/mastra-host/model-agent-catalog";
 import { ModelRelayTransport } from "../src/bun/model-relay-transport";
 import type { RemoteAuthSessionManager } from "../src/bun/remote-auth-session";
 
@@ -24,6 +28,7 @@ describe("ModelRelayTransport", () => {
 		const opened = transport.open(
 			{
 				runId: "shutdown-owned-run",
+				agentId: MODEL_AGENT_IDS.conversation,
 				body: {
 					model: "approved-model",
 					messages: [{ role: "user", content: "hello" }],
@@ -47,6 +52,7 @@ describe("ModelRelayTransport", () => {
 			transport.open(
 				{
 					runId: "late-run",
+					agentId: MODEL_AGENT_IDS.conversation,
 					body: {
 						model: "approved-model",
 						messages: [{ role: "user", content: "late" }],
@@ -62,15 +68,21 @@ describe("ModelRelayTransport", () => {
 			`data: ${"x".repeat(70_000)}\n\ndata: [DONE]\n\n`,
 		);
 		const captured: {
-			value: { path: string; init: RequestInit; purpose: string } | null;
+			value: {
+				path: string;
+				init: RequestInit;
+				purpose: string;
+				agentId: ModelAgentId;
+			} | null;
 		} = { value: null };
 		const auth = {
 			authorizedFetch: async (
 				path: string,
 				init: RequestInit,
 				purpose: string,
+				agentId: ModelAgentId,
 			) => {
-				captured.value = { path, init, purpose };
+				captured.value = { path, init, purpose, agentId };
 				return new Response(bytes, {
 					status: 200,
 					headers: { "content-type": "text/event-stream" },
@@ -95,7 +107,11 @@ describe("ModelRelayTransport", () => {
 			stream: true,
 		};
 		await transport.open(
-			{ runId: "run-1", body },
+			{
+				runId: "run-1",
+				agentId: MODEL_AGENT_IDS.conversation,
+				body,
+			},
 			{
 				onResponse: (metadata) => {
 					status = metadata.status;
@@ -109,6 +125,7 @@ describe("ModelRelayTransport", () => {
 		expect(status).toBe(200);
 		expect(captured.value?.path).toBe("/v1/chat/completions");
 		expect(captured.value?.purpose).toBe("agent");
+		expect(captured.value?.agentId).toBe(MODEL_AGENT_IDS.conversation);
 		expect(JSON.parse(String(captured.value?.init.body))).toEqual(body);
 		expect(chunks.every((chunk) => chunk.byteLength <= 64 * 1024)).toBe(true);
 		const restored = new Uint8Array(
@@ -123,12 +140,21 @@ describe("ModelRelayTransport", () => {
 	});
 
 	test("uses the same authenticated endpoint with a host-owned activity purpose", async () => {
-		const captured: Array<{ path: string; purpose: string; headers: Headers }> =
-			[];
+		const captured: Array<{
+			path: string;
+			purpose: string;
+			agentId: ModelAgentId;
+			headers: Headers;
+		}> = [];
 		const transport = new ModelRelayTransport(
 			{
-				authorizedFetch: async (path, init, purpose) => {
-					captured.push({ path, purpose, headers: new Headers(init.headers) });
+				authorizedFetch: async (path, init, purpose, agentId) => {
+					captured.push({
+						path,
+						purpose,
+						agentId,
+						headers: new Headers(init.headers),
+					});
 					return Response.json({ ok: true });
 				},
 			},
@@ -137,6 +163,7 @@ describe("ModelRelayTransport", () => {
 		await transport.open(
 			{
 				runId: "activity-run-1",
+				agentId: MODEL_AGENT_IDS.activitySupportSupervisor,
 				body: {
 					model: "approved-model",
 					messages: [{ role: "user", content: "sealed activity prompt" }],
@@ -148,15 +175,22 @@ describe("ModelRelayTransport", () => {
 		expect(captured).toHaveLength(1);
 		expect(captured[0]?.path).toBe("/v1/chat/completions");
 		expect(captured[0]?.purpose).toBe("activity");
+		expect(captured[0]?.agentId).toBe(
+			MODEL_AGENT_IDS.activitySupportSupervisor,
+		);
 		expect(captured[0]?.headers.get("x-whalehall-model-purpose")).toBeNull();
 	});
 
 	test("uses an independent host-owned purpose for dynamic Planning", async () => {
-		const captured: Array<{ path: string; purpose: string }> = [];
+		const captured: Array<{
+			path: string;
+			purpose: string;
+			agentId: ModelAgentId;
+		}> = [];
 		const transport = new ModelRelayTransport(
 			{
-				authorizedFetch: async (path, _init, purpose) => {
-					captured.push({ path, purpose });
+				authorizedFetch: async (path, _init, purpose, agentId) => {
+					captured.push({ path, purpose, agentId });
 					return Response.json({ ok: true });
 				},
 			},
@@ -165,6 +199,7 @@ describe("ModelRelayTransport", () => {
 		await transport.open(
 			{
 				runId: "planning-analysis-invocation-1",
+				agentId: MODEL_AGENT_IDS.planningAnalysis,
 				body: {
 					model: "approved-model",
 					messages: [{ role: "user", content: "bounded planning input" }],
@@ -174,16 +209,24 @@ describe("ModelRelayTransport", () => {
 		);
 
 		expect(captured).toEqual([
-			{ path: "/v1/chat/completions", purpose: "planning" },
+			{
+				path: "/v1/chat/completions",
+				purpose: "planning",
+				agentId: MODEL_AGENT_IDS.planningAnalysis,
+			},
 		]);
 	});
 
 	test("uses an independent host-owned purpose for sealed-window reflection", async () => {
-		const captured: Array<{ path: string; purpose: string }> = [];
+		const captured: Array<{
+			path: string;
+			purpose: string;
+			agentId: ModelAgentId;
+		}> = [];
 		const transport = new ModelRelayTransport(
 			{
-				authorizedFetch: async (path, _init, purpose) => {
-					captured.push({ path, purpose });
+				authorizedFetch: async (path, _init, purpose, agentId) => {
+					captured.push({ path, purpose, agentId });
 					return Response.json({ ok: true });
 				},
 			},
@@ -192,6 +235,7 @@ describe("ModelRelayTransport", () => {
 		await transport.open(
 			{
 				runId: "reflection-invocation-1",
+				agentId: MODEL_AGENT_IDS.activityReflection,
 				body: {
 					model: "reflection",
 					messages: [{ role: "user", content: "sealed reflection prompt" }],
@@ -201,7 +245,11 @@ describe("ModelRelayTransport", () => {
 		);
 
 		expect(captured).toEqual([
-			{ path: "/v1/chat/completions", purpose: "reflection" },
+			{
+				path: "/v1/chat/completions",
+				purpose: "reflection",
+				agentId: MODEL_AGENT_IDS.activityReflection,
+			},
 		]);
 	});
 
@@ -237,6 +285,7 @@ describe("ModelRelayTransport", () => {
 		await transport.open(
 			{
 				runId: "run-replay",
+				agentId: MODEL_AGENT_IDS.conversation,
 				idempotencyKey: "relay-stable-replay-key",
 				body: {
 					model: "approved-model",
@@ -280,6 +329,7 @@ describe("ModelRelayTransport", () => {
 			transport.open(
 				{
 					runId: "run-still-inflight",
+					agentId: MODEL_AGENT_IDS.conversation,
 					body: {
 						model: "approved-model",
 						messages: [{ role: "user", content: "wait" }],
@@ -307,6 +357,12 @@ describe("ModelRelayTransport", () => {
 			"purpose",
 			"modelPurpose",
 			"model_purpose",
+			"agentId",
+			"agent_id",
+			"agentKey",
+			"agent_key",
+			"modelAgent",
+			"model_agent",
 			"token",
 			"key",
 			"api_key",
@@ -316,6 +372,7 @@ describe("ModelRelayTransport", () => {
 				transport.open(
 					{
 						runId: `run-identity-${index}`,
+						agentId: MODEL_AGENT_IDS.conversation,
 						body: {
 							model: "approved-model",
 							messages: [{ role: "user", content: "hello" }],
@@ -342,6 +399,7 @@ describe("ModelRelayTransport", () => {
 			transport.open(
 				{
 					runId: "run-unavailable",
+					agentId: MODEL_AGENT_IDS.conversation,
 					body: {
 						model: "approved-model",
 						messages: [{ role: "user", content: "hello" }],
@@ -355,5 +413,32 @@ describe("ModelRelayTransport", () => {
 				message: "当前测试账号没有模型转发能力。",
 			}),
 		);
+	});
+
+	test("rejects a known Agent that does not belong to the transport purpose", async () => {
+		let remoteCalls = 0;
+		const transport = new ModelRelayTransport(
+			{
+				authorizedFetch: async () => {
+					remoteCalls += 1;
+					return Response.json({ ok: true });
+				},
+			},
+			{ purpose: "activity" },
+		);
+		await expect(
+			transport.open(
+				{
+					runId: "activity-purpose-mismatch",
+					agentId: MODEL_AGENT_IDS.conversation,
+					body: {
+						model: "approved-model",
+						messages: [{ role: "user", content: "hello" }],
+					},
+				},
+				{ onResponse() {}, onChunk() {} },
+			),
+		).rejects.toEqual(expect.objectContaining({ code: "invalid-request" }));
+		expect(remoteCalls).toBe(0);
 	});
 });

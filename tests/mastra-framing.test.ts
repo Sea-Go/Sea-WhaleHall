@@ -14,6 +14,19 @@ import {
 import { safeSidecarEnvironment } from "../src/bun/mastra-sidecar-client";
 
 describe("Mastra sidecar Content-Length framing", () => {
+	test("pins required model Agent identity to protocol v3", () => {
+		expect(AGENT_HOST_PROTOCOL_VERSION).toBe(3);
+		expect(
+			isAgentHostRequest({
+				protocolVersion: 2,
+				type: "request",
+				requestId: "legacy-initialize",
+				method: "runtime.initialize",
+				params: {},
+			}),
+		).toBe(false);
+	});
+
 	test("uses UTF-8 byte lengths and accepts arbitrarily fragmented input", () => {
 		const value = {
 			text: "鲸落，让每个字节都被准确计数。",
