@@ -77,26 +77,6 @@ describe("local Agent production boundary", () => {
 		expect(activityRuntime).not.toContain("agents.activity.stream(");
 	});
 
-	test("keeps the remote service surface limited to identity and opaque model relay", () => {
-		const relayServer = source("services/model-relay/server.ts");
-		const routes = [
-			...relayServer.matchAll(/url\.pathname === "(\/v1\/[^"]+)"/gu),
-		].map((match) => match[1]);
-
-		expect(routes).toEqual([
-			"/v1/auth/sessions",
-			"/v1/auth/sessions/refresh",
-			"/v1/auth/sessions/current",
-			"/v1/auth/me",
-			"/v1/chat/completions",
-		]);
-		expect(relayServer).not.toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
-		expect(relayServer).not.toContain("COMPRESSED_ACTIVITY_EVENTS_JSON");
-		expect(relayServer).not.toContain(
-			"activityReflectionOutputToWorkerResponse",
-		);
-	});
-
 	test("registers every client RPC as a concrete guarded BrowserView handler", () => {
 		const bunComposition = source("src/bun/index.ts");
 

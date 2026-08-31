@@ -98,18 +98,7 @@ describe("desktop model-call boundary", () => {
 		expect(reflection).toContain("new DeterministicReflectionInference()");
 	});
 
-	test("keeps the retired activity path isolated from desktop release inputs", async () => {
-		const fragment = await readFile(
-			join(repositoryRoot, "deploy/home-cloud/model-relay/Caddyfile.fragment"),
-			"utf8",
-		);
-		expect(fragment).toMatch(
-			/@whalehall_retired_activity_completion \{\s+path \/v1\/activity\/completions\s+\}/,
-		);
-		expect(fragment).toContain(
-			"respond @whalehall_retired_activity_completion 410",
-		);
-
+	test("keeps the retired activity path absent from desktop release inputs", async () => {
 		const sources = await sourceFiles();
 		for (const path of [
 			"config.template.yaml",
@@ -146,9 +135,6 @@ describe("desktop model-call boundary", () => {
 
 		const remoteAuth = sources.get("src/bun/remote-auth-session.ts") ?? "";
 		expect(remoteAuth).toContain('headers.delete("x-whalehall-agent-key")');
-		const provisioner = sources.get("scripts/provision-relay-owner.ts") ?? "";
-		expect(provisioner).not.toContain("agentKeyHash");
-		expect(provisioner).not.toContain("randomBytes");
 
 		for (const path of ["config.template.yaml", "config.example.yaml"]) {
 			const configuration = await readFile(join(repositoryRoot, path), "utf8");
@@ -171,7 +157,7 @@ async function sourceFiles(): Promise<Map<string, string>> {
 async function productionSourceFiles(): Promise<Map<string, string>> {
 	const paths = (
 		await Promise.all(
-			["src", "services", "scripts"].map((path) =>
+			["src", "scripts"].map((path) =>
 				listProductionSourceFiles(join(repositoryRoot, path)),
 			),
 		)

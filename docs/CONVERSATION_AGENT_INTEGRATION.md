@@ -167,8 +167,7 @@ versioned Vault Broker，并继续执行既有 post-wrap/post-package 签名和�
 在 macOS 授予 monitoring 权限前，先按 README 使用
 `bun run setup:macos-signing -- --create` 建立固定本地开发身份。
 
-桌面生产远端服务是 DataCenter。`services/model-relay/main.ts` 仅保留为历史独立的
-loopback-Ollama 联调/回归资产，不参与桌面打包或生产调用，也不能作为 DataCenter 的回退。
+桌面生产远端服务是 DataCenter；仓库不提供独立 relay 服务或 DataCenter 回退。
 完整门禁：
 
 ```bash
