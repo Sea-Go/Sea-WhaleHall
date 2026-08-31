@@ -15,6 +15,9 @@ describe("local Agent production boundary", () => {
 		const activityPrompt = source("src/agent/activity-reflection-prompt.ts");
 		const dispatcher = source("src/bun/activity-analysis-dispatcher.ts");
 		const activityAgent = source("src/agent/mastra-host/agents.ts");
+		const modelAgentCatalog = source(
+			"src/agent/mastra-host/model-agent-catalog.ts",
+		);
 		const activityRuntime = source("src/agent/mastra-host/runtime.ts");
 		const activitySupport = source(
 			"src/agent/mastra-host/activity-support-team.ts",
@@ -45,8 +48,10 @@ describe("local Agent production boundary", () => {
 		).toBeTrue();
 		expect(dispatcher).not.toContain("raw_event");
 		expect(dispatcher).not.toContain("EventWindowV1");
-		expect(activityAgent).not.toContain('id: "whalehall-activity-analysis"');
-		expect(activityAgent).toContain('id: "whalehall-conversation"');
+		expect(modelAgentCatalog).not.toContain(
+			'id: "whalehall-activity-analysis"',
+		);
+		expect(modelAgentCatalog).toContain('id: "whalehall-conversation"');
 		expect(activityAgent).toContain(
 			"skills: activityReflectionNativeSkillPaths",
 		);
@@ -55,10 +60,12 @@ describe("local Agent production boundary", () => {
 			"loadActivityReflectionNativeSkillContext",
 		);
 		expect(activityRuntime).toContain('toolChoice: "none"');
-		expect(activityAgent).toContain(
+		expect(modelAgentCatalog).toContain(
 			'id: "whalehall-activity-support-supervisor"',
 		);
-		expect(activityAgent).toContain('id: "whalehall-activity-support-voice"');
+		expect(modelAgentCatalog).toContain(
+			'id: "whalehall-activity-support-voice"',
+		);
 		expect(activitySupport).toContain("不要复述桌面内容");
 		expect(activitySupport).toContain("不得输出分数");
 		expect(activityRuntime).toContain(

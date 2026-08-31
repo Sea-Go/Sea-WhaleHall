@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import {
+	isModelAgentId,
+	type ModelAgentId,
+	modelAgentPurpose,
+} from "../agent/mastra-host/model-agent-catalog";
 import type { AuthCredentials } from "../shared/auth";
 import type {
 	AuthSessionIdentity,
@@ -295,6 +300,7 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 		path: string,
 		init: RequestInit,
 		purpose: ModelRelayPurpose,
+		agentId: ModelAgentId,
 	): Promise<Response> {
 		this.requireAcceptingWork();
 		if (path !== "/v1/chat/completions") {
@@ -314,14 +320,24 @@ export class RemoteAuthSessionManager implements DesktopAuthSessionManager {
 				"模型请求用途不是 WhaleHall 允许的固定用途。",
 			);
 		}
-		const headers = new Headers(init.headers);
-		if (headers.has("x-whalehall-model-purpose")) {
+		if (!isModelAgentId(agentId) || modelAgentPurpose(agentId) !== purpose) {
 			throw new RemoteAuthError(
 				"unexpected",
-				"模型请求用途只能由 WhaleHall 主进程设置。",
+				"模型 Agent 与 WhaleHall 固定调用用途不匹配。",
+			);
+		}
+		const headers = new Headers(init.headers);
+		if (
+			headers.has("x-whalehall-model-purpose") ||
+			headers.has("x-whalehall-model-agent")
+		) {
+			throw new RemoteAuthError(
+				"unexpected",
+				"模型请求用途与 Agent 身份只能由 WhaleHall 主进程设置。",
 			);
 		}
 		headers.set("x-whalehall-model-purpose", purpose);
+		headers.set("x-whalehall-model-agent", agentId);
 		return this.authorizedRequest(path, { ...init, headers });
 	}
 

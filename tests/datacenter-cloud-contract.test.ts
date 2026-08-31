@@ -12,6 +12,7 @@ import {
 } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { MODEL_AGENT_CATALOG } from "../src/agent/mastra-host/model-agent-catalog";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
 import type { CloudSyncConfiguration } from "../src/bun/client-config";
 import {
@@ -175,6 +176,60 @@ const contentConfiguration: CloudSyncConfiguration = {
 };
 
 describeDataCenterContract("DataCenter cross-repository cloud contract", () => {
+	test("shares the code-owned model Agent catalog and rejects body-declared identity", () => {
+		const catalog = readFileSync(
+			resolve(DATA_CENTER_REPOSITORY, "internal/modelcontrol/catalog.go"),
+			"utf8",
+		);
+		const purposeConstants = {
+			agent: "ScopeAgent",
+			activity: "ScopeActivity",
+			planning: "ScopePlanning",
+			reflection: "ScopeReflection",
+		} as const;
+		const tierConstants = {
+			high: "ReasoningTierHigh",
+			medium: "ReasoningTierMedium",
+			low: "ReasoningTierLow",
+		} as const;
+		for (const agent of MODEL_AGENT_CATALOG) {
+			const definition = catalog
+				.split("\n")
+				.find((line) => line.includes(`AgentKey: "${agent.id}"`));
+			expect(definition, agent.id).toBeDefined();
+			expect(definition, agent.id).toContain(
+				`Purpose: ${purposeConstants[agent.purpose]}`,
+			);
+			expect(definition, agent.id).toContain(
+				`RecommendedTier: ${tierConstants[agent.recommendedTier]}`,
+			);
+		}
+		expect(
+			[...catalog.matchAll(/AgentKey:\s*"(whalehall-[^"]+)"/gu)].map(
+				(match) => match[1],
+			),
+		).toEqual(MODEL_AGENT_CATALOG.map((agent) => agent.id));
+
+		const gateway = readFileSync(
+			resolve(DATA_CENTER_REPOSITORY, "internal/llmgateway/gateway.go"),
+			"utf8",
+		);
+		expect(gateway).toMatch(
+			/modelAgentHeader\s*=\s*"X-WhaleHall-Model-Agent"/u,
+		);
+		expect(gateway).toContain("modelAgent(r.Header.Values(modelAgentHeader))");
+		for (const key of [
+			"agent_key",
+			"agentKey",
+			"agent_id",
+			"agentId",
+			"model_agent",
+			"modelAgent",
+		]) {
+			expect(gateway, key).toContain(`"${key}"`);
+		}
+	});
+
 	test("runs against a pinned DataCenter checkout in CI", () => {
 		expect(
 			existsSync(resolve(CONTRACT_DIRECTORY, "signatures.json")),

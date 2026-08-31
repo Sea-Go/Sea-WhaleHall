@@ -5,9 +5,9 @@ WhaleHall 的“Agent 本地”是指：对话上下文、Memory、规划 Workfl
 ```mermaid
 flowchart LR
   React["React WebView\n只负责 UI"] <-->|"Typed RPC"| Bun["Bun 主进程\n身份、存储、日历、政策"]
-  Bun <-->|"Content-Length stdio"| Sidecar["Node 22.18 Mastra Sidecar\nAgent、Memory、Workflow"]
+  Bun <-->|"Content-Length stdio v3\n模型调用携带 Agent ID"| Sidecar["Node 22.18 Mastra Sidecar\nAgent、Memory、Workflow"]
   Sidecar -->|"完整 OpenAI-compatible body"| Bun
-  Bun -->|"HTTPS · 认证/Bearer\n模型 purpose · Agent v2 签名"| DataCenter["DataCenter data origin\n认证、聊天、Agent、同步"]
+  Bun -->|"HTTPS · 认证/Bearer\n模型 purpose · Agent ID"| DataCenter["DataCenter data origin\n认证、聊天、Agent、同步"]
   DataCenter -->|"聊天模型转发"| Provider["模型供应商"]
   Bun --> SQLite["字段加密 SQLite"]
   Bun --> Vault["Credential Manager / Keychain"]
@@ -77,7 +77,7 @@ origin 固定在代码中；Timeline 与 Reflection journal 不从配置接受�
 
 打包使用 Node `22.18.0`。`scripts/node-runtime-manifest.ts` 固定官方归档 URL 和 SHA-256；缓存命中仍重新校验，随后只提取 `node[.exe]`。`scripts/build-agent-host.ts` 使用这个二进制检查生成的 Sidecar，而不是依赖用户 PATH 中的 Node。
 
-Sidecar 与 Bun 使用双向 `Content-Length` JSON framing：单帧上限 16 MiB，模型响应块上限 64 KiB。每个运行事件带严格递增 sequence 和版本；未知消息、重复终态、倒序事件或超限帧都会 fail closed。入站 host request 保持有序，但 reverse response 与 relay frame 会立即处理，避免 Workflow 在等待 Bun 回执时发生协议死锁。正常取消由 Bun 先按 `runId` 直接中止模型 relay，再通知 Sidecar；这条路径不等待 provider 响应头。Sidecar 崩溃或协议失败时，Bun 先中止全部 relay，再把相关运行标记为中断，并按 1/5/15 秒退避重启。已持久化的澄清 Workflow 可以恢复；历史待审批状态只保留供人工处置，当前纯文本 conversation 不会自动恢复或执行 Tool。
+Sidecar 与 Bun 使用双向 `Content-Length` JSON framing，当前协议版本固定为 v3：Sidecar Agent Host 从固定代码映射为每个模型调用绑定 `agentId`，并在 `model/relay.open` 中携带；Bun 校验 Agent catalog、purpose 与 owning run 后才生成远端 HTTP 头。activity owning run 还维护瞬态 `supervisor → 任一固定 specialist → voice → done` 状态，只有 relay open 成功才推进，失败、重复或越序请求都不推进；具体 specialist 仍由 Sidecar 的 guarded route 映射选择，首次接受后若 open 失败，重试必须保持同一 Agent。v2 peer 会在初始化或消息解析阶段 fail closed，不能握手后延迟到首个模型调用才暴露不兼容。单帧上限 16 MiB，模型响应块上限 64 KiB。每个运行事件带严格递增 sequence 和版本；未知消息、重复终态、倒序事件或超限帧都会 fail closed。入站 host request 保持有序，但 reverse response 与 relay frame 会立即处理，避免 Workflow 在等待 Bun 回执时发生协议死锁。正常取消由 Bun 先按 `runId` 直接中止模型 relay，再通知 Sidecar；这条路径不等待 provider 响应头。Sidecar 崩溃或协议失败时，Bun 先中止全部 relay，再把相关运行标记为中断，并按 1/5/15 秒退避重启。已持久化的澄清 Workflow 可以恢复；历史待审批状态只保留供人工处置，当前纯文本 conversation 不会自动恢复或执行 Tool。
 
 ## 本地状态和加密
 
@@ -147,7 +147,9 @@ DataCenter Chat endpoint 只以 bearer subject 确定账号，拒绝 body/header
 然后把原始 OpenAI-compatible 字节转发到 DataCenter 所有的 allowlisted provider。
 SSE 保持顺序和背压；客户端取消会中止上游；完整非流式响应可按幂等键重放，
 流式中断不会续传。请求幂等键保持由 run ID 与 exact body 派生；
-`X-WhaleHall-Model-Purpose` 只由 Bun bridge 设置，Sidecar、Renderer 和 body 都不能覆盖。
+Sidecar Agent Host 通过私有 v3 协议携带代码绑定的 Agent ID；`X-WhaleHall-Model-Purpose`
+与 `X-WhaleHall-Model-Agent` 只由 Bun bridge 在完成 catalog、purpose 和 owning-run 校验后设置。
+Renderer、JSON body 与调用方 HTTP headers 都不能设置或覆盖这两个字段。
 raw activity outbox、receipt、score 与 Agent job 使用账号专属 ledger；未登录窗口不上传，
 A 的 pending 只能由 A 重登恢复，B 无法接管。
 

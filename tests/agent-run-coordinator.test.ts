@@ -3,6 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS,
+	MODEL_AGENT_IDS,
+} from "../src/agent/mastra-host/model-agent-catalog";
+import {
 	AGENT_HOST_PROTOCOL_VERSION,
 	type AgentHostMethod,
 	type AgentRunEventFrame,
@@ -132,6 +136,7 @@ describe("AgentRunCoordinator", () => {
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
 		);
+		await advanceActivityModelRelayStages(harness.coordinator, runId);
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(
 				runId,
@@ -175,6 +180,165 @@ describe("AgentRunCoordinator", () => {
 				status: "completed",
 			}),
 		]);
+	});
+
+	test("advances the activity model relay only after supervisor, one specialist, and voice open successfully", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-model-stages";
+		const analysis = activityAnalysisResult(
+			"worker-request-model-stages",
+			"sealed-window-model-stages",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-window-model-stages",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await harness.coordinator.startActivityAnalysis({
+			jobId: "activity-job-model-stages",
+			runId,
+			requestId: "activity-request-model-stages",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+
+		let openCalls = 0;
+		const open = (
+			agentId: Parameters<typeof harness.coordinator.runBoundModelRelayCall>[1],
+		) =>
+			harness.coordinator.runBoundModelRelayCall(
+				runId,
+				agentId,
+				async (purpose) => {
+					openCalls += 1;
+					return purpose;
+				},
+			);
+		await expect(open(MODEL_AGENT_IDS.activitySupportVoice)).rejects.toThrow(
+			"supervisor stage",
+		);
+		expect(openCalls).toBe(0);
+
+		const supervisorOpenStarted = deferred();
+		const releaseSupervisorOpen = deferred();
+		const failedSupervisorOpen = harness.coordinator.runBoundModelRelayCall(
+			runId,
+			MODEL_AGENT_IDS.activitySupportSupervisor,
+			async () => {
+				openCalls += 1;
+				supervisorOpenStarted.resolve();
+				await releaseSupervisorOpen.promise;
+				throw new Error("upstream open failed");
+			},
+		);
+		await supervisorOpenStarted.promise;
+		await expect(
+			open(MODEL_AGENT_IDS.activitySupportSupervisor),
+		).rejects.toThrow("already has an active call");
+		releaseSupervisorOpen.resolve();
+		await expect(failedSupervisorOpen).rejects.toThrow("upstream open failed");
+		await expect(open(MODEL_AGENT_IDS.activitySupportSupervisor)).resolves.toBe(
+			"activity",
+		);
+		await expect(
+			open(MODEL_AGENT_IDS.activitySupportSupervisor),
+		).rejects.toThrow("specialist stage");
+		await expect(open(MODEL_AGENT_IDS.activitySupportVoice)).rejects.toThrow(
+			"specialist stage",
+		);
+
+		await expect(
+			harness.coordinator.runBoundModelRelayCall(
+				runId,
+				ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.focusCoach,
+				async () => {
+					openCalls += 1;
+					throw new Error("specialist open failed");
+				},
+			),
+		).rejects.toThrow("specialist open failed");
+		await expect(
+			open(ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.blockerCoach),
+		).rejects.toThrow("originally selected specialist Agent");
+		await expect(
+			open(ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.focusCoach),
+		).resolves.toBe("activity");
+		await expect(
+			open(ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.momentumCoach),
+		).rejects.toThrow("voice stage");
+		await expect(open(MODEL_AGENT_IDS.activitySupportVoice)).resolves.toBe(
+			"activity",
+		);
+		await expect(open(MODEL_AGENT_IDS.activitySupportVoice)).rejects.toThrow(
+			"done stage",
+		);
+		expect(openCalls).toBe(5);
+	});
+
+	test("fails closed when activity completion arrives before all model relay stages", async () => {
+		const harness = createHarness();
+		const runId = "activity-run-early-completion";
+		const analysis = activityAnalysisResult(
+			"worker-request-early-completion",
+			"sealed-window-early-completion",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-window-early-completion",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		await harness.coordinator.startActivityAnalysis({
+			jobId: "activity-job-early-completion",
+			runId,
+			requestId: "activity-request-early-completion",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
+		);
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				runId,
+				2,
+				{
+					kind: "run.completed",
+					result: { summary: "不应接受的提前完成。" },
+				},
+				"completed",
+			),
+		);
+
+		await waitFor(() => harness.activityTerminals.length === 1);
+		expect(harness.activityTerminals[0]).toMatchObject({
+			jobId: "activity-job-early-completion",
+			runId,
+			status: "failed",
+			failureClass: "invalid-output",
+			feedback: null,
+		});
+		await expect(
+			harness.repository.getRun("account-a", runId),
+		).resolves.toEqual(expect.objectContaining({ status: "failed" }));
+		await expect(
+			harness.coordinator.runBoundModelRelayCall(
+				runId,
+				MODEL_AGENT_IDS.activitySupportSupervisor,
+				async () => undefined,
+			),
+		).rejects.toThrow("运行不存在");
 	});
 
 	test("does not dispatch support context after the activity session changes during archive loading", async () => {
@@ -396,6 +560,7 @@ describe("AgentRunCoordinator", () => {
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
 		);
+		await advanceActivityModelRelayStages(harness.coordinator, runId);
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(
 				runId,
@@ -475,6 +640,7 @@ describe("AgentRunCoordinator", () => {
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
 		);
+		await advanceActivityModelRelayStages(harness.coordinator, runId);
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(
 				runId,
@@ -673,6 +839,7 @@ describe("AgentRunCoordinator", () => {
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
 		);
+		await advanceActivityModelRelayStages(harness.coordinator, runId);
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(
 				runId,
@@ -2036,6 +2203,27 @@ function activityAnalysisResult(requestId: string, sourceEventId: string) {
 			},
 		],
 	};
+}
+
+async function advanceActivityModelRelayStages(
+	coordinator: AgentRunCoordinator,
+	runId: string,
+): Promise<void> {
+	for (const agentId of [
+		MODEL_AGENT_IDS.activitySupportSupervisor,
+		ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.momentumCoach,
+		MODEL_AGENT_IDS.activitySupportVoice,
+	]) {
+		await coordinator.runBoundModelRelayCall(
+			runId,
+			agentId,
+			async (purpose) => {
+				if (purpose !== "activity") {
+					throw new Error("Expected an activity-bound model relay call.");
+				}
+			},
+		);
+	}
 }
 
 function createHarness(): {

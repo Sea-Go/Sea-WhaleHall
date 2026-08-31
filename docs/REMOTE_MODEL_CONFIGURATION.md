@@ -9,8 +9,16 @@ POST https://data.sea-ridethewindbreakthewaves.xyz/v1/chat/completions
 
 每个请求要求当前原生会话的 bearer、由 run ID 与 exact body 派生的
 `Idempotency-Key`，以及 Bun 主进程添加的
-`X-WhaleHall-Model-Purpose: agent|activity|planning|reflection`。DataCenter 只从认证 session 确定 user；
-Renderer、Sidecar 和 JSON body 都不能提供或覆盖 user/purpose/token。
+`X-WhaleHall-Model-Purpose: agent|activity|planning|reflection` 与固定的
+`X-WhaleHall-Model-Agent`。Sidecar Agent Host 从固定代码映射为当前模型调用绑定 Agent ID，
+并通过 private stdio v3 的必填 `model/relay.open.agentId` 携带；Bun 校验 catalog、purpose
+与 owning run 后才生成这两个 HTTP 头；activity run 还只允许
+`supervisor → 任一固定 specialist → voice → done`，成功 open 后才推进，首次接受的 specialist
+在失败重试中保持不变。DataCenter 只从认证
+session 确定 user；Renderer、JSON body 与调用方 HTTP headers 都不能提供或覆盖 user、purpose、
+Agent 或 token。
+DataCenter 仅校验 bearer、catalog 与 purpose 匹配，不会把 Agent 头当作设备证明或官方
+客户端证明。v2 peer 不兼容并会 fail closed。
 
 ## 配置
 
@@ -37,7 +45,10 @@ cloudSync:
 activity Agent 使用，`planning` 供任务规划和 Dynamic Planning 分析使用，`reflection`
 供 sealed-window activity reflection 使用。真实的上游模型、URL 和 API key 只由
 DataCenter 的私有 `config.yaml` 映射；桌面端不得保存、发送或推测它们。DataCenter
-production origin 是代码所有常量，不能由安装包、环境变量或用户配置覆盖。旧的双角色
+按固定 Agent catalog 把每个具体 Agent 分配到 `high`、`medium` 或 `low` 推理层级，管理员
+可以修改 Agent → tier 和 tier → 模型绑定并按 revision 原子发布；WhaleHall 仍只发送代码
+所有的逻辑模型名、purpose 与 Agent ID，不接收真实 Provider 凭据。
+DataCenter production origin 是代码所有常量，不能由安装包、环境变量或用户配置覆盖。旧的双角色
 `qwen3:1.7b` 文件可在内存中迁移到三个逻辑角色，但新三角色配置不接受真实 Provider
 模型名。旧文件中的 `reflection.baseurl`、
 `reflection.apikey`、`agent.baseurl` 和 `agent.apikey` 仍可兼容解析，但其值在配置边界即被

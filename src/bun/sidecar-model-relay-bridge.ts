@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isModelAgentId } from "../agent/mastra-host/model-agent-catalog";
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
 	type AgentHostErrorPayload,
@@ -96,6 +97,7 @@ export class SidecarModelRelayBridge {
 			.open(
 				{
 					runId: transportRunId,
+					agentId: input.agentId,
 					body,
 					idempotencyKey: relayIdempotencyKey(input.originatingRequestId, body),
 				},
@@ -205,6 +207,7 @@ function requireOpenParams(
 		!boundedId(value.relayId) ||
 		(value.runId !== null && !boundedId(value.runId)) ||
 		!boundedId(value.originatingRequestId) ||
+		!isModelAgentId(value.agentId) ||
 		!boundedId(value.provider) ||
 		!boundedId(value.modelId) ||
 		!isRecord(value.request) ||

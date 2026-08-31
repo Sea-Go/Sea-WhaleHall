@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import {
+	ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS,
+	MODEL_AGENT_IDS,
+	type ModelAgentId,
+} from "../agent/mastra-host/model-agent-catalog";
 import type {
 	AgentHostMethod,
 	AgentRunEventFrame as SidecarRunEventFrame,
@@ -71,8 +76,10 @@ class AgentSessionChangedError extends Error {
 }
 
 class ActivityAnalysisOutputError extends Error {
-	constructor() {
-		super("Activity analysis sidecar completed without a valid summary.");
+	constructor(
+		message = "Activity analysis sidecar completed without a valid summary.",
+	) {
+		super(message);
 		this.name = "ActivityAnalysisOutputError";
 	}
 }
@@ -593,9 +600,27 @@ interface ActiveRun {
 	recoveredFromPersistence: boolean;
 	criticalOperation: ActiveRunCriticalOperation | null;
 	hostCalls: Set<Promise<void>>;
+	activityModelRelayStage: ActivityModelRelayStage | null;
+	activityModelRelayReservation: ActivityModelRelayReservation | null;
+	activityModelRelaySpecialistAgentId: ModelAgentId | null;
 	activityFailureClass?: "transient" | "invalid-output";
 	sidecarPlanningVersion?: number;
 }
+
+type ActivityModelRelayStage = "supervisor" | "specialist" | "voice" | "done";
+
+interface ActivityModelRelayReservation {
+	stage: ActivityModelRelayStage;
+	nextStage: ActivityModelRelayStage;
+	agentId: ModelAgentId;
+}
+
+// Bun owns the stage category and order. The Sidecar's guarded route mapping
+// owns the exact choice among these five fixed catalog specialists. DataCenter
+// can bind each specialist to a different reasoning tier.
+const activitySupportSpecialistAgentIds = new Set<ModelAgentId>(
+	Object.values(ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS),
+);
 
 interface ActiveRunCriticalOperation {
 	kind:
@@ -1687,12 +1712,95 @@ export class AgentRunCoordinator
 		}
 	}
 
+	async runBoundModelRelayCall<TResult>(
+		ownerRunId: string,
+		agentId: ModelAgentId,
+		operation: (
+			runPurpose: "agent" | "activity" | "planning",
+		) => Promise<TResult>,
+	): Promise<TResult> {
+		// Activity orchestration is not resumable inside a Sidecar run, so this
+		// authority stays transient with ActiveRun. Reserve before opening to reject
+		// overlap, and commit only after the bridge has returned upstream metadata.
+		return this.runBoundHostCall(ownerRunId, async () => {
+			const run = this.requireHostRun(ownerRunId);
+			const runPurpose = this.modelPurposeForRun(ownerRunId);
+			const reservation =
+				runPurpose === "activity"
+					? this.reserveActivityModelRelayStage(run, agentId)
+					: null;
+			try {
+				const result = await operation(runPurpose);
+				this.assertRunSession(run);
+				if (reservation) {
+					if (
+						run.activityModelRelayReservation !== reservation ||
+						run.activityModelRelayStage !== reservation.stage
+					) {
+						throw new Error("Activity model relay stage changed unexpectedly.");
+					}
+					if (reservation.stage === "specialist") {
+						if (
+							run.activityModelRelaySpecialistAgentId !== reservation.agentId
+						) {
+							throw new Error(
+								"Activity model relay specialist changed unexpectedly.",
+							);
+						}
+						run.activityModelRelaySpecialistAgentId = null;
+					}
+					run.activityModelRelayStage = reservation.nextStage;
+				}
+				return result;
+			} finally {
+				if (run.activityModelRelayReservation === reservation) {
+					run.activityModelRelayReservation = null;
+				}
+			}
+		});
+	}
+
 	/** Host-owned model classification for the exact authenticated run. */
 	modelPurposeForRun(ownerRunId: string): "agent" | "activity" | "planning" {
 		const run = this.requireHostRun(ownerRunId);
 		if (run.snapshot.kind === "activity-analysis") return "activity";
 		if (run.snapshot.kind === "task-planning") return "planning";
 		return "agent";
+	}
+
+	private reserveActivityModelRelayStage(
+		run: ActiveRun,
+		agentId: ModelAgentId,
+	): ActivityModelRelayReservation {
+		if (
+			run.snapshot.kind !== "activity-analysis" ||
+			run.activityModelRelayStage === null
+		) {
+			throw new Error("Activity model relay is not bound to an activity run.");
+		}
+		if (run.activityModelRelayReservation !== null) {
+			throw new Error("Activity model relay stage already has an active call.");
+		}
+		const stage = run.activityModelRelayStage;
+		const nextStage = nextActivityModelRelayStage(stage, agentId);
+		if (stage === "specialist") {
+			if (
+				run.activityModelRelaySpecialistAgentId !== null &&
+				run.activityModelRelaySpecialistAgentId !== agentId
+			) {
+				throw new Error(
+					"Activity model relay retry must use the originally selected specialist Agent.",
+				);
+			}
+			run.activityModelRelaySpecialistAgentId = agentId;
+		}
+		const reservation = {
+			stage,
+			nextStage,
+			agentId,
+		};
+		run.activityModelRelayReservation = reservation;
+		return reservation;
 	}
 
 	async load(
@@ -2121,6 +2229,14 @@ export class AgentRunCoordinator
 			await this.emit(run, { type: "planning.draft.ready", session });
 			await this.emit(run, { type: "planning.completed", session });
 		} else {
+			if (
+				run.activityModelRelayStage !== "done" ||
+				run.activityModelRelayReservation !== null
+			) {
+				throw new ActivityAnalysisOutputError(
+					"Activity analysis sidecar completed before the required model relay stages.",
+				);
+			}
 			const summary = activityResultText(result);
 			if (summary === null) {
 				throw new ActivityAnalysisOutputError();
@@ -2517,6 +2633,10 @@ export class AgentRunCoordinator
 			recoveredFromPersistence: false,
 			criticalOperation: null,
 			hostCalls: new Set(),
+			activityModelRelayStage:
+				snapshot.kind === "activity-analysis" ? "supervisor" : null,
+			activityModelRelayReservation: null,
+			activityModelRelaySpecialistAgentId: null,
 		};
 		this.active.set(snapshot.runId, run);
 		return run;
@@ -2991,6 +3111,28 @@ export class AgentRunCoordinator
 		this.pendingStarts.add(pending);
 		return pending;
 	}
+}
+
+function nextActivityModelRelayStage(
+	stage: ActivityModelRelayStage,
+	agentId: ModelAgentId,
+): ActivityModelRelayStage {
+	switch (stage) {
+		case "supervisor":
+			if (agentId === MODEL_AGENT_IDS.activitySupportSupervisor) {
+				return "specialist";
+			}
+			break;
+		case "specialist":
+			if (activitySupportSpecialistAgentIds.has(agentId)) return "voice";
+			break;
+		case "voice":
+			if (agentId === MODEL_AGENT_IDS.activitySupportVoice) return "done";
+			break;
+		case "done":
+			break;
+	}
+	throw new Error(`Activity model relay Agent is invalid for ${stage} stage.`);
 }
 
 function sameSessionIdentity(

@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+	MODEL_AGENT_IDS,
+	type ModelAgentId,
+} from "../src/agent/mastra-host/model-agent-catalog";
 import type { ModelRelayEventFrame } from "../src/agent/mastra-host/protocol";
 import {
 	type ModelRelayAuthorization,
@@ -353,6 +357,15 @@ describe("SidecarModelRelayBridge", () => {
 			"user_id",
 			"accessToken",
 			"apiKey",
+			"purpose",
+			"modelPurpose",
+			"model_purpose",
+			"agentId",
+			"agent_id",
+			"agentKey",
+			"agent_key",
+			"modelAgent",
+			"model_agent",
 			"token",
 			"key",
 			"api_key",
@@ -367,6 +380,32 @@ describe("SidecarModelRelayBridge", () => {
 					}),
 				),
 			).rejects.toThrow("不得携带自报身份或供应商凭据");
+		}
+		expect(remoteCalls).toBe(0);
+	});
+
+	test("rejects a missing or unknown host-owned Agent before any remote request", async () => {
+		let remoteCalls = 0;
+		const bridge = new SidecarModelRelayBridge({
+			transport: new ModelRelayTransport(
+				authWithResponse(() => {
+					remoteCalls += 1;
+					return Response.json({ ok: true });
+				}),
+			),
+			modelId: "approved-model",
+			send: async () => {},
+		});
+		for (const agentId of [undefined, "whalehall-forged-agent"]) {
+			const params = relayOpenParams(
+				`relay-invalid-agent-${String(agentId)}`,
+				`run-invalid-agent-${String(agentId)}`,
+				validBody(),
+			);
+			params.agentId = agentId;
+			await expect(
+				bridge.open(`host-invalid-agent-${String(agentId)}`, params),
+			).rejects.toThrow("Invalid model relay open request");
 		}
 		expect(remoteCalls).toBe(0);
 	});
@@ -441,6 +480,46 @@ describe("SidecarModelRelayBridge", () => {
 		expect(keys[2]).not.toBe(keys[0]);
 		expect(keys[3]).not.toBe(keys[0]);
 	});
+
+	test("keeps the pre-Agent durable key stable while DataCenter binds Agent authority", async () => {
+		const keys: string[] = [];
+		const bridge = new SidecarModelRelayBridge({
+			transport: new ModelRelayTransport(
+				authWithResponse((_path, init) => {
+					keys.push(new Headers(init.headers).get("idempotency-key") ?? "");
+					return Response.json({ ok: true });
+				}),
+				{ purpose: "activity" },
+			),
+			modelId: "approved-model",
+			send: async () => {},
+		});
+		const body = validBody();
+		await bridge.open(
+			"host-agent-key-1",
+			relayOpenParams(
+				"relay-agent-key-1",
+				"run-agent-key-1",
+				body,
+				"origin-agent-key",
+				MODEL_AGENT_IDS.activitySupportSupervisor,
+			),
+		);
+		await bridge.open(
+			"host-agent-key-2",
+			relayOpenParams(
+				"relay-agent-key-2",
+				"run-agent-key-2",
+				body,
+				"origin-agent-key",
+				MODEL_AGENT_IDS.activitySupportVoice,
+			),
+		);
+
+		expect(keys).toHaveLength(2);
+		expect(keys[0]).toMatch(/^relay-[0-9a-f]{64}$/);
+		expect(keys[1]).toBe(keys[0]);
+	});
 });
 
 function authWithResponse(
@@ -456,11 +535,13 @@ function relayOpenParams(
 	runId: string,
 	body: Record<string, unknown>,
 	originatingRequestId = `origin-${relayId}`,
+	agentId: ModelAgentId = MODEL_AGENT_IDS.conversation,
 ): Record<string, unknown> {
 	return {
 		relayId,
 		runId,
 		originatingRequestId,
+		agentId,
 		provider: "whalehall-relay",
 		modelId: "approved-model",
 		request: {

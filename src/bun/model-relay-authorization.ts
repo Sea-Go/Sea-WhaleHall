@@ -1,3 +1,9 @@
+import {
+	isModelAgentId,
+	MODEL_AGENT_IDS,
+	modelAgentPurpose,
+} from "../agent/mastra-host/model-agent-catalog";
+
 /** A model relay bridge selected only after the host run's role is verified. */
 export type AuthorizedModelRelayBridge = "agent" | "activity" | "planning";
 
@@ -5,6 +11,7 @@ export type AuthorizeRunBoundModelRelayInput = {
 	provider: string;
 	agentProvider: string;
 	planningProvider: string;
+	agentId: unknown;
 	runPurpose: AuthorizedModelRelayBridge | null;
 	dynamicPlanningPending: boolean;
 };
@@ -17,16 +24,33 @@ export type AuthorizeRunBoundModelRelayInput = {
 export function authorizeRunBoundModelRelay(
 	input: AuthorizeRunBoundModelRelayInput,
 ): AuthorizedModelRelayBridge {
+	if (!isModelAgentId(input.agentId)) {
+		throw new Error("Model relay Agent identity is not approved.");
+	}
 	if (input.dynamicPlanningPending) {
-		if (input.provider !== input.planningProvider) {
+		if (
+			input.agentId !== MODEL_AGENT_IDS.planningAnalysis ||
+			input.provider !== input.planningProvider
+		) {
 			throw new Error(
-				"Dynamic Planning model relay must use the Planning provider.",
+				"Dynamic Planning model relay must use its fixed Agent and Planning provider.",
 			);
 		}
 		return "planning";
 	}
 	if (input.runPurpose === null) {
 		throw new Error("Model relay call is not bound to an active Agent run.");
+	}
+	if (modelAgentPurpose(input.agentId) !== input.runPurpose) {
+		throw new Error("Model relay Agent does not match the owning run purpose.");
+	}
+	if (
+		(input.runPurpose === "agent" &&
+			input.agentId !== MODEL_AGENT_IDS.conversation) ||
+		(input.runPurpose === "planning" &&
+			input.agentId !== MODEL_AGENT_IDS.planning)
+	) {
+		throw new Error("Model relay Agent does not match the owning run kind.");
 	}
 	if (input.provider === input.planningProvider) {
 		if (input.runPurpose !== "planning") {

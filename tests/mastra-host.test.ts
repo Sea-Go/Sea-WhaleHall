@@ -6,6 +6,10 @@ import {
 	encodeContentLengthFrame,
 } from "../src/agent/mastra-host/framing";
 import {
+	ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS,
+	MODEL_AGENT_IDS,
+} from "../src/agent/mastra-host/model-agent-catalog";
+import {
 	AGENT_HOST_PROTOCOL_VERSION,
 	type AgentRunEventFrame,
 	isRecord,
@@ -197,6 +201,11 @@ describe("Mastra Node sidecar", () => {
 				},
 			]),
 		);
+		expect(host.modelAgentIds).toEqual([
+			MODEL_AGENT_IDS.conversation,
+			MODEL_AGENT_IDS.planning,
+			MODEL_AGENT_IDS.planning,
+		]);
 
 		await harness.shutdown();
 	}, 30_000);
@@ -228,6 +237,7 @@ describe("Mastra Node sidecar", () => {
 				runId: "activity-reflection-without-skills",
 			},
 		]);
+		expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.activityReflection]);
 		const body = host.modelBodies[0];
 		expect(JSON.stringify(body?.messages)).toContain(
 			"# 已加载的活动反思分析 Skill",
@@ -281,6 +291,7 @@ describe("Mastra Node sidecar", () => {
 			},
 		});
 		expect(host.modelOrigins).toEqual(["planning-analysis:operation-1"]);
+		expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.planningAnalysis]);
 		expect(host.calls).toContain("model/relay.open");
 		expect(host.modelCalls).toEqual([
 			{
@@ -323,6 +334,11 @@ describe("Mastra Node sidecar", () => {
 			"supervisor",
 			"specialist",
 			"voice",
+		]);
+		expect(host.modelAgentIds).toEqual([
+			MODEL_AGENT_IDS.activitySupportSupervisor,
+			ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.momentumCoach,
+			MODEL_AGENT_IDS.activitySupportVoice,
 		]);
 		expect(
 			host.calls.some(
@@ -452,6 +468,7 @@ describe("Mastra Node sidecar", () => {
 				runId: "activity-reflection-window-1",
 			},
 		]);
+		expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.activityReflection]);
 		const reflectionBody = reflectionBodies[0];
 		expect(JSON.stringify(reflectionBody?.messages)).toContain(
 			"private raw activity",
@@ -1056,6 +1073,7 @@ class FakeHost {
 		Pick<ModelRelayOpenParams, "provider" | "modelId" | "runId">
 	> = [];
 	readonly modelOrigins: string[] = [];
+	readonly modelAgentIds: ModelRelayOpenParams["agentId"][] = [];
 	readonly activitySupportStages: Array<"supervisor" | "specialist" | "voice"> =
 		[];
 	readonly workflowSnapshotCalls: Array<{
@@ -1350,6 +1368,7 @@ class FakeHost {
 			runId: params.runId,
 		});
 		this.modelOrigins.push(params.originatingRequestId);
+		this.modelAgentIds.push(params.agentId);
 		const body = JSON.parse(
 			Buffer.from(params.request.bodyBase64 ?? "", "base64").toString("utf8"),
 		) as Record<string, unknown>;
