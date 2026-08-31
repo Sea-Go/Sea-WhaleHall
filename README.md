@@ -74,7 +74,6 @@ Production login uses the fixed DataCenter email/password service. The submitted
 | Electrobun main process   | [`src/bun`](src/bun)                                         | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition           |
 | Shared frontend contracts | [`src/shared`](src/shared)                                   | Electrobun Typed RPC schemas shared with both WebViews                                                            |
 | Native subprocesses       | [`native`](native)                                           | Local Tool Host, credential helper, signed macOS Observer, and versioned Vault Broker source                       |
-| Legacy standalone relay   | [`services/model-relay`](services/model-relay)               | Historical local-Ollama test/deployment artifact; not part of the packaged desktop or DataCenter production path  |
 | Rust Local protocol       | [`native/local-host/protocol`](native/local-host/protocol)   | JSONL requests, responses, tool descriptors, events, and errors                                                   |
 | Rust Local core           | [`native/local-host/core`](native/local-host/core)           | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence                      |
 | Rust Local server         | [`native/local-host/server`](native/local-host/server)       | Concurrent stdin/stdout JSONL server and packaged executable                                                      |
