@@ -36,10 +36,13 @@ export type TargetArch = "arm64" | "x64";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const vaultBrokerRoot = resolve(projectRoot, "native/vault-broker");
-const localToolManifestPath = resolve(projectRoot, "whalehall-local/Cargo.toml");
+const localToolManifestPath = resolve(
+	projectRoot,
+	"native/local-host/Cargo.toml",
+);
 const credentialHelperManifestPath = resolve(
 	projectRoot,
-	"whalehall-credential-helper/Cargo.toml",
+	"native/credential-helper/Cargo.toml",
 );
 const observerRoot = resolve(projectRoot, "native/observer");
 const observerBundleName = "WhaleHall Observer.app";
@@ -665,7 +668,11 @@ export function buildNative(): string {
 	]);
 
 	const binaryName = os === "win" ? "whalehall-local.exe" : "whalehall-local";
-	const source = resolve(projectRoot, "whalehall-local/target/release", binaryName);
+	const source = resolve(
+		projectRoot,
+		"native/local-host/target/release",
+		binaryName,
+	);
 	const destination = resolve(projectRoot, `.native/${os}-${arch}`, binaryName);
 	mkdirSync(dirname(destination), { recursive: true });
 	copyFileSync(source, destination);
@@ -684,7 +691,7 @@ export function buildNative(): string {
 			: "whalehall-credential-helper";
 	const helperSource = resolve(
 		projectRoot,
-		"whalehall-credential-helper/target/release",
+		"native/credential-helper/target/release",
 		helperBinaryName,
 	);
 	const helperDestination = resolve(

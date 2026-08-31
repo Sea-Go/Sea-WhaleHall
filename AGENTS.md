@@ -17,9 +17,12 @@ ownership boundaries:
 | Electrobun main | `src/bun` | Native windows, Typed RPC routing, lifecycle, and composition |
 | Shared contracts | `src/shared` | Typed RPC and model-independent data shared across WebViews and Bun |
 | TypeScript Agent | `src/agent` | Thin orchestration boundary and the Local Tool process client |
-| Rust protocol | `whalehall-local/protocol` | JSONL request, response, event, and error contracts |
-| Rust core | `whalehall-local/core` | Local capabilities, permissions, sensors, SQLite, and Tool execution |
-| Rust server | `whalehall-local/server` | Concurrent stdin/stdout JSONL host and process lifecycle |
+| Rust protocol | `native/local-host/protocol` | JSONL request, response, event, and error contracts |
+| Rust core | `native/local-host/core` | Local capabilities, permissions, sensors, SQLite, and Tool execution |
+| Rust server | `native/local-host/server` | Concurrent stdin/stdout JSONL host and process lifecycle |
+| Credential helper | `native/credential-helper` | One-shot OS vault access without exposing secrets to Renderer RPC |
+| macOS Observer | `native/observer` | Signed accessibility, input, browser, and screen observation helper |
+| macOS Vault Broker | `native/vault-broker` | Signed versioned bridge to protected observation content |
 
 React must not call Rust, native window APIs, or another WebView directly.
 WebViews communicate through Typed RPC implemented by the Bun main process.
@@ -28,8 +31,7 @@ The TypeScript Agent must remain thin and must not duplicate Rust Tool
 registration, validation, permissions, cancellation, or sensor state machines.
 
 Generated output is not source. Do not hand-edit `dist/`, `build/`,
-`artifacts/`, `.native/`, `native/**/target/`, or
-`whalehall-local/target/`.
+`artifacts/`, `.native/`, or `native/**/target/`.
 
 ## Read before changing
 
@@ -50,7 +52,7 @@ Also read the files for the affected boundary:
   `src/agent/agent-runtime.ts`, and the relevant Rust protocol/core code;
 - pet work: `src/views/pet/core/types.ts`, `src/shared/pet-actions.ts`,
   `src/bun/pet-state.ts`, and the pet architecture tests;
-- sensor work: `whalehall-local/SENSORS.md`, the sensor-specific document, and
+- sensor work: `native/local-host/SENSORS.md`, the sensor-specific document, and
   `tests/native-integration.test.ts`;
 - build or packaging work: `package.json`, `vite.config.ts`,
   `electrobun.config.ts`, `scripts/`, and the workflows under `.github/`.

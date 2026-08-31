@@ -73,11 +73,11 @@ Production login uses the fixed DataCenter email/password service. The submitted
 | TypeScript local runtimes | [`src/agent`](src/agent)                                     | Mastra boundary, Local Tool client, Reflection/Timeline v2, and handwritten protocol mirrors                      |
 | Electrobun main process   | [`src/bun`](src/bun)                                         | Windows, identity, encrypted Agent storage, authoritative calendar, Tool policy, relay, and composition           |
 | Shared frontend contracts | [`src/shared`](src/shared)                                   | Electrobun Typed RPC schemas shared with both WebViews                                                            |
-| Credential helper         | [`whalehall-credential-helper`](whalehall-credential-helper) | One-shot OS vault access without secrets in argv, environment, stderr, or Renderer RPC                            |
+| Native subprocesses       | [`native`](native)                                           | Local Tool Host, credential helper, signed macOS Observer, and versioned Vault Broker source                       |
 | Legacy standalone relay   | [`services/model-relay`](services/model-relay)               | Historical local-Ollama test/deployment artifact; not part of the packaged desktop or DataCenter production path  |
-| Rust Local protocol       | [`whalehall-local/protocol`](whalehall-local/protocol)       | JSONL requests, responses, tool descriptors, events, and errors                                                   |
-| Rust Local core           | [`whalehall-local/core`](whalehall-local/core)               | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence                      |
-| Rust Local server         | [`whalehall-local/server`](whalehall-local/server)           | Concurrent stdin/stdout JSONL server and packaged executable                                                      |
+| Rust Local protocol       | [`native/local-host/protocol`](native/local-host/protocol)   | JSONL requests, responses, tool descriptors, events, and errors                                                   |
+| Rust Local core           | [`native/local-host/core`](native/local-host/core)           | Tool registry plus one-file sensor entry points, foreground tracking, and SQLite persistence                      |
+| Rust Local server         | [`native/local-host/server`](native/local-host/server)       | Concurrent stdin/stdout JSONL server and packaged executable                                                      |
 
 Project contribution and frontend implementation rules:
 
@@ -90,13 +90,13 @@ Project contribution and frontend implementation rules:
 - [`config.example.yaml`](config.example.yaml) and [`docs/REMOTE_MODEL_CONFIGURATION.md`](docs/REMOTE_MODEL_CONFIGURATION.md) — the authenticated internal-test model gateway and configuration guide.
 - [`docs/MODEL_CALL_BOUNDARY.md`](docs/MODEL_CALL_BOUNDARY.md) — Mastra-only desktop model-call policy and zero-local-model release gate.
 
-Every sensor has one public entry file under `whalehall-local/core/src/sensors/`; Agent-facing adapters live under `whalehall-local/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`whalehall-local/SENSORS.md`](whalehall-local/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. The approval-bound planning/calendar Tool policy remains implemented for a future conforming provider, but the production conversation Agent currently registers no Tools; it also never registers the sensor, accessibility, browser, activity, or cleanup catalogue.
+Every sensor has one public entry file under `native/local-host/core/src/sensors/`; Agent-facing adapters live under `native/local-host/core/src/tools/`. Stateful support code such as the activity SQLite engine remains private to the Rust core. The sensor layout, accessibility tree, device snapshot contract, resident application/process inventory, presence monitor, and browser activity monitor are documented in [`native/local-host/SENSORS.md`](native/local-host/SENSORS.md). Future browser control, filesystem operations, and other OS integrations also belong in the Rust core. The approval-bound planning/calendar Tool policy remains implemented for a future conforming provider, but the production conversation Agent currently registers no Tools; it also never registers the sensor, accessibility, browser, activity, or cleanup catalogue.
 
 Generated files stay outside source areas:
 
 ```text
 dist/views/                         Vite output for client and pet pages
-whalehall-local/target/             Cargo build cache and binaries
+native/**/target/                   Cargo build caches and binaries
 .native/<platform>-<architecture>/  Native binary staged before packaging
 .native/<platform>-<architecture>/node[.exe] and whalehall-agent-host.mjs
 build/                              Electrobun application bundles
@@ -354,7 +354,7 @@ The foreground source is sampled every 100 ms by default (`WHALEHALL_ACTIVITY_PO
 
 Cleanup is explicit and local: `longTerm` retains the latest 30 days, `shortTerm` retains the latest 7 days, and `all` deletes every row. Retention cleanup only removes closed sessions whose `ended_at_ms` is before the cutoff. Complete cleanup is serialized through the monitor, clears its in-memory current session, and lets the next foreground observation create a fresh row, so the resident sensor continues normally after deletion.
 
-The detailed Rust ownership, lifecycle, schema, API, Tool, privacy, and extension contract is documented in [`whalehall-local/ACTIVITY_SENSOR.md`](whalehall-local/ACTIVITY_SENSOR.md).
+The detailed Rust ownership, lifecycle, schema, API, Tool, privacy, and extension contract is documented in [`native/local-host/ACTIVITY_SENSOR.md`](native/local-host/ACTIVITY_SENSOR.md).
 
 ### Verifying activity history
 

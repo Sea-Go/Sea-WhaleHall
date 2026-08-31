@@ -171,4 +171,4 @@ To add a sensor:
 
 Hosted runners can lack an interactive display, battery, or foreground window. A probe must validate successful collection and the component's degraded-state contract on such machines; hardware-dependent values may be empty only when the sensor returns an explicit warning or documented empty representation.
 
-The complete hosted, distribution-container, virtual-X11, and self-hosted real-desktop matrices are documented in [`.github/CI_COMPATIBILITY.md`](../.github/CI_COMPATIBILITY.md). A skipped self-hosted job is not compatibility evidence.
+The complete hosted, distribution-container, virtual-X11, and self-hosted real-desktop matrices are documented in [`.github/CI_COMPATIBILITY.md`](../../.github/CI_COMPATIBILITY.md). A skipped self-hosted job is not compatibility evidence.

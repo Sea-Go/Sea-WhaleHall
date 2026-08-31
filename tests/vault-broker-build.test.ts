@@ -66,11 +66,17 @@ describe("Vault Broker build contract", () => {
 
 	test("uses unambiguous codesign display arguments in the macOS runtime", () => {
 		const broker = readFileSync(
-			resolve(import.meta.dir, "../whalehall-local/core/src/vault_broker.rs"),
+			resolve(
+				import.meta.dir,
+				"../native/local-host/core/src/vault_broker.rs",
+			),
 			"utf8",
 		);
 		const observations = readFileSync(
-			resolve(import.meta.dir, "../whalehall-local/core/src/observations.rs"),
+			resolve(
+				import.meta.dir,
+				"../native/local-host/core/src/observations.rs",
+			),
 			"utf8",
 		);
 		expect(broker).toContain('.arg("--display")');
