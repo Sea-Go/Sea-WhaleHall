@@ -29,7 +29,7 @@
 		"@fullcalendar/rrule": "7.0.2",
 		"@mastra/core": "1.63.0",
 		"@mastra/memory": "1.28.0",
-		"electrobun": "1.18.1",
+		"electrobun": "2.0.1",
 		"lucide-react": "1.35.0",
 		"react": "19.2.8",
 		"react-dom": "19.2.8",
