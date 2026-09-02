@@ -6,6 +6,7 @@ import {
 import {
 	addMinutes,
 	instantToLocalParts,
+	miniCalendarDayFlags,
 	resolveLocalDateTime,
 } from "../src/views/client/features/calendar/date-time";
 import {
@@ -248,6 +249,28 @@ describe("calendar time abstraction", () => {
 		if (repeated.status === "ambiguous") {
 			expect(repeated.earlier).not.toBe(repeated.later);
 		}
+	});
+});
+
+describe("mini calendar day flags", () => {
+	test("separates today from the currently selected date", () => {
+		const flags = miniCalendarDayFlags(
+			"2026-07-29",
+			"2026-07-29",
+			"2026-08-03",
+		);
+		expect(flags.isToday).toBe(true);
+		expect(flags.isSelected).toBe(false);
+	});
+
+	test("selected day tracks the viewed date instead of a fixed reference", () => {
+		const flags = miniCalendarDayFlags(
+			"2026-08-03",
+			"2026-07-29",
+			"2026-08-03",
+		);
+		expect(flags.isToday).toBe(false);
+		expect(flags.isSelected).toBe(true);
 	});
 });
 
