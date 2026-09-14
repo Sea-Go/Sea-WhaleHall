@@ -9,3 +9,9 @@
 装配时只能把 `session.tools()` 交给**该父运行专属、已通过实际模型 Tool-call 兼容测试的 Agent**。当前正式 interactive conversation 的 `tools: {}`、`activeTools: []` 和 `toolChoice: "none"` 均未修改，生产模型尚未通过这一兼容测试，不能直接开启云搜索。`src/agent/mastra-host/agents.ts`、`runtime.ts`、Sidecar 私有协议和 Bun Typed RPC 的共享装配应由各自唯一 writer 在 H02 接口确定后串行接入。若要公开答案/反馈，还须补 RTW 真实引用读取及真正可见的产品曝光收据；本机 pet feedback `sent` 不等于该收据。
 
 专属测试用锁定版 Mastra 的真实 Agent 和模拟兼容 OpenAI Tool-call 响应，证明 `search_fast` 后父 Agent 收到 Tool 结果并继续生成自己的答案；还覆盖累计预算、伪造收据/正文/修订、跨运行证据 ID、空结果及运行中取消。此 fixture 不证明当前生产模型兼容、不证明实际 Bun→RTW→BTW 联通、Collector 链路或真实页面曝光。验收命令和结果以集成验收记录中的对应提交 SHA 为准。
+
+## 当前分支验收
+
+- `bun run typecheck`、`bunx biome check src/agent/mastra-host/cloud-tools tests/mastra-cloud-search-tools.test.ts`：通过。
+- `bun test tests/model-call-boundary.test.ts tests/mastra-cloud-search-tools.test.ts`：`11 pass / 0 fail`，含真实 Mastra 父 Agent 继续执行的 fixture。
+- `bun run check`：Rust fmt、Clippy、Rust/credential-helper 测试通过；Bun 全量 `1407 pass / 5 skip / 1 fail`，故整体验收未通过。唯一失败是现存跨仓契约测试 `tests/datacenter-cloud-contract.test.ts:364` 仍断言 `events.json` 为 27 项，而当前 DataCenter 原始仓与隔离 `4422146` 的契约均为 29 项。本分支未修改该测试或 DC 契约。隔离工作树起初还缺测试硬编码的相邻 DC 路径；复验时临时给该路径建立指向固定 DC worktree 的只读符号链接，复验后已移除，链接不属于交付。
