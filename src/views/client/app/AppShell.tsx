@@ -34,6 +34,8 @@ import {
 	CalendarPage,
 	type CalendarService,
 } from "../features/calendar/public";
+import { HistoryWorkspace } from "../features/cloud-history/HistoryWorkspace";
+import type { CloudHistoryController } from "../features/cloud-history/public";
 import {
 	type ConversationController,
 	ConversationPage,
@@ -133,6 +135,7 @@ export interface AppShellProps {
 	monitoringController: MonitoringController;
 	auditExportService: AuditExportService;
 	proactiveFeedbackHistoryController: ProactiveFeedbackHistoryController;
+	cloudHistoryController?: CloudHistoryController;
 	proactiveFeedbackPolicyController?: ProactiveFeedbackPolicyController;
 	appUpdateController?: AppUpdateController;
 	initialPage?: PageId;
@@ -153,6 +156,7 @@ export function AppShell({
 	monitoringController,
 	auditExportService,
 	proactiveFeedbackHistoryController,
+	cloudHistoryController,
 	proactiveFeedbackPolicyController,
 	appUpdateController,
 	initialPage = "calendar",
@@ -470,9 +474,16 @@ export function AppShell({
 					/>
 				) : null}
 				{activePage === "history" ? (
-					<ProactiveFeedbackHistoryPage
-						controller={proactiveFeedbackHistoryController}
-					/>
+					cloudHistoryController ? (
+						<HistoryWorkspace
+							local={proactiveFeedbackHistoryController}
+							cloud={cloudHistoryController}
+						/>
+					) : (
+						<ProactiveFeedbackHistoryPage
+							controller={proactiveFeedbackHistoryController}
+						/>
+					)
 				) : null}
 				{activePage === "reports" ? (
 					<ReportsPage controller={reportController} />

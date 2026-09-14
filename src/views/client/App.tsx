@@ -10,6 +10,7 @@ import {
 } from "./features/app-update/public";
 import { AuthGate, type AuthSession } from "./features/auth/public";
 import { CalendarController } from "./features/calendar/public";
+import { CloudHistoryController } from "./features/cloud-history/public";
 import { ConversationController } from "./features/conversation/public";
 import { MonitoringController } from "./features/monitoring/public";
 import { PlanningController } from "./features/planning/public";
@@ -155,6 +156,16 @@ function AuthenticatedApp({
 		() => new ProactiveFeedbackHistoryController(proactiveFeedbackService),
 		[proactiveFeedbackService],
 	);
+	const cloudHistoryController = useMemo(
+		() =>
+			new CloudHistoryController({
+				list: async (input) => {
+					const { clientApi } = await import("./rpc");
+					return clientApi.listCloudAcceptedAnswers(input);
+				},
+			}),
+		[],
+	);
 	const proactiveFeedbackPolicyController = useMemo(
 		() => new ProactiveFeedbackPolicyController(proactiveFeedbackService),
 		[proactiveFeedbackService],
@@ -176,6 +187,9 @@ function AuthenticatedApp({
 	useStrictModeSafeDispose(proactiveFeedbackHistoryController, (controller) =>
 		controller.dispose(),
 	);
+	useStrictModeSafeDispose(cloudHistoryController, (controller) =>
+		controller.dispose(),
+	);
 	useStrictModeSafeDispose(proactiveFeedbackPolicyController, (controller) =>
 		controller.dispose(),
 	);
@@ -193,6 +207,7 @@ function AuthenticatedApp({
 			transition: onLogout,
 			clearLocalAccountState: () => {
 				proactiveFeedbackPolicyController.dispose();
+				cloudHistoryController.clear();
 				calendarController.clearAccountData();
 				planningController.dispose();
 				conversationController.dispose();
@@ -215,6 +230,7 @@ function AuthenticatedApp({
 			monitoringController={monitoringController}
 			auditExportService={auditExportService}
 			proactiveFeedbackHistoryController={proactiveFeedbackHistoryController}
+			cloudHistoryController={cloudHistoryController}
 			proactiveFeedbackPolicyController={proactiveFeedbackPolicyController}
 			appUpdateController={appUpdateController}
 			enableQaControls={enableQaControls}
