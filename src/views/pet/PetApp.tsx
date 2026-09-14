@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { PetBehaviorController } from "./behavior";
 import { CanvasPetRenderer } from "./CanvasPetRenderer";
 import { PetActivityFeedbackBubble } from "./PetActivityFeedbackBubble";
+import { PetCloudSearchPanel } from "./PetCloudSearchPanel";
 import { petApi } from "./rpc";
 
 export function PetApp() {
@@ -67,6 +68,7 @@ export function PetApp() {
 		<div className="pet-stage">
 			<canvas ref={canvasRef} aria-label="WhaleHall 可交互桌面伙伴" />
 			<PetActivityFeedbackBubble />
+			<PetCloudSearchPanel port={null} />
 		</div>
 	);
 }
