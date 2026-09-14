@@ -27,7 +27,10 @@ export function HistoryWorkspace({
 					type="button"
 					role="tab"
 					aria-selected={tab === "local"}
-					onClick={() => setTab("local")}
+					onClick={() => {
+						cloud.setVisible(false);
+						setTab("local");
+					}}
 				>
 					本地主动反馈
 				</button>

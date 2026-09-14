@@ -126,6 +126,62 @@ test("可用引用展示摘录，加载后续页断网立即清除旧摘录", as
 	expect(html).toContain("当前引用状态无法核验");
 });
 
+test("离开云端页同步清摘录，撤回后返回首帧不复用旧引用", async () => {
+	const citation = first.citations[0];
+	if (!citation) throw new Error("fixture citation missing");
+	const available = {
+		...first,
+		citations: [
+			{ ...citation, state: "available" as const, excerpt: "先前可用摘录" },
+		],
+	};
+	let release!: (value: CloudHistoryResult<CloudAnswersPage>) => void;
+	const withdrawnPage = new Promise<CloudHistoryResult<CloudAnswersPage>>(
+		(resolve) => {
+			release = resolve;
+		},
+	);
+	let withdrawn = false;
+	const controller = new CloudHistoryController({
+		list: async () =>
+			withdrawn
+				? withdrawnPage
+				: { kind: "ok", data: { items: [available], nextOrdinal: null } },
+	});
+	controller.setScope({
+		logicalSessionId: "logical-1",
+		productSessionId: "rtw-1",
+		generation: 1,
+	});
+	await controller.load();
+	expect(
+		renderToStaticMarkup(<CloudHistoryPage controller={controller} />),
+	).toContain("先前可用摘录");
+	controller.setVisible(false);
+	expect(
+		renderToStaticMarkup(<CloudHistoryPage controller={controller} />),
+	).not.toContain("先前可用摘录");
+	withdrawn = true;
+	controller.setVisible(true);
+	expect(
+		renderToStaticMarkup(<CloudHistoryPage controller={controller} />),
+	).not.toContain("先前可用摘录");
+	release({
+		kind: "ok",
+		data: {
+			items: [{ ...first, citations: [{ ...citation, state: "unavailable" }] }],
+			nextOrdinal: null,
+		},
+	});
+	await withdrawnPage;
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	const html = renderToStaticMarkup(
+		<CloudHistoryPage controller={controller} />,
+	);
+	expect(html).toContain("已撤回或不可用");
+	expect(html).not.toContain("先前可用摘录");
+});
+
 test("切换主体清空旧页并丢弃晚到回执，登录失效清空现页", async () => {
 	let release!: (value: CloudHistoryResult<CloudAnswersPage>) => void;
 	const pending = new Promise<CloudHistoryResult<CloudAnswersPage>>(
