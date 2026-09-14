@@ -11,6 +11,7 @@ import type {
 } from "./rtw-product-search-client";
 
 const id = z.string().min(1).max(512);
+const subject = z.object({ authority_id: id, tenant_id: id, subject_id: id });
 const citation = z.object({
 	evidence_id: id,
 	source_kind: id,
@@ -23,6 +24,7 @@ const citation = z.object({
 const answer = z.object({
 	answer_id: id,
 	search_id: id,
+	subject,
 	session_id: id,
 	status: z.enum(["succeeded", "insufficient"]),
 	accepted_ordinal: z.number().int().positive().safe(),
@@ -43,6 +45,7 @@ const turn = z.object({
 	Request: z.object({
 		SearchID: id,
 		AnswerID: id,
+		Subject: subject,
 		SessionID: id,
 		Search: z.object({ Query: z.string().min(1).max(4096) }),
 	}),
@@ -203,6 +206,10 @@ export class RTWCloudHistoryClient {
 			accepted.data.Request.SearchID !== item.search_id ||
 			accepted.data.Request.AnswerID !== item.answer_id ||
 			accepted.data.Request.SessionID !== item.session_id ||
+			accepted.data.Request.Subject.authority_id !==
+				item.subject.authority_id ||
+			accepted.data.Request.Subject.tenant_id !== item.subject.tenant_id ||
+			accepted.data.Request.Subject.subject_id !== item.subject.subject_id ||
 			accepted.data.result.answer_id !== item.answer_id ||
 			accepted.data.result.summary_status !== item.status ||
 			(item.status === "succeeded" && !accepted.data.result.answer) ||

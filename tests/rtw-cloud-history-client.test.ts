@@ -14,10 +14,16 @@ const reference = {
 	quote_hash: "hash-1",
 	state: "available",
 };
+const subject = {
+	authority_id: "rtw.identity",
+	tenant_id: "platform",
+	subject_id: "42",
+};
 const turn = JSON.stringify({
 	Request: {
 		SearchID: "s-1",
 		AnswerID: "a-1",
+		Subject: subject,
 		SessionID: "history-1",
 		Search: { Query: "如何使用？" },
 	},
@@ -48,6 +54,7 @@ const turn = JSON.stringify({
 const row = {
 	answer_id: "a-1",
 	search_id: "s-1",
+	subject,
 	session_id: "history-1",
 	status: "succeeded",
 	accepted_ordinal: 1,
@@ -151,6 +158,15 @@ test("网络回执期间换号拒收，错误主体和逆序页拒收", async ()
 	);
 	expect(
 		wrong.client.list({ logicalSessionId: "history-1" }),
+	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+	const wrongSubject = fixture(async () =>
+		json({
+			items: [{ ...row, subject: { ...subject, subject_id: "other" } }],
+			next_ordinal: 0,
+		}),
+	);
+	expect(
+		wrongSubject.client.list({ logicalSessionId: "history-1" }),
 	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
 	const reverse = fixture(async () => json({ items: [row], next_ordinal: 0 }));
 	expect(
