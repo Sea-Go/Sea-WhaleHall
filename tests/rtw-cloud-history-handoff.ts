@@ -13,6 +13,7 @@ const ready = JSON.parse(readFileSync(readyPath, "utf8")) as {
 	answer_ids: string[];
 	accepted_ordinals: number[];
 	expected_statuses: Array<"succeeded" | "insufficient">;
+	expected_quote: string;
 	expected_citation_states: Array<{
 		answer_id: string;
 		evidence_id: string;
@@ -68,7 +69,10 @@ for (let index = 0; index < ready.answer_ids.length; index++) {
 			actual.revisionId !== expected.revision_id ||
 			actual.state !== expected.state ||
 			"quote" in actual ||
-			answer.citationState !== "verified"
+			answer.citationState !== "verified" ||
+			(expected.state === "available" &&
+				!actual.excerpt?.includes(ready.expected_quote)) ||
+			(expected.state === "unavailable" && actual.excerpt !== undefined)
 		) {
 			throw new Error(`live citation mismatch at page ${index + 1}`);
 		}
@@ -76,6 +80,7 @@ for (let index = 0; index < ready.answer_ids.length; index++) {
 	seen.push({
 		ordinal: answer.acceptedOrdinal,
 		citationState: answer.citations[0]?.state ?? null,
+		excerptVisible: Boolean(answer.citations[0]?.excerpt),
 	});
 	afterOrdinal = result.nextOrdinal ?? 0;
 }

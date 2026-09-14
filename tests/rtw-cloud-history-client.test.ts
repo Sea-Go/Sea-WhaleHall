@@ -1,17 +1,25 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
 	RTWCloudHistoryClient,
 	RTWCloudHistoryError,
 } from "../src/bun/clients/product/rtw-cloud-history-client";
 import type { RTWProductSession } from "../src/bun/clients/product/rtw-product-search-client";
 
+const quote = "仅在冻结包中的旧摘录";
+const quoteHash = createHash("sha256").update(quote, "utf8").digest("hex");
+const snapshot = {
+	module_id: "module-1",
+	release_id: "release-1",
+	publication_revision: "publication-1",
+};
 const reference = {
 	evidence_id: "e-1",
 	source_kind: "wiki",
 	content_id: "c-1",
 	revision_id: "r-1",
 	chunk_id: "k-1",
-	quote_hash: "hash-1",
+	quote_hash: quoteHash,
 	state: "available",
 };
 const subject = {
@@ -25,7 +33,7 @@ const turn = JSON.stringify({
 		AnswerID: "a-1",
 		Subject: subject,
 		SessionID: "history-1",
-		Search: { Query: "如何使用？" },
+		Search: { Query: "如何使用？", Snapshot: snapshot },
 	},
 	result: {
 		answer_id: "a-1",
@@ -34,6 +42,7 @@ const turn = JSON.stringify({
 		citations: ["e-1"],
 		search: {
 			evidence_pack: {
+				snapshot,
 				evidence: [
 					{
 						evidence_id: "e-1",
@@ -43,8 +52,8 @@ const turn = JSON.stringify({
 							revision_id: "r-1",
 							chunk_id: "k-1",
 						},
-						quote_hash: "hash-1",
-						quote: "仅在冻结包中的旧摘录",
+						quote_hash: quoteHash,
+						quote,
 					},
 				],
 			},
@@ -95,7 +104,7 @@ function json(data: unknown, status = 200): Response {
 	return Response.json({ code: status, msg: "success", data }, { status });
 }
 
-test("真实分页游标按接纳序号递增，引用只交付实时元数据", async () => {
+test("真实分页游标按接纳序号递增，当前可用引用才交付已校验摘录", async () => {
 	const paths: string[] = [];
 	const { client } = fixture(async (request) => {
 		const url = new URL(String(request));
@@ -105,6 +114,7 @@ test("真实分页游标按接纳序号递增，引用只交付实时元数据",
 				answer_id: "a-1",
 				search_id: "s-1",
 				status: "succeeded",
+				...snapshot,
 				citations: [reference],
 			});
 		return json({ items: [row], next_ordinal: 1 });
@@ -113,7 +123,8 @@ test("真实分页游标按接纳序号递增，引用只交付实时元数据",
 	expect(result.nextOrdinal).toBe(1);
 	expect(result.items[0]?.question).toBe("如何使用？");
 	expect(result.items[0]?.citations[0]?.revisionId).toBe("r-1");
-	expect(JSON.stringify(result)).not.toContain("仅在冻结包中的旧摘录");
+	expect(result.items[0]?.citations[0]?.excerpt).toBe(quote);
+	expect(JSON.stringify(result)).not.toContain("turn_json");
 	expect(JSON.stringify(result)).not.toContain("jwt-1");
 	expect(paths[0]).toContain("after_ordinal=0&limit=1");
 });
@@ -126,17 +137,81 @@ test("撤回状态与冻结引用修订不符时不回放旧摘录", async () =>
 					answer_id: "a-1",
 					search_id: "s-1",
 					status: "succeeded",
+					...snapshot,
 					citations: [live],
 				})
 			: json({ items: [row], next_ordinal: 0 }),
 	);
 	let result = await client.list({ logicalSessionId: "history-1" });
 	expect(result.items[0]?.citations[0]?.state).toBe("unavailable");
+	expect(result.items[0]?.citations[0]?.excerpt).toBeUndefined();
 	expect(result.items[0]?.citationState).toBe("verified");
 	live = { ...reference, revision_id: "r-2", state: "available" };
 	result = await client.list({ logicalSessionId: "history-1" });
 	expect(result.items[0]?.citationState).toBe("unavailable");
 	expect(result.items[0]?.citations).toEqual([]);
+});
+
+test("冻结引用文本哈希与当前发布版本不一致时不投影摘录", async () => {
+	const changed = JSON.stringify(JSON.parse(turn), (_key, value) =>
+		value === quote ? "改写后的引用" : value,
+	);
+	const { client } = fixture(async (request) =>
+		String(request).endsWith("/citations")
+			? json({
+					answer_id: "a-1",
+					search_id: "s-1",
+					status: "succeeded",
+					...snapshot,
+					citations: [reference],
+				})
+			: json({ items: [{ ...row, turn_json: changed }], next_ordinal: 0 }),
+	);
+	const result = await client.list({ logicalSessionId: "history-1" });
+	expect(result.items[0]?.citationState).toBe("unavailable");
+	expect(result.items[0]?.citations).toEqual([]);
+
+	const { client: wrongRelease } = fixture(async (request) =>
+		String(request).endsWith("/citations")
+			? json({
+					answer_id: "a-1",
+					search_id: "s-1",
+					status: "succeeded",
+					...snapshot,
+					release_id: "release-2",
+					citations: [reference],
+				})
+			: json({ items: [row], next_ordinal: 0 }),
+	);
+	const wrong = await wrongRelease.list({ logicalSessionId: "history-1" });
+	expect(wrong.items[0]?.citations).toEqual([]);
+});
+
+test("长引用先校验完整文本，再限长投影摘录", async () => {
+	const longQuote = "海".repeat(300);
+	const longHash = createHash("sha256").update(longQuote, "utf8").digest("hex");
+	const frozen = JSON.parse(turn);
+	frozen.result.search.evidence_pack.evidence[0].quote = longQuote;
+	frozen.result.search.evidence_pack.evidence[0].quote_hash = longHash;
+	const { client } = fixture(async (request) =>
+		String(request).endsWith("/citations")
+			? json({
+					answer_id: "a-1",
+					search_id: "s-1",
+					status: "succeeded",
+					...snapshot,
+					citations: [{ ...reference, quote_hash: longHash }],
+				})
+			: json({
+					items: [{ ...row, turn_json: JSON.stringify(frozen) }],
+					next_ordinal: 0,
+				}),
+	);
+	const result = await client.list({ logicalSessionId: "history-1" });
+	const excerpt = result.items[0]?.citations[0]?.excerpt;
+	expect(Array.from(excerpt ?? "")).toHaveLength(240);
+	expect(excerpt?.endsWith("…")).toBe(true);
+	expect(excerpt).not.toBe(longQuote);
 });
 
 test("网络回执期间换号拒收，错误主体和逆序页拒收", async () => {

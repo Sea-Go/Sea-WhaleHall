@@ -6,6 +6,8 @@ export interface CloudAnswerCitation {
 	revisionId: string;
 	chunkId: string;
 	state: "available" | "unavailable";
+	/** Bounded excerpt only when the frozen quote and current RTW citation match. */
+	excerpt?: string;
 }
 
 export interface CloudAcceptedAnswer {
@@ -17,7 +19,7 @@ export interface CloudAcceptedAnswer {
 	status: "succeeded" | "insufficient";
 	question: string;
 	answer: string | null;
-	/** Citation metadata is current RTW state, never a historical quote. */
+	/** Current RTW citation state is rechecked before any frozen excerpt appears. */
 	citations: CloudAnswerCitation[];
 	citationState: "verified" | "unavailable";
 }
