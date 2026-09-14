@@ -1,5 +1,5 @@
 import { CloudOff, RefreshCw } from "lucide-react";
-import { useEffect, useSyncExternalStore } from "react";
+import { useLayoutEffect, useSyncExternalStore } from "react";
 import { Button } from "../../shared/ui/Button";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { PageHeader } from "../../shared/ui/PageHeader";
@@ -16,7 +16,7 @@ export function CloudHistoryPage({
 		controller.getSnapshot,
 		controller.getServerSnapshot,
 	);
-	useEffect(() => {
+	useLayoutEffect(() => {
 		controller.setVisible(true);
 		return () => controller.setVisible(false);
 	}, [controller]);

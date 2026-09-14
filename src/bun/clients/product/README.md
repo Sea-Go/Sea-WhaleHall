@@ -10,7 +10,7 @@
 
 真 RTW/UserCenter 双阶段交接可运行`RTW_CLOUD_HISTORY_READY=/path/to/0600-ready.json bun tests/rtw-cloud-history-handoff.ts`。2026-09-15 的同现场父验收`/private/tmp/sea-whalehall-history-parent-20260915/report.json`退出0：真实UserCenter/Knowledge HTTP及Go race/vet/mod verify通过；Bun按`after_ordinal`读取两笔答案，stage1两笔引用`available`且摘录可见，知识源撤回后stage2两笔`unavailable`且摘录不可见，另一真实账号读取0笔，renderer输出没有原始quote字段。此为隔离交接验证，尚未建立正式 WhaleHall 产品登录、主窗口真实账号联验或生产可见能力。
 
-WhaleHall 局部`bun test tests/cloud-history-client.test.tsx tests/rtw-cloud-history-client.test.ts`为10 pass；`bun run typecheck`和`bun run build:views`退出0。首次隔离`bun run check`因该worktree缺固定邻接`Sea-DataCenter/contracts/v1`而在既有 DataCenter 合同测试加载时报错；临时建立仅供测试读取的邻接符号链接、保留原断言后复跑`bun run check`为1434 pass/5 skip/0 fail（含Rust检查），随后移除链接并确认不存在。HappyDOM/静态DOM只验状态与文案，未进行真实Electrobun窗口1440×900、1180×720视觉验收。
+WhaleHall 局部`bun test tests/cloud-history-client.test.tsx tests/rtw-cloud-history-client.test.ts`为11 pass，包含页隐藏→来源撤回→返回云端首帧无旧摘录；`bun run typecheck`和`bun run build:views`退出0。首次隔离`bun run check`因该worktree缺固定邻接`Sea-DataCenter/contracts/v1`而在既有 DataCenter 合同测试加载时报错；临时建立仅供测试读取的邻接符号链接、保留原断言后复跑`bun run check`为1435 pass/5 skip/0 fail（含Rust检查），随后移除链接并确认不存在。静态DOM只验状态与文案，未进行真实Electrobun窗口1440×900、1180×720视觉验收。
 
 返回值区分已接纳`succeeded/insufficient`、`in_flight`及`retryable_failure`。202应按固定SearchID GET，503/可重试状态应以原正文和原幂等键POST；409是异文冲突，调用方停止旧键。取消只终止本机等待，不假装撤销RTW已提交操作；恢复时以同键或固定ID查RTW权威记录。当前组件不做自动重试、不持久化未决操作、不实现Tools证据接口或完整SSE。客户端校验响应状态/核心ID/引用quote hash，RTW PG仍是引用和答案的权威接纳者。
 
