@@ -40,8 +40,8 @@ import {
 	parseAppUpdateSignature,
 	parseStableSemver,
 	sanitizeAppUpdateFailure,
-} from "../shared/app-update";
-import { prepareMacUpdateInstall } from "./app-update-macos-installer";
+} from "../../shared/app-update";
+import { prepareMacUpdateInstall } from "./macos-installer";
 
 const DEFAULT_MANIFEST_BASE_URL =
 	"https://github.com/Sea-Go/Sea-WhaleHall/releases/latest/download";

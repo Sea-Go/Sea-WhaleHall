@@ -299,7 +299,7 @@ jobs:
       - name: Exercise the app-owned macOS atomic update and rollback
         env:
           WHALEHALL_REQUIRE_MACOS_UPDATE_INTEGRATION: "1"
-        run: bun test tests/app-update-macos-installer.integration.test.ts
+        run: bun test tests/bun/updates/macos-installer.integration.test.ts
 
       - name: Pin the Stable update verification key
         env:
@@ -467,7 +467,7 @@ jobs:
         shell: pwsh
         env:
           WHALEHALL_REQUIRE_WINDOWS_UPDATE_INTEGRATION: "1"
-        run: bun test tests/app-update-windows-installer.integration.test.ts
+        run: bun test tests/bun/updates/windows-installer.integration.test.ts
 
       - name: Pin the Stable update verification key
         shell: pwsh

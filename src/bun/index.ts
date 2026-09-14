@@ -75,7 +75,7 @@ import {
 import {
 	AppUpdateController,
 	createElectrobunAppUpdaterAdapter,
-} from "./app-update-controller";
+} from "./updates/controller";
 import { shouldForceRendererPlanLock } from "./calendar-mutation-policy";
 import { CalendarRepository } from "./calendar-repository";
 import {

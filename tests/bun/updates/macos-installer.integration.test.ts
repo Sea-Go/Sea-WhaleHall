@@ -17,7 +17,7 @@ import {
 	atomicSwapMacDirectories,
 	prepareMacUpdateInstall,
 	prepareMacUpdateTransaction,
-} from "../src/bun/app-update-macos-installer";
+} from "../../../src/bun/updates/macos-installer";
 
 const macTest = process.platform === "darwin" ? test : test.skip;
 const temporaryRoots: string[] = [];
@@ -191,7 +191,7 @@ async function runRealHelperScenario(fixture: AppFixture): Promise<{
 	helperProcessId: number;
 }> {
 	const moduleUrl = pathToFileURL(
-		join(process.cwd(), "src", "bun", "app-update-macos-installer.ts"),
+		join(process.cwd(), "src", "bun", "updates", "macos-installer.ts"),
 	).href;
 	const mainHarnessPath = join(fixture.root, "main-harness.mjs");
 	const launcherHarnessPath = join(fixture.root, "launcher-harness.mjs");

@@ -17,7 +17,7 @@ import {
 	type WindowsUpdateInstallerPlan,
 	windowsUpdateInstallerLaunch,
 	windowsUpdateInstallerScript,
-} from "../src/bun/app-update-controller";
+} from "../../../src/bun/updates/controller";
 
 const REQUIRE_WINDOWS_INTEGRATION =
 	process.env.WHALEHALL_REQUIRE_WINDOWS_UPDATE_INTEGRATION === "1";

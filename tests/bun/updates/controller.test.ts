@@ -6,12 +6,12 @@ import { join } from "node:path";
 import {
 	AppUpdateController,
 	type AppUpdaterAdapter,
-} from "../src/bun/app-update-controller";
+} from "../../../src/bun/updates/controller";
 import {
 	APP_UPDATE_MANIFEST_SCHEMA_VERSION,
 	type AppUpdateManifest,
 	canonicalizeAppUpdateManifest,
-} from "../src/shared/app-update";
+} from "../../../src/shared/app-update";
 
 const temporaryDirectories: string[] = [];
 
