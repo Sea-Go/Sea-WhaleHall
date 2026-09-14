@@ -37,6 +37,11 @@ import type {
 	CalendarMutationResult,
 } from "./calendar";
 import type {
+	CloudAnswersPage,
+	CloudHistoryResult,
+	ListCloudAnswersRequest,
+} from "./cloud-history";
+import type {
 	ConversationRpcResult,
 	ConversationRpcSendResult,
 	ConversationRpcThread,
@@ -102,6 +107,8 @@ export type {
 	CalendarMutationResult,
 	CancelAgentRunRequest,
 	ClearProactiveFeedbackResult,
+	CloudAnswersPage,
+	CloudHistoryResult,
 	CommitPlanningDraftRequest,
 	ConfirmPlanningObservationCommand,
 	ConfirmPlanRevisionCommand,
@@ -111,6 +118,7 @@ export type {
 	CreatePlanDraftCommand,
 	DecideAgentToolApprovalRequest,
 	GetAgentRunSnapshotRequest,
+	ListCloudAnswersRequest,
 	ListProactiveFeedbackRequest,
 	ListRestorableAgentRunsRequest,
 	LocalMonitoringConfigure,
@@ -390,6 +398,10 @@ export type ClientRPC = {
 			listProactiveFeedback: {
 				params: ListProactiveFeedbackRequest;
 				response: ProactiveFeedbackRpcResult<ProactiveFeedbackPage>;
+			};
+			listCloudAcceptedAnswers: {
+				params: ListCloudAnswersRequest;
+				response: CloudHistoryResult<CloudAnswersPage>;
 			};
 			clearProactiveFeedbackData: {
 				params: Record<string, never>;
