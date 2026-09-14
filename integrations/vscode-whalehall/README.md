@@ -66,13 +66,18 @@ runtime:
 ```bash
 bun run build
 bunx @vscode/vsce@3.9.2 package --no-dependencies \
-  --allow-missing-repository --no-rewrite-relative-links --skip-license \
+  --allow-missing-repository --no-rewrite-relative-links \
   --out whalehall-vscode-bridge.vsix
 code --install-extension whalehall-vscode-bridge.vsix
 ```
 
 The extension has no runtime dependencies. `@types/node`, `@types/vscode`, and
 TypeScript are development-only dependencies.
+
+## License
+
+This extension is licensed under the [Apache License, Version 2.0](LICENSE).
+The license is included in the VSIX package.
 
 ## Configuration
 
