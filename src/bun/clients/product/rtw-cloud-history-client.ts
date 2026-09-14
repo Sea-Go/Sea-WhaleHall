@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type {
 	CloudAcceptedAnswer,
@@ -11,6 +12,13 @@ import type {
 } from "./rtw-product-search-client";
 
 const id = z.string().min(1).max(512);
+const MAX_EXCERPT_RUNES = 240;
+const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
+const snapshot = z.object({
+	module_id: id,
+	release_id: id,
+	publication_revision: id,
+});
 const subject = z.object({ authority_id: id, tenant_id: id, subject_id: id });
 const citation = z.object({
 	evidence_id: id,
@@ -18,7 +26,7 @@ const citation = z.object({
 	content_id: id,
 	revision_id: id,
 	chunk_id: id,
-	quote_hash: id,
+	quote_hash: sha256,
 	state: z.enum(["available", "unavailable"]),
 });
 const answer = z.object({
@@ -39,6 +47,9 @@ const citationState = z.object({
 	answer_id: id,
 	search_id: id,
 	status: z.string(),
+	module_id: z.string(),
+	release_id: z.string(),
+	publication_revision: z.string(),
 	citations: z.array(citation).max(100),
 });
 const turn = z.object({
@@ -47,11 +58,15 @@ const turn = z.object({
 		AnswerID: id,
 		Subject: subject,
 		SessionID: id,
-		Search: z.object({ Query: z.string().min(1).max(4096) }),
+		Search: z.object({
+			Query: z.string().min(1).max(4096),
+			Snapshot: snapshot,
+		}),
 	}),
 	result: z.object({
 		search: z.object({
 			evidence_pack: z.object({
+				snapshot,
 				evidence: z.array(
 					z.object({
 						evidence_id: id,
@@ -61,7 +76,11 @@ const turn = z.object({
 							revision_id: id,
 							chunk_id: id,
 						}),
-						quote_hash: id,
+						quote_hash: sha256,
+						quote: z
+							.string()
+							.min(1)
+							.max(1 << 20),
 					}),
 				),
 			}),
@@ -235,6 +254,8 @@ export class RTWCloudHistoryClient {
 				throw new RTWCloudHistoryError("BAD_RESPONSE");
 			}
 			const frozen = accepted.data.result.citations;
+			const fixedSnapshot = accepted.data.Request.Search.Snapshot;
+			const packSnapshot = accepted.data.result.search.evidence_pack.snapshot;
 			const frozenEvidence = new Map(
 				accepted.data.result.search.evidence_pack.evidence.map((entry) => [
 					entry.evidence_id,
@@ -242,6 +263,14 @@ export class RTWCloudHistoryClient {
 				]),
 			);
 			if (
+				(item.status === "succeeded" &&
+					(live.module_id !== fixedSnapshot.module_id ||
+						live.release_id !== fixedSnapshot.release_id ||
+						live.publication_revision !== fixedSnapshot.publication_revision ||
+						packSnapshot.module_id !== fixedSnapshot.module_id ||
+						packSnapshot.release_id !== fixedSnapshot.release_id ||
+						packSnapshot.publication_revision !==
+							fixedSnapshot.publication_revision)) ||
 				new Set(frozen).size !== frozen.length ||
 				live.citations.length !== frozen.length ||
 				live.citations.some((entry, index) => {
@@ -253,20 +282,36 @@ export class RTWCloudHistoryClient {
 						entry.content_id !== original.key.content_id ||
 						entry.revision_id !== original.key.revision_id ||
 						entry.chunk_id !== original.key.chunk_id ||
-						entry.quote_hash !== original.quote_hash
+						entry.quote_hash !== original.quote_hash ||
+						createHash("sha256")
+							.update(original.quote, "utf8")
+							.digest("hex") !== original.quote_hash
 					);
 				})
 			) {
 				throw new RTWCloudHistoryError("BAD_RESPONSE");
 			}
-			citations = live.citations.map((entry) => ({
-				evidenceId: entry.evidence_id,
-				sourceKind: entry.source_kind,
-				contentId: entry.content_id,
-				revisionId: entry.revision_id,
-				chunkId: entry.chunk_id,
-				state: entry.state,
-			}));
+			citations = live.citations.map((entry) => {
+				const original = frozenEvidence.get(entry.evidence_id);
+				if (!original) throw new RTWCloudHistoryError("BAD_RESPONSE");
+				const runes = Array.from(original.quote);
+				return {
+					evidenceId: entry.evidence_id,
+					sourceKind: entry.source_kind,
+					contentId: entry.content_id,
+					revisionId: entry.revision_id,
+					chunkId: entry.chunk_id,
+					state: entry.state,
+					...(entry.state === "available"
+						? {
+								excerpt:
+									runes.length > MAX_EXCERPT_RUNES
+										? `${runes.slice(0, MAX_EXCERPT_RUNES - 1).join("")}…`
+										: original.quote,
+							}
+						: {}),
+				};
+			});
 			state = "verified";
 		} catch (error) {
 			if (
