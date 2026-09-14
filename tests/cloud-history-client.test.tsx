@@ -78,6 +78,54 @@ test("后续分页按接纳序号递增，撤回引用只展示状态", async ()
 	expect(html).not.toContain("更早记录");
 });
 
+test("可用引用展示摘录，加载后续页断网立即清除旧摘录", async () => {
+	const citation = first.citations[0];
+	if (!citation) throw new Error("fixture citation missing");
+	const available = {
+		...first,
+		citations: [
+			{
+				...citation,
+				state: "available" as const,
+				excerpt: "仅当前可用的摘录",
+			},
+		],
+	};
+	let release!: (value: CloudHistoryResult<CloudAnswersPage>) => void;
+	const delayed = new Promise<CloudHistoryResult<CloudAnswersPage>>(
+		(resolve) => {
+			release = resolve;
+		},
+	);
+	let calls = 0;
+	const controller = new CloudHistoryController({
+		list: async () =>
+			++calls === 1
+				? { kind: "ok", data: { items: [available], nextOrdinal: 1 } }
+				: delayed,
+	});
+	controller.setScope({
+		logicalSessionId: "logical-1",
+		productSessionId: "rtw-1",
+		generation: 1,
+	});
+	await controller.load();
+	expect(
+		renderToStaticMarkup(<CloudHistoryPage controller={controller} />),
+	).toContain("仅当前可用的摘录");
+	const pending = controller.loadMore();
+	expect(
+		renderToStaticMarkup(<CloudHistoryPage controller={controller} />),
+	).not.toContain("仅当前可用的摘录");
+	release({ kind: "offline" });
+	await pending;
+	const html = renderToStaticMarkup(
+		<CloudHistoryPage controller={controller} />,
+	);
+	expect(html).not.toContain("仅当前可用的摘录");
+	expect(html).toContain("当前引用状态无法核验");
+});
+
 test("切换主体清空旧页并丢弃晚到回执，登录失效清空现页", async () => {
 	let release!: (value: CloudHistoryResult<CloudAnswersPage>) => void;
 	const pending = new Promise<CloudHistoryResult<CloudAnswersPage>>(
@@ -107,11 +155,19 @@ test("切换主体清空旧页并丢弃晚到回执，登录失效清空现页",
 	controller.setScope({ ...scope, generation: 2 });
 	expect(controller.getSnapshot()).toEqual({ status: "disabled" });
 
+	const cited = first.citations[0];
+	if (!cited) throw new Error("fixture citation missing");
+	const availableFirst = {
+		...first,
+		citations: [
+			{ ...cited, state: "available" as const, excerpt: "旧账号摘录" },
+		],
+	};
 	let calls = 0;
 	const changed = new CloudHistoryController({
 		list: async () =>
 			++calls === 1
-				? { kind: "ok", data: { items: [first], nextOrdinal: 1 } }
+				? { kind: "ok", data: { items: [availableFirst], nextOrdinal: 1 } }
 				: { kind: "session_changed" },
 	});
 	changed.setScope({
@@ -120,7 +176,13 @@ test("切换主体清空旧页并丢弃晚到回执，登录失效清空现页",
 		generation: 1,
 	});
 	await changed.load();
+	expect(
+		renderToStaticMarkup(<CloudHistoryPage controller={changed} />),
+	).toContain("旧账号摘录");
 	await changed.loadMore();
+	expect(
+		renderToStaticMarkup(<CloudHistoryPage controller={changed} />),
+	).not.toContain("旧账号摘录");
 	expect(changed.getSnapshot()).toEqual({
 		status: "error",
 		reason: "session_changed",
