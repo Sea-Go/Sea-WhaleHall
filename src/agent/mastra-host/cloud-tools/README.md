@@ -14,4 +14,4 @@
 
 - `bun run typecheck`、`bunx biome check src/agent/mastra-host/cloud-tools tests/mastra-cloud-search-tools.test.ts`：通过。
 - `bun test tests/model-call-boundary.test.ts tests/mastra-cloud-search-tools.test.ts`：`11 pass / 0 fail`，含真实 Mastra 父 Agent 继续执行的 fixture。
-- `bun run check`：Rust fmt、Clippy、Rust/credential-helper 测试通过；Bun 全量 `1407 pass / 5 skip / 1 fail`，故整体验收未通过。唯一失败是现存跨仓契约测试 `tests/datacenter-cloud-contract.test.ts:364` 仍断言 `events.json` 为 27 项，而当前 DataCenter 原始仓与隔离 `4422146` 的契约均为 29 项。本分支未修改该测试或 DC 契约。隔离工作树起初还缺测试硬编码的相邻 DC 路径；复验时临时给该路径建立指向固定 DC worktree 的只读符号链接，复验后已移除，链接不属于交付。
+- 初始Tools独立分支的`bun run check`为`1407 pass / 5 skip / 1 fail`：其V2云同步合同未投影DataCenter新增的`authorization.changed`和`system.cursorCheckpoint`，不能只把测试期待从27改成29。后续WhaleHall隔离集成分支接纳完整V2类型/校验/投影提交`42df758`；跨仓合同6/6、云搜索与模型边界定向合计17/17、TypeScript和本次相关6文件Biome通过。合入后的首次全量`bun run check`有一次macOS Observer JSONL帧等待超时，单独复跑5/5通过；第二次完整`bun run check`为`1408 pass / 5 skip / 0 fail`，含Rust fmt/Clippy/tests和Bun全量。`bun run lint:changed`仍扫到相对origin/main已有的pet文件格式/导入问题，不属于本组件或V2合同改动，直接相关文件Biome通过。测试使用临时只读相邻DC工作树链接，复验后已移除，不属于交付。以上是本地代码门禁，不证明正式Bun H02 Port、生产模型Tool-call或RTW/BTW产品服务已联通。
