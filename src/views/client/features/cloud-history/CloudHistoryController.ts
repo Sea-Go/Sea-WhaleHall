@@ -83,6 +83,12 @@ export class CloudHistoryController {
 
 	setVisible(visible: boolean): void {
 		this.visible = visible;
+		if (!visible) {
+			this.version++;
+			this.pending = false;
+			this.setState({ status: "disabled" });
+			return;
+		}
 		if (visible && this.scope) void this.load();
 	}
 
@@ -145,7 +151,8 @@ export class CloudHistoryController {
 			!this.scope
 		)
 			return;
-		const { items, nextOrdinal } = this.state;
+		const { nextOrdinal } = this.state;
+		const items = withoutCurrentExcerpts(this.state.items);
 		const logicalSessionId = this.scope.logicalSessionId;
 		const version = ++this.version;
 		this.pending = true;
@@ -228,4 +235,17 @@ export class CloudHistoryController {
 		this.state = state;
 		for (const listener of this.listeners) listener();
 	}
+}
+
+function withoutCurrentExcerpts(
+	items: readonly CloudAcceptedAnswer[],
+): CloudAcceptedAnswer[] {
+	return items.map((item) => ({
+		...item,
+		citationState: "unavailable",
+		citations: item.citations.map(({ excerpt: _excerpt, ...citation }) => ({
+			...citation,
+			state: "unavailable",
+		})),
+	}));
 }

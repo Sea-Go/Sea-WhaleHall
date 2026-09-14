@@ -97,6 +97,9 @@ export function CloudHistoryPage({
 													: "已撤回或不可用"}{" "}
 												· {citation.sourceKind} · {citation.contentId} · 修订{" "}
 												{citation.revisionId}
+												{citation.state === "available" && citation.excerpt ? (
+													<blockquote>{citation.excerpt}</blockquote>
+												) : null}
 											</li>
 										))}
 									</ul>
