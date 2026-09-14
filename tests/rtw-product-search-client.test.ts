@@ -212,6 +212,38 @@ test("does not expose an old account response after session cutover", async () =
 	);
 });
 
+test("captures session fields when the provider mutates its object in place", async () => {
+	const current: RTWProductSession = {
+		accessToken: "rtw-jwt-1",
+		sessionId: "rtw-session-1",
+		generation: 1,
+	};
+	const provider: RTWProductSessionProvider = {
+		current: async () => current,
+		isCurrent: (session) =>
+			current.sessionId === session.sessionId &&
+			current.generation === session.generation,
+	};
+	let release!: (response: Response) => void;
+	const pending = new Promise<Response>((resolve) => {
+		release = resolve;
+	});
+	const client = new RTWProductSearchClient({
+		baseUrl: "https://rtw.example.invalid",
+		sessions: provider,
+		fetch: async () => pending,
+	});
+	const operation = client.createSearch(input);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	current.accessToken = "rtw-jwt-2";
+	current.sessionId = "rtw-session-2";
+	current.generation = 2;
+	release(Response.json(accepted));
+	await expect(operation).rejects.toEqual(
+		expect.objectContaining({ code: "SESSION_CHANGED" }),
+	);
+});
+
 test("cancels an in-flight request without inventing a completed answer", async () => {
 	const controller = new AbortController();
 	const client = new RTWProductSearchClient({

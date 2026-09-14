@@ -185,8 +185,18 @@ export class RTWProductSearchClient {
 		body: object | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<RTWSearchOutcome> {
-		const session = await this.options.sessions.current();
-		if (!session?.accessToken || !this.options.sessions.isCurrent(session)) {
+		const current = await this.options.sessions.current();
+		if (!current?.accessToken || !Number.isSafeInteger(current.generation)) {
+			throw new RTWProductSearchError("NOT_AUTHENTICATED");
+		}
+		// A provider may reuse and mutate its current object on account cutover.
+		// Keep this request's identity and credential immutable across the await.
+		const session: RTWProductSession = {
+			accessToken: current.accessToken,
+			sessionId: current.sessionId,
+			generation: current.generation,
+		};
+		if (!this.options.sessions.isCurrent(session)) {
 			throw new RTWProductSearchError("NOT_AUTHENTICATED");
 		}
 		const url = new URL(path, this.baseUrl);
