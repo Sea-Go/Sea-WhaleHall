@@ -167,9 +167,9 @@ test("冻结引用文本哈希与当前发布版本不一致时不投影摘录",
 				})
 			: json({ items: [{ ...row, turn_json: changed }], next_ordinal: 0 }),
 	);
-	const result = await client.list({ logicalSessionId: "history-1" });
-	expect(result.items[0]?.citationState).toBe("unavailable");
-	expect(result.items[0]?.citations).toEqual([]);
+	expect(client.list({ logicalSessionId: "history-1" })).rejects.toMatchObject({
+		code: "BAD_RESPONSE",
+	});
 
 	const { client: wrongRelease } = fixture(async (request) =>
 		String(request).endsWith("/citations")
@@ -260,4 +260,239 @@ test("越权和离线不可回退缓存", async () => {
 	expect(
 		offline.client.list({ logicalSessionId: "history-1" }),
 	).rejects.toMatchObject({ code: "UNAVAILABLE" });
+});
+
+function turnWithSubject(owner: object): string {
+	const original = JSON.parse(turn);
+	original.Request.Subject = owner;
+	return JSON.stringify(original);
+}
+
+function historyClientFor(record: object) {
+	return fixture(async (request) =>
+		String(request).endsWith("/citations")
+			? json({
+					answer_id: "a-1",
+					search_id: "s-1",
+					status: "succeeded",
+					...snapshot,
+					citations: [reference],
+				})
+			: json({ items: [record], next_ordinal: 0 }),
+	).client;
+}
+
+test("旧外层与旧turn、新外层与新turn、v2投影与不可变旧turn均双读为同一人", async () => {
+	const subjectV2 = { issuer: "rtw.identity", subject_id: "42" };
+	for (const record of [
+		row,
+		{ ...row, subject: subjectV2, turn_json: turnWithSubject(subjectV2) },
+		{ ...row, subject: subjectV2, turn_json: turn },
+	]) {
+		const result = await historyClientFor(record).list({
+			logicalSessionId: "history-1",
+		});
+		expect(result.items[0]?.answerId).toBe("a-1");
+		expect(result.items[0]?.searchId).toBe("s-1");
+		expect(result.items[0]?.citationState).toBe("verified");
+		expect(result.items[0]?.citations[0]?.excerpt).toBe(quote);
+		expect(JSON.stringify(result)).not.toContain("subject_id");
+		expect(JSON.stringify(result)).not.toContain("jwt-1");
+	}
+	const v1OuterWithV2Turn = {
+		...row,
+		turn_json: turnWithSubject(subjectV2),
+	};
+	expect(
+		historyClientFor(v1OuterWithV2Turn).list({
+			logicalSessionId: "history-1",
+		}),
+	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+});
+
+test("UID全程保持十进制高位精度并拒绝越界或非规范值", async () => {
+	for (const highUID of ["9007199254740993", "9223372036854775807"]) {
+		const owner = { issuer: "rtw.identity", subject_id: highUID };
+		const result = await historyClientFor({
+			...row,
+			subject: owner,
+			turn_json: turnWithSubject(owner),
+		}).list({ logicalSessionId: "history-1" });
+		expect(result.items[0]?.answerId).toBe("a-1");
+		const mixed = await historyClientFor({
+			...row,
+			subject: owner,
+			turn_json: turnWithSubject({ ...subject, subject_id: highUID }),
+		}).list({ logicalSessionId: "history-1" });
+		expect(mixed.items[0]?.citationState).toBe("verified");
+	}
+	for (const value of [
+		"0",
+		"-1",
+		"01",
+		"42.0",
+		"9223372036854775808",
+		"9007199254740993.0",
+	]) {
+		const owner = { issuer: "rtw.identity", subject_id: value };
+		expect(
+			historyClientFor({
+				...row,
+				subject: owner,
+				turn_json: turnWithSubject(owner),
+			}).list({ logicalSessionId: "history-1" }),
+		).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+	}
+});
+
+test("v1错误兼容槽、v2额外主体字段和外层turn跨用户均拒收", async () => {
+	const v2 = { issuer: "rtw.identity", subject_id: "42" };
+	const badOwners: unknown[] = [
+		{ ...subject, tenant_id: "other" },
+		{ ...subject, authority_id: "other" },
+		{ ...v2, tenant_id: "platform" },
+		{ ...v2, realm: "platform" },
+		{ ...v2, authority_id: "rtw.identity" },
+		{ ...v2, issuer: "other" },
+		null,
+	];
+	for (const owner of badOwners) {
+		expect(
+			historyClientFor({ ...row, subject: owner }).list({
+				logicalSessionId: "history-1",
+			}),
+		).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+		expect(
+			historyClientFor({
+				...row,
+				subject: v2,
+				turn_json: turnWithSubject(owner ?? { ...v2, subject_id: "43" }),
+			}).list({ logicalSessionId: "history-1" }),
+		).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+	}
+	expect(
+		historyClientFor({
+			...row,
+			subject: v2,
+			turn_json: turnWithSubject({ ...v2, subject_id: "43" }),
+		}).list({ logicalSessionId: "history-1" }),
+	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+});
+
+test("同一分页会话不得混入第二个UID，答复和检索引用仍须一致", async () => {
+	const otherSubject = { issuer: "rtw.identity", subject_id: "43" };
+	const otherTurn = JSON.parse(turn);
+	otherTurn.Request.Subject = otherSubject;
+	otherTurn.Request.SearchID = "s-2";
+	otherTurn.Request.AnswerID = "a-2";
+	otherTurn.result.answer_id = "a-2";
+	const other = {
+		...row,
+		answer_id: "a-2",
+		search_id: "s-2",
+		subject: otherSubject,
+		accepted_ordinal: 2,
+		turn_json: JSON.stringify(otherTurn),
+	};
+	let citationReads = 0;
+	const mixed = fixture(async (request) => {
+		if (String(request).endsWith("/citations")) {
+			citationReads++;
+			return json({
+				answer_id: "a-1",
+				search_id: "s-1",
+				status: "succeeded",
+				...snapshot,
+				citations: [reference],
+			});
+		}
+		return json({ items: [row, other], next_ordinal: 0 });
+	}).client;
+	expect(mixed.list({ logicalSessionId: "history-1" })).rejects.toMatchObject({
+		code: "BAD_RESPONSE",
+	});
+	expect(citationReads).toBe(0);
+	const badPack = JSON.parse(turn);
+	badPack.result.search.evidence_pack.search_id = "s-other";
+	expect(
+		historyClientFor({ ...row, turn_json: JSON.stringify(badPack) }).list({
+			logicalSessionId: "history-1",
+		}),
+	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+});
+
+test("未知、null和重复JSON字段在Bun投影前拒绝", async () => {
+	const badTurn = JSON.parse(turn);
+	badTurn.Request.Subject = {
+		issuer: "rtw.identity",
+		subject_id: "42",
+		realm: "platform",
+	};
+	for (const record of [
+		{ ...row, unknown: "injected" },
+		{
+			...row,
+			subject: { issuer: "rtw.identity", subject_id: "42" },
+			turn_json: JSON.stringify(badTurn),
+		},
+		{ ...row, turn_json: "null" },
+		{
+			...row,
+			turn_json: JSON.stringify({
+				...JSON.parse(turn),
+				Request: { ...JSON.parse(turn).Request, Subject: null },
+			}),
+		},
+		{
+			...row,
+			turn_json: turn.replace(
+				'"subject_id":"42"',
+				'"subject_id":"42","subject_id":"43"',
+			),
+		},
+	]) {
+		expect(
+			historyClientFor(record).list({ logicalSessionId: "history-1" }),
+		).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+	}
+	const rawDuplicate = JSON.stringify({
+		code: 200,
+		msg: "success",
+		data: { items: [row], next_ordinal: 0 },
+	}).replace('"subject_id":"42"', '"subject_id":"42","subject_id":"43"');
+	const client = fixture(
+		async () =>
+			new Response(rawDuplicate, {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+	).client;
+	expect(client.list({ logicalSessionId: "history-1" })).rejects.toMatchObject({
+		code: "BAD_RESPONSE",
+	});
+	const badLiveCitation = fixture(async (request) =>
+		String(request).endsWith("/citations")
+			? json({
+					answer_id: "a-1",
+					search_id: "s-1",
+					status: "succeeded",
+					...snapshot,
+					citations: [reference],
+					unknown: "injected",
+				})
+			: json({ items: [row], next_ordinal: 0 }),
+	).client;
+	expect(
+		badLiveCitation.list({ logicalSessionId: "history-1" }),
+	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+});
+
+test("冻结证据包的来源版本与请求版本不一致时拒绝整条历史", async () => {
+	const changed = JSON.parse(turn);
+	changed.result.search.evidence_pack.snapshot.release_id = "other-release";
+	expect(
+		historyClientFor({ ...row, turn_json: JSON.stringify(changed) }).list({
+			logicalSessionId: "history-1",
+		}),
+	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
 });

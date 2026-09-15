@@ -6,6 +6,12 @@ import type {
 	CloudHistoryResult,
 	ListCloudAnswersRequest,
 } from "../../../shared/cloud-history";
+import { parseRTWHistoryJSON } from "./rtw-history-json";
+import {
+	canonicalRTWSubject,
+	rtwHistorySubject,
+	rtwSubjectVersion,
+} from "./rtw-history-subject";
 import type {
 	RTWProductSession,
 	RTWProductSessionProvider,
@@ -14,83 +20,109 @@ import type {
 const id = z.string().min(1).max(512);
 const MAX_EXCERPT_RUNES = 240;
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
-const snapshot = z.object({
-	module_id: id,
-	release_id: id,
-	publication_revision: id,
-});
-const subject = z.object({ authority_id: id, tenant_id: id, subject_id: id });
-const citation = z.object({
-	evidence_id: id,
-	source_kind: id,
-	content_id: id,
-	revision_id: id,
-	chunk_id: id,
-	quote_hash: sha256,
-	state: z.enum(["available", "unavailable"]),
-});
-const answer = z.object({
-	answer_id: id,
-	search_id: id,
-	subject,
-	session_id: id,
-	status: z.enum(["succeeded", "insufficient"]),
-	accepted_ordinal: z.number().int().positive().safe(),
-	accepted_at: z.string().datetime({ offset: true }),
-	turn_json: z.string().max(4 * 1024 * 1024),
-});
-const page = z.object({
-	items: z.array(answer).max(20),
-	next_ordinal: z.number().int().nonnegative().safe().optional().default(0),
-});
-const citationState = z.object({
-	answer_id: id,
-	search_id: id,
-	status: z.string(),
-	module_id: z.string(),
-	release_id: z.string(),
-	publication_revision: z.string(),
-	citations: z.array(citation).max(100),
-});
-const turn = z.object({
-	Request: z.object({
-		SearchID: id,
-		AnswerID: id,
-		Subject: subject,
-		SessionID: id,
-		Search: z.object({
-			Query: z.string().min(1).max(4096),
-			Snapshot: snapshot,
-		}),
-	}),
-	result: z.object({
-		search: z.object({
-			evidence_pack: z.object({
-				snapshot,
-				evidence: z.array(
-					z.object({
-						evidence_id: id,
-						key: z.object({
-							source_kind: id,
-							content_id: id,
-							revision_id: id,
-							chunk_id: id,
-						}),
-						quote_hash: sha256,
-						quote: z
-							.string()
-							.min(1)
-							.max(1 << 20),
-					}),
-				),
-			}),
-		}),
+const snapshot = z
+	.object({
+		module_id: id,
+		release_id: id,
+		publication_revision: id,
+	})
+	.passthrough();
+const citation = z
+	.object({
+		evidence_id: id,
+		source_kind: id,
+		content_id: id,
+		revision_id: id,
+		chunk_id: id,
+		quote_hash: sha256,
+		state: z.enum(["available", "unavailable"]),
+	})
+	.strict();
+const answer = z
+	.object({
 		answer_id: id,
-		answer: z.string().optional(),
-		summary_status: z.enum(["succeeded", "insufficient"]),
-		citations: z.array(id),
-	}),
-});
+		search_id: id,
+		subject: rtwHistorySubject,
+		session_id: id,
+		status: z.enum(["succeeded", "insufficient"]),
+		accepted_ordinal: z.number().int().positive().safe(),
+		accepted_at: z.string().datetime({ offset: true }),
+		turn_json: z.string().max(4 * 1024 * 1024),
+	})
+	.strict();
+const page = z
+	.object({
+		items: z.array(answer).max(20),
+		next_ordinal: z.number().int().nonnegative().safe().optional().default(0),
+	})
+	.strict();
+const citationState = z
+	.object({
+		answer_id: id,
+		search_id: id,
+		status: z.string(),
+		module_id: z.string(),
+		release_id: z.string(),
+		publication_revision: z.string(),
+		citations: z.array(citation).max(100),
+	})
+	.strict();
+const turn = z
+	.object({
+		Request: z
+			.object({
+				SearchID: id,
+				AnswerID: id,
+				Subject: rtwHistorySubject,
+				SessionID: id,
+				Search: z
+					.object({
+						Query: z.string().min(1).max(4096),
+						Snapshot: snapshot,
+					})
+					.passthrough(),
+			})
+			.strict(),
+		result: z
+			.object({
+				search: z
+					.object({
+						evidence_pack: z
+							.object({
+								search_id: id.optional(),
+								snapshot,
+								evidence: z.array(
+									z
+										.object({
+											evidence_id: id,
+											key: z
+												.object({
+													source_kind: id,
+													content_id: id,
+													revision_id: id,
+													chunk_id: id,
+												})
+												.strict(),
+											quote_hash: sha256,
+											quote: z
+												.string()
+												.min(1)
+												.max(1 << 20),
+										})
+										.passthrough(),
+								),
+							})
+							.passthrough(),
+					})
+					.passthrough(),
+				answer_id: id,
+				answer: z.string().optional(),
+				summary_status: z.enum(["succeeded", "insufficient"]),
+				citations: z.array(id),
+			})
+			.strict(),
+	})
+	.strict();
 
 export interface RTWCloudHistoryClientOptions {
 	baseUrl: string;
@@ -113,6 +145,8 @@ export class RTWCloudHistoryError extends Error {
 		this.name = "RTWCloudHistoryError";
 	}
 }
+
+class CitationMismatchError extends Error {}
 
 /** Bun-only transport. The renderer receives neither the bearer nor historical evidence/quote. */
 export class RTWCloudHistoryClient {
@@ -183,11 +217,17 @@ export class RTWCloudHistoryClient {
 			limit: String(input.limit ?? 5),
 		});
 		const raw = await this.get(`${root}?${query}`, session, page);
-		const result: CloudAcceptedAnswer[] = [];
 		let previous = input.afterOrdinal ?? 0;
 		const seen = new Set<string>();
+		const firstSubject = raw.items[0]
+			? canonicalRTWSubject(raw.items[0].subject)
+			: null;
 		for (const item of raw.items) {
+			const owner = canonicalRTWSubject(item.subject);
 			if (
+				(firstSubject &&
+					(owner.issuer !== firstSubject.issuer ||
+						owner.subjectId !== firstSubject.subjectId)) ||
 				item.session_id !== input.logicalSessionId ||
 				item.accepted_ordinal <= previous ||
 				seen.has(item.answer_id)
@@ -196,15 +236,18 @@ export class RTWCloudHistoryClient {
 			}
 			previous = item.accepted_ordinal;
 			seen.add(item.answer_id);
-			result.push(await this.project(item, root, session));
 		}
-		this.assertCurrent(session);
 		if (
 			raw.next_ordinal !== 0 &&
-			(result.length === 0 || raw.next_ordinal !== previous)
+			(raw.items.length === 0 || raw.next_ordinal !== previous)
 		) {
 			throw new RTWCloudHistoryError("BAD_RESPONSE");
 		}
+		const result: CloudAcceptedAnswer[] = [];
+		for (const item of raw.items) {
+			result.push(await this.project(item, root, session));
+		}
+		this.assertCurrent(session);
 		return { items: result, nextOrdinal: raw.next_ordinal || null };
 	}
 
@@ -215,26 +258,58 @@ export class RTWCloudHistoryClient {
 	): Promise<CloudAcceptedAnswer> {
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(item.turn_json);
+			parsed = parseRTWHistoryJSON(item.turn_json);
 		} catch {
 			throw new RTWCloudHistoryError("BAD_RESPONSE");
 		}
 		const accepted = turn.safeParse(parsed);
+		const outerSubject = canonicalRTWSubject(item.subject);
+		const turnSubject = accepted.success
+			? canonicalRTWSubject(accepted.data.Request.Subject)
+			: null;
 		if (
 			!accepted.success ||
+			(rtwSubjectVersion(item.subject) === 1 &&
+				rtwSubjectVersion(accepted.data.Request.Subject) === 2) ||
 			accepted.data.Request.SearchID !== item.search_id ||
 			accepted.data.Request.AnswerID !== item.answer_id ||
 			accepted.data.Request.SessionID !== item.session_id ||
-			accepted.data.Request.Subject.authority_id !==
-				item.subject.authority_id ||
-			accepted.data.Request.Subject.tenant_id !== item.subject.tenant_id ||
-			accepted.data.Request.Subject.subject_id !== item.subject.subject_id ||
+			turnSubject?.issuer !== outerSubject.issuer ||
+			turnSubject.subjectId !== outerSubject.subjectId ||
 			accepted.data.result.answer_id !== item.answer_id ||
+			(accepted.data.result.search.evidence_pack.search_id !== undefined &&
+				accepted.data.result.search.evidence_pack.search_id !==
+					item.search_id) ||
 			accepted.data.result.summary_status !== item.status ||
 			(item.status === "succeeded" && !accepted.data.result.answer) ||
+			(item.status === "succeeded" &&
+				accepted.data.result.citations.length === 0) ||
 			(item.status === "insufficient" &&
 				(accepted.data.result.answer ||
 					accepted.data.result.citations.length > 0))
+		) {
+			throw new RTWCloudHistoryError("BAD_RESPONSE");
+		}
+		const frozen = accepted.data.result.citations;
+		const evidence = accepted.data.result.search.evidence_pack.evidence;
+		const fixedSnapshot = accepted.data.Request.Search.Snapshot;
+		const packSnapshot = accepted.data.result.search.evidence_pack.snapshot;
+		const frozenEvidence = new Map(
+			evidence.map((entry) => [entry.evidence_id, entry]),
+		);
+		if (
+			packSnapshot.module_id !== fixedSnapshot.module_id ||
+			packSnapshot.release_id !== fixedSnapshot.release_id ||
+			packSnapshot.publication_revision !==
+				fixedSnapshot.publication_revision ||
+			new Set(frozen).size !== frozen.length ||
+			frozenEvidence.size !== evidence.length ||
+			frozen.some((key) => !frozenEvidence.has(key)) ||
+			evidence.some(
+				(entry) =>
+					createHash("sha256").update(entry.quote, "utf8").digest("hex") !==
+					entry.quote_hash,
+			)
 		) {
 			throw new RTWCloudHistoryError("BAD_RESPONSE");
 		}
@@ -253,25 +328,12 @@ export class RTWCloudHistoryClient {
 			) {
 				throw new RTWCloudHistoryError("BAD_RESPONSE");
 			}
-			const frozen = accepted.data.result.citations;
-			const fixedSnapshot = accepted.data.Request.Search.Snapshot;
-			const packSnapshot = accepted.data.result.search.evidence_pack.snapshot;
-			const frozenEvidence = new Map(
-				accepted.data.result.search.evidence_pack.evidence.map((entry) => [
-					entry.evidence_id,
-					entry,
-				]),
-			);
 			if (
 				(item.status === "succeeded" &&
 					(live.module_id !== fixedSnapshot.module_id ||
 						live.release_id !== fixedSnapshot.release_id ||
-						live.publication_revision !== fixedSnapshot.publication_revision ||
-						packSnapshot.module_id !== fixedSnapshot.module_id ||
-						packSnapshot.release_id !== fixedSnapshot.release_id ||
-						packSnapshot.publication_revision !==
+						live.publication_revision !==
 							fixedSnapshot.publication_revision)) ||
-				new Set(frozen).size !== frozen.length ||
 				live.citations.length !== frozen.length ||
 				live.citations.some((entry, index) => {
 					const original = frozenEvidence.get(entry.evidence_id);
@@ -282,18 +344,15 @@ export class RTWCloudHistoryClient {
 						entry.content_id !== original.key.content_id ||
 						entry.revision_id !== original.key.revision_id ||
 						entry.chunk_id !== original.key.chunk_id ||
-						entry.quote_hash !== original.quote_hash ||
-						createHash("sha256")
-							.update(original.quote, "utf8")
-							.digest("hex") !== original.quote_hash
+						entry.quote_hash !== original.quote_hash
 					);
 				})
 			) {
-				throw new RTWCloudHistoryError("BAD_RESPONSE");
+				throw new CitationMismatchError();
 			}
 			citations = live.citations.map((entry) => {
 				const original = frozenEvidence.get(entry.evidence_id);
-				if (!original) throw new RTWCloudHistoryError("BAD_RESPONSE");
+				if (!original) throw new CitationMismatchError();
 				const runes = Array.from(original.quote);
 				return {
 					evidenceId: entry.evidence_id,
@@ -316,7 +375,9 @@ export class RTWCloudHistoryClient {
 		} catch (error) {
 			if (
 				error instanceof RTWCloudHistoryError &&
-				(error.code === "NOT_AUTHENTICATED" || error.code === "SESSION_CHANGED")
+				(error.code === "NOT_AUTHENTICATED" ||
+					error.code === "SESSION_CHANGED" ||
+					error.code === "BAD_RESPONSE")
 			)
 				throw error;
 			// Citation status is unavailable or mismatched: never fall back to the frozen quote.
@@ -382,14 +443,15 @@ export class RTWCloudHistoryClient {
 		this.assertCurrent(session);
 		let payload: unknown;
 		try {
-			payload = JSON.parse(
+			payload = parseRTWHistoryJSON(
 				new TextDecoder("utf-8", { fatal: true }).decode(bytes),
 			);
 		} catch {
 			throw new RTWCloudHistoryError("BAD_RESPONSE");
 		}
 		const parsed = z
-			.object({ code: z.number().int(), data: schema })
+			.object({ code: z.number().int(), msg: z.string(), data: schema })
+			.strict()
 			.safeParse(payload);
 		if (!parsed.success || parsed.data.code !== 200)
 			throw new RTWCloudHistoryError("BAD_RESPONSE");
