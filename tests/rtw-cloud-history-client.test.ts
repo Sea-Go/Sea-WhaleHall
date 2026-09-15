@@ -8,10 +8,33 @@ import type { RTWProductSession } from "../src/bun/clients/product/rtw-product-s
 
 const quote = "仅在冻结包中的旧摘录";
 const quoteHash = createHash("sha256").update(quote, "utf8").digest("hex");
+const objectHash = createHash("sha256")
+	.update("fixed-original", "utf8")
+	.digest("hex");
+const original = { key: `sha256/${objectHash}`, sha256: objectHash };
+const locator = {
+	locator: "paragraph:1",
+	original_byte_start: 0,
+	original_byte_end: 30,
+	normalized_rune_start: 0,
+	normalized_rune_end: 14,
+};
 const snapshot = {
 	module_id: "module-1",
 	release_id: "release-1",
+	generation: 1,
 	publication_revision: "publication-1",
+	indexes: {
+		dense: original,
+		sparse: original,
+		multivector: original,
+	},
+	valid_revision_ids: ["r-1"],
+};
+const liveSnapshot = {
+	module_id: snapshot.module_id,
+	release_id: snapshot.release_id,
+	publication_revision: snapshot.publication_revision,
 };
 const reference = {
 	evidence_id: "e-1",
@@ -19,6 +42,8 @@ const reference = {
 	content_id: "c-1",
 	revision_id: "r-1",
 	chunk_id: "k-1",
+	original,
+	locator,
 	quote_hash: quoteHash,
 	state: "available",
 };
@@ -42,7 +67,9 @@ const turn = JSON.stringify({
 		citations: ["e-1"],
 		search: {
 			evidence_pack: {
+				search_id: "s-1",
 				snapshot,
+				status: "complete",
 				evidence: [
 					{
 						evidence_id: "e-1",
@@ -52,6 +79,8 @@ const turn = JSON.stringify({
 							revision_id: "r-1",
 							chunk_id: "k-1",
 						},
+						original,
+						locator,
 						quote_hash: quoteHash,
 						quote,
 					},
@@ -114,7 +143,7 @@ test("真实分页游标按接纳序号递增，当前可用引用才交付已�
 				answer_id: "a-1",
 				search_id: "s-1",
 				status: "succeeded",
-				...snapshot,
+				...liveSnapshot,
 				citations: [reference],
 			});
 		return json({ items: [row], next_ordinal: 1 });
@@ -137,7 +166,7 @@ test("撤回状态与冻结引用修订不符时不回放旧摘录", async () =>
 					answer_id: "a-1",
 					search_id: "s-1",
 					status: "succeeded",
-					...snapshot,
+					...liveSnapshot,
 					citations: [live],
 				})
 			: json({ items: [row], next_ordinal: 0 }),
@@ -162,7 +191,7 @@ test("冻结引用文本哈希与当前发布版本不一致时不投影摘录",
 					answer_id: "a-1",
 					search_id: "s-1",
 					status: "succeeded",
-					...snapshot,
+					...liveSnapshot,
 					citations: [reference],
 				})
 			: json({ items: [{ ...row, turn_json: changed }], next_ordinal: 0 }),
@@ -177,7 +206,7 @@ test("冻结引用文本哈希与当前发布版本不一致时不投影摘录",
 					answer_id: "a-1",
 					search_id: "s-1",
 					status: "succeeded",
-					...snapshot,
+					...liveSnapshot,
 					release_id: "release-2",
 					citations: [reference],
 				})
@@ -199,7 +228,7 @@ test("长引用先校验完整文本，再限长投影摘录", async () => {
 					answer_id: "a-1",
 					search_id: "s-1",
 					status: "succeeded",
-					...snapshot,
+					...liveSnapshot,
 					citations: [{ ...reference, quote_hash: longHash }],
 				})
 			: json({
@@ -275,7 +304,7 @@ function historyClientFor(record: object) {
 					answer_id: "a-1",
 					search_id: "s-1",
 					status: "succeeded",
-					...snapshot,
+					...liveSnapshot,
 					citations: [reference],
 				})
 			: json({ items: [record], next_ordinal: 0 }),
@@ -402,7 +431,7 @@ test("同一分页会话不得混入第二个UID，答复和检索引用仍须�
 				answer_id: "a-1",
 				search_id: "s-1",
 				status: "succeeded",
-				...snapshot,
+				...liveSnapshot,
 				citations: [reference],
 			});
 		}
@@ -476,7 +505,7 @@ test("未知、null和重复JSON字段在Bun投影前拒绝", async () => {
 					answer_id: "a-1",
 					search_id: "s-1",
 					status: "succeeded",
-					...snapshot,
+					...liveSnapshot,
 					citations: [reference],
 					unknown: "injected",
 				})
@@ -494,5 +523,108 @@ test("冻结证据包的来源版本与请求版本不一致时拒绝整条历�
 		historyClientFor({ ...row, turn_json: JSON.stringify(changed) }).list({
 			logicalSessionId: "history-1",
 		}),
+	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+	for (const change of [
+		(pack: {
+			snapshot: typeof snapshot;
+			search_id?: string;
+			status?: string;
+		}) => {
+			pack.snapshot.generation = 2;
+		},
+		(pack: {
+			snapshot: typeof snapshot;
+			search_id?: string;
+			status?: string;
+		}) => {
+			pack.snapshot.generation = 0;
+		},
+		(pack: {
+			snapshot: typeof snapshot;
+			search_id?: string;
+			status?: string;
+		}) => {
+			pack.snapshot.indexes.dense.sha256 = quoteHash;
+		},
+		(pack: {
+			snapshot: typeof snapshot;
+			search_id?: string;
+			status?: string;
+		}) => {
+			pack.snapshot.valid_revision_ids = ["other-revision"];
+		},
+		(pack: {
+			snapshot: typeof snapshot;
+			search_id?: string;
+			status?: string;
+		}) => {
+			delete pack.search_id;
+		},
+		(pack: {
+			snapshot: typeof snapshot;
+			search_id?: string;
+			status?: string;
+		}) => {
+			pack.status = "empty";
+		},
+		(pack: {
+			snapshot: typeof snapshot;
+			search_id?: string;
+			status?: string;
+		}) => {
+			delete pack.status;
+		},
+	]) {
+		const bad = JSON.parse(turn);
+		change(bad.result.search.evidence_pack);
+		expect(
+			historyClientFor({ ...row, turn_json: JSON.stringify(bad) }).list({
+				logicalSessionId: "history-1",
+			}),
+		).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+	}
+	const zeroGeneration = JSON.parse(turn);
+	zeroGeneration.Request.Search.Snapshot.generation = 0;
+	zeroGeneration.result.search.evidence_pack.snapshot.generation = 0;
+	expect(
+		historyClientFor({
+			...row,
+			turn_json: JSON.stringify(zeroGeneration),
+		}).list({
+			logicalSessionId: "history-1",
+		}),
+	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+});
+
+test("RTW引用原对象与定位的已知字段需核同，异文不回放旧摘录", async () => {
+	const mismatched = fixture(async (request) =>
+		String(request).endsWith("/citations")
+			? json({
+					answer_id: "a-1",
+					search_id: "s-1",
+					status: "succeeded",
+					...liveSnapshot,
+					citations: [
+						{ ...reference, locator: { ...locator, locator: "paragraph:2" } },
+					],
+				})
+			: json({ items: [row], next_ordinal: 0 }),
+	).client;
+	const result = await mismatched.list({ logicalSessionId: "history-1" });
+	expect(result.items[0]?.citationState).toBe("unavailable");
+	expect(result.items[0]?.citations).toEqual([]);
+	const missingOriginal = fixture(async (request) =>
+		String(request).endsWith("/citations")
+			? json({
+					answer_id: "a-1",
+					search_id: "s-1",
+					status: "succeeded",
+					...liveSnapshot,
+					citations: [{ ...reference, original: undefined }],
+				})
+			: json({ items: [row], next_ordinal: 0 }),
+	).client;
+	expect(
+		missingOriginal.list({ logicalSessionId: "history-1" }),
 	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
 });
