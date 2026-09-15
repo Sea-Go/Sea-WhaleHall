@@ -105,6 +105,7 @@ function fixture(
 		input: RequestInfo | URL,
 		init?: RequestInit,
 	) => Promise<Response>,
+	readVersion?: "v1" | "v2",
 ) {
 	let current: RTWProductSession = {
 		accessToken: "jwt-1",
@@ -114,6 +115,7 @@ function fixture(
 	return {
 		client: new RTWCloudHistoryClient({
 			baseUrl: "http://127.0.0.1:8080",
+			readVersion,
 			sessions: {
 				current: async () => current,
 				isCurrent: (s) =>
@@ -156,6 +158,121 @@ test("真实分页游标按接纳序号递增，当前可用引用才交付已�
 	expect(JSON.stringify(result)).not.toContain("turn_json");
 	expect(JSON.stringify(result)).not.toContain("jwt-1");
 	expect(paths[0]).toContain("after_ordinal=0&limit=1");
+	expect(paths.every((path) => path.startsWith("/v1/knowledge/"))).toBe(true);
+});
+
+test("显式 v2 的 list、detail、citations 同路由，旧 turn 仅交付安全投影", async () => {
+	const paths: string[] = [];
+	const methods: string[] = [];
+	const v2Row = {
+		...row,
+		subject: { issuer: "rtw.identity", subject_id: "42" },
+	};
+	const { client } = fixture(async (request, init) => {
+		const url = new URL(String(request));
+		paths.push(`${url.pathname}${url.search}`);
+		methods.push(init?.method ?? "");
+		expect(init?.body).toBeUndefined();
+		expect(url.searchParams.has("subject_id")).toBe(false);
+		expect(url.searchParams.has("authority_id")).toBe(false);
+		expect(url.searchParams.has("tenant_id")).toBe(false);
+		if (url.pathname.endsWith("/citations"))
+			return json({
+				answer_id: "a-1",
+				search_id: "s-1",
+				status: "succeeded",
+				...liveSnapshot,
+				citations: [reference],
+			});
+		if (url.pathname.endsWith("/a-1")) return json(v2Row);
+		return json({ items: [v2Row], next_ordinal: 0 });
+	}, "v2");
+	const listed = await client.list({
+		logicalSessionId: "history-1",
+		limit: 1,
+		// A caller's forged subject remains outside the read request.
+		subject_id: "999",
+	} as Parameters<typeof client.list>[0]);
+	const listedAnswer = listed.items[0];
+	if (!listedAnswer) throw new Error("v2 list fixture returned no answer");
+	const detail = await client.detail("history-1", "a-1");
+	expect(detail).toEqual(listedAnswer);
+	expect(paths).toEqual([
+		"/v2/knowledge/answer-sessions/history-1/accepted-answers?after_ordinal=0&limit=1",
+		"/v2/knowledge/answer-sessions/history-1/accepted-answers/a-1/citations",
+		"/v2/knowledge/answer-sessions/history-1/accepted-answers/a-1",
+		"/v2/knowledge/answer-sessions/history-1/accepted-answers/a-1/citations",
+	]);
+	expect(methods).toEqual(["GET", "GET", "GET", "GET"]);
+	expect(JSON.stringify(detail)).not.toContain("turn_json");
+	expect(JSON.stringify(detail)).not.toContain("subject_id");
+	expect(JSON.stringify(detail)).not.toContain("jwt-1");
+	expect("quote" in (detail.citations[0] ?? {})).toBe(false);
+});
+
+test("显式未知版本、v2 认证失败及跨账号 detail 拒绝且不回退 v1", async () => {
+	let requests = 0;
+	const response = async () => {
+		requests++;
+		return json({}, 401);
+	};
+	for (const version of ["v3", null])
+		expect(() => fixture(response, version as "v2")).toThrowError(
+			"INVALID_INPUT",
+		);
+	expect(requests).toBe(0);
+	const { client } = fixture(response, "v2");
+	expect(client.list({ logicalSessionId: "history-1" })).rejects.toMatchObject({
+		code: "NOT_AUTHENTICATED",
+	});
+	const paths: string[] = [];
+	const other = fixture(async (request) => {
+		paths.push(new URL(String(request)).pathname);
+		return json({}, 404);
+	}, "v2").client;
+	expect(other.detail("history-1", "a-1")).rejects.toMatchObject({
+		code: "NOT_FOUND",
+	});
+	expect(paths).toEqual([
+		"/v2/knowledge/answer-sessions/history-1/accepted-answers/a-1",
+	]);
+});
+
+test("v2 页拒绝多 UID 和旧外层主体；当前引用 404 不回放冻结摘录", async () => {
+	const own = { ...row, subject: { issuer: "rtw.identity", subject_id: "42" } };
+	const other = {
+		...row,
+		answer_id: "a-2",
+		accepted_ordinal: 2,
+		subject: { issuer: "rtw.identity", subject_id: "43" },
+	};
+	const mixed = fixture(
+		async () => json({ items: [own, other], next_ordinal: 0 }),
+		"v2",
+	).client;
+	expect(mixed.list({ logicalSessionId: "history-1" })).rejects.toMatchObject({
+		code: "BAD_RESPONSE",
+	});
+	const oldOuter = fixture(
+		async () => json({ items: [row], next_ordinal: 0 }),
+		"v2",
+	).client;
+	expect(
+		oldOuter.list({ logicalSessionId: "history-1" }),
+	).rejects.toMatchObject({
+		code: "BAD_RESPONSE",
+	});
+	const withdrawn = fixture(
+		async (request) =>
+			String(request).endsWith("/citations")
+				? json({}, 404)
+				: json({ items: [own], next_ordinal: 0 }),
+		"v2",
+	).client;
+	const answer = (await withdrawn.list({ logicalSessionId: "history-1" }))
+		.items[0];
+	expect(answer?.citationState).toBe("unavailable");
+	expect(answer?.citations).toEqual([]);
 });
 
 test("撤回状态与冻结引用修订不符时不回放旧摘录", async () => {
