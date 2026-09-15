@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 
@@ -92,6 +92,8 @@ export interface CloudSearchParent {
 export interface CloudSearchProductPort {
 	search(input: {
 		parent: Readonly<Omit<CloudSearchParent, "signal" | "budget">>;
+		/** Stable for one actual Mastra Tool-call ID, not supplied by model JSON. */
+		requestKey: string;
 		depth: "fast" | "detailed";
 		query: string;
 		intelligence: SearchIntelligence;
@@ -101,6 +103,7 @@ export interface CloudSearchProductPort {
 	}): Promise<unknown>;
 	readEvidence(input: {
 		parent: Readonly<Omit<CloudSearchParent, "signal" | "budget">>;
+		requestKey: string;
 		searchId: string;
 		evidenceId: string;
 		signal: AbortSignal;
@@ -250,6 +253,7 @@ export class CloudSearchToolSession {
 		depth: "fast" | "detailed",
 		rawInput: unknown,
 		toolSignal?: AbortSignal,
+		toolCallId?: string,
 	) {
 		const parsedInput = searchInput.safeParse(rawInput);
 		if (!parsedInput.success) {
@@ -259,6 +263,7 @@ export class CloudSearchToolSession {
 			);
 		}
 		const input = parsedInput.data;
+		const requestKey = this.requestKey(`search_${depth}`, toolCallId);
 		return this.exclusive(async () => {
 			const signal = this.callSignal(toolSignal);
 			if (
@@ -295,6 +300,7 @@ export class CloudSearchToolSession {
 			const raw = await abortable(
 				this.port.search({
 					parent: this.parent,
+					requestKey,
 					depth,
 					query: input.query,
 					intelligence: input.intelligence,
@@ -413,7 +419,11 @@ export class CloudSearchToolSession {
 		}
 	}
 
-	async readEvidence(rawInput: unknown, toolSignal?: AbortSignal) {
+	async readEvidence(
+		rawInput: unknown,
+		toolSignal?: AbortSignal,
+		toolCallId?: string,
+	) {
 		const parsedInput = readInput.safeParse(rawInput);
 		if (!parsedInput.success) {
 			throw new CloudSearchToolError(
@@ -422,6 +432,7 @@ export class CloudSearchToolSession {
 			);
 		}
 		const input = parsedInput.data;
+		const requestKey = this.requestKey("read_evidence", toolCallId);
 		return this.exclusive(async () => {
 			const signal = this.callSignal(toolSignal);
 			const stored = this.searches.get(input.search_id);
@@ -447,6 +458,7 @@ export class CloudSearchToolSession {
 			const raw = await abortable(
 				this.port.readEvidence({
 					parent: this.parent,
+					requestKey,
 					searchId: input.search_id,
 					evidenceId: input.evidence_id,
 					signal,
@@ -488,6 +500,34 @@ export class CloudSearchToolSession {
 		});
 	}
 
+	/** Each real Agent Tool call must carry its stable framework identity. */
+	private agentCallId(toolCallId?: string): string {
+		if (!toolCallId)
+			throw new CloudSearchToolError(
+				"INVALID_SCOPE",
+				"Mastra Tool-call identity is missing.",
+			);
+		return toolCallId;
+	}
+
+	/** Stable for one framework Tool-call ID; direct component calls may be one-shot. */
+	private requestKey(toolName: string, toolCallId?: string): string {
+		if (toolCallId === undefined) return `whale_${randomUUID()}`;
+		if (
+			toolCallId.length < 1 ||
+			toolCallId.length > 200 ||
+			[...toolCallId].some((character) => {
+				const code = character.charCodeAt(0);
+				return code < 32 || code === 127;
+			})
+		)
+			throw new CloudSearchToolError(
+				"INVALID_SCOPE",
+				"Tool-call identity is invalid.",
+			);
+		return `whale_${digest(`${this.parent.runId}:${this.parent.operationId}:${toolName}:${toolCallId}`)}`;
+	}
+
 	/** Attach only to a compatible caller Agent created for this same parent run. */
 	tools() {
 		return {
@@ -497,7 +537,12 @@ export class CloudSearchToolSession {
 				inputSchema: searchInput,
 				strict: true,
 				execute: (input, context) =>
-					this.search("fast", input, context.abortSignal),
+					this.search(
+						"fast",
+						input,
+						context.abortSignal,
+						this.agentCallId(context.agent?.toolCallId),
+					),
 			}),
 			search_detailed: createTool({
 				id: "search_detailed",
@@ -505,7 +550,12 @@ export class CloudSearchToolSession {
 				inputSchema: searchInput,
 				strict: true,
 				execute: (input, context) =>
-					this.search("detailed", input, context.abortSignal),
+					this.search(
+						"detailed",
+						input,
+						context.abortSignal,
+						this.agentCallId(context.agent?.toolCallId),
+					),
 			}),
 			read_evidence: createTool({
 				id: "read_evidence",
@@ -513,7 +563,11 @@ export class CloudSearchToolSession {
 				inputSchema: readInput,
 				strict: true,
 				execute: (input, context) =>
-					this.readEvidence(input, context.abortSignal),
+					this.readEvidence(
+						input,
+						context.abortSignal,
+						this.agentCallId(context.agent?.toolCallId),
+					),
 			}),
 		};
 	}

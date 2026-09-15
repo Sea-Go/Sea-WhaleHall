@@ -273,11 +273,13 @@ describe("Mastra cloud search tools", () => {
 	test("a compatible Mastra parent receives Tool evidence and continues to its own answer", async () => {
 		let modelCalls = 0;
 		let productCalls = 0;
+		let productKey = "";
 		const session = new CloudSearchToolSession(
 			parent(),
 			port({
-				search: async () => {
+				search: async (input) => {
 					productCalls++;
+					productKey = input.requestKey;
 					return searchResult();
 				},
 			}),
@@ -377,6 +379,11 @@ describe("Mastra cloud search tools", () => {
 		});
 		expect(answer.text).toContain("根据同版证据");
 		expect(productCalls).toBe(1);
+		expect(productKey).toBe(
+			`whale_${createHash("sha256")
+				.update("parent-run:operation-1:search_fast:call-1")
+				.digest("hex")}`,
+		);
 		expect(modelCalls).toBe(2);
 	});
 });
