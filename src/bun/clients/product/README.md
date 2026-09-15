@@ -1,5 +1,7 @@
 # RTW summary 产品客户端边界
 
+WS04-D 的 RTW 云搜索 Tools 父操作、子搜索与证据重读 Bun Port 候选见 [`rtw-cloud-tools-client.ts`](rtw-cloud-tools-client.ts) 和 [`CLOUD_TOOLS_RTW_HOST_ACCEPTANCE.md`](../../../../docs/CLOUD_TOOLS_RTW_HOST_ACCEPTANCE.md)。该候选复用显式 RTW 产品会话提供者，当前正式进程仍不注册 Tools 宿主或云搜索 Renderer RPC。
+
 `RTWProductSearchClient` 只属于 Bun。它按 RTW `api/knowledge.api` 发起已认证的产品 POST/GET：POST 正文固定为 `module_id/query/depth/intelligence/idempotency_key`，GET 使用 RTW 返回的 `search_id`。本组件不签发用户 SubjectRef、发布快照、search/answer ID，不向 WebView 或 Mastra Sidecar交付 bearer。
 
 调用方必须给出**RTW认可的本人产品会话**提供者。`RTWProductSessionProvider`按每次请求取当前短期会话，并在网络回执后再次核对会话代次；换号中的旧回执返回`SESSION_CHANGED`而不交给新账号。当前WhaleHall只登录DataCenter UUID账号，尚无RTW UID/JWT关联提供端，本客户端未在正式Bun进程注册。产品账号方案与联调门禁见Sea-Docs`H01双账号关联与桌面产品会话交接.md`。
