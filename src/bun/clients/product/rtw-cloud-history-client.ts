@@ -20,13 +20,50 @@ import type {
 const id = z.string().min(1).max(512);
 const MAX_EXCERPT_RUNES = 240;
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
+const citationObject = z.object({ key: id, sha256 }).strict();
+const lanes = ["dense", "sparse", "multivector"] as const;
 const snapshot = z
 	.object({
 		module_id: id,
 		release_id: id,
+		generation: z.number().int().positive().safe(),
 		publication_revision: id,
+		indexes: z
+			.object({
+				dense: citationObject,
+				sparse: citationObject,
+				multivector: citationObject,
+			})
+			.strict(),
+		valid_revision_ids: z.array(id),
 	})
 	.passthrough();
+const sameSnapshot = (
+	a: z.infer<typeof snapshot>,
+	b: z.infer<typeof snapshot>,
+) =>
+	a.module_id === b.module_id &&
+	a.release_id === b.release_id &&
+	a.generation === b.generation &&
+	a.publication_revision === b.publication_revision &&
+	lanes.every(
+		(lane) =>
+			a.indexes[lane].key === b.indexes[lane].key &&
+			a.indexes[lane].sha256 === b.indexes[lane].sha256,
+	) &&
+	a.valid_revision_ids.length === b.valid_revision_ids.length &&
+	a.valid_revision_ids.every(
+		(revision, index) => revision === b.valid_revision_ids[index],
+	);
+const locator = z
+	.object({
+		locator: id,
+		original_byte_start: z.number().int().nonnegative().safe(),
+		original_byte_end: z.number().int().nonnegative().safe(),
+		normalized_rune_start: z.number().int().nonnegative().safe(),
+		normalized_rune_end: z.number().int().nonnegative().safe(),
+	})
+	.strict();
 const citation = z
 	.object({
 		evidence_id: id,
@@ -34,6 +71,8 @@ const citation = z
 		content_id: id,
 		revision_id: id,
 		chunk_id: id,
+		original: citationObject,
+		locator,
 		quote_hash: sha256,
 		state: z.enum(["available", "unavailable"]),
 	})
@@ -89,8 +128,9 @@ const turn = z
 					.object({
 						evidence_pack: z
 							.object({
-								search_id: id.optional(),
+								search_id: id,
 								snapshot,
+								status: z.enum(["complete", "partial", "empty"]),
 								evidence: z.array(
 									z
 										.object({
@@ -103,6 +143,8 @@ const turn = z
 													chunk_id: id,
 												})
 												.strict(),
+											original: citationObject,
+											locator,
 											quote_hash: sha256,
 											quote: z
 												.string()
@@ -277,16 +319,18 @@ export class RTWCloudHistoryClient {
 			turnSubject?.issuer !== outerSubject.issuer ||
 			turnSubject.subjectId !== outerSubject.subjectId ||
 			accepted.data.result.answer_id !== item.answer_id ||
-			(accepted.data.result.search.evidence_pack.search_id !== undefined &&
-				accepted.data.result.search.evidence_pack.search_id !==
-					item.search_id) ||
+			accepted.data.result.search.evidence_pack.search_id !== item.search_id ||
 			accepted.data.result.summary_status !== item.status ||
+			(item.status === "succeeded" &&
+				accepted.data.result.search.evidence_pack.status === "empty") ||
 			(item.status === "succeeded" && !accepted.data.result.answer) ||
 			(item.status === "succeeded" &&
 				accepted.data.result.citations.length === 0) ||
 			(item.status === "insufficient" &&
 				(accepted.data.result.answer ||
-					accepted.data.result.citations.length > 0))
+					accepted.data.result.citations.length > 0 ||
+					accepted.data.result.search.evidence_pack.status !== "empty" ||
+					accepted.data.result.search.evidence_pack.evidence.length > 0))
 		) {
 			throw new RTWCloudHistoryError("BAD_RESPONSE");
 		}
@@ -298,10 +342,7 @@ export class RTWCloudHistoryClient {
 			evidence.map((entry) => [entry.evidence_id, entry]),
 		);
 		if (
-			packSnapshot.module_id !== fixedSnapshot.module_id ||
-			packSnapshot.release_id !== fixedSnapshot.release_id ||
-			packSnapshot.publication_revision !==
-				fixedSnapshot.publication_revision ||
+			!sameSnapshot(packSnapshot, fixedSnapshot) ||
 			new Set(frozen).size !== frozen.length ||
 			frozenEvidence.size !== evidence.length ||
 			frozen.some((key) => !frozenEvidence.has(key)) ||
@@ -344,6 +385,17 @@ export class RTWCloudHistoryClient {
 						entry.content_id !== original.key.content_id ||
 						entry.revision_id !== original.key.revision_id ||
 						entry.chunk_id !== original.key.chunk_id ||
+						entry.original.key !== original.original.key ||
+						entry.original.sha256 !== original.original.sha256 ||
+						entry.locator.locator !== original.locator.locator ||
+						entry.locator.original_byte_start !==
+							original.locator.original_byte_start ||
+						entry.locator.original_byte_end !==
+							original.locator.original_byte_end ||
+						entry.locator.normalized_rune_start !==
+							original.locator.normalized_rune_start ||
+						entry.locator.normalized_rune_end !==
+							original.locator.normalized_rune_end ||
 						entry.quote_hash !== original.quote_hash
 					);
 				})
