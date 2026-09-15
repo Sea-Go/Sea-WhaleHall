@@ -339,6 +339,42 @@ test("旧外层与旧turn、新外层与新turn、v2投影与不可变旧turn均
 	).rejects.toMatchObject({ code: "BAD_RESPONSE" });
 });
 
+test("证据不足历史在两版主体和完整旧快照下不产生摘录", async () => {
+	const empty = JSON.parse(turn);
+	empty.result.answer = "";
+	empty.result.summary_status = "insufficient";
+	empty.result.citations = [];
+	empty.result.search.evidence_pack.status = "empty";
+	empty.result.search.evidence_pack.evidence = [];
+	const v2 = { issuer: "rtw.identity", subject_id: "42" };
+	for (const accepted of [
+		{ ...row, status: "insufficient", turn_json: JSON.stringify(empty) },
+		{
+			...row,
+			status: "insufficient",
+			subject: v2,
+			turn_json: JSON.stringify(empty),
+		},
+	]) {
+		const client = fixture(async (request) =>
+			String(request).endsWith("/citations")
+				? json({
+						answer_id: "a-1",
+						search_id: "s-1",
+						status: "insufficient",
+						...liveSnapshot,
+						citations: [],
+					})
+				: json({ items: [accepted], next_ordinal: 0 }),
+		).client;
+		const answer = (await client.list({ logicalSessionId: "history-1" }))
+			.items[0];
+		expect(answer?.status).toBe("insufficient");
+		expect(answer?.answer).toBeNull();
+		expect(answer?.citations).toEqual([]);
+	}
+});
+
 test("UID全程保持十进制高位精度并拒绝越界或非规范值", async () => {
 	for (const highUID of ["9007199254740993", "9223372036854775807"]) {
 		const owner = { issuer: "rtw.identity", subject_id: highUID };
