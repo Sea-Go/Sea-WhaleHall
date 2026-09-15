@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 
@@ -115,6 +116,7 @@ export class CloudSearchToolError extends Error {
 		readonly code:
 			| "INVALID_SCOPE"
 			| "INVALID_INPUT"
+			| "IDEMPOTENCY_CONFLICT"
 			| "BUDGET_EXHAUSTED"
 			| "CANCELLED"
 			| "BAD_EVIDENCE"
@@ -132,6 +134,19 @@ type SearchRecord = {
 	receipt: NonNullable<CloudSearchResult["citation_receipt"]>;
 	evidence: Map<string, CloudSearchResult["evidence"][number]>;
 };
+type SearchAttempt = {
+	depth: "fast" | "detailed";
+	query: string;
+	intelligence: SearchIntelligence;
+	continueSearchId?: string;
+	limits: { readCalls: number; quoteRunes: number };
+	accepted?: CloudSearchResult;
+};
+type ReadAttempt = {
+	searchId: string;
+	evidenceId: string;
+	accepted?: CloudReadEvidenceResult;
+};
 
 /** One instance belongs to one parent Agent run. Reusing it across accounts is forbidden. */
 export class CloudSearchToolSession {
@@ -142,6 +157,9 @@ export class CloudSearchToolSession {
 	private readonly budget: CloudSearchParent["budget"];
 	private remaining: Remaining;
 	private readonly searches = new Map<string, SearchRecord>();
+	/** One reservation and one immutable body per parent/tool-call identity. */
+	private readonly searchAttempts = new Map<string, SearchAttempt>();
+	private readonly readAttempts = new Map<string, ReadAttempt>();
 	private tail: Promise<void> = Promise.resolve();
 
 	constructor(
@@ -266,6 +284,18 @@ export class CloudSearchToolSession {
 		const requestKey = this.requestKey(`search_${depth}`, toolCallId);
 		return this.exclusive(async () => {
 			const signal = this.callSignal(toolSignal);
+			let attempt = this.searchAttempts.get(requestKey);
+			if (
+				attempt &&
+				(attempt.depth !== depth ||
+					attempt.query !== input.query ||
+					attempt.intelligence !== input.intelligence ||
+					attempt.continueSearchId !== input.continue_search_id)
+			)
+				throw new CloudSearchToolError(
+					"IDEMPOTENCY_CONFLICT",
+					"Tool-call ID reused with different search input.",
+				);
 			if (
 				input.continue_search_id &&
 				!this.searches.has(input.continue_search_id)
@@ -275,32 +305,29 @@ export class CloudSearchToolSession {
 					"Continuation search ID is outside this parent run.",
 				);
 			}
-			const reservedReads = Math.min(
-				this.remaining.readCalls,
-				this.budget.maxReadsPerSearch,
-			);
-			const reservedRunes = Math.min(
-				this.remaining.quoteRunes,
-				this.budget.maxQuoteRunesPerSearch,
-			);
-			if (
-				this.remaining.searchCalls < 1 ||
-				reservedReads < 1 ||
-				reservedRunes < 1
-			) {
-				throw new CloudSearchToolError(
-					"BUDGET_EXHAUSTED",
-					"Parent search budget is exhausted.",
+			if (!attempt) {
+				const reservedReads = Math.min(
+					this.remaining.readCalls,
+					this.budget.maxReadsPerSearch,
 				);
-			}
-			// Reserve the upper bound first. Failed calls and retries consume it.
-			this.remaining.searchCalls--;
-			this.remaining.readCalls -= reservedReads;
-			this.remaining.quoteRunes -= reservedRunes;
-			const raw = await abortable(
-				this.port.search({
-					parent: this.parent,
-					requestKey,
+				const reservedRunes = Math.min(
+					this.remaining.quoteRunes,
+					this.budget.maxQuoteRunesPerSearch,
+				);
+				if (
+					this.remaining.searchCalls < 1 ||
+					reservedReads < 1 ||
+					reservedRunes < 1
+				)
+					throw new CloudSearchToolError(
+						"BUDGET_EXHAUSTED",
+						"Parent search budget is exhausted.",
+					);
+				// The first logical Tool call atomically pins its body and reservation.
+				this.remaining.searchCalls--;
+				this.remaining.readCalls -= reservedReads;
+				this.remaining.quoteRunes -= reservedRunes;
+				attempt = {
 					depth,
 					query: input.query,
 					intelligence: input.intelligence,
@@ -308,6 +335,20 @@ export class CloudSearchToolSession {
 						? { continueSearchId: input.continue_search_id }
 						: {}),
 					limits: { readCalls: reservedReads, quoteRunes: reservedRunes },
+				};
+				this.searchAttempts.set(requestKey, attempt);
+			}
+			const raw = await abortable(
+				this.port.search({
+					parent: this.parent,
+					requestKey,
+					depth: attempt.depth,
+					query: attempt.query,
+					intelligence: attempt.intelligence,
+					...(attempt.continueSearchId
+						? { continueSearchId: attempt.continueSearchId }
+						: {}),
+					limits: { ...attempt.limits },
 					signal,
 				}),
 				signal,
@@ -321,30 +362,44 @@ export class CloudSearchToolSession {
 				);
 			}
 			const result = parsedResult.data;
-			this.validateSearchResult(
-				result,
-				input.intelligence,
-				reservedReads,
-				reservedRunes,
-			);
-			this.remaining.readCalls += reservedReads - result.usage.read_calls;
-			this.remaining.quoteRunes += reservedRunes - result.usage.quote_runes;
-			if (result.evidence.length > 0) {
-				const receipt = result.citation_receipt;
-				if (!receipt)
+			if (attempt.accepted) {
+				if (!isDeepStrictEqual(result, attempt.accepted))
 					throw new CloudSearchToolError(
-						"BAD_RECEIPT",
-						"Citation receipt is missing.",
+						"BAD_EVIDENCE",
+						"RTW changed an already accepted Tool result on same-key replay.",
 					);
-				this.searches.set(result.search_id, {
-					snapshotRef: result.snapshot_ref,
-					receipt: { ...receipt },
-					evidence: new Map(
-						result.evidence.map((item) => [item.evidence_id, { ...item }]),
-					),
-				});
+			} else {
+				this.validateSearchResult(
+					result,
+					attempt.intelligence,
+					attempt.limits.readCalls,
+					attempt.limits.quoteRunes,
+				);
+				this.remaining.readCalls +=
+					attempt.limits.readCalls - result.usage.read_calls;
+				this.remaining.quoteRunes +=
+					attempt.limits.quoteRunes - result.usage.quote_runes;
+				if (result.evidence.length > 0) {
+					const receipt = result.citation_receipt;
+					if (!receipt)
+						throw new CloudSearchToolError(
+							"BAD_RECEIPT",
+							"Citation receipt is missing.",
+						);
+					this.searches.set(result.search_id, {
+						snapshotRef: result.snapshot_ref,
+						receipt: { ...receipt },
+						evidence: new Map(
+							result.evidence.map((item) => [item.evidence_id, { ...item }]),
+						),
+					});
+				}
+				attempt.accepted = structuredClone(result);
 			}
-			return { search: result, remaining: this.remainingBudget() };
+			return {
+				search: structuredClone(result),
+				remaining: this.remainingBudget(),
+			};
 		});
 	}
 
@@ -435,6 +490,16 @@ export class CloudSearchToolSession {
 		const requestKey = this.requestKey("read_evidence", toolCallId);
 		return this.exclusive(async () => {
 			const signal = this.callSignal(toolSignal);
+			let attempt = this.readAttempts.get(requestKey);
+			if (
+				attempt &&
+				(attempt.searchId !== input.search_id ||
+					attempt.evidenceId !== input.evidence_id)
+			)
+				throw new CloudSearchToolError(
+					"IDEMPOTENCY_CONFLICT",
+					"Tool-call ID reused with different evidence identity.",
+				);
 			const stored = this.searches.get(input.search_id);
 			const evidence = stored?.evidence.get(input.evidence_id);
 			if (!stored || !evidence) {
@@ -443,24 +508,27 @@ export class CloudSearchToolSession {
 					"Evidence ID is outside this parent run.",
 				);
 			}
-			const quoteRunes = [...evidence.quote].length;
-			if (
-				this.remaining.readCalls < 1 ||
-				this.remaining.quoteRunes < quoteRunes
-			) {
-				throw new CloudSearchToolError(
-					"BUDGET_EXHAUSTED",
-					"Parent evidence-read budget is exhausted.",
-				);
+			if (!attempt) {
+				const quoteRunes = [...evidence.quote].length;
+				if (
+					this.remaining.readCalls < 1 ||
+					this.remaining.quoteRunes < quoteRunes
+				)
+					throw new CloudSearchToolError(
+						"BUDGET_EXHAUSTED",
+						"Parent evidence-read budget is exhausted.",
+					);
+				this.remaining.readCalls--;
+				this.remaining.quoteRunes -= quoteRunes;
+				attempt = { searchId: input.search_id, evidenceId: input.evidence_id };
+				this.readAttempts.set(requestKey, attempt);
 			}
-			this.remaining.readCalls--;
-			this.remaining.quoteRunes -= quoteRunes;
 			const raw = await abortable(
 				this.port.readEvidence({
 					parent: this.parent,
 					requestKey,
-					searchId: input.search_id,
-					evidenceId: input.evidence_id,
+					searchId: attempt.searchId,
+					evidenceId: attempt.evidenceId,
 					signal,
 				}),
 				signal,
@@ -492,9 +560,16 @@ export class CloudSearchToolSession {
 					"Reread changed the fixed revision, locator, quote or receipt.",
 				);
 			}
+			if (attempt.accepted) {
+				if (!isDeepStrictEqual(result, attempt.accepted))
+					throw new CloudSearchToolError(
+						"BAD_EVIDENCE",
+						"RTW changed an already reread citation on same-key replay.",
+					);
+			} else attempt.accepted = structuredClone(result);
 			return {
-				evidence: result.evidence,
-				citation_receipt: result.citation_receipt,
+				evidence: structuredClone(result.evidence),
+				citation_receipt: structuredClone(result.citation_receipt),
 				remaining: this.remainingBudget(),
 			};
 		});

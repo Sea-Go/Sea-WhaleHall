@@ -15,6 +15,9 @@ const id = z.string().regex(/^[A-Za-z0-9_.-]{1,256}$/u);
 const boundedText = z.string().trim().min(1).max(256);
 const key = z.string().regex(/^[A-Za-z0-9_.-]{8,128}$/u);
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
+const durableRef = z
+	.string()
+	.regex(/^search-citations\/sha256\/[a-f0-9]{64}$/u);
 const sessionId = z
 	.string()
 	.min(1)
@@ -28,7 +31,7 @@ const sessionId = z
 const receipt = z.object({
 	search_id: id,
 	pack_hash: hash,
-	durable_ref: id,
+	durable_ref: durableRef,
 });
 const evidence = z.object({
 	evidence_id: id,
@@ -498,7 +501,10 @@ export class RTWCloudToolsRun {
 			parsed.data.usage.quote_runes > request.limits.quoteRunes ||
 			parsed.data.evidence.some(
 				(item) => digest(item.quote) !== item.quote_hash,
-			)
+			) ||
+			(parsed.data.citation_receipt &&
+				parsed.data.citation_receipt.durable_ref !==
+					`search-citations/sha256/${digest(parsed.data.search_id)}`)
 		)
 			throw new RTWCloudToolsError("BAD_RESPONSE");
 		return parsed.data;
@@ -535,7 +541,9 @@ export class RTWCloudToolsRun {
 			parsed.data.snapshot_ref !== this.parent.snapshotRef ||
 			parsed.data.evidence.evidence_id !== request.evidenceId ||
 			parsed.data.citation_receipt.search_id !== request.searchId ||
-			digest(parsed.data.evidence.quote) !== parsed.data.evidence.quote_hash
+			digest(parsed.data.evidence.quote) !== parsed.data.evidence.quote_hash ||
+			parsed.data.citation_receipt.durable_ref !==
+				`search-citations/sha256/${digest(request.searchId)}`
 		)
 			throw new RTWCloudToolsError("BAD_RESPONSE");
 		return parsed.data;

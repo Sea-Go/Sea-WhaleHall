@@ -46,7 +46,7 @@ const evidence = {
 const receipt = {
 	search_id: "search-1",
 	pack_hash: packHash,
-	durable_ref: "rtw-citation-1",
+	durable_ref: `search-citations/sha256/${createHash("sha256").update("search-1", "utf8").digest("hex")}`,
 };
 const searchData = () => ({
 	search_id: "search-1",
@@ -180,6 +180,9 @@ test("Bun pins RTW Tool parent and Mastra consumes only structured evidence", as
 		intelligence: "low",
 	});
 	expect(searched.search.evidence[0]?.quote).toBe(quote);
+	expect(searched.search.citation_receipt?.durable_ref).toBe(
+		receipt.durable_ref,
+	);
 	expect("future_subject_ref" in searched.search).toBe(false);
 	expect(searched.search).not.toHaveProperty("answer");
 	const reread = await tools.readEvidence(
@@ -191,6 +194,7 @@ test("Bun pins RTW Tool parent and Mastra consumes only structured evidence", as
 		"read-call-1",
 	);
 	expect(reread.evidence).toMatchObject({ quote, quote_hash: quoteHash });
+	expect(reread.citation_receipt.durable_ref).toBe(receipt.durable_ref);
 	const unverified = cloudToolSearchView(searched.search);
 	const available = cloudToolRereadView(unverified, {
 		search_id: "search-1",
@@ -248,6 +252,42 @@ test("Bun pins RTW Tool parent and Mastra consumes only structured evidence", as
 		searchCalls: 3,
 		readCalls: 22,
 	});
+});
+
+test("RTW durable citation ref accepts only its fixed path and search-ID digest", async () => {
+	for (const wrong of [
+		`search-citations/sha256/${"0".repeat(64)}`,
+		`other/sha256/${createHash("sha256").update("search-1").digest("hex")}`,
+	]) {
+		const client = new RTWCloudToolsClient({
+			baseUrl: "https://rtw.example.invalid",
+			sessions: productSession().provider,
+			accountSessions: accountSession().provider,
+			fetch: async (_url, init) =>
+				String(init?.body).includes("module_id")
+					? Response.json({ code: 200, msg: "success", data: parentData() })
+					: Response.json({
+							code: 200,
+							msg: "success",
+							data: {
+								...searchData(),
+								citation_receipt: { ...receipt, durable_ref: wrong },
+							},
+						}),
+		});
+		const run = await client.startParent(parentInput());
+		await expect(
+			run.port.search({
+				parent: run.parent,
+				requestKey: "whale_ref_test_1",
+				depth: "fast",
+				query: "鲸落",
+				intelligence: "low",
+				limits: { readCalls: 8, quoteRunes: 8192 },
+				signal: run.parent.signal,
+			}),
+		).rejects.toMatchObject({ code: "BAD_RESPONSE" });
+	}
 });
 
 test("no RTW session or a forged parent never reaches a child product route", async () => {
@@ -593,7 +633,7 @@ test("lost HTTP acknowledgement reuses the same RTW child key for the same Mastr
 	expect(JSON.parse(childBodies[0] ?? "{}").idempotency_key).toMatch(
 		/^whale_[a-f0-9]{64}$/u,
 	);
-	expect(mastra.remainingBudget().searchCalls).toBe(2);
+	expect(mastra.remainingBudget().searchCalls).toBe(3);
 	await expect(
 		mastra.search(
 			"fast",
@@ -602,7 +642,7 @@ test("lost HTTP acknowledgement reuses the same RTW child key for the same Mastr
 			"",
 		),
 	).rejects.toMatchObject({ code: "INVALID_SCOPE" });
-	expect(mastra.remainingBudget().searchCalls).toBe(2);
+	expect(mastra.remainingBudget().searchCalls).toBe(3);
 });
 
 test("real loopback RTW-shaped HTTP rejects duplicate status, nested quote hash and Unicode-key aliases", async () => {
@@ -743,4 +783,206 @@ test("direct component calls without framework Tool-call ID are one-shot, not a 
 	expect(keys).toHaveLength(2);
 	expect(keys[0]).not.toBe(keys[1]);
 	expect(mastra.remainingBudget().searchCalls).toBe(2);
+});
+
+test("one remaining RTW search call survives a lost ACK and same Tool-call replay without new budget", async () => {
+	const stored = new Map<string, string>();
+	const server = Bun.serve({
+		port: 0,
+		fetch: async (request) => {
+			const path = new URL(request.url).pathname;
+			if (path.endsWith("/tool-runs"))
+				return Response.json({
+					code: 200,
+					msg: "success",
+					data: {
+						...parentData(),
+						budget: {
+							search_calls: 1,
+							read_calls: 1,
+							quote_runes: 8192,
+							max_reads_per_search: 1,
+							max_quote_runes_per_search: 8192,
+						},
+					},
+				});
+			const body = await request.text();
+			const key = JSON.parse(body).idempotency_key as string;
+			const previous = stored.get(key);
+			if (previous && previous !== body)
+				return new Response(null, { status: 409 });
+			stored.set(key, body);
+			return Response.json({ code: 200, msg: "success", data: searchData() });
+		},
+	});
+	servers.push(server);
+	let dropFirstSearchReply = true;
+	const client = new RTWCloudToolsClient({
+		baseUrl: `http://127.0.0.1:${server.port}`,
+		sessions: productSession().provider,
+		accountSessions: accountSession().provider,
+		fetch: async (url, init) => {
+			const response = await fetch(url, init);
+			if (
+				new URL(String(url)).pathname.endsWith("/searches") &&
+				dropFirstSearchReply
+			) {
+				dropFirstSearchReply = false;
+				await response.body?.cancel();
+				throw new Error("client lost HTTP response after RTW accepted child");
+			}
+			return response;
+		},
+	});
+	const run = await client.startParent(parentInput());
+	const mastra = new CloudSearchToolSession(run.parent, run.port);
+	await expect(
+		mastra.search(
+			"fast",
+			{ query: "鲸落", intelligence: "low" },
+			undefined,
+			"call-once",
+		),
+	).rejects.toMatchObject({ code: "UNAVAILABLE" });
+	expect(mastra.remainingBudget().searchCalls).toBe(0);
+	const replay = await mastra.search(
+		"fast",
+		{ query: "鲸落", intelligence: "low" },
+		undefined,
+		"call-once",
+	);
+	expect(replay.search.search_id).toBe("search-1");
+	expect(stored.size).toBe(1);
+	expect(mastra.remainingBudget().searchCalls).toBe(0);
+	const verifiedAgain = await mastra.search(
+		"fast",
+		{ query: "鲸落", intelligence: "low" },
+		undefined,
+		"call-once",
+	);
+	expect(verifiedAgain.search.search_id).toBe("search-1");
+	expect(mastra.remainingBudget().searchCalls).toBe(0);
+	await expect(
+		mastra.search(
+			"fast",
+			{ query: "异文", intelligence: "low" },
+			undefined,
+			"call-once",
+		),
+	).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+	await expect(
+		mastra.search(
+			"fast",
+			{ query: "鲸落", intelligence: "low" },
+			undefined,
+			"another-call",
+		),
+	).rejects.toMatchObject({ code: "BUDGET_EXHAUSTED" });
+	expect(stored.size).toBe(1);
+});
+
+test("one remaining reread survives lost ACK, same-key replay, and later withdrawal without stale cache", async () => {
+	const quoteRunes = [...quote].length;
+	const reads = new Map<string, string>();
+	let withdrawn = false;
+	const server = Bun.serve({
+		port: 0,
+		fetch: async (request) => {
+			const path = new URL(request.url).pathname;
+			if (path.endsWith("/tool-runs"))
+				return Response.json({
+					code: 200,
+					msg: "success",
+					data: {
+						...parentData(),
+						budget: {
+							search_calls: 1,
+							read_calls: 2,
+							quote_runes: 2 * quoteRunes,
+							max_reads_per_search: 1,
+							max_quote_runes_per_search: quoteRunes,
+						},
+					},
+				});
+			if (path.endsWith("/searches"))
+				return Response.json({
+					code: 200,
+					msg: "success",
+					data: searchData(),
+				});
+			if (withdrawn)
+				return Response.json(
+					{ code: 503, msg: "citation unavailable", data: {} },
+					{ status: 503 },
+				);
+			const body = await request.text();
+			const key = JSON.parse(body).idempotency_key as string;
+			const previous = reads.get(key);
+			if (previous && previous !== body)
+				return new Response(null, { status: 409 });
+			reads.set(key, body);
+			return Response.json({
+				code: 200,
+				msg: "success",
+				data: {
+					search_id: "search-1",
+					snapshot_ref: "snapshot-1",
+					evidence,
+					citation_receipt: receipt,
+				},
+			});
+		},
+	});
+	servers.push(server);
+	let dropFirstReadReply = true;
+	const client = new RTWCloudToolsClient({
+		baseUrl: `http://127.0.0.1:${server.port}`,
+		sessions: productSession().provider,
+		accountSessions: accountSession().provider,
+		fetch: async (url, init) => {
+			const response = await fetch(url, init);
+			if (
+				new URL(String(url)).pathname.endsWith("/evidence-reads") &&
+				dropFirstReadReply
+			) {
+				dropFirstReadReply = false;
+				await response.body?.cancel();
+				throw new Error("client lost reread response after RTW stored it");
+			}
+			return response;
+		},
+	});
+	const run = await client.startParent(parentInput());
+	const mastra = new CloudSearchToolSession(run.parent, run.port);
+	await mastra.search(
+		"fast",
+		{ query: "鲸落", intelligence: "low" },
+		undefined,
+		"search-once",
+	);
+	expect(mastra.remainingBudget().readCalls).toBe(1);
+	const rereadInput = { search_id: "search-1", evidence_id: "ev-1" };
+	await expect(
+		mastra.readEvidence(rereadInput, undefined, "read-once"),
+	).rejects.toMatchObject({ code: "UNAVAILABLE" });
+	expect(mastra.remainingBudget().readCalls).toBe(0);
+	const replay = await mastra.readEvidence(rereadInput, undefined, "read-once");
+	expect(replay.evidence.quote).toBe(quote);
+	expect(reads.size).toBe(1);
+	expect(mastra.remainingBudget().readCalls).toBe(0);
+	await expect(
+		mastra.readEvidence(
+			{ ...rereadInput, evidence_id: "ev-other" },
+			undefined,
+			"read-once",
+		),
+	).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+	await expect(
+		mastra.readEvidence(rereadInput, undefined, "new-read"),
+	).rejects.toMatchObject({ code: "BUDGET_EXHAUSTED" });
+	withdrawn = true;
+	await expect(
+		mastra.readEvidence(rereadInput, undefined, "read-once"),
+	).rejects.toMatchObject({ code: "UNAVAILABLE" });
+	expect(mastra.remainingBudget().readCalls).toBe(0);
 });
