@@ -169,6 +169,8 @@ const turn = z
 export interface RTWCloudHistoryClientOptions {
 	baseUrl: string;
 	sessions: RTWProductSessionProvider;
+	/** Bun-owned read route; ordinary product sessions continue to use v1. */
+	readVersion?: "v1" | "v2";
 	fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 	requestTimeoutMs?: number;
 }
@@ -198,8 +200,14 @@ export class RTWCloudHistoryClient {
 		init?: RequestInit,
 	) => Promise<Response>;
 	private readonly timeoutMs: number;
+	private readonly readVersion: "v1" | "v2";
 
 	constructor(private readonly options: RTWCloudHistoryClientOptions) {
+		const readVersion =
+			options.readVersion === undefined ? "v1" : options.readVersion;
+		if (readVersion !== "v1" && readVersion !== "v2")
+			throw new RTWCloudHistoryError("INVALID_INPUT");
+		this.readVersion = readVersion;
 		let baseUrl: URL;
 		try {
 			baseUrl = new URL(options.baseUrl);
@@ -253,7 +261,7 @@ export class RTWCloudHistoryClient {
 		}
 		const session = { ...current };
 		this.assertCurrent(session);
-		const root = `/v1/knowledge/answer-sessions/${encodeURIComponent(input.logicalSessionId)}/accepted-answers`;
+		const root = this.answerRoot(input.logicalSessionId);
 		const query = new URLSearchParams({
 			after_ordinal: String(input.afterOrdinal ?? 0),
 			limit: String(input.limit ?? 5),
@@ -293,6 +301,43 @@ export class RTWCloudHistoryClient {
 		return { items: result, nextOrdinal: raw.next_ordinal || null };
 	}
 
+	/** Bun-only detail read returns the same bounded, live-citation projection as list. */
+	async detail(
+		logicalSessionId: string,
+		answerId: string,
+	): Promise<CloudAcceptedAnswer> {
+		if (
+			!id.safeParse(logicalSessionId).success ||
+			!id.safeParse(answerId).success
+		)
+			throw new RTWCloudHistoryError("INVALID_INPUT");
+		const current = await this.options.sessions.current();
+		if (
+			!current?.accessToken ||
+			!current.sessionId ||
+			!Number.isSafeInteger(current.generation)
+		) {
+			throw new RTWCloudHistoryError("NOT_AUTHENTICATED");
+		}
+		const session = { ...current };
+		this.assertCurrent(session);
+		const root = this.answerRoot(logicalSessionId);
+		const item = await this.get(
+			`${root}/${encodeURIComponent(answerId)}`,
+			session,
+			answer,
+		);
+		if (item.answer_id !== answerId || item.session_id !== logicalSessionId)
+			throw new RTWCloudHistoryError("BAD_RESPONSE");
+		const result = await this.project(item, root, session);
+		this.assertCurrent(session);
+		return result;
+	}
+
+	private answerRoot(logicalSessionId: string): string {
+		return `/${this.readVersion}/knowledge/answer-sessions/${encodeURIComponent(logicalSessionId)}/accepted-answers`;
+	}
+
 	private async project(
 		item: z.infer<typeof answer>,
 		root: string,
@@ -311,6 +356,7 @@ export class RTWCloudHistoryClient {
 			: null;
 		if (
 			!accepted.success ||
+			(this.readVersion === "v2" && rtwSubjectVersion(item.subject) !== 2) ||
 			(rtwSubjectVersion(item.subject) === 1 &&
 				rtwSubjectVersion(accepted.data.Request.Subject) === 2) ||
 			accepted.data.Request.SearchID !== item.search_id ||

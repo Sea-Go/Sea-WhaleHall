@@ -1,9 +1,26 @@
 /** Opt-in live RTW/UserCenter handoff; ready JSON is 0600 and never logged. */
 import { readFileSync } from "node:fs";
-import { RTWCloudHistoryClient } from "../src/bun/clients/product/rtw-cloud-history-client";
+import {
+	RTWCloudHistoryClient,
+	RTWCloudHistoryError,
+} from "../src/bun/clients/product/rtw-cloud-history-client";
 
 const readyPath = process.env.RTW_CLOUD_HISTORY_READY;
 if (!readyPath) throw new Error("RTW_CLOUD_HISTORY_READY is required");
+const readVersion = process.env.RTW_CLOUD_HISTORY_READ_VERSION ?? "v1";
+if (readVersion !== "v1" && readVersion !== "v2")
+	throw new Error("RTW_CLOUD_HISTORY_READ_VERSION must be v1 or v2");
+const expectedOtherItemsRaw =
+	process.env.RTW_CLOUD_HISTORY_EXPECTED_OTHER_ACCOUNT_ITEMS ?? "0";
+if (!/^(?:0|[1-9][0-9]*)$/u.test(expectedOtherItemsRaw))
+	throw new Error(
+		"RTW_CLOUD_HISTORY_EXPECTED_OTHER_ACCOUNT_ITEMS must be a count",
+	);
+const expectedOtherItems = Number(expectedOtherItemsRaw);
+if (!Number.isSafeInteger(expectedOtherItems) || expectedOtherItems > 20)
+	throw new Error(
+		"RTW_CLOUD_HISTORY_EXPECTED_OTHER_ACCOUNT_ITEMS is out of range",
+	);
 const ready = JSON.parse(readFileSync(readyPath, "utf8")) as {
 	stage: string;
 	base_url: string;
@@ -29,6 +46,7 @@ const clientFor = (token: string) => {
 	};
 	return new RTWCloudHistoryClient({
 		baseUrl: ready.base_url,
+		readVersion,
 		sessions: {
 			current: async () => product,
 			isCurrent: (value) =>
@@ -57,6 +75,9 @@ for (let index = 0; index < ready.answer_ids.length; index++) {
 	) {
 		throw new Error(`live answer mismatch at page ${index + 1}`);
 	}
+	const detail = await client.detail(ready.session_id, answer.answerId);
+	if (JSON.stringify(detail) !== JSON.stringify(answer))
+		throw new Error(`live detail mismatch at page ${index + 1}`);
 	const expected = ready.expected_citation_states.find(
 		(value) => value.answer_id === answer.answerId,
 	);
@@ -86,15 +107,34 @@ for (let index = 0; index < ready.answer_ids.length; index++) {
 }
 const other = await clientFor(ready.other_token).list({
 	logicalSessionId: ready.session_id,
-	limit: 2,
+	limit: 20,
 });
-if (other.items.length !== 0)
-	throw new Error("other account received accepted answers");
+const otherAccountTargetItems = other.items.filter((answer) =>
+	ready.answer_ids.includes(answer.answerId),
+).length;
+if (other.items.length !== expectedOtherItems || otherAccountTargetItems !== 0)
+	throw new Error(
+		"other account received target answers or lost its own answer",
+	);
+if (ready.answer_ids[0]) {
+	try {
+		await clientFor(ready.other_token).detail(
+			ready.session_id,
+			ready.answer_ids[0],
+		);
+		throw new Error("other account received answer detail");
+	} catch (error) {
+		if (!(error instanceof RTWCloudHistoryError) || error.code !== "NOT_FOUND")
+			throw error;
+	}
+}
 console.log(
 	JSON.stringify({
 		stage: ready.stage,
+		readVersion,
 		answers: seen,
-		otherAccountItems: 0,
+		otherAccountItems: other.items.length,
+		otherAccountTargetItems,
 		quoteFieldExposed: false,
 	}),
 );
