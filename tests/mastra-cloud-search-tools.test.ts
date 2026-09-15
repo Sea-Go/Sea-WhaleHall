@@ -24,7 +24,7 @@ const evidence = {
 const receipt = {
 	search_id: "search-1",
 	pack_hash: packHash,
-	durable_ref: "rtw-citation-1",
+	durable_ref: `search-citations/sha256/${createHash("sha256").update("search-1", "utf8").digest("hex")}`,
 };
 
 function parent(overrides: Partial<CloudSearchParent> = {}): CloudSearchParent {
@@ -336,7 +336,9 @@ describe("Mastra cloud search tools", () => {
 					);
 					expect(toolMessage).toBeDefined();
 					expect(JSON.stringify(toolMessage)).toContain("ev-1");
-					expect(JSON.stringify(toolMessage)).toContain("rtw-citation-1");
+					expect(JSON.stringify(toolMessage)).toContain(
+						"search-citations/sha256/",
+					);
 					return new Response(
 						JSON.stringify({
 							id: "fixture-2",
