@@ -13,6 +13,7 @@ import type {
 	CreatePlanDraftCommand,
 	DecideAgentToolApprovalRequest,
 	GetAgentRunSnapshotRequest,
+	ListCloudAnswersRequest,
 	ListProactiveFeedbackRequest,
 	ListRestorableAgentRunsRequest,
 	LocalMonitoringConfigure,
@@ -136,6 +137,8 @@ export const clientApi = {
 		rpc.request.setProactiveFeedbackPolicy(input),
 	listProactiveFeedback: (input: ListProactiveFeedbackRequest = {}) =>
 		rpc.request.listProactiveFeedback(input),
+	listCloudAcceptedAnswers: (input: ListCloudAnswersRequest) =>
+		rpc.request.listCloudAcceptedAnswers(input),
 	clearProactiveFeedbackData: () => rpc.request.clearProactiveFeedbackData({}),
 	getAgentReadPermissions: () => rpc.request.getAgentReadPermissions({}),
 	setAgentReadPermissions: (input: SetAgentReadPermissionsRequest) =>

@@ -167,6 +167,7 @@ export default {
 			},
 		},
 		copy: {
+			LICENSE: "LICENSE",
 			"dist/views": "views",
 			"config.template.yaml": "config.yaml",
 			...nativeCopies,

@@ -1328,6 +1328,9 @@ const clientRequestHandlers: ClientRequestHandlers = {
 				input,
 			);
 		}),
+	// No RTW product-session provider or logical-session mapping is approved yet.
+	// Keep the transport typed but explicitly disabled on the current DC-only login.
+	listCloudAcceptedAnswers: () => Promise.resolve({ kind: "disabled" as const }),
 	clearProactiveFeedbackData: (input) =>
 		proactiveFeedbackRpc(async () => {
 			if (!hasExactKeys(input, [])) {
