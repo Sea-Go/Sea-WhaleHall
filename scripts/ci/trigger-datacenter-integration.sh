@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly datacenter_gitlab_origin="https://gitlab.sea-ridethewindbreakthewaves.xyz"
+readonly datacenter_gitlab_origin="https://code.sea-ridethewindbreakthewaves.xyz"
 readonly canonical_whalehall_repository_url="https://github.com/Sea-Go/Sea-WhaleHall.git"
 readonly datacenter_ci_whalehall_repository_url="file:///srv/datacenter-ci-sources/Sea-WhaleHall.git"
 readonly whalehall_repository_url="${DATACENTER_WHALEHALL_REPOSITORY_URL:-$canonical_whalehall_repository_url}"
