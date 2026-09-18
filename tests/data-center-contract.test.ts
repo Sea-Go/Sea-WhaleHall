@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, createPublicKey, verify } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { MODEL_AGENT_CATALOG } from "../src/agent/mastra-host/model-agent-catalog";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
 import type { CloudSyncConfiguration } from "../src/bun/client-config";
 import {
@@ -17,6 +20,8 @@ import {
 	validateDataCenterAdvanceResponse,
 	validateDataCenterBatchResponse,
 } from "../src/bun/data-center-contract";
+
+const repositoryRoot = resolve(import.meta.dir, "..");
 
 const metadataConfiguration: CloudSyncConfiguration = {
 	enabled: true,
@@ -39,6 +44,94 @@ const contentConfiguration: CloudSyncConfiguration = {
 };
 
 describe("DataCenter desktop contract", () => {
+	test("freezes the code-owned model Agent catalog and routing boundary", () => {
+		expect(
+			MODEL_AGENT_CATALOG.map(({ id, purpose, recommendedTier }) => ({
+				id,
+				purpose,
+				recommendedTier,
+			})),
+		).toEqual([
+			{
+				id: "whalehall-conversation",
+				purpose: "agent",
+				recommendedTier: "medium",
+			},
+			{
+				id: "whalehall-planning",
+				purpose: "planning",
+				recommendedTier: "high",
+			},
+			{
+				id: "whalehall-planning-analysis",
+				purpose: "planning",
+				recommendedTier: "high",
+			},
+			{
+				id: "whalehall-activity-reflection",
+				purpose: "reflection",
+				recommendedTier: "high",
+			},
+			{
+				id: "whalehall-activity-support-supervisor",
+				purpose: "activity",
+				recommendedTier: "medium",
+			},
+			{
+				id: "whalehall-activity-momentum-coach",
+				purpose: "activity",
+				recommendedTier: "low",
+			},
+			{
+				id: "whalehall-activity-blocker-coach",
+				purpose: "activity",
+				recommendedTier: "low",
+			},
+			{
+				id: "whalehall-activity-focus-coach",
+				purpose: "activity",
+				recommendedTier: "low",
+			},
+			{
+				id: "whalehall-activity-recovery-companion",
+				purpose: "activity",
+				recommendedTier: "low",
+			},
+			{
+				id: "whalehall-activity-check-in-companion",
+				purpose: "activity",
+				recommendedTier: "low",
+			},
+			{
+				id: "whalehall-activity-support-voice",
+				purpose: "activity",
+				recommendedTier: "low",
+			},
+		]);
+
+		const remoteAuth = readFileSync(
+			resolve(repositoryRoot, "src/bun/remote-auth-session.ts"),
+			"utf8",
+		);
+		expect(remoteAuth).toContain(
+			'headers.set("x-whalehall-model-agent", agentId)',
+		);
+		const transport = readFileSync(
+			resolve(repositoryRoot, "src/bun/model-relay-transport.ts"),
+			"utf8",
+		);
+		for (const key of [
+			"agentId",
+			"agent_id",
+			"agentKey",
+			"agent_key",
+			"modelAgent",
+			"model_agent",
+		]) {
+			expect(transport, key).toContain(`"${key}" in request.body`);
+		}
+	});
+
 	test("creates an independent Ed25519 registration identity and signs the exact v2 canonical body", () => {
 		const credentials = createDataCenterAgentCredentials({
 			accountId: "account-1",
@@ -336,8 +429,10 @@ describe("DataCenter desktop contract", () => {
 		);
 		expect(maximum?.eventCount).toBe(500);
 
+		const firstEvent = events[0];
+		if (!firstEvent) throw new Error("Expected a batch fixture event.");
 		const oversized = {
-			...events[0]!,
+			...firstEvent,
 			payload: { value: "x".repeat(15 * 1024 * 1024) },
 		};
 		expect(

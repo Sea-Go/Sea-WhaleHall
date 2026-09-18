@@ -16,6 +16,10 @@ import {
 	ACTIVITY_SUPPORT_VOICE_INSTRUCTIONS,
 } from "./activity-support-team";
 import type { HostMastraStorage } from "./mastra-storage";
+import {
+	ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS,
+	MODEL_AGENT_IDS,
+} from "./model-agent-catalog";
 import type { ModelRelay } from "./model-relay";
 import {
 	createTaskPlanningWorkflow,
@@ -102,7 +106,7 @@ export function createMastraAgentSet(
 		},
 	});
 	const conversation = new Agent({
-		id: "whalehall-conversation",
+		id: MODEL_AGENT_IDS.conversation,
 		name: "WhaleHall 对话助手",
 		description: "在桌面端持续对话并流式返回自然中文回答。",
 		instructions: [
@@ -120,7 +124,7 @@ export function createMastraAgentSet(
 		maxRetries: 0,
 	});
 	const planning = new Agent({
-		id: "whalehall-planning",
+		id: MODEL_AGENT_IDS.planning,
 		name: "WhaleHall 计划助手",
 		description: "把目标澄清并拆分成可排期、可验收的里程碑和任务。",
 		instructions: [
@@ -134,7 +138,7 @@ export function createMastraAgentSet(
 		maxRetries: 0,
 	});
 	const planningAnalysis = new Agent({
-		id: "whalehall-planning-analysis",
+		id: MODEL_AGENT_IDS.planningAnalysis,
 		name: "WhaleHall 动态计划分析器",
 		description: "为本地 PlanningRuntime 返回严格结构化的语义分析。",
 		instructions: PLANNING_MODEL_SYSTEM_PROMPT,
@@ -154,7 +158,7 @@ export function createMastraAgentSet(
 		maxRetries: 0,
 	});
 	const activityReflection = new Agent({
-		id: "whalehall-activity-reflection",
+		id: MODEL_AGENT_IDS.activityReflection,
 		name: "WhaleHall 活动反思模型",
 		description: "对一个本地封闭活动窗口生成可核对的结构化中文事件。",
 		instructions: ACTIVITY_REFLECTION_SYSTEM_PROMPT,
@@ -165,7 +169,7 @@ export function createMastraAgentSet(
 		maxRetries: 0,
 	});
 	const activitySupportSupervisor = new Agent({
-		id: "whalehall-activity-support-supervisor",
+		id: MODEL_AGENT_IDS.activitySupportSupervisor,
 		name: "WhaleHall 主动关怀分诊",
 		description: "从脱敏活动摘要中谨慎判断此刻最值得提供的帮助。",
 		instructions: ACTIVITY_SUPPORT_SUPERVISOR_INSTRUCTIONS,
@@ -199,33 +203,33 @@ export function createMastraAgentSet(
 		});
 	const activitySupportSpecialists = {
 		momentumCoach: createActivitySupportSpecialist(
-			"whalehall-activity-momentum-coach",
+			ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.momentumCoach,
 			"WhaleHall 推进教练",
 			ACTIVITY_SUPPORT_SPECIALIST_INSTRUCTIONS.momentumCoach,
 		),
 		blockerCoach: createActivitySupportSpecialist(
-			"whalehall-activity-blocker-coach",
+			ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.blockerCoach,
 			"WhaleHall 卡点拆解教练",
 			ACTIVITY_SUPPORT_SPECIALIST_INSTRUCTIONS.blockerCoach,
 		),
 		focusCoach: createActivitySupportSpecialist(
-			"whalehall-activity-focus-coach",
+			ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.focusCoach,
 			"WhaleHall 注意力回归教练",
 			ACTIVITY_SUPPORT_SPECIALIST_INSTRUCTIONS.focusCoach,
 		),
 		recoveryCompanion: createActivitySupportSpecialist(
-			"whalehall-activity-recovery-companion",
+			ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.recoveryCompanion,
 			"WhaleHall 恢复陪伴者",
 			ACTIVITY_SUPPORT_SPECIALIST_INSTRUCTIONS.recoveryCompanion,
 		),
 		checkInCompanion: createActivitySupportSpecialist(
-			"whalehall-activity-check-in-companion",
+			ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.checkInCompanion,
 			"WhaleHall 轻量问候者",
 			ACTIVITY_SUPPORT_SPECIALIST_INSTRUCTIONS.checkInCompanion,
 		),
 	};
 	const activitySupportVoice = new Agent({
-		id: "whalehall-activity-support-voice",
+		id: MODEL_AGENT_IDS.activitySupportVoice,
 		name: "WhaleHall 主动关怀表达",
 		description: "把已校验的团队关怀要点写成自然、有分寸的中文。",
 		instructions: ACTIVITY_SUPPORT_VOICE_INSTRUCTIONS,

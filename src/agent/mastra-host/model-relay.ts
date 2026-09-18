@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { OpenAICompatibleProviderSettings } from "@ai-sdk/openai-compatible";
+import { isModelAgentId, type ModelAgentId } from "./model-agent-catalog";
 import {
 	type AgentHostErrorPayload,
 	isRecord,
@@ -13,6 +14,7 @@ import { AgentHostRuntimeError, type HostRequestPeer } from "./transport";
 export interface ModelRelayContext {
 	runId: string;
 	originatingRequestId: string;
+	agentId: ModelAgentId;
 }
 
 interface RelayStreamState {
@@ -45,7 +47,8 @@ export class ModelRelay {
 		if (
 			!activeContext ||
 			!isBoundedContextId(activeContext.runId) ||
-			!isBoundedContextId(activeContext.originatingRequestId)
+			!isBoundedContextId(activeContext.originatingRequestId) ||
+			!isModelAgentId(activeContext.agentId)
 		) {
 			throw new AgentHostRuntimeError({
 				code: "MODEL_RELAY_ERROR",
@@ -120,6 +123,7 @@ export class ModelRelay {
 					relayId,
 					runId: activeContext.runId,
 					originatingRequestId: activeContext.originatingRequestId,
+					agentId: activeContext.agentId,
 					provider: this.provider,
 					modelId: this.modelId,
 					request: {

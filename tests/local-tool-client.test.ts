@@ -563,41 +563,28 @@ describe("LocalToolClient", () => {
 	);
 
 	test("locks the Rust process Job and EOF cleanup behind Windows tree completion", () => {
+		const serverSourceDirectory = join(
+			import.meta.dir,
+			"..",
+			"native",
+			"local-host",
+			"server",
+			"src",
+		);
 		const mainSource = readFileSync(
-			join(
-				import.meta.dir,
-				"..",
-				"whalehall-local",
-				"server",
-				"src",
-				"main.rs",
-			),
+			join(serverSourceDirectory, "main.rs"),
 			"utf8",
 		);
 		const serverSource = readFileSync(
-			join(import.meta.dir, "..", "whalehall-local", "server", "src", "lib.rs"),
+			join(serverSourceDirectory, "lib.rs"),
 			"utf8",
 		);
 		const observerSource = readFileSync(
-			join(
-				import.meta.dir,
-				"..",
-				"whalehall-local",
-				"server",
-				"src",
-				"observer.rs",
-			),
+			join(serverSourceDirectory, "observer.rs"),
 			"utf8",
 		);
 		const windowsTreeSource = readFileSync(
-			join(
-				import.meta.dir,
-				"..",
-				"whalehall-local",
-				"server",
-				"src",
-				"windows_process_tree.rs",
-			),
+			join(serverSourceDirectory, "windows_process_tree.rs"),
 			"utf8",
 		);
 		const eofCleanupStart = serverSource.indexOf("calls.abort_all();");

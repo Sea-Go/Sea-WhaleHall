@@ -1166,6 +1166,7 @@ const DESKTOP_EVENT_KINDS = new Set<DesktopEventKind>([
 	"accessibility.focusChanged",
 	"accessibility.valueChanged",
 	"accessibility.documentChanged",
+	// Retained so journals created by the retired VS Code bridge remain readable.
 	"editor.documentChanged",
 	"input.activityAggregated",
 	"presence.afkStarted",

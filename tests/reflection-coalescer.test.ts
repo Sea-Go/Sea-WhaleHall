@@ -4,7 +4,6 @@ import {
 	DESKTOP_OBSERVATION_SCHEMA_VERSION,
 	SemanticEventCoalescer,
 	type DesktopEventForKind,
-	type EditorDocumentDeltaObservationV1,
 	type EventIdentityFactory,
 	type InputActivityObservationV1,
 	type ProcessScanObservationV1,
@@ -48,35 +47,6 @@ function inputSample(
 			scrollDelta: 0,
 			mouseDistance: 1,
 			...overrides,
-		},
-	};
-}
-
-function editDelta(
-	index: number,
-	atMs: number,
-	text = "x",
-	sensitivity: EditorDocumentDeltaObservationV1["sensitivity"] = "content",
-): EditorDocumentDeltaObservationV1 {
-	return {
-		schemaVersion: DESKTOP_OBSERVATION_SCHEMA_VERSION,
-		observationId: `edit-${index}`,
-		deviceId: "device-1",
-		sessionId: "session-1",
-		kind: "editor.documentDelta",
-		source: "vscode-extension",
-		occurredAtMs: atMs,
-		observedAtMs: atMs,
-		goalVersion: null,
-		sensitivity,
-		payload: {
-			editorId: "vscode",
-			documentId: "doc-1",
-			relativePath: "src/index.ts",
-			language: "typescript",
-			insertedChars: text.length,
-			deletedChars: 0,
-			text,
 		},
 	};
 }
@@ -161,63 +131,6 @@ describe("SemanticEventCoalescer input aggregation", () => {
 		if (crossed[0]?.kind === "input.activityAggregated" && second[0]?.kind === "input.activityAggregated") {
 			expect(crossed[0].payload.bucketStartedAtMs).toBe(0);
 			expect(second[0].payload.bucketStartedAtMs).toBe(5_000);
-		}
-	});
-});
-
-describe("SemanticEventCoalescer editor bursts", () => {
-	test("two seconds of edit silence finalizes one document burst", () => {
-		const coalescer = createCoalescer();
-		coalescer.push(editDelta(1, 0, "hello"));
-		coalescer.push(editDelta(2, 1_000, " world"));
-		expect(coalescer.flush(2_999)).toEqual([]);
-		const output = coalescer.flush(3_000);
-		expect(output).toHaveLength(1);
-		expect(output[0]).toMatchObject({
-			kind: "editor.documentChanged",
-			sensitivity: "content",
-			payload: {
-				documentId: "doc-1",
-				insertedChars: 11,
-				text: "hello world",
-				burstStartedAtMs: 0,
-				burstEndedAtMs: 3_000,
-			},
-		});
-	});
-
-	test("continuous edits force-close at ten seconds", () => {
-		const coalescer = createCoalescer();
-		for (let second = 0; second < 10; second += 1) {
-			expect(coalescer.push(editDelta(second, second * 1_000))).toEqual([]);
-		}
-		const output = coalescer.push(editDelta(10, 10_000));
-		expect(output).toHaveLength(1);
-		expect(output[0]).toMatchObject({
-			kind: "editor.documentChanged",
-			payload: {
-				insertedChars: 10,
-				burstStartedAtMs: 0,
-				burstEndedAtMs: 10_000,
-			},
-		});
-		expect(coalescer.flush(12_000)).toHaveLength(1);
-	});
-
-	test("metadata edit observations cannot smuggle text into a burst", () => {
-		const coalescer = createCoalescer();
-		coalescer.push(editDelta(1, 0, "secret", "metadata"));
-
-		const output = coalescer.flush(2_000);
-
-		expect(output).toHaveLength(1);
-		expect(output[0]).toMatchObject({
-			kind: "editor.documentChanged",
-			sensitivity: "metadata",
-			payload: { insertedChars: 6 },
-		});
-		if (output[0]?.kind === "editor.documentChanged") {
-			expect("text" in output[0].payload).toBe(false);
 		}
 	});
 });

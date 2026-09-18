@@ -20,6 +20,10 @@ import type {
 	LocalVaultLegacyMigrationResult,
 } from "../agent/local-protocol";
 import { LocalClientError, LocalToolClient } from "../agent/local-tool-client";
+import {
+	isModelAgentId,
+	MODEL_AGENT_IDS,
+} from "../agent/mastra-host/model-agent-catalog";
 import { AGENT_HOST_PROTOCOL_VERSION } from "../agent/mastra-host/protocol";
 import { loadOrCreateReflectionIdentity } from "../agent/reflection";
 import {
@@ -508,10 +512,18 @@ const sidecar = new MastraSidecarClient({
 				throw new Error("Model relay provider is invalid.");
 			}
 			const provider = params.provider;
+			const agentId = params.agentId;
+			if (!isModelAgentId(agentId)) {
+				throw new Error("Model relay Agent identity is not approved.");
+			}
 			if (provider === reflectionModelRelayProvider) {
 				const analyzer = activityReflectionAnalyzer;
 				const bridge = activityReflectionRelayBridge;
-				if (!analyzer?.hasPendingInvocation(ownerRunId) || !bridge) {
+				if (
+					agentId !== MODEL_AGENT_IDS.activityReflection ||
+					!analyzer?.hasPendingInvocation(ownerRunId) ||
+					!bridge
+				) {
 					throw new Error(
 						"Reflection model relay call is not locally authorized.",
 					);
@@ -525,27 +537,32 @@ const sidecar = new MastraSidecarClient({
 					provider,
 					agentProvider: agentModelRelayProvider,
 					planningProvider: planningModelRelayProvider,
+					agentId,
 					runPurpose: null,
 					dynamicPlanningPending,
 				});
 				return planningRelayBridge.open(call.requestId, params);
 			}
-			return coordinator.runBoundHostCall(ownerRunId, () => {
-				const bridge = authorizeRunBoundModelRelay({
-					provider,
-					agentProvider: agentModelRelayProvider,
-					planningProvider: planningModelRelayProvider,
-					runPurpose: coordinator.modelPurposeForRun(ownerRunId),
-					dynamicPlanningPending,
-				});
-				if (bridge === "planning") {
-					return planningRelayBridge.open(call.requestId, params);
-				}
-				return (bridge === "activity"
-					? activityAgentRelayBridge
-					: relayBridge
-				).open(call.requestId, params);
-			});
+			return coordinator.runBoundModelRelayCall(
+				ownerRunId,
+				agentId,
+				(runPurpose) => {
+					const bridge = authorizeRunBoundModelRelay({
+						provider,
+						agentProvider: agentModelRelayProvider,
+						planningProvider: planningModelRelayProvider,
+						agentId,
+						runPurpose,
+						dynamicPlanningPending,
+					});
+					if (bridge === "planning") {
+						return planningRelayBridge.open(call.requestId, params);
+					}
+					return (
+						bridge === "activity" ? activityAgentRelayBridge : relayBridge
+					).open(call.requestId, params);
+				},
+			);
 		}
 		if (call.method === "model/relay.abort") {
 			const ownerRunId = call.params.ownerRunId;

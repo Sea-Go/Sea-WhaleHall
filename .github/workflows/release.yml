@@ -211,7 +211,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: whalehall-local -> target
+          workspaces: native/local-host -> target
           cache-on-failure: true
           key: stable-release-quality
 
@@ -289,7 +289,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: whalehall-local -> target
+          workspaces: native/local-host -> target
           cache-on-failure: true
           key: stable-release-macos-arm64
 
@@ -440,7 +440,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: whalehall-local -> target
+          workspaces: native/local-host -> target
           cache-on-failure: true
           key: stable-release-windows-x64
 
@@ -450,7 +450,7 @@ jobs:
       - name: Prove whalehall-local Windows process-tree ownership
         shell: pwsh
         run: |
-          $output = & cargo test --locked --manifest-path whalehall-local/Cargo.toml `
+          $output = & cargo test --locked --manifest-path native/local-host/Cargo.toml `
             -p whalehall-local-server --test windows_process_tree -- `
             --nocapture --test-threads=1 2>&1
           $exitCode = $LASTEXITCODE

@@ -50,6 +50,10 @@ import {
 	type ConversationMemoryExecutionContext,
 	HostMastraStorage,
 } from "./mastra-storage";
+import {
+	ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS,
+	MODEL_AGENT_IDS,
+} from "./model-agent-catalog";
 import { ModelRelay } from "./model-relay";
 import {
 	decodeDynamicPlanningProviderOutput,
@@ -511,7 +515,11 @@ export class AgentHostRuntime {
 		const relay = this.requirePlanningRelay();
 		try {
 			return await relay.runInContext(
-				{ runId: invocationId, originatingRequestId: requestId },
+				{
+					runId: invocationId,
+					originatingRequestId: requestId,
+					agentId: MODEL_AGENT_IDS.planningAnalysis,
+				},
 				async () => {
 					const result = await runDynamicPlanningAnalysisWithDeadline(
 						(abortSignal) =>
@@ -835,6 +843,7 @@ export class AgentHostRuntime {
 					{
 						runId: record.snapshot.runId,
 						originatingRequestId: record.snapshot.requestId,
+						agentId: MODEL_AGENT_IDS.conversation,
 					},
 					async () => {
 						const requestContext = this.createRequestContext(record);
@@ -938,45 +947,53 @@ export class AgentHostRuntime {
 			await this.emit(record, { kind: "run.started", runKind: "activity" });
 			const agents = this.requireAgents();
 			const relay = this.requireRelay();
-			await relay.runInContext(
+			const assessmentResult = await relay.runInContext(
 				{
 					runId: record.snapshot.runId,
 					originatingRequestId: record.snapshot.requestId,
+					agentId: MODEL_AGENT_IDS.activitySupportSupervisor,
 				},
-				async () => {
-					const assessmentResult =
-						await agents.activitySupportSupervisor.generate(
-							activitySupportAssessmentPrompt(activity.supportContext),
-							{
-								runId: activitySupportAgentRunId(record, "triage"),
-								abortSignal: record.controller.signal,
-								requestContext: this.createRequestContext(record),
-								activeTools: [],
-								toolChoice: "none",
-								maxSteps: 1,
-								modelSettings: { temperature: 0 },
-								structuredOutput: {
-									schema: activitySupportAssessmentSchema,
-									errorStrategy: "strict",
-								},
+				() =>
+					agents.activitySupportSupervisor.generate(
+						activitySupportAssessmentPrompt(activity.supportContext),
+						{
+							runId: activitySupportAgentRunId(record, "triage"),
+							abortSignal: record.controller.signal,
+							requestContext: this.createRequestContext(record),
+							activeTools: [],
+							toolChoice: "none",
+							maxSteps: 1,
+							modelSettings: { temperature: 0 },
+							structuredOutput: {
+								schema: activitySupportAssessmentSchema,
+								errorStrategy: "strict",
 							},
-						);
-					const assessment = activitySupportAssessmentSchema.safeParse(
-						assessmentResult.object,
-					);
-					if (!assessment.success) {
-						throw runtimeError(
-							"ACTIVITY_OUTPUT_INVALID",
-							"Activity support supervisor returned invalid output.",
-						);
-					}
-					const guardedAssessment = guardActivitySupportAssessment(
-						activity.supportContext,
-						assessment.data,
-					);
-					const specialistKey = specialistKeyForRoute(guardedAssessment.route);
-					const specialist = agents.activitySupportSpecialists[specialistKey];
-					const briefResult = await specialist.generate(
+						},
+					),
+			);
+			const assessment = activitySupportAssessmentSchema.safeParse(
+				assessmentResult.object,
+			);
+			if (!assessment.success) {
+				throw runtimeError(
+					"ACTIVITY_OUTPUT_INVALID",
+					"Activity support supervisor returned invalid output.",
+				);
+			}
+			const guardedAssessment = guardActivitySupportAssessment(
+				activity.supportContext,
+				assessment.data,
+			);
+			const specialistKey = specialistKeyForRoute(guardedAssessment.route);
+			const specialist = agents.activitySupportSpecialists[specialistKey];
+			const briefResult = await relay.runInContext(
+				{
+					runId: record.snapshot.runId,
+					originatingRequestId: record.snapshot.requestId,
+					agentId: ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS[specialistKey],
+				},
+				() =>
+					specialist.generate(
 						activitySupportSpecialistPrompt(
 							activity.supportContext,
 							guardedAssessment,
@@ -994,14 +1011,22 @@ export class AgentHostRuntime {
 								errorStrategy: "strict",
 							},
 						},
-					);
-					const parsedBrief = activitySupportBriefSchema.safeParse(
-						briefResult.object,
-					);
-					const brief =
-						parsedBrief.success && isSafeActivitySupportBrief(parsedBrief.data)
-							? parsedBrief.data
-							: fallbackActivitySupportBrief(guardedAssessment.route);
+					),
+			);
+			const parsedBrief = activitySupportBriefSchema.safeParse(
+				briefResult.object,
+			);
+			const brief =
+				parsedBrief.success && isSafeActivitySupportBrief(parsedBrief.data)
+					? parsedBrief.data
+					: fallbackActivitySupportBrief(guardedAssessment.route);
+			await relay.runInContext(
+				{
+					runId: record.snapshot.runId,
+					originatingRequestId: record.snapshot.requestId,
+					agentId: MODEL_AGENT_IDS.activitySupportVoice,
+				},
+				async () => {
 					const stream = await agents.activitySupportVoice.stream(
 						activitySupportVoicePrompt(brief),
 						{
@@ -1316,7 +1341,11 @@ export class AgentHostRuntime {
 		const agents = this.requireAgents();
 		const relay = this.requireReflectionRelay();
 		return relay.runInContext(
-			{ runId: invocationId, originatingRequestId: requestId },
+			{
+				runId: invocationId,
+				originatingRequestId: requestId,
+				agentId: MODEL_AGENT_IDS.activityReflection,
+			},
 			async () => {
 				const providerOutputSchema =
 					createActivityReflectionProviderOutputSchema(
@@ -1384,6 +1413,7 @@ export class AgentHostRuntime {
 			{
 				runId: record.snapshot.runId,
 				originatingRequestId: record.snapshot.requestId,
+				agentId: MODEL_AGENT_IDS.planning,
 			},
 			async () => {
 				const requestContext = this.createRequestContext(record);

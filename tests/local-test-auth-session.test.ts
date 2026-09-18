@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { LOCAL_TEST_AUTH_EXPERIENCE } from "../src/shared/auth";
+import { MODEL_AGENT_IDS } from "../src/agent/mastra-host/model-agent-catalog";
 import {
 	LOCAL_TEST_ACCOUNT_ID,
 	LocalTestAuthError,
 	LocalTestAuthSessionManager,
 } from "../src/bun/local-test-auth-session";
+import { LOCAL_TEST_AUTH_EXPERIENCE } from "../src/shared/auth";
 
 function controlledPromise() {
 	let resolve!: () => void;
@@ -113,7 +114,12 @@ describe("LocalTestAuthSessionManager", () => {
 		const manager = new LocalTestAuthSessionManager();
 		await manager.signInTestAccount(LOCAL_TEST_AUTH_EXPERIENCE);
 		await expect(
-			manager.authorizedFetch("/v1/chat/completions", {}, "agent"),
+			manager.authorizedFetch(
+				"/v1/chat/completions",
+				{},
+				"agent",
+				MODEL_AGENT_IDS.conversation,
+			),
 		).rejects.toMatchObject({
 			kind: "service-unavailable",
 		});

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ModelAgentId } from "../agent/mastra-host/model-agent-catalog";
 import {
 	type AuthCredentials,
 	type AuthRpcFailureKind,
@@ -164,6 +165,7 @@ export class LocalTestAuthSessionManager implements DesktopAuthSessionManager {
 		_path: string,
 		_init: RequestInit,
 		_purpose: ModelRelayPurpose,
+		_agentId: ModelAgentId,
 	): Promise<Response> {
 		throw new LocalTestAuthError(
 			"service-unavailable",

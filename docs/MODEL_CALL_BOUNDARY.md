@@ -17,10 +17,36 @@ WhaleHall 桌面端的所有模型调用必须经过 `src/agent/mastra-host` 的
 
 四个用途都请求固定 `POST /v1/chat/completions`。Bun 的
 `RemoteAuthSessionManager` 注入认证信息，并由代码设置
-`X-WhaleHall-Model-Purpose`；Sidecar、请求 body 与 Renderer 不能提供或覆盖用途、
-token、key 或用户身份。Dynamic Planning 使用稳定的
+`X-WhaleHall-Model-Purpose` 和 `X-WhaleHall-Model-Agent`。purpose 是审计与授权边界；
+Agent ID 标识具体调用者，由 DataCenter 映射到 `high`、`medium`、`low` 推理层级和当前
+生效模型。Sidecar Agent Host 从固定代码映射为当前模型调用绑定 Agent ID，并通过 private
+stdio v3 的必填 `model/relay.open.agentId` 携带；Bun 校验 Agent catalog、purpose 与 owning
+run 后才生成两个远端 HTTP 头。activity run 还强制
+`supervisor → 任一固定 specialist → voice → done` 的瞬态顺序，只有 relay open 成功后才推进；
+具体 specialist 由 Sidecar 对 guarded route 的固定映射选择，首次接受后的失败重试必须保持同一 Agent。请求 body、Renderer 与调用方
+HTTP headers 不能提供或覆盖用途、Agent、token、key 或用户身份。DataCenter 校验 bearer、Agent 是否属于固定 catalog
+以及 Agent 与 purpose 是否匹配，但不会把该头视为设备证明或官方客户端证明。v2 peer 会
+fail closed。Dynamic Planning 使用稳定的
 `planning-analysis:${operationId}` 作为 originating request identity，使现有 relay
-幂等键在恢复和重试时保持不变。
+幂等键在恢复和重试时保持不变。Agent ID 不改变升级前的 key 派生；DataCenter 在同一
+key 的 durable authority 上绑定非空 Agent，跨 Agent 复用会 fail closed，旧的空 Agent
+记录则可按升级兼容规则继续恢复或 replay。
+
+固定 Agent catalog：
+
+| Agent ID | 用途 | 默认推理层级 |
+| --- | --- | --- |
+| `whalehall-conversation` | `agent` | `medium` |
+| `whalehall-planning` | `planning` | `high` |
+| `whalehall-planning-analysis` | `planning` | `high` |
+| `whalehall-activity-reflection` | `reflection` | `high` |
+| `whalehall-activity-support-supervisor` | `activity` | `medium` |
+| `whalehall-activity-momentum-coach` | `activity` | `low` |
+| `whalehall-activity-blocker-coach` | `activity` | `low` |
+| `whalehall-activity-focus-coach` | `activity` | `low` |
+| `whalehall-activity-recovery-companion` | `activity` | `low` |
+| `whalehall-activity-check-in-companion` | `activity` | `low` |
+| `whalehall-activity-support-voice` | `activity` | `low` |
 
 `activity-reflection` 与 `planning-analysis` 都是 live-only 入口，不注册到 durable
 Mastra Agent 集合。它们不创建产品 Tool、Memory 或 snapshot。前者的完整窗口 prompt，
@@ -52,8 +78,10 @@ conformance gate 后，才可在单独改动中重新启用本地 Tool allowlist
   配置、日志、durable snapshot、普通 Agent run 或 Tool。Bearer 与上游凭据始终留在 Bun/DataCenter。
 - DataCenter 不添加 system prompt、不聚合事件、不格式化 action、不计算分数；这些合同由
   客户端代码拥有。内测环境的 exact request/response 审计必须按已认证账号隔离。
-- `X-WhaleHall-Model-Purpose` 只能由 Bun 的 code-owned transport 设置；Sidecar、body 和
-  Renderer 都不能提供或覆盖。请求 body 中的 `userId`、token 或 key 一律拒绝。
+- Sidecar Agent Host 只通过私有 v3 协议携带代码绑定的 Agent ID；
+  `X-WhaleHall-Model-Purpose` 与 `X-WhaleHall-Model-Agent` 只能由 Bun transport 在完成
+  catalog、purpose 与 owning-run 校验后设置。Renderer、请求 body 与调用方 HTTP headers
+  都不能设置或覆盖；请求 body 中的 `userId`、Agent identity、token 或 key 一律拒绝。
 - raw activity outbox、receipt、score 和后台 Agent job 使用账号专属 ledger。未登录
   窗口不进入云 outbox；不同账号不能接管 pending 数据。
 - 每个模型入口必须覆盖输入边界、严格输出合同、取消/超时、错误恢复、幂等与用途审计。

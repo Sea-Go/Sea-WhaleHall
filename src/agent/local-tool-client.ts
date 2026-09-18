@@ -133,8 +133,8 @@ const ownedProcessTrees = new WeakMap<ChildTransport, OwnedProcessTree>();
 type EnvironmentSource = Readonly<Record<string, string | undefined>>;
 
 // whalehall-local intentionally receives a closed environment. Keep this list
-// aligned with environment reads in whalehall-local/core and
-// whalehall-local/server. New entries require a security review; in
+// aligned with environment reads in native/local-host/core and
+// native/local-host/server. New entries require a security review; in
 // particular, model/auth credentials belong in the Bun host and must never be
 // added here.
 const LOCAL_TOOL_ENVIRONMENT_KEYS = [
@@ -206,7 +206,6 @@ const LOCAL_TOOL_ENVIRONMENT_KEYS = [
 	"WHALEHALL_ACCESSIBILITY_MAX_NODES",
 	"WHALEHALL_ACCESSIBILITY_DOCUMENT_TEXT_LIMIT",
 	"WHALEHALL_ACCESSIBILITY_RETENTION_DAYS",
-	"WHALEHALL_VSCODE_BRIDGE_DIRECTORY",
 	"WHALEHALL_OBSERVER_HELPER_PATH",
 	"WHALEHALL_OBSERVER_MONITORING_ENABLED",
 	"WHALEHALL_OBSERVER_CAPTURE_CONTENT",

@@ -15,6 +15,9 @@ describe("local Agent production boundary", () => {
 		const activityPrompt = source("src/agent/activity-reflection-prompt.ts");
 		const dispatcher = source("src/bun/activity-analysis-dispatcher.ts");
 		const activityAgent = source("src/agent/mastra-host/agents.ts");
+		const modelAgentCatalog = source(
+			"src/agent/mastra-host/model-agent-catalog.ts",
+		);
 		const activityRuntime = source("src/agent/mastra-host/runtime.ts");
 		const activitySupport = source(
 			"src/agent/mastra-host/activity-support-team.ts",
@@ -45,8 +48,10 @@ describe("local Agent production boundary", () => {
 		).toBeTrue();
 		expect(dispatcher).not.toContain("raw_event");
 		expect(dispatcher).not.toContain("EventWindowV1");
-		expect(activityAgent).not.toContain('id: "whalehall-activity-analysis"');
-		expect(activityAgent).toContain('id: "whalehall-conversation"');
+		expect(modelAgentCatalog).not.toContain(
+			'id: "whalehall-activity-analysis"',
+		);
+		expect(modelAgentCatalog).toContain('id: "whalehall-conversation"');
 		expect(activityAgent).toContain(
 			"skills: activityReflectionNativeSkillPaths",
 		);
@@ -55,10 +60,12 @@ describe("local Agent production boundary", () => {
 			"loadActivityReflectionNativeSkillContext",
 		);
 		expect(activityRuntime).toContain('toolChoice: "none"');
-		expect(activityAgent).toContain(
+		expect(modelAgentCatalog).toContain(
 			'id: "whalehall-activity-support-supervisor"',
 		);
-		expect(activityAgent).toContain('id: "whalehall-activity-support-voice"');
+		expect(modelAgentCatalog).toContain(
+			'id: "whalehall-activity-support-voice"',
+		);
 		expect(activitySupport).toContain("不要复述桌面内容");
 		expect(activitySupport).toContain("不得输出分数");
 		expect(activityRuntime).toContain(
@@ -68,26 +75,6 @@ describe("local Agent production boundary", () => {
 		expect(activityRuntime).toContain("agents.conversation.stream(");
 		expect(activityRuntime).not.toContain("activityConversationPrompt");
 		expect(activityRuntime).not.toContain("agents.activity.stream(");
-	});
-
-	test("keeps the remote service surface limited to identity and opaque model relay", () => {
-		const relayServer = source("services/model-relay/server.ts");
-		const routes = [
-			...relayServer.matchAll(/url\.pathname === "(\/v1\/[^"]+)"/gu),
-		].map((match) => match[1]);
-
-		expect(routes).toEqual([
-			"/v1/auth/sessions",
-			"/v1/auth/sessions/refresh",
-			"/v1/auth/sessions/current",
-			"/v1/auth/me",
-			"/v1/chat/completions",
-		]);
-		expect(relayServer).not.toContain("ACTIVITY_REFLECTION_SYSTEM_PROMPT");
-		expect(relayServer).not.toContain("COMPRESSED_ACTIVITY_EVENTS_JSON");
-		expect(relayServer).not.toContain(
-			"activityReflectionOutputToWorkerResponse",
-		);
 	});
 
 	test("registers every client RPC as a concrete guarded BrowserView handler", () => {

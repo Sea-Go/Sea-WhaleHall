@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MODEL_AGENT_IDS } from "../src/agent/mastra-host/model-agent-catalog";
 import {
 	RemoteAuthSessionManager,
 	type SecureCredentialStore,
@@ -264,6 +265,7 @@ describe("RemoteAuthSessionManager", () => {
 				headers: { "X-WhaleHall-Agent-Key": "retired-desktop-key" },
 			},
 			"reflection",
+			MODEL_AGENT_IDS.activityReflection,
 		);
 		await manager.bearerFetch("/v1/agent/register", {
 			method: "POST",
@@ -277,6 +279,9 @@ describe("RemoteAuthSessionManager", () => {
 		expect(headers.get("authorization")).toStartWith("Bearer ");
 		expect(headers.get("x-session-generation")).toBe("1");
 		expect(headers.get("x-whalehall-model-purpose")).toBe("reflection");
+		expect(headers.get("x-whalehall-model-agent")).toBe(
+			MODEL_AGENT_IDS.activityReflection,
+		);
 		expect(observed.bearerHeaders?.get("authorization")).toStartWith("Bearer ");
 		expect(observed.bearerHeaders?.get("x-whalehall-agent-key")).toBeNull();
 		expect(observed.modelRedirect).toBe("error");
@@ -285,7 +290,39 @@ describe("RemoteAuthSessionManager", () => {
 		expect(manager.isCurrentSession(identity)).toBeFalse();
 	});
 
-	test("rejects a caller-supplied model purpose before sending credentials", async () => {
+	test("rejects caller-supplied model routing headers before sending credentials", async () => {
+		const credentials = new MemoryCredentials();
+		let modelCalls = 0;
+		const manager = new RemoteAuthSessionManager(credentials, {
+			baseUrl: "https://relay.example.test",
+			fetch: (async (input: RequestInfo | URL) => {
+				if (new URL(String(input)).pathname === "/v1/auth/sessions") {
+					return Response.json(sessionPayload("active"));
+				}
+				modelCalls += 1;
+				return Response.json({});
+			}) as unknown as typeof fetch,
+		});
+		await manager.signIn({ email: "test@example.com", password: "password" });
+
+		const routingHeaders: Array<Record<string, string>> = [
+			{ "X-WhaleHall-Model-Purpose": "agent" },
+			{ "X-WhaleHall-Model-Agent": MODEL_AGENT_IDS.conversation },
+		];
+		for (const headers of routingHeaders) {
+			await expect(
+				manager.authorizedFetch(
+					"/v1/chat/completions",
+					{ headers },
+					"activity",
+					MODEL_AGENT_IDS.activitySupportSupervisor,
+				),
+			).rejects.toMatchObject({ kind: "unexpected" });
+		}
+		expect(modelCalls).toBe(0);
+	});
+
+	test("rejects a fixed Agent whose catalog purpose does not match", async () => {
 		const credentials = new MemoryCredentials();
 		let modelCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
@@ -303,8 +340,9 @@ describe("RemoteAuthSessionManager", () => {
 		await expect(
 			manager.authorizedFetch(
 				"/v1/chat/completions",
-				{ headers: { "X-WhaleHall-Model-Purpose": "agent" } },
+				{},
 				"activity",
+				MODEL_AGENT_IDS.conversation,
 			),
 		).rejects.toMatchObject({ kind: "unexpected" });
 		expect(modelCalls).toBe(0);
@@ -313,6 +351,7 @@ describe("RemoteAuthSessionManager", () => {
 	test("keeps the host-owned purpose across a 401 refresh retry", async () => {
 		const credentials = new MemoryCredentials();
 		const modelPurposes: Array<string | null> = [];
+		const modelAgents: Array<string | null> = [];
 		const retiredKeyHeaders: Array<string | null> = [];
 		let modelCalls = 0;
 		const manager = new RemoteAuthSessionManager(credentials, {
@@ -328,6 +367,9 @@ describe("RemoteAuthSessionManager", () => {
 				modelCalls += 1;
 				modelPurposes.push(
 					new Headers(init?.headers).get("x-whalehall-model-purpose"),
+				);
+				modelAgents.push(
+					new Headers(init?.headers).get("x-whalehall-model-agent"),
 				);
 				retiredKeyHeaders.push(
 					new Headers(init?.headers).get("x-whalehall-agent-key"),
@@ -346,10 +388,15 @@ describe("RemoteAuthSessionManager", () => {
 				headers: { "X-WhaleHall-Agent-Key": "retired-desktop-key" },
 			},
 			"activity",
+			MODEL_AGENT_IDS.activitySupportSupervisor,
 		);
 
 		expect(response.ok).toBeTrue();
 		expect(modelPurposes).toEqual(["activity", "activity"]);
+		expect(modelAgents).toEqual([
+			MODEL_AGENT_IDS.activitySupportSupervisor,
+			MODEL_AGENT_IDS.activitySupportSupervisor,
+		]);
 		expect(retiredKeyHeaders).toEqual([null, null]);
 	});
 
@@ -383,6 +430,7 @@ describe("RemoteAuthSessionManager", () => {
 				"/v1/chat/completions",
 				{ method: "POST" },
 				"activity",
+				MODEL_AGENT_IDS.activitySupportSupervisor,
 			),
 		).resolves.toMatchObject({ ok: true });
 		expect(activated).toEqual(["session-active", "session-rotated"]);
@@ -424,6 +472,7 @@ describe("RemoteAuthSessionManager", () => {
 				"/v1/chat/completions",
 				{ method: "POST" },
 				"activity",
+				MODEL_AGENT_IDS.activitySupportSupervisor,
 			),
 		).rejects.toThrow("injected session-ready failure");
 		expect(manager.getSession()).toBeNull();
@@ -517,7 +566,12 @@ describe("RemoteAuthSessionManager", () => {
 
 		await manager.signIn({ email: "a@example.com", password: "password" });
 		const staleRequest = manager
-			.authorizedFetch("/v1/chat/completions", { method: "POST" }, "agent")
+			.authorizedFetch(
+				"/v1/chat/completions",
+				{ method: "POST" },
+				"agent",
+				MODEL_AGENT_IDS.conversation,
+			)
 			.then(
 				() => null,
 				(error: unknown) => error,
@@ -928,7 +982,12 @@ describe("RemoteAuthSessionManager", () => {
 		await manager.signIn({ email: "test@example.com", password: "password" });
 
 		await expect(
-			manager.authorizedFetch("/v1/chat/completions", {}, "agent"),
+			manager.authorizedFetch(
+				"/v1/chat/completions",
+				{},
+				"agent",
+				MODEL_AGENT_IDS.conversation,
+			),
 		).rejects.toMatchObject({
 			kind: "expired",
 		});

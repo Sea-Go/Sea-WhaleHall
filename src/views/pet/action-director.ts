@@ -303,12 +303,7 @@ export class PetActionDirector {
 			}
 			return;
 		}
-		this.startPlan(
-			`context:${action}`,
-			"context",
-			[contextStep],
-			now,
-		);
+		this.startPlan(`context:${action}`, "context", [contextStep], now);
 	}
 
 	tick(nowMs: number, localHour: number): void {

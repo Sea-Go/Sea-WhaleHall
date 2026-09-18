@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+	ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS,
+	MODEL_AGENT_IDS,
+} from "../src/agent/mastra-host/model-agent-catalog";
+import type { ModelRelayContext } from "../src/agent/mastra-host/model-relay";
+import {
 	AGENT_HOST_PROTOCOL_VERSION,
 	type AgentRunEventFrame,
 	type ProtocolMessage,
@@ -76,11 +81,15 @@ describe("AgentHostRuntime activity analysis", () => {
 				}),
 			},
 		});
+		const modelContexts: ModelRelayContext[] = [];
 		Reflect.set(runtime, "relay", {
 			runInContext: async <TResult>(
-				_context: unknown,
+				context: ModelRelayContext,
 				operation: () => Promise<TResult>,
-			): Promise<TResult> => operation(),
+			): Promise<TResult> => {
+				modelContexts.push(structuredClone(context));
+				return operation();
+			},
 		});
 
 		await runtime.dispatch({
@@ -108,6 +117,23 @@ describe("AgentHostRuntime activity analysis", () => {
 		});
 
 		const terminal = await waitForTerminal(messages, "activity-run");
+		expect(modelContexts).toEqual([
+			{
+				runId: "activity-run",
+				originatingRequestId: "activity-request",
+				agentId: MODEL_AGENT_IDS.activitySupportSupervisor,
+			},
+			{
+				runId: "activity-run",
+				originatingRequestId: "activity-request",
+				agentId: ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.momentumCoach,
+			},
+			{
+				runId: "activity-run",
+				originatingRequestId: "activity-request",
+				agentId: MODEL_AGENT_IDS.activitySupportVoice,
+			},
+		]);
 		expect(terminal.event).toEqual({
 			kind: "run.failed",
 			error: {
@@ -185,11 +211,15 @@ describe("AgentHostRuntime activity analysis", () => {
 				}),
 			},
 		});
+		const modelContexts: ModelRelayContext[] = [];
 		Reflect.set(runtime, "relay", {
 			runInContext: async <TResult>(
-				_context: unknown,
+				context: ModelRelayContext,
 				operation: () => Promise<TResult>,
-			): Promise<TResult> => operation(),
+			): Promise<TResult> => {
+				modelContexts.push(structuredClone(context));
+				return operation();
+			},
 		});
 
 		await runtime.dispatch({
@@ -218,6 +248,23 @@ describe("AgentHostRuntime activity analysis", () => {
 
 		const terminal = await waitForTerminal(messages, "activity-run-fallback");
 		expect(checkInCalls).toBe(1);
+		expect(modelContexts).toEqual([
+			{
+				runId: "activity-run-fallback",
+				originatingRequestId: "activity-request-fallback",
+				agentId: MODEL_AGENT_IDS.activitySupportSupervisor,
+			},
+			{
+				runId: "activity-run-fallback",
+				originatingRequestId: "activity-request-fallback",
+				agentId: ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.checkInCompanion,
+			},
+			{
+				runId: "activity-run-fallback",
+				originatingRequestId: "activity-request-fallback",
+				agentId: MODEL_AGENT_IDS.activitySupportVoice,
+			},
+		]);
 		expect(terminal.event).toEqual({
 			kind: "run.completed",
 			result: {

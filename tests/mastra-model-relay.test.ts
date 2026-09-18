@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MODEL_AGENT_IDS } from "../src/agent/mastra-host/model-agent-catalog";
 import { ModelRelay } from "../src/agent/mastra-host/model-relay";
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
@@ -37,7 +38,11 @@ describe("Mastra ModelRelay event sequencing", () => {
 
 		await expect(
 			relay.runInContext(
-				{ runId: "run-missing-origin", originatingRequestId: "" },
+				{
+					runId: "run-missing-origin",
+					originatingRequestId: "",
+					agentId: MODEL_AGENT_IDS.conversation,
+				},
 				() =>
 					relay.fetch(
 						"https://model-relay.whalehall.invalid/v1/chat/completions",
@@ -55,6 +60,7 @@ describe("Mastra ModelRelay event sequencing", () => {
 		peer.emit(relayFrame(relayId, 3, { kind: "model/relay.end" }));
 
 		await expect(reading).resolves.toBe("first-second");
+		expect(peer.openAgentId).toBe(MODEL_AGENT_IDS.conversation);
 		expect(peer.abortCalls).toHaveLength(0);
 		expect(peer.listenerCount(relayId)).toBe(0);
 	});
@@ -104,6 +110,7 @@ async function openRelay(): Promise<{
 		{
 			runId: "run-sequence-test",
 			originatingRequestId: "request-sequence-test",
+			agentId: MODEL_AGENT_IDS.conversation,
 		},
 		() =>
 			relay.fetch("https://model-relay.whalehall.invalid/v1/chat/completions", {
@@ -128,6 +135,7 @@ class FakeRelayPeer implements HostRequestPeer {
 		options?: HostRequestOptions;
 	}> = [];
 	openRelayId: string | null = null;
+	openAgentId: string | null = null;
 	private readonly listeners = new Map<
 		string,
 		Set<(event: ModelRelayEventFrame) => void>
@@ -140,6 +148,7 @@ class FakeRelayPeer implements HostRequestPeer {
 	): Promise<TResult> {
 		if (method === "model/relay.open") {
 			this.openRelayId = String(params.relayId);
+			this.openAgentId = String(params.agentId);
 			return Promise.resolve({
 				relayId: this.openRelayId,
 				status: 200,

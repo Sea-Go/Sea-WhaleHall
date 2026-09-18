@@ -89,10 +89,9 @@ contracts are in the [desktop runtime reference](docs/desktop-runtime.md#archite
 | Native application coordination and updates | [`src/bun`](src/bun) |
 | Agent and local runtimes | [`src/agent`](src/agent) |
 | Cross-runtime contracts | [`src/shared`](src/shared) |
-| Rust protocol, core, and server | [`whalehall-local`](whalehall-local) |
-| Native credential storage | [`whalehall-credential-helper`](whalehall-credential-helper) |
+| Rust protocol, core, and server | [`native/local-host`](native/local-host) |
+| Native credential storage | [`native/credential-helper`](native/credential-helper) |
 | macOS Observer and Vault Broker | [`native`](native) |
-| Editor integration | [`integrations/vscode-whalehall`](integrations/vscode-whalehall) |
 | Tests | [`tests`](tests) |
 
 The [detailed ownership map](docs/desktop-runtime.md#development-areas) covers
@@ -131,7 +130,7 @@ requests, events, permissions, and available local capabilities.
 [Activity storage](docs/desktop-runtime.md#foreground-application-usage-and-sqlite)
 and [activity verification](docs/desktop-runtime.md#verifying-activity-history)
 cover SQLite sessions, crash recovery, cleanup, and inspection steps. Sensor
-implementation details start at the [Rust sensor overview](whalehall-local/SENSORS.md).
+implementation details start at the [Rust sensor overview](native/local-host/SENSORS.md).
 
 ## License
 

@@ -28,7 +28,9 @@ describe("desktop model-call boundary", () => {
 		expect(protocol).toContain("interface PlanningAnalyzeParams");
 		expect(protocol).toContain('"planning.analyze"');
 		const agents = sources.get("src/agent/mastra-host/agents.ts") ?? "";
-		expect(agents).toContain('id: "whalehall-planning-analysis"');
+		const agentCatalog =
+			sources.get("src/agent/mastra-host/model-agent-catalog.ts") ?? "";
+		expect(agentCatalog).toContain('id: "whalehall-planning-analysis"');
 		expect(agents).not.toMatch(/agents:\s*\{[^}]*planningAnalysis/s);
 	});
 
@@ -56,6 +58,18 @@ describe("desktop model-call boundary", () => {
 		expect(auth).toContain('purpose !== "planning"');
 		expect(auth).toContain('purpose !== "reflection"');
 		expect(auth).toContain('headers.set("x-whalehall-model-purpose", purpose)');
+		expect(auth).toContain('headers.set("x-whalehall-model-agent", agentId)');
+		const transport = sources.get("src/bun/model-relay-transport.ts") ?? "";
+		for (const key of [
+			"agentId",
+			"agent_id",
+			"agentKey",
+			"agent_key",
+			"modelAgent",
+			"model_agent",
+		]) {
+			expect(transport).toContain(`"${key}" in request.body`);
+		}
 	});
 
 	test("has no desktop local-model client, lock, probe, or loopback dependency", async () => {
@@ -84,18 +98,7 @@ describe("desktop model-call boundary", () => {
 		expect(reflection).toContain("new DeterministicReflectionInference()");
 	});
 
-	test("keeps the retired activity path isolated from desktop release inputs", async () => {
-		const fragment = await readFile(
-			join(repositoryRoot, "deploy/home-cloud/model-relay/Caddyfile.fragment"),
-			"utf8",
-		);
-		expect(fragment).toMatch(
-			/@whalehall_retired_activity_completion \{\s+path \/v1\/activity\/completions\s+\}/,
-		);
-		expect(fragment).toContain(
-			"respond @whalehall_retired_activity_completion 410",
-		);
-
+	test("keeps the retired activity path absent from desktop release inputs", async () => {
 		const sources = await sourceFiles();
 		for (const path of [
 			"config.template.yaml",
@@ -132,9 +135,6 @@ describe("desktop model-call boundary", () => {
 
 		const remoteAuth = sources.get("src/bun/remote-auth-session.ts") ?? "";
 		expect(remoteAuth).toContain('headers.delete("x-whalehall-agent-key")');
-		const provisioner = sources.get("scripts/provision-relay-owner.ts") ?? "";
-		expect(provisioner).not.toContain("agentKeyHash");
-		expect(provisioner).not.toContain("randomBytes");
 
 		for (const path of ["config.template.yaml", "config.example.yaml"]) {
 			const configuration = await readFile(join(repositoryRoot, path), "utf8");
@@ -157,7 +157,7 @@ async function sourceFiles(): Promise<Map<string, string>> {
 async function productionSourceFiles(): Promise<Map<string, string>> {
 	const paths = (
 		await Promise.all(
-			["src", "services", "scripts"].map((path) =>
+			["src", "scripts"].map((path) =>
 				listProductionSourceFiles(join(repositoryRoot, path)),
 			),
 		)

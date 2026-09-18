@@ -1,3 +1,4 @@
+import type { ModelAgentId } from "../agent/mastra-host/model-agent-catalog";
 import type { AuthCredentials, AuthSession } from "../shared/auth";
 import type { AuthSessionIdentity } from "../shared/session-identity";
 import type { ModelRelayPurpose } from "./model-relay-transport";
@@ -20,6 +21,7 @@ export interface DesktopAuthSessionManager {
 		path: string,
 		init: RequestInit,
 		purpose: ModelRelayPurpose,
+		agentId: ModelAgentId,
 	): Promise<Response>;
 	captureCurrentSession(): AuthSessionIdentity | null;
 	isCurrentSession(identity: AuthSessionIdentity): boolean;
