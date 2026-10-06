@@ -1,6 +1,20 @@
+import type { Locator } from "../../shared/locator-types";
+
 export interface PetCloudSearchPort {
 	/** Bun must bind this port to the current RTW product session and module. */
 	search(input: { query: string; signal: AbortSignal }): Promise<unknown>;
+}
+
+/**
+ * StructureLocator-shaped citation anchor for CitationBubble rendering:
+ * the Locator contract mirror (locator-types.ts) plus the doc identity
+ * (`doc_key`). The current RTW accepted-search wire only guarantees
+ * evidence_id/revision_id/quote per citation, so the locator is mapped
+ * opportunistically from any extra wire fields; `undefined` keeps the
+ * panel on the legacy excerpt line until the wire carries the full shape.
+ */
+export interface PetCitationLocator extends Locator {
+	doc_key: string;
 }
 
 export type PetCloudSearchState =
@@ -14,6 +28,8 @@ export type PetCloudSearchState =
 				id: string;
 				kind: "source" | "wiki";
 				excerpt: string;
+				/** Absent while the wire citation lacks StructureLocator fields. */
+				locator?: PetCitationLocator;
 			}[];
 	  }
 	| { kind: "insufficient" }
@@ -71,6 +87,7 @@ function acceptedSearchState(value: unknown): PetCloudSearchState {
 		id: string;
 		kind: "source" | "wiki";
 		excerpt: string;
+		locator?: PetCitationLocator;
 	}[] = [];
 	for (const citation of citations) {
 		const item = asRecord(citation);
@@ -84,16 +101,59 @@ function acceptedSearchState(value: unknown): PetCloudSearchState {
 		) {
 			return { kind: "failed", message: "引用状态无法确认，请稍后重试。" };
 		}
+		// revision_id/quote are already validated above; doc_key/section_path/
+		// para_index are checked inside citationLocator and degrade to the
+		// excerpt-only projection when the wire has not grown them yet.
+		const locator = citationLocator(item, item.revision_id, item.quote);
 		visibleCitations.push({
 			id: item.evidence_id,
 			kind: item.source_kind,
 			excerpt: Array.from(item.quote).slice(0, 120).join(""),
+			...(locator ? { locator } : {}),
 		});
 	}
 	return {
 		kind: "answered",
 		answer: result.answer,
 		citations: visibleCitations,
+	};
+}
+
+/**
+ * Map one accepted wire citation onto the StructureLocator shape
+ * (doc_key/revision_id/section_path/para_index/quote) when every locator
+ * field is present and well-formed; otherwise return undefined so the
+ * panel falls back to the legacy excerpt line.
+ */
+function citationLocator(
+	item: Record<string, unknown>,
+	revisionId: string,
+	quote: string,
+): PetCitationLocator | undefined {
+	const docKey = typeof item.doc_key === "string" ? item.doc_key.trim() : "";
+	const sectionPath =
+		Array.isArray(item.section_path) &&
+		item.section_path.every((part) => typeof part === "string")
+			? (item.section_path as string[])
+			: undefined;
+	const paraIndex =
+		typeof item.para_index === "number" &&
+		Number.isInteger(item.para_index) &&
+		item.para_index >= 0
+			? item.para_index
+			: undefined;
+	if (
+		docKey.length === 0 ||
+		sectionPath === undefined ||
+		paraIndex === undefined
+	)
+		return undefined;
+	return {
+		doc_key: docKey,
+		revision_id: revisionId,
+		section_path: sectionPath,
+		para_index: paraIndex,
+		quote,
 	};
 }
 

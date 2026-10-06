@@ -56,6 +56,36 @@ function deferred<T>() {
 	return { promise, resolve };
 }
 
+/** Accepted outcome whose first citation carries full StructureLocator
+ * fields and whose second one does not (legacy excerpt fallback). */
+const acceptedWithLocator = {
+	kind: "accepted",
+	result: {
+		search_id: "search-9",
+		answer_id: "answer-9",
+		status: "succeeded",
+		answer: "海水的密度差驱动深层环流。",
+		citation_receipt_ref: "receipt-9",
+		citations: [
+			{
+				evidence_id: "evidence-9",
+				revision_id: "revision-9",
+				source_kind: "wiki",
+				quote: "密度差驱动深层环流。",
+				doc_key: "wiki/ocean-currents",
+				section_path: ["第一章 深海环境", "1.2 海流"],
+				para_index: 3,
+			},
+			{
+				evidence_id: "evidence-10",
+				revision_id: "revision-10",
+				source_kind: "source",
+				quote: "风推动海表水运动。",
+			},
+		],
+	},
+};
+
 describe("pet cloud search product projection", () => {
 	test("requires an injected RTW session port before any search", async () => {
 		const states: string[] = [];
@@ -126,6 +156,84 @@ describe("pet cloud search product projection", () => {
 		);
 		await controller.start("海流是什么？");
 		expect(controller.state.kind).toBe("failed");
+	});
+
+	test("maps full StructureLocator fields onto answered citations", async () => {
+		const controller = new PetCloudSearchController(
+			{ search: async () => acceptedWithLocator },
+			() => {},
+		);
+		await controller.start("海流是什么？");
+		expect(controller.state).toEqual({
+			kind: "answered",
+			answer: "海水的密度差驱动深层环流。",
+			citations: [
+				{
+					id: "evidence-9",
+					kind: "wiki",
+					excerpt: "密度差驱动深层环流。",
+					locator: {
+						doc_key: "wiki/ocean-currents",
+						revision_id: "revision-9",
+						section_path: ["第一章 深海环境", "1.2 海流"],
+						para_index: 3,
+						quote: "密度差驱动深层环流。",
+					},
+				},
+				{ id: "evidence-10", kind: "source", excerpt: "风推动海表水运动。" },
+			],
+		});
+	});
+
+	test("partial locator fields degrade to the excerpt-only projection", async () => {
+		const base = accepted.result.citations[0];
+		const controller = new PetCloudSearchController(
+			{
+				search: async () => ({
+					kind: "accepted",
+					result: {
+						...accepted.result,
+						citations: [
+							// No section_path at all.
+							{ ...base, doc_key: "docs/ocean", para_index: 3 },
+							// Non-integer para_index.
+							{
+								...base,
+								evidence_id: "evidence-p2",
+								doc_key: "docs/ocean",
+								section_path: ["第一章"],
+								para_index: 1.5,
+							},
+							// section_path with a non-string crumb.
+							{
+								...base,
+								evidence_id: "evidence-p3",
+								doc_key: "docs/ocean",
+								section_path: ["第一章", 7],
+								para_index: 2,
+							},
+							// Blank doc_key.
+							{
+								...base,
+								evidence_id: "evidence-p4",
+								doc_key: "  ",
+								section_path: ["第一章"],
+								para_index: 2,
+							},
+						],
+					},
+				}),
+			},
+			() => {},
+		);
+		await controller.start("海流是什么？");
+		const state = controller.state;
+		expect(state.kind).toBe("answered");
+		if (state.kind !== "answered") return;
+		expect(state.citations.length).toBe(4);
+		for (const citation of state.citations) {
+			expect(citation.locator).toBeUndefined();
+		}
 	});
 
 	test("explicit cancel aborts and ignores a late accepted result", async () => {
@@ -235,7 +343,37 @@ describe("pet cloud search panel", () => {
 		});
 		expect(view.getByText(accepted.result.answer)).toBeTruthy();
 		expect(view.getByText("已绑定 1 条引用")).toBeTruthy();
+		// The legacy fixture carries no StructureLocator fields, so the
+		// fallback excerpt line stays.
 		expect(view.getByText(/原始资料 1：/u)).toBeTruthy();
+		expect(view.container.querySelector(".pet-citation")).toBeNull();
+		expect(view.container.querySelector("a")).toBeNull();
+	});
+
+	test("answered citations with locators render as citation bubbles", async () => {
+		const response = deferred<unknown>();
+		const port = { search: async () => response.promise };
+		const view = render(<PetCloudSearchPanel port={port} />);
+		const user = userEvent.setup({ document });
+		await user.type(
+			view.getByRole("textbox", { name: "搜索问题" }),
+			"海流是什么？",
+		);
+		await user.click(view.getByRole("button", { name: "搜索" }));
+		await act(async () => {
+			response.resolve(acceptedWithLocator);
+			await response.promise;
+		});
+		expect(view.getByText("已绑定 2 条引用")).toBeTruthy();
+		const bubbles = view.container.querySelectorAll(".pet-citation");
+		expect(bubbles.length).toBe(1);
+		expect(bubbles[0]?.getAttribute("data-citation-id")).toBe("evidence-9");
+		// section_path breadcrumb with paragraph anchor, rendered by the bubble.
+		expect(view.getByText("Wiki")).toBeTruthy();
+		expect(view.getByText("§ 第一章 深海环境 › 1.2 海流 · ¶ 3")).toBeTruthy();
+		expect(view.getByText("密度差驱动深层环流。")).toBeTruthy();
+		// The field-less citation keeps the legacy line beside the bubble.
+		expect(view.getByText(/原始资料 2：风推动海表水运动。/u)).toBeTruthy();
 		expect(view.container.querySelector("a")).toBeNull();
 	});
 });

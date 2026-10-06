@@ -3,6 +3,7 @@ import { PetBehaviorController } from "./behavior";
 import { CanvasPetRenderer } from "./CanvasPetRenderer";
 import { PetActivityFeedbackBubble } from "./PetActivityFeedbackBubble";
 import { PetCloudSearchPanel } from "./PetCloudSearchPanel";
+import { PetPlanPanelSlot } from "./PetPlanPanelSlot";
 import { petApi } from "./rpc";
 
 export function PetApp() {
@@ -69,6 +70,10 @@ export function PetApp() {
 			<canvas ref={canvasRef} aria-label="WhaleHall 可交互桌面伙伴" />
 			<PetActivityFeedbackBubble />
 			<PetCloudSearchPanel port={null} />
+			{/* Dev switch (sea.pet.planPanel / ?petPlanPanel=1), default off;
+			 * top bubble slot of the same pet-stage container language as the
+			 * cloud-search card. Mock payload until the RTW task domain lands. */}
+			<PetPlanPanelSlot />
 		</div>
 	);
 }

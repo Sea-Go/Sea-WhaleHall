@@ -1,4 +1,5 @@
 import { type SyntheticEvent, useEffect, useRef, useState } from "react";
+import { CitationBubble } from "./CitationBubble";
 import {
 	PetCloudSearchController,
 	type PetCloudSearchPort,
@@ -100,8 +101,24 @@ export function PetCloudSearchPanel({ port }: PetCloudSearchPanelProps) {
 								<ol className="pet-cloud-search__citations">
 									{state.citations.map((citation, index) => (
 										<li key={citation.id}>
-											{citation.kind === "wiki" ? "Wiki" : "原始资料"}{" "}
-											{index + 1}：{citation.excerpt}
+											{citation.locator ? (
+												<CitationBubble
+													citation={{
+														id: citation.id,
+														sourceKind: citation.kind,
+														locator: citation.locator,
+													}}
+												/>
+											) : (
+												// Fallback: this wire citation has not grown the
+												// StructureLocator fields (doc_key/section_path/
+												// para_index) yet, so keep the legacy excerpt line
+												// instead of a half-shaped bubble.
+												<>
+													{citation.kind === "wiki" ? "Wiki" : "原始资料"}{" "}
+													{index + 1}：{citation.excerpt}
+												</>
+											)}
 										</li>
 									))}
 								</ol>
