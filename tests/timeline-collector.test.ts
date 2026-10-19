@@ -8,7 +8,7 @@ import {
 	InMemoryTimelineV2Repository,
 	TimelineV2Collector,
 	type SemanticEventV2,
-} from "../src/agent/timeline-v2";
+} from "../src/agent/timeline";
 
 class FakeClock implements ReflectionClock {
 	private id = 0;

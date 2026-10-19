@@ -51,7 +51,7 @@ import {
 } from "./local-protocol";
 import type { LocalClientError, LocalToolProcess } from "./local-tool-client";
 import type { DesktopEventV1 } from "./reflection/types";
-import type { SemanticEventV2 } from "./timeline-v2/types";
+import type { SemanticEventV2 } from "./timeline/types";
 
 export type AgentRuntimeOptions = {
 	/**

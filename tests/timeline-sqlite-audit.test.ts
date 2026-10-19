@@ -23,7 +23,7 @@ import {
 	type TimelineVaultDeleteRequest,
 	type TimelineVaultOpenRequest,
 	type TimelineVaultSealRequest,
-} from "../src/agent/timeline-v2";
+} from "../src/agent/timeline";
 
 const temporaryDirectories: string[] = [];
 

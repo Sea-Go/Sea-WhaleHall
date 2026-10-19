@@ -4,8 +4,8 @@ import type {
 	DesktopEventKind,
 	DesktopEventV1,
 } from "./reflection/types";
-import { isSemanticEventV2 } from "./timeline-v2/contract";
-import type { CoverageLevel, SemanticEventV2 } from "./timeline-v2/types";
+import { isSemanticEventV2 } from "./timeline/contract";
+import type { CoverageLevel, SemanticEventV2 } from "./timeline/types";
 
 export const MAX_JSONL_LINE_BYTES = 1024 * 1024;
 /** Count bound per byte-bounded native calendar page. */

@@ -16,7 +16,7 @@ import {
 import {
 	TIMELINE_AUDIT_SCHEMA_VERSION,
 	type TimelineAuditBundleV3,
-} from "../src/agent/timeline-v2/types";
+} from "../src/agent/timeline/types";
 
 const temporaryDirectories: string[] = [];
 

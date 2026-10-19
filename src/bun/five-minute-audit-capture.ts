@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { TimelineCursorAuthority } from "../agent/timeline-v2/repository";
-import type { SemanticEventV2 } from "../agent/timeline-v2/types";
+import type { TimelineCursorAuthority } from "../agent/timeline/repository";
+import type { SemanticEventV2 } from "../agent/timeline/types";
 import type {
 	FiveMinuteAuditCaptureFailureCode,
 	FiveMinuteAuditCaptureState,

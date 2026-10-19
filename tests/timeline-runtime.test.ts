@@ -6,7 +6,7 @@ import type { AgentRuntime } from "../src/agent/agent-runtime";
 import {
 	createTimelineV2Runtime,
 	type TimelineV2Runtime,
-} from "../src/agent/timeline-v2";
+} from "../src/agent/timeline";
 
 const directories: string[] = [];
 const runtimes: TimelineV2Runtime[] = [];

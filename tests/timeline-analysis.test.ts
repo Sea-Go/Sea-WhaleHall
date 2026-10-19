@@ -11,7 +11,7 @@ import {
 	type SemanticEventV2,
 	TimelineV2Processor,
 	type TimelineWindowV2,
-} from "../src/agent/timeline-v2";
+} from "../src/agent/timeline";
 
 function browserEvent(
 	index: number,

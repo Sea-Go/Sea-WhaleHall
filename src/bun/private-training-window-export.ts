@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { basename, isAbsolute, join } from "node:path";
-import type { PrivateTrainingWindowExporter } from "../agent/timeline-v2/training-window-export";
+import type { PrivateTrainingWindowExporter } from "../agent/timeline/training-window-export";
 import type {
 	PrivateTrainingWindowExportRequest,
 	PrivateTrainingWindowExportScope,

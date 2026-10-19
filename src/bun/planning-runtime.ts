@@ -12,7 +12,7 @@ import {
 	projectTimelinePlanningObservation,
 	scheduledTaskIntervals,
 } from "../agent/planning";
-import type { AgentInputV1 } from "../agent/timeline-v2/types";
+import type { AgentInputV1 } from "../agent/timeline/types";
 import type {
 	PlanningAdjustmentProjection,
 	PlanningChangeProjection,

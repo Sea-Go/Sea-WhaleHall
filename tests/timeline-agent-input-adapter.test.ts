@@ -10,11 +10,11 @@ import {
 	AGENT_INPUT_REPLAY_RESPONSE_VERSION,
 	AgentInputAdapterError,
 	TimelineAgentInputAdapterV1,
-} from "../src/agent/timeline-v2/agent-input-adapter";
+} from "../src/agent/timeline/agent-input-adapter";
 import type {
 	AgentInputEnvelopeV1,
 	AgentInputV1,
-} from "../src/agent/timeline-v2/types";
+} from "../src/agent/timeline/types";
 
 class FakeAgentInputService {
 	nowMs = 10_000;

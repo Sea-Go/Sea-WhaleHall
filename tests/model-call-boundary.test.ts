@@ -89,7 +89,7 @@ describe("desktop model-call boundary", () => {
 			expect(findContaining(sources, token), token).toEqual([]);
 		}
 
-		const timeline = sources.get("src/agent/timeline-v2/runtime.ts") ?? "";
+		const timeline = sources.get("src/agent/timeline/runtime.ts") ?? "";
 		expect(timeline).toContain("new HeuristicTimelineEpisodeClassifier()");
 		expect(timeline).toContain(
 			"new DeterministicTimelineHypothesisGenerator()",

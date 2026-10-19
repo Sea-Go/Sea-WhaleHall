@@ -29,11 +29,11 @@ import { loadOrCreateReflectionIdentity } from "../agent/reflection";
 import {
 	type RawFiveMinuteAuditSource,
 	TimelineFiveMinuteAuditExporter,
-} from "../agent/timeline-v2/audit";
+} from "../agent/timeline/audit";
 import {
 	createTimelineV2Runtime,
 	type TimelineV2Runtime,
-} from "../agent/timeline-v2/runtime";
+} from "../agent/timeline/runtime";
 import { createActivitySupportPersonalization } from "../shared/activity-support";
 import type {
 	AgentRunEventEnvelope,

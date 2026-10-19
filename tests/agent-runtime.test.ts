@@ -37,7 +37,7 @@ import {
 	type LocalToolProcess,
 } from "../src/agent/local-tool-client";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
-import type { SemanticEventV2 } from "../src/agent/timeline-v2/types";
+import type { SemanticEventV2 } from "../src/agent/timeline/types";
 
 class FakeLocalProcess implements LocalToolProcess {
 	pid: number | null = null;
