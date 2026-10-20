@@ -14,6 +14,15 @@
 	--pet-feedback-shadow: 0 8px 24px rgb(0 18 28 / 35%);
 	--pet-feedback-radius: 14px;
 	--pet-feedback-motion: 140ms ease;
+	/* Plan lifecycle status colors. Semantic names map 1:1 to the six-state
+	 * machine in 客户端计划制定与执行引导方案.md §1; keep in sync with
+	 * PLAN_LIFECYCLE_META in src/views/pet/plan-lifecycle.ts. */
+	--pet-plan-status-draft: #9fb6c2;
+	--pet-plan-status-confirmed: #8ea6ff;
+	--pet-plan-status-active: #53c8d8;
+	--pet-plan-status-review: #ffd166;
+	--pet-plan-status-adjusting: #ff9f6e;
+	--pet-plan-status-archived: #7d8f99;
 }
 
 * {
@@ -331,6 +340,301 @@ canvas {
 
 @media (prefers-reduced-motion: reduce) {
 	.pet-activity-feedback button {
+		transition: none;
+	}
+}
+
+/* Citation bubble: locator breadcrumb + highlighted quote. */
+.pet-citation {
+	display: grid;
+	gap: 4px;
+	margin: 0;
+	padding: 7px 9px;
+	background: rgb(255 255 255 / 6%);
+	border: 1px solid var(--pet-feedback-border);
+	border-radius: 10px;
+}
+
+.pet-citation__meta {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 10px;
+	color: var(--pet-feedback-muted);
+}
+
+.pet-citation__kind {
+	flex-shrink: 0;
+	font-weight: 700;
+}
+
+.pet-citation__breadcrumb {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.pet-citation__quote {
+	margin: 0;
+	padding-inline-start: 8px;
+	font-size: 11px;
+	line-height: 1.5;
+	color: var(--pet-feedback-text);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	border-inline-start: 2px solid var(--pet-feedback-accent);
+}
+
+.pet-citation__toggle {
+	justify-self: start;
+	min-height: 22px;
+	padding: 2px 8px;
+	font: inherit;
+	font-size: 10px;
+	font-weight: 650;
+	color: var(--pet-feedback-accent);
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 7px;
+	cursor: pointer;
+	transition: border-color var(--pet-feedback-motion);
+}
+
+.pet-citation__toggle:hover,
+.pet-citation__toggle:focus-visible {
+	border-color: var(--pet-feedback-border);
+}
+
+.pet-citation__toggle:focus-visible {
+	outline: 2px solid var(--pet-feedback-focus);
+	outline-offset: 2px;
+}
+
+/* Plan lifecycle badge: six states, colors from --pet-plan-status-*. */
+.pet-plan-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 8px;
+	font-size: 10px;
+	font-weight: 700;
+	line-height: 1.7;
+	white-space: nowrap;
+	border: 1px solid var(--pet-plan-status-draft);
+	border-radius: 999px;
+}
+
+.pet-plan-badge--draft {
+	color: var(--pet-plan-status-draft);
+	border-color: var(--pet-plan-status-draft);
+	background: rgb(159 182 194 / 14%);
+}
+
+.pet-plan-badge--confirmed {
+	color: var(--pet-plan-status-confirmed);
+	border-color: var(--pet-plan-status-confirmed);
+	background: rgb(142 166 255 / 14%);
+}
+
+.pet-plan-badge--active {
+	color: var(--pet-plan-status-active);
+	border-color: var(--pet-plan-status-active);
+	background: rgb(83 200 216 / 16%);
+}
+
+.pet-plan-badge--review {
+	color: var(--pet-plan-status-review);
+	border-color: var(--pet-plan-status-review);
+	background: rgb(255 209 102 / 14%);
+}
+
+.pet-plan-badge--adjusting {
+	color: var(--pet-plan-status-adjusting);
+	border-color: var(--pet-plan-status-adjusting);
+	background: rgb(255 159 110 / 14%);
+}
+
+.pet-plan-badge--archived {
+	color: var(--pet-plan-status-archived);
+	border-color: var(--pet-plan-status-archived);
+	background: rgb(125 143 153 / 14%);
+}
+
+/* Check-in three-key row. */
+.pet-plan-checkin {
+	display: grid;
+	gap: 5px;
+}
+
+.pet-plan-checkin__keys {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+
+.pet-plan-checkin__key,
+.pet-plan-checkin__why-toggle {
+	min-height: 24px;
+	padding: 3px 9px;
+	font: inherit;
+	font-size: 11px;
+	font-weight: 650;
+	color: var(--pet-feedback-text);
+	background: var(--pet-feedback-control);
+	border: 1px solid var(--pet-feedback-border);
+	border-radius: 8px;
+	cursor: pointer;
+	transition:
+		background-color var(--pet-feedback-motion),
+		border-color var(--pet-feedback-motion);
+}
+
+.pet-plan-checkin__key--done {
+	color: var(--pet-feedback-on-accent);
+	background: var(--pet-feedback-accent);
+	border-color: var(--pet-feedback-accent);
+}
+
+.pet-plan-checkin__key:hover,
+.pet-plan-checkin__key:active,
+.pet-plan-checkin__why-toggle:hover,
+.pet-plan-checkin__why-toggle:active {
+	background: var(--pet-feedback-control-hover);
+}
+
+.pet-plan-checkin__key--done:hover,
+.pet-plan-checkin__key--done:active {
+	background: var(--pet-feedback-focus);
+	border-color: var(--pet-feedback-focus);
+}
+
+.pet-plan-checkin__key:disabled,
+.pet-plan-checkin__why-toggle:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.pet-plan-checkin :is(button, input):focus-visible {
+	outline: 2px solid var(--pet-feedback-focus);
+	outline-offset: 2px;
+}
+
+.pet-plan-checkin__why-toggle {
+	border-style: dashed;
+	background: transparent;
+}
+
+.pet-plan-checkin__note {
+	display: grid;
+	gap: 3px;
+}
+
+.pet-plan-checkin__note-hint {
+	font-size: 10px;
+	color: var(--pet-feedback-muted);
+}
+
+.pet-plan-checkin__note input {
+	min-width: 0;
+	min-height: 26px;
+	padding: 3px 7px;
+	font: inherit;
+	font-size: 11px;
+	color: var(--pet-feedback-text);
+	background: var(--pet-feedback-control);
+	border: 1px solid var(--pet-feedback-border);
+	border-radius: 8px;
+}
+
+/* Plan panel skeleton: same bubble language as the cloud-search panel. */
+.pet-plan-panel {
+	position: absolute;
+	z-index: 1;
+	top: 8px;
+	right: 12px;
+	left: 12px;
+	display: grid;
+	gap: 6px;
+	max-height: 260px;
+	padding: 9px 11px;
+	overflow-y: auto;
+	color: var(--pet-feedback-text);
+	background: var(--pet-feedback-surface);
+	border: 1px solid var(--pet-feedback-border);
+	border-radius: var(--pet-feedback-radius);
+	box-shadow: var(--pet-feedback-shadow);
+	pointer-events: auto;
+}
+
+.pet-plan-panel__empty {
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--pet-feedback-muted);
+}
+
+.pet-plan-panel__header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.pet-plan-panel__goal {
+	font-size: 12px;
+	line-height: 1.4;
+}
+
+.pet-plan-panel__items {
+	display: grid;
+	gap: 6px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.pet-plan-panel__item {
+	display: grid;
+	gap: 3px;
+	padding: 7px 9px;
+	background: rgb(255 255 255 / 6%);
+	border: 1px solid var(--pet-feedback-border);
+	border-radius: 10px;
+}
+
+.pet-plan-panel__item-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.pet-plan-panel__cue {
+	min-width: 0;
+	font-size: 10px;
+	color: var(--pet-feedback-muted);
+	overflow-wrap: anywhere;
+}
+
+.pet-plan-panel__action {
+	margin: 0;
+	font-size: 12px;
+	font-weight: 650;
+	line-height: 1.4;
+}
+
+.pet-plan-panel__micro {
+	margin: 0;
+	font-size: 11px;
+	color: var(--pet-feedback-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.pet-citation__toggle,
+	.pet-plan-checkin__key,
+	.pet-plan-checkin__why-toggle {
 		transition: none;
 	}
 }
