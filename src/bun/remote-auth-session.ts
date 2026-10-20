@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
 	isModelAgentId,
 	type ModelAgentId,
@@ -929,7 +928,8 @@ function credentialFailure(error: unknown): RemoteAuthError {
 
 function cloneSession(session: RemoteAuthSession): RemoteAuthSession {
 	return {
-		id: session.id || randomUUID(),
+		// 保留原 ID：旧实现现场生成随机 ID 会让两次 clone 判为"换了会话"
+		id: session.id,
 		expiresAtMs: session.expiresAtMs,
 		user: { ...session.user },
 	};
