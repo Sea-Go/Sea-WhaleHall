@@ -15,7 +15,7 @@ import {
 	TimelineV2Service,
 	type SemanticEventV2,
 	type TimelineV2Processor,
-} from "../src/agent/timeline-v2";
+} from "../src/agent/timeline";
 
 class FakeClock implements ReflectionClock {
 	private id = 0;

@@ -74,7 +74,7 @@ import {
 	MAX_JSONL_LINE_BYTES,
 	parseLocalMessage,
 } from "./local-protocol";
-import { isSemanticCursorV2, isSemanticEventV2 } from "./timeline-v2/contract";
+import { isSemanticCursorV2, isSemanticEventV2 } from "./timeline/contract";
 
 export type LocalClientFailureCode =
 	| "SPAWN_FAILED"

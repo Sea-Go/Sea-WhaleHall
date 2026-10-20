@@ -2,8 +2,8 @@ import { constants } from "node:fs";
 import { link, open, stat, unlink } from "node:fs/promises";
 import { basename, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { FIVE_MINUTE_AUDIT_DURATION_MS } from "../agent/timeline-v2/audit";
-import type { TimelineAuditBundleV3 } from "../agent/timeline-v2/types";
+import { FIVE_MINUTE_AUDIT_DURATION_MS } from "../agent/timeline/audit";
+import type { TimelineAuditBundleV3 } from "../agent/timeline/types";
 import type {
 	FiveMinuteAuditFileExportRequest,
 	FiveMinuteAuditFileExportResult,

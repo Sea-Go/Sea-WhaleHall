@@ -11,7 +11,7 @@ import {
 	type TimelineVaultDeleteRequest,
 	type TimelineVaultOpenRequest,
 	type TimelineVaultSealRequest,
-} from "../src/agent/timeline-v2";
+} from "../src/agent/timeline";
 
 const RAW_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const temporaryDirectories: string[] = [];

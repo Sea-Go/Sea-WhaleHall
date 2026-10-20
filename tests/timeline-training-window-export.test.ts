@@ -42,7 +42,7 @@ import {
 	type TimelineJobV2,
 	type TimelineSummaryV2,
 	type TimelineWindowV2,
-} from "../src/agent/timeline-v2";
+} from "../src/agent/timeline";
 
 const temporaryDirectories: string[] = [];
 

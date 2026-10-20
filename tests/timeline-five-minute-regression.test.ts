@@ -14,7 +14,7 @@ import {
 	TimelineV2JobRunner,
 	TimelineV2Processor,
 	type SemanticEventV2,
-} from "../src/agent/timeline-v2";
+} from "../src/agent/timeline";
 
 class ReplayClock implements ReflectionClock {
 	private timerId = 0;
