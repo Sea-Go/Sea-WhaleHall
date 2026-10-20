@@ -1,0 +1,9 @@
+{
+  "entries": [
+    {
+      "path": "tests/fixtures/modernbert-episode-v2",
+      "reason": "对应 ModernBERT episode 数据格式版本的测试夹具",
+      "converge_event": "Timeline 契约版本核对后对齐命名或确认豁免"
+    }
+  ]
+}
