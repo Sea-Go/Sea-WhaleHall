@@ -104,8 +104,8 @@ function renderTemplate(event: SemanticEventV2): RenderedTemplate | null {
 			const label = contentValue(event, "label");
 			const addedText = contentValue(event, "addedText");
 			const finalValue = contentValue(event, "finalValue");
-			const insertedChars = numberValue(event, "insertedChars") ?? 0;
-			const deletedChars = numberValue(event, "deletedChars") ?? 0;
+			const insertedChars = numberValue(event, "insertedChars");
+			const deletedChars = numberValue(event, "deletedChars");
 			const deltaAvailable = booleanValue(event, "deltaAvailable") === true;
 			const control = label ? `“${label}”控件` : "焦点控件";
 			const renderedText = textValueChangeDescription({
@@ -238,8 +238,8 @@ function textValueChangeDescription(input: {
 	control: string;
 	addedText: string | null;
 	finalValue: string | null;
-	insertedChars: number;
-	deletedChars: number;
+	insertedChars: number | null;
+	deletedChars: number | null;
 	deltaAvailable: boolean;
 }): string {
 	const {
@@ -260,6 +260,9 @@ function textValueChangeDescription(input: {
 			return `${subject}最终显示为${displayed}，因缺少基线无法判断增删或输入方式`;
 		}
 		return `${subject}最终值不可用，无法判断增删或输入方式`;
+	}
+	if (insertedChars === null || deletedChars === null) {
+		return `${subject}内容发生变化，但增删计数缺失（计数未随事件采集），输入方式未知`;
 	}
 	if (insertedChars > 0 && addedText) {
 		const deletionDetail =
