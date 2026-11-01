@@ -349,6 +349,14 @@ export class WhaleHallPlanningRuntime {
 			const end = persistedTimed?.end ?? item.end;
 			const timeZone = persistedTimed?.timeZone ?? item.timeZone;
 			const schedules = schedulesByTask.get(item.taskId) ?? [];
+			if (!persisted) {
+				// 权威日历记录缺失：投影回退模型 schedule 时必须可见，
+				// 用户手动调整可能被无声还原（评审危险项）。
+				console.warn(
+					"[planning] 持久化日历缺失，任务投影回退模型 schedule:",
+					item.taskId,
+				);
+			}
 			schedules.push({
 				eventId: item.id,
 				start,

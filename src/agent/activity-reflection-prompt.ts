@@ -856,12 +856,12 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 		if (pendingBoundary) addActivityReflectionSignal(current, pendingBoundary);
 		segments.push(current);
 	} else if (prelude.length > 0) {
-		const fallback = createActivityReflectionSignalSegment(
-			"other",
-			prelude[0]?.timestamp ?? 0,
-		);
-		for (const entry of prelude) addActivityReflectionSignal(fallback, entry);
-		segments.push(fallback);
+		const startedAtMs = prelude[0]?.timestamp; // 缺时间戳不伪造 1970 起点
+		if (startedAtMs !== undefined) {
+			const fallback = createActivityReflectionSignalSegment("other", startedAtMs);
+			for (const entry of prelude) addActivityReflectionSignal(fallback, entry);
+			segments.push(fallback);
+		}
 	}
 
 	return {
