@@ -167,6 +167,17 @@ export function miniCalendarDays(anchorDate: string): MiniCalendarDay[] {
 	});
 }
 
+export function miniCalendarDayFlags(
+	date: string,
+	todayDate: string,
+	selectedDate: string,
+): { isToday: boolean; isSelected: boolean } {
+	return {
+		isToday: date === todayDate,
+		isSelected: date === selectedDate,
+	};
+}
+
 export function monthLabel(date: string): string {
 	const value = Temporal.PlainDate.from(date);
 	return `${value.year}年${value.month}月`;
