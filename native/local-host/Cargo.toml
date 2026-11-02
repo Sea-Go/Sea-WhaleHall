@@ -23,7 +23,7 @@ network-interface = "2.0.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["libc", "std", "NSRunningApplication"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDate", "CFMachPort", "CFRunLoop"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 security-framework = { version = "3.5.1", features = ["OSX_10_15"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
