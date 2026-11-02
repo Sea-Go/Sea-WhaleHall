@@ -33,6 +33,7 @@ import {
 	calendarRangeLabel,
 	durationMinutes,
 	instantToLocalParts,
+	miniCalendarDayFlags,
 	miniCalendarDays,
 	monthLabel,
 	moveMonth,
@@ -646,6 +647,7 @@ export function CalendarPage({
 	}, [range.currentDate]);
 
 	const miniDays = useMemo(() => miniCalendarDays(miniAnchor), [miniAnchor]);
+	const selectedDate = range.currentDate.slice(0, 10);
 	const filteredEvents = useMemo(() => {
 		const normalized = query.trim().toLocaleLowerCase("zh-CN");
 		return calendar.events.filter(
@@ -998,30 +1000,31 @@ export function CalendarPage({
 							))}
 						</div>
 						<div className="mini-calendar__days">
-							{miniDays.map((day) => (
-								<button
-									type="button"
-									key={day.date}
-									className={[
-										!day.inMonth ? "mini-calendar__adjacent" : "",
-										day.date === CALENDAR_REFERENCE_DATE
-											? "mini-calendar__today"
-											: "",
-										day.date === CALENDAR_REFERENCE_DATE
-											? "mini-calendar__selected"
-											: "",
-									]
-										.filter(Boolean)
-										.join(" ")}
-									aria-label={day.date}
-									aria-current={
-										day.date === CALENDAR_REFERENCE_DATE ? "date" : undefined
-									}
-									onClick={() => calendarRef.current?.goToDate(day.date)}
-								>
-									{day.day}
-								</button>
-							))}
+							{miniDays.map((day) => {
+								const flags = miniCalendarDayFlags(
+									day.date,
+									CALENDAR_REFERENCE_DATE,
+									selectedDate,
+								);
+								return (
+									<button
+										type="button"
+										key={day.date}
+										className={[
+											!day.inMonth ? "mini-calendar__adjacent" : "",
+											flags.isToday ? "mini-calendar__today" : "",
+											flags.isSelected ? "mini-calendar__selected" : "",
+										]
+											.filter(Boolean)
+											.join(" ")}
+										aria-label={day.date}
+										aria-current={flags.isSelected ? "date" : undefined}
+										onClick={() => calendarRef.current?.goToDate(day.date)}
+									>
+										{day.day}
+									</button>
+								);
+							})}
 						</div>
 					</section>
 
