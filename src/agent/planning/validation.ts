@@ -266,8 +266,12 @@ function isPlanRevision(
 	estimateIds: ReadonlySet<string>,
 	timeZone: string,
 ): value is PlanRevision {
+	if (!isRecord(value)) return false;
+	const record = value as Record<string, unknown>;
 	if (
-		!isRecordWithKeys(value, [
+		!isRecordWithKeys(
+			record,
+			[
 			"id",
 			"planId",
 			"number",
@@ -284,9 +288,54 @@ function isPlanRevision(
 			"schedule",
 			"unscheduledTaskIds",
 			"createdAt",
-		])
+			// 新版修订带 evaluations；旧数据没有该键也算合法。
+		],
+		["evaluations"],
+	)
 	) {
 		return false;
+	}
+	if (
+		value.evaluations !== undefined &&
+		value.evaluations !== null &&
+		!Array.isArray(value.evaluations)
+	) {
+		return false;
+	}
+	if (Array.isArray(value.evaluations)) {
+		const revisionTaskIdsForEvaluations = new Set(
+			(value.tasks as Array<{ taskId: string }>).map((task) => task.taskId),
+		);
+		if (
+			!value.evaluations.every((item) => {
+				if (
+					!isRecordWithKeys(item, [
+						"angle",
+						"verdict",
+						"summary",
+						"affectedTaskIds",
+					])
+				) {
+					return false;
+				}
+				return (
+					[
+						"goal-alignment",
+						"time-feasibility",
+						"dependency-risk",
+						"load-recovery",
+						"evidence-sufficiency",
+					].includes(item.angle as never) &&
+					["pass", "adjust", "block"].includes(item.verdict as never) &&
+					boundedText(item.summary, 1, 300) &&
+					stringArray(item.affectedTaskIds, (id) =>
+						typeof id === "string" && revisionTaskIdsForEvaluations.has(id),
+					)
+				);
+			})
+		) {
+			return false;
+		}
 	}
 	if (
 		!identifier(value.id) ||
@@ -350,17 +399,36 @@ function isPlanRevision(
 	);
 	if (
 		revisionTaskIds.size !== value.tasks.length ||
-		!value.tasks.every((task) => {
+		!value.tasks.every((rawTask) => {
+			if (!isRecord(rawTask)) return false;
+			const task = rawTask as Record<string, unknown>;
 			if (
-				!isRecordWithKeys(task, [
-					"taskId",
-					"sourceKey",
-					"purpose",
-					"title",
-					"description",
-					"estimatedMinutes",
-					"dependencyTaskIds",
-				])
+				!isRecordWithKeys(
+					task,
+					[
+						"taskId",
+						"sourceKey",
+						"purpose",
+						"title",
+						"description",
+						"estimatedMinutes",
+						"dependencyTaskIds",
+					],
+					["relevance", "relevanceReason"],
+				)
+			) {
+				return false;
+			}
+			if (
+				task.relevance !== undefined &&
+				task.relevance !== "strong" &&
+				task.relevance !== "weak"
+			) {
+				return false;
+			}
+			if (
+				task.relevanceReason !== undefined &&
+				!boundedText(task.relevanceReason, 1, 300)
 			) {
 				return false;
 			}
@@ -773,11 +841,14 @@ function isPendingAnalysis(value: unknown): boolean {
 function isRecordWithKeys<K extends string>(
 	value: unknown,
 	keys: readonly K[],
+	optionalKeys: readonly string[] = [],
 ): value is Record<K, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		return false;
 	}
-	const actual = Object.keys(value).sort();
+	const actual = Object.keys(value)
+		.filter((key) => !optionalKeys.includes(key))
+		.sort();
 	const expected = [...keys].sort();
 	return (
 		actual.length === expected.length &&

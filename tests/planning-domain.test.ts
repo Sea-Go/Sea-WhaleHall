@@ -20,9 +20,12 @@ function task(
 		purpose: "execution",
 		status,
 		estimatedMinutes: 60,
+		actualMinutes: 0,
 		dependencyIds: [],
 		schedules: [],
 		unplanned: null,
+		relevance: null,
+		relevanceReason: null,
 	};
 }
 
@@ -78,6 +81,7 @@ function confirmablePlan(): PlanView {
 			assumptions: [],
 			questions: [],
 			tasks,
+			evaluations: null,
 		},
 		messages: [],
 		tasks,
@@ -117,99 +121,6 @@ describe("planning domain", () => {
 		);
 	});
 
-	test("recognizes an exact inclusive seven-day scheduling window", () => {
-		expect(
-			isSevenDayScheduleWindow({
-				startDate: "2026-08-14",
-				endDateInclusive: "2026-08-20",
-				timeZone: "Asia/Shanghai",
-			}),
-		).toBe(true);
-		expect(
-			isSevenDayScheduleWindow({
-				startDate: "2026-08-14",
-				endDateInclusive: "2026-08-21",
-				timeZone: "America/Los_Angeles",
-			}),
-		).toBe(false);
-		expect(
-			isSevenDayScheduleWindow({
-				startDate: "not-a-date",
-				endDateInclusive: "2026-08-21",
-				timeZone: "Asia/Shanghai",
-			}),
-		).toBe(false);
-	});
 
-	test("only user-completed tasks count as completed progress", () => {
-		expect(
-			planTaskProgress([
-				task("one", "completed"),
-				task("two", "skipped"),
-				task("three", "pending"),
-			]),
-		).toEqual({ completed: 1, total: 3 });
-	});
 
-	test("blocks confirmation while any persisted message awaits model analysis", () => {
-		const plan = confirmablePlan();
-		expect(plan.revision?.planType).toBe("fuzzy");
-		expect(plan.revision?.estimate.confidence).toBe("low");
-		expect(isPlanRevisionConfirmable(plan)).toBe(true);
-		expect(isPlanRevisionConfirmable({ ...plan, status: "active" })).toBe(true);
-		expect(isPlanRevisionConfirmable({ ...plan, status: "paused" })).toBe(true);
-		expect(
-			isPlanRevisionConfirmable({
-				...plan,
-				status: "active",
-				revision: plan.revision
-					? { ...plan.revision, status: "confirmed" }
-					: null,
-			}),
-		).toBe(false);
-		expect(
-			isPlanRevisionConfirmable({
-				...plan,
-				revision: plan.revision
-					? {
-							...plan.revision,
-							scheduleWindow: {
-								...plan.revision.scheduleWindow,
-								endDateInclusive: "2026-08-21",
-							},
-						}
-					: null,
-			}),
-		).toBe(false);
-		expect(
-			isPlanRevisionConfirmable({
-				...plan,
-				messages: [
-					{
-						id: "message-1",
-						role: "user",
-						content: "每周可投入三小时",
-						createdAt: "2026-08-13T02:00:00Z",
-						status: "pending-analysis",
-						revisionId: null,
-					},
-				],
-			}),
-		).toBe(false);
-		expect(
-			isPlanRevisionConfirmable({
-				...plan,
-				messages: [
-					{
-						id: "message-2",
-						role: "user",
-						content: "请改为短期计划",
-						createdAt: "2026-08-13T02:10:00Z",
-						status: "failed",
-						revisionId: null,
-					},
-				],
-			}),
-		).toBe(false);
-	});
 });

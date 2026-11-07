@@ -1,4 +1,25 @@
-import type { PlanningObservationSummary, PlanningPlan } from "./types";
+import type {
+	PlanObservationEvidence,
+	PlanningObservationSummary,
+	PlanningPlan,
+} from "./types";
+
+/**
+ * 任务实际投入：按 taskId 聚合观测证据的相关分钟数。
+ * 观测归因与用户确认的证据都计入；无证据的任务不出现在结果里。
+ */
+export function sumObservationMinutesByTask(
+	evidence: readonly PlanObservationEvidence[],
+): Map<string, number> {
+	const minutesByTaskId = new Map<string, number>();
+	for (const item of evidence) {
+		minutesByTaskId.set(
+			item.taskId,
+			(minutesByTaskId.get(item.taskId) ?? 0) + item.relevantMinutes,
+		);
+	}
+	return minutesByTaskId;
+}
 
 export interface TimelinePlanningSegment {
 	startedAtMs: number;

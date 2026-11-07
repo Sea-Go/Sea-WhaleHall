@@ -140,6 +140,30 @@ export const dynamicPlanningInputSchema = z
 					.strict(),
 			)
 			.max(MAX_PLANNING_MODEL_CALENDAR_EVENTS),
+		memoryHints: z
+			.object({
+				similarPlanCount: z.number().int().min(1).max(10_000),
+				estimateCalibrationRatio: z.number().min(0.2).max(5).nullable(),
+				calibrationSamples: z.number().int().min(0).max(100_000),
+				weakSkipRate: z.number().min(0).max(1).nullable(),
+				overrideCount: z.number().int().min(0).max(100_000),
+				similarGoals: z.array(z.string().max(64)).max(3),
+			})
+			.strict()
+			.nullable(),
+		relevanceHints: z
+			.array(
+				z
+					.object({
+						taskKey: z.string().trim().min(1).max(100),
+						suggested: z.enum(["strong", "weak"]),
+						reason: z.string().trim().min(1).max(300),
+					})
+					.strict(),
+			)
+			.max(100)
+			.nullable()
+			.optional(),
 	})
 	.strict();
 
@@ -170,6 +194,23 @@ const planningTaskSchema = z
 		description: z.string().max(1_000),
 		estimatedMinutes: z.number().int().min(15).max(100_000).multipleOf(15),
 		dependencyKeys: z.array(z.string().max(100)).max(50),
+		relevance: z.enum(["strong", "weak"]).optional(),
+		relevanceReason: z.string().trim().min(1).max(300).optional(),
+	})
+	.strict();
+
+const planningEvaluationSchema = z
+	.object({
+		angle: z.enum([
+			"goal-alignment",
+			"time-feasibility",
+			"dependency-risk",
+			"load-recovery",
+			"evidence-sufficiency",
+		]),
+		verdict: z.enum(["pass", "adjust", "block"]),
+		summary: z.string().trim().min(1).max(300),
+		affectedTaskKeys: z.array(z.string().max(100)).max(20),
 	})
 	.strict();
 
@@ -191,6 +232,7 @@ const planningProposalPayloadSchema = z
 		schedulingPreferenceSource: z.enum(["user-provided", "confirmed-reuse"]),
 		schedulingPreferences: planningPreferencesSchema,
 		tasks: z.array(planningTaskSchema).min(1).max(100),
+		evaluations: z.array(planningEvaluationSchema).max(5).optional(),
 	})
 	.strict();
 
@@ -202,6 +244,7 @@ const planningProposalKeys = [
 	"schedulingPreferenceSource",
 	"schedulingPreferences",
 	"tasks",
+	"evaluations",
 ] as const;
 
 const planningProviderCommonKeys = [
@@ -329,6 +372,15 @@ export function decodeDynamicPlanningProviderOutput(
 		// they do not have the same user-confirmation boundary.
 		clarificationQuestions: [],
 		...proposal.data,
+		// 分级与评定按可用性降级：模型漏写时 relevance 默认 strong（保持既有
+		// 排程语义），evaluations 置 null（UI 显示"未评定"），不让整单作废。
+		tasks: proposal.data.tasks.map((task) => ({
+			...task,
+			relevance: task.relevance ?? "strong",
+			relevanceReason:
+				task.relevanceReason ?? "模型未标注，按强关联对待。",
+		})),
+		evaluations: proposal.data.evaluations ?? null,
 		// With no confirmed revision, a manual draft can only be user-provided.
 		// Reclassifying the provider's bad label is safe because the proposal is
 		// still inert until the user reviews and confirms it. Automatic analysis

@@ -40,6 +40,7 @@ function planProjection(): PlanningPlanProjection {
 			typeReason: "路径尚未稳定，先安排验证任务。",
 			assumptions: ["每周投入四小时"],
 			clarifyingQuestions: [],
+			evaluations: null,
 			estimate,
 			schedulingPreferences: {
 				weeklyCapacityMinutes: 240,
@@ -72,6 +73,7 @@ function planProjection(): PlanningPlanProjection {
 				purpose: "execution",
 				status: "pending",
 				estimatedMinutes: 120,
+				actualMinutes: 0,
 				dependsOnTaskIds: [],
 				schedules: [
 					{
@@ -96,6 +98,8 @@ function planProjection(): PlanningPlanProjection {
 					},
 				],
 				unscheduledReason: null,
+					relevance: null,
+					relevanceReason: null,
 			},
 		],
 		monitoring: {
@@ -172,6 +176,8 @@ function planningRpc(
 		sendPlanMessage: planResponse,
 		confirmPlanRevision: planResponse,
 		setPlanningTaskStatus: planResponse,
+	setPlanningTaskRelevance: planResponse,
+	onPlanningProgress: () => () => {},
 		confirmPlanningObservation: planResponse,
 		pausePlan: planResponse,
 		resumePlan: planResponse,
@@ -294,6 +300,8 @@ describe("Electrobun planning service", () => {
 			sendPlanMessage: record("message"),
 			confirmPlanRevision: record("confirm"),
 			setPlanningTaskStatus: record("task"),
+			setPlanningTaskRelevance: record("relevance"),
+			onPlanningProgress: () => () => {},
 			confirmPlanningObservation: record("observation"),
 			pausePlan: record("pause"),
 			resumePlan: record("resume"),
@@ -437,6 +445,39 @@ describe("Electrobun planning service", () => {
 			} catch (error) {
 				expect(error).toBeInstanceOf(PlanningServiceError);
 				expect((error as PlanningServiceError).code).toBe(code);
+			}
+		}
+	});
+
+	test("distinguishes analysis failure reasons in the model-unavailable message", async () => {
+		for (const [message, expected] of [
+			[
+				"MODEL_UNAVAILABLE:invalid-output",
+				"这一版计划生成结果没有通过校验。你的消息已保留，点重试会重新生成。",
+			],
+			[
+				"MODEL_UNAVAILABLE:request-timeout",
+				"模型响应超时。你的消息已保留，可稍后重试。",
+			],
+			[
+				"MODEL_UNAVAILABLE",
+				"计划分析服务暂时不可用。你的消息已保留，可在服务恢复后继续分析。",
+			],
+		] as const) {
+			const service = new ElectrobunPlanningService(async () =>
+				planningRpc({
+					listPlans: async () => {
+						throw new Error(message);
+					},
+				}),
+			);
+			try {
+				await service.listPlans();
+				expect.unreachable("Expected listPlans to reject");
+			} catch (error) {
+				expect(error).toBeInstanceOf(PlanningServiceError);
+				expect((error as PlanningServiceError).code).toBe("model-unavailable");
+				expect((error as PlanningServiceError).message).toBe(expected);
 			}
 		}
 	});

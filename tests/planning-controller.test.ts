@@ -14,7 +14,7 @@ import {
 	PlanningServiceError,
 	type PlanningServiceEvent,
 	type SendPlanMessageRequest,
-	type SetPlanTaskStatusRequest,
+	type SetPlanTaskRelevanceRequest, SetPlanTaskStatusRequest,
 	type UndoPlanAdjustmentRequest,
 } from "../src/views/client/features/planning/planning-service";
 
@@ -42,9 +42,12 @@ function planningTask(
 		purpose: "execution",
 		status: "pending",
 		estimatedMinutes: 90,
+		actualMinutes: 0,
 		dependencyIds: [],
 		schedules: [schedule(`${id}-session-1`, "2026-08-14T01:00:00Z")],
 		unplanned: null,
+		relevance: null,
+		relevanceReason: null,
 		...overrides,
 	};
 }
@@ -108,6 +111,7 @@ function basePlan(
 			assumptions: ["每周至少投入 3 小时"],
 			questions: [],
 			tasks,
+		evaluations: null,
 		},
 		messages: [
 			{
@@ -198,6 +202,7 @@ class FakePlanningService implements PlanningService {
 	sendErrorAfterPersist: PlanningServiceError | null = null;
 	pauseError: PlanningServiceError | null = null;
 	listError: PlanningServiceError | null = null;
+	retryFailsWith: PlanningServiceError | null = null;
 	createErrorOnce: PlanningServiceError | null = null;
 
 	constructor(plan: PlanView | null = basePlan()) {
@@ -305,6 +310,32 @@ class FakePlanningService implements PlanningService {
 		};
 	}
 
+	onPlanningProgress() {
+		return () => {};
+	}
+
+	async setTaskRelevance(request: SetPlanTaskRelevanceRequest): Promise<void> {
+		const plan = this.requirePlan();
+		this.plan = {
+			...plan,
+			version: plan.version + 1,
+			revision: plan.revision
+				? {
+						...plan.revision,
+						tasks: plan.revision.tasks.map((task) =>
+							task.id === request.taskId
+								? {
+										...task,
+										relevance: request.relevance,
+										relevanceReason: "用户改判",
+									}
+								: task,
+						),
+					}
+				: null,
+		};
+	}
+
 	async confirmObservationAttribution(
 		request: ConfirmObservationAttributionRequest,
 	): Promise<void> {
@@ -361,6 +392,10 @@ class FakePlanningService implements PlanningService {
 	async retryPendingAnalysis(request: ChangePlanStatusRequest): Promise<void> {
 		this.statusRequests.push({ action: "retry-analysis", request });
 		const plan = this.requirePlan();
+		if (this.retryFailsWith) {
+			// 失败链：消息保持挂起，错误驱动 model-unavailable 状态。
+			throw this.retryFailsWith;
+		}
 		this.sendErrorAfterPersist = null;
 		this.plan = {
 			...plan,
@@ -654,5 +689,72 @@ describe("PlanningController execution and recovery", () => {
 		expect(state.status).toBe("offline");
 		if (state.status !== "offline") throw new Error("Expected offline state");
 		expect(state.cached?.plan.id).toBe("plan-1");
+	});
+});
+
+async function untilStable(
+	predicate: () => boolean,
+	timeoutMs = 3_000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	expect(predicate()).toBeTrue();
+}
+
+describe("PlanningController unattended analysis recovery", () => {
+	test("auto-retries a pending analysis after load without any user action", async () => {
+		const service = new FakePlanningService(null);
+		const controller = new PlanningController(service, ids(), [10]);
+		await controller.initialize();
+		controller.updateCreateInput({ goal: "学会图数据" });
+		await controller.createPlanDraft();
+		expect(currentPlan(controller).messages[0]?.status).toBe(
+			"pending-analysis",
+		);
+
+		// 无人点击：加载后自动重跑挂起的分析并收敛为完成态。
+		await untilStable(
+			() => controller.getSnapshot().status === "awaiting-confirmation",
+		);
+		expect(currentPlan(controller).messages[0]?.status).toBe("complete");
+		expect(
+			service.statusRequests.filter((item) => item.action === "retry-analysis"),
+		).toHaveLength(1);
+		controller.dispose();
+	});
+
+	test("stops after the session retry budget instead of retrying forever", async () => {
+		const service = new FakePlanningService(null);
+		service.retryFailsWith = new PlanningServiceError(
+			"model-unavailable",
+			"计划分析服务暂时不可用。",
+		);
+		const controller = new PlanningController(service, ids(), [5, 5, 5]);
+		await controller.initialize();
+		controller.updateCreateInput({ goal: "学会图数据" });
+		await controller.createPlanDraft();
+
+		const retries = () =>
+			service.statusRequests.filter((item) => item.action === "retry-analysis")
+				.length;
+		await untilStable(() => retries() === 3);
+		await new Promise((resolve) => setTimeout(resolve, 40));
+		expect(retries()).toBe(3);
+		expect(controller.getSnapshot().status).toBe("model-unavailable");
+		controller.dispose();
+	});
+
+	test("never schedules an auto retry when no analysis is owed", async () => {
+		const service = new FakePlanningService(basePlan());
+		const controller = new PlanningController(service, ids(), [10]);
+		await controller.initialize();
+		await new Promise((resolve) => setTimeout(resolve, 40));
+		expect(
+			service.statusRequests.filter((item) => item.action === "retry-analysis"),
+		).toHaveLength(0);
+		controller.dispose();
 	});
 });

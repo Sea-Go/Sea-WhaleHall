@@ -1,5 +1,14 @@
-import { createTool } from "@mastra/core/tools";
-import { z } from "zod";
+/**
+ * Host-tool 名称契约与审批门。
+ *
+ * 休眠状态说明（2026-11 摘除死代码）：8 个 `createWhaleHallAgentTools` Mastra
+ * 包装器已删除——它们从未挂载到任何 Agent（计划模型刻意走快照注入，对话
+ * Agent 刻意 text-only，网关检索工具在服务端闭环），属于不可达死代码。本文件
+ * 的名称映射与审批门保留，服务 runtime.ts 的 executeTool 审批路径；该路径
+ * 当前同样休眠（toolProposals 无写入点），等对话 Agent 通过 provider
+ * conformance gate 后重新评估挂载或整体摘除
+ * （见 docs/PLANNING_ORCHESTRATION_CORRECTION_PLAN.md 的 W4）。
+ */
 
 export const exposedToCanonicalToolName = {
 	calendar_list_events: "calendar.list_events",
@@ -36,157 +45,8 @@ export interface AgentToolExecutionInput extends AgentToolRequestContext {
 	signal?: AbortSignal;
 }
 
-export type AgentToolExecutor = (
-	input: AgentToolExecutionInput,
-) => Promise<unknown>;
-
-const recordSchema = z.record(z.string(), z.unknown());
-const emptySchema = z.object({}).strict();
-const planScheduleItemSchema = z.object({
-	id: z.string().min(1),
-	taskId: z.string().min(1),
-	title: z.string().min(1),
-	start: z.string().min(1),
-	end: z.string().min(1),
-	timeZone: z.string().min(1),
-}).strict();
-
-export function createWhaleHallAgentTools(execute: AgentToolExecutor) {
-	return {
-		calendar_list_events: createHostTool(
-			"calendar_list_events",
-			"读取指定日期范围内的本地日历事件。",
-			z.object({
-				fromDate: z.string().min(1),
-				toDateExclusive: z.string().min(1),
-				timeZone: z.string().min(1),
-			}),
-			false,
-			execute,
-		),
-		planning_get_active_plan: createHostTool(
-			"planning_get_active_plan",
-			"读取当前生效的本地计划。",
-			emptySchema,
-			false,
-			execute,
-		),
-		planning_get_active_goal: createHostTool(
-			"planning_get_active_goal",
-			"读取当前生效的本地目标。",
-			emptySchema,
-			false,
-			execute,
-		),
-		planning_save_draft: createHostTool(
-			"planning_save_draft",
-			"保存一个本地计划草案；执行前必须由用户批准。",
-			z.object({
-				title: z.string().min(1),
-				draft: recordSchema,
-				expectedVersion: z.number().int().nonnegative().optional(),
-			}),
-			true,
-			execute,
-		),
-		calendar_create_event: createHostTool(
-			"calendar_create_event",
-			"创建一个本地日历事件；执行前必须由用户批准。",
-			z.object({
-				title: z.string().min(1).optional(),
-				event: recordSchema,
-			}),
-			true,
-			execute,
-		),
-		calendar_update_event: createHostTool(
-			"calendar_update_event",
-			"修改一个本地日历事件；执行前必须由用户批准。",
-			z.object({
-				eventId: z.string().min(1),
-				title: z.string().min(1).optional(),
-				expectedVersion: z.number().int().nonnegative(),
-				recurrenceScope: z.enum(["occurrence", "following", "series"]).optional(),
-				event: recordSchema,
-			}),
-			true,
-			execute,
-		),
-		calendar_delete_event: createHostTool(
-			"calendar_delete_event",
-			"删除一个本地日历事件；执行前必须由用户批准。",
-			z.object({
-				eventId: z.string().min(1),
-				title: z.string().min(1).optional(),
-				expectedVersion: z.number().int().nonnegative(),
-				recurrenceScope: z.enum(["occurrence", "following", "series"]).optional(),
-			}),
-			true,
-			execute,
-		),
-		calendar_commit_plan_schedule: createHostTool(
-			"calendar_commit_plan_schedule",
-			"把计划排程写入正式日历；执行前必须由用户批准。",
-			z.object({
-				planId: z.string().min(1),
-				title: z.string().min(1).optional(),
-				calendarRevision: z.number().int().nonnegative(),
-				schedule: z.array(planScheduleItemSchema).min(1).max(500),
-			}).strict(),
-			true,
-			execute,
-		),
-	};
-}
-
-export function canonicalToolName(value: string): CanonicalAgentToolName | null {
-	return Object.prototype.hasOwnProperty.call(exposedToCanonicalToolName, value)
-		? exposedToCanonicalToolName[value as ExposedAgentToolName]
-		: null;
-}
-
 export function isApprovalRequiredToolName(
 	value: CanonicalAgentToolName,
 ): boolean {
 	return approvalRequiredToolNames.has(value);
-}
-
-function createHostTool<
-	const TId extends ExposedAgentToolName,
-	const TSchema extends z.ZodType<Record<string, unknown>>,
->(
-	id: TId,
-	description: string,
-	inputSchema: TSchema,
-	requireApproval: boolean,
-	execute: AgentToolExecutor,
-) {
-	return createTool({
-		id,
-		description,
-		inputSchema,
-		requireApproval,
-		strict: true,
-		execute: async (argumentsValue, context) => {
-			const requestContext = context.requestContext;
-			const runId = requestContext.get("runId");
-			const requestId = requestContext.get("requestId");
-			const toolCallId = context.agent?.toolCallId;
-			if (
-				typeof runId !== "string" ||
-				typeof requestId !== "string" ||
-				typeof toolCallId !== "string"
-			) {
-				throw new Error("Agent Tool execution context is incomplete.");
-			}
-			return execute({
-				runId,
-				requestId,
-				toolCallId,
-				name: exposedToCanonicalToolName[id],
-				arguments: argumentsValue,
-				signal: context.abortSignal,
-			});
-		},
-	});
 }

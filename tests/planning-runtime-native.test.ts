@@ -17,6 +17,10 @@ import {
 } from "../src/agent/planning";
 import { PlanningVaultPersistenceError } from "../src/agent/planning/native-vault";
 
+// 慢速集成层：默认 dev 套件不执行这些用例；WHALEHALL_FULL_TESTS=1
+// （CI/发布前全量）时按原样注册运行。
+const fullTest = process.env.WHALEHALL_FULL_TESTS === "1" ? test : () => {};
+
 interface FakeVaultRecord extends LocalVaultOpenResultRecord {
 	contentJson: string;
 }
@@ -391,7 +395,7 @@ function plaintext(snapshot: LocalPlanningPlanSnapshot): string {
 }
 
 describe("NativePlanningRepository encrypted persistence", () => {
-	test("writes only safe indexes and restores the full plan through the vault", async () => {
+	fullTest("writes only safe indexes and restores the full plan through the vault", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const repository = new NativePlanningRepository(agent);
 		const plan = activePlan();
@@ -440,7 +444,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		expect(await repository.getPlan(plan.id)).toEqual(plan);
 	});
 
-	test("supports a near-8 MiB plan with encrypted manifest and bounded chunks", async () => {
+	fullTest("supports a near-8 MiB plan with encrypted manifest and bounded chunks", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const repository = new NativePlanningRepository(agent);
 		const plan = largePlan(8 * 1024 * 1024 - 16 * 1024);
@@ -472,7 +476,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		expect(await repository.getPlan(plan.id)).toEqual(plan);
 	}, 60_000);
 
-	test("rejects payloads above 8 MiB before writing SQLite", async () => {
+	fullTest("rejects payloads above 8 MiB before writing SQLite", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const repository = new NativePlanningRepository(agent);
 		const plan = largePlan(8 * 1024 * 1024 + 128 * 1024);
@@ -488,7 +492,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		expect(agent.sealBatches).toEqual([]);
 	}, 60_000);
 
-	test("rejects identifiers that native SQLite cannot index before sealing", async () => {
+	fullTest("rejects identifiers that native SQLite cannot index before sealing", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const repository = new NativePlanningRepository(agent);
 		await expect(
@@ -500,7 +504,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		expect(agent.sealBatches).toEqual([]);
 	});
 
-	test("strictly rejects reference, schema, identity, manifest, and ref mismatches", async () => {
+	fullTest("strictly rejects reference, schema, identity, manifest, and ref mismatches", async () => {
 		const cases: Array<{
 			name: string;
 			mutate(
@@ -595,7 +599,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		}
 	});
 
-	test("reads a legacy plaintext payload only for migration and seals the next write", async () => {
+	fullTest("reads a legacy plaintext payload only for migration and seals the next write", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const repository = new NativePlanningRepository(agent);
 		const legacy = activePlan();
@@ -624,7 +628,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		expect(await repository.getPlan(legacy.id)).toEqual(migrated);
 	});
 
-	test("preserves the native actual version in optimistic conflicts", async () => {
+	fullTest("preserves the native actual version in optimistic conflicts", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const repository = new NativePlanningRepository(agent);
 		const plan = activePlan();
@@ -649,7 +653,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		}
 	});
 
-	test("never downgrades a broken sealed snapshot to its plaintext runtime payload", async () => {
+	fullTest("never downgrades a broken sealed snapshot to its plaintext runtime payload", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const repository = new NativePlanningRepository(agent);
 		const plan = activePlan();
@@ -665,7 +669,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		);
 	});
 
-	test("binds vault record IDs to operation and rejects same-operation content reuse", async () => {
+	fullTest("binds vault record IDs to operation and rejects same-operation content reuse", async () => {
 		const firstAgent = new FakeNativePlanningAgent();
 		const secondAgent = new FakeNativePlanningAgent();
 		const plan = activePlan();
@@ -694,7 +698,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		).rejects.toThrow("fake vault record conflict");
 	});
 
-	test("redacts model calendar titles before native persistence", async () => {
+	fullTest("redacts model calendar titles before native persistence", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const calendar = new NativePlanningCalendar(agent);
 		const changeSet: CalendarChangeSet = {
@@ -746,7 +750,7 @@ describe("NativePlanningRepository encrypted persistence", () => {
 		expect(result.events[0]?.title).toBe("计划任务");
 	});
 
-	test("does not call native calendar.mutate for an empty change set", async () => {
+	fullTest("does not call native calendar.mutate for an empty change set", async () => {
 		const agent = new FakeNativePlanningAgent();
 		const calendar = new NativePlanningCalendar(agent);
 		const result = await calendar.applyChangeSet({

@@ -15,7 +15,12 @@ import {
 	PlanStateError,
 	PlanVersionConflictError,
 } from "./ports";
+import { planMemoryHints, type PlanMemoryHints } from "./plan-memory";
 import { buildDeterministicSevenDaySchedule } from "./scheduler";
+import {
+	deriveRelevanceHints,
+	type RelevanceSignalTaskInput,
+} from "./relevance-signal";
 import {
 	addDays,
 	assertIanaTimeZone,
@@ -49,12 +54,14 @@ import type {
 	PlanningPlan,
 	PlanObservationEvidence,
 	PlanRevision,
+	PlanRevisionEvaluation,
 	PlanScheduleItem,
 	PlanTask,
 	PlanTaskStatus,
 	RetryPlanAnalysisRequest,
 	RevisionTask,
 	SendPlanMessageRequest,
+	SetTaskRelevanceRequest,
 	SetTaskStatusRequest,
 	UndoPlanAdjustmentRequest,
 } from "./types";
@@ -68,7 +75,18 @@ export interface PlanningRuntimeOptions {
 	clock?: PlanningClock;
 	createId?: () => string;
 	minimumObservationConfidence?: number;
+	/** 计划记忆读取器；缺省用仓库内已完成计划的纯读推导。 */
+	planMemory?: PlanningPlanMemoryReader;
 }
+
+/** 记划记忆读取器：给定当前计划与目标，返回同类历史校准提示。 */
+export type PlanningPlanMemoryReader = (
+	plans: readonly PlanningPlan[],
+	currentPlanId: string,
+	currentGoal: string,
+) => PlanMemoryHints | null;
+
+const defaultPlanMemoryReader: PlanningPlanMemoryReader = planMemoryHints;
 
 const unavailableObservations: PlanningObservationPort = {
 	async listSummaries() {
@@ -85,6 +103,7 @@ export class PlanningRuntime {
 	private readonly clock: PlanningClock;
 	private readonly createId: () => string;
 	private readonly minimumObservationConfidence: number;
+	private readonly planMemory: PlanningPlanMemoryReader;
 
 	constructor(options: PlanningRuntimeOptions) {
 		const resolveTimeZone =
@@ -108,6 +127,7 @@ export class PlanningRuntime {
 		this.clock = options.clock ?? new SystemPlanningClock();
 		this.createId = options.createId ?? (() => crypto.randomUUID());
 		this.minimumObservationConfidence = minimumConfidence;
+		this.planMemory = options.planMemory ?? defaultPlanMemoryReader;
 	}
 
 	listPlans(): Promise<readonly PlanningPlan[]> {
@@ -319,6 +339,15 @@ export class PlanningRuntime {
 				},
 			);
 		}
+		if (
+			request.acknowledgeRelevanceDemotion !== true &&
+			revisionDemotesStrongTasks(plan, proposal)
+		) {
+			throw new PlanStateError(
+				"relevance-demotion-unacknowledged",
+				"提案将既有强关联任务降级为弱关联，需要显式确认。",
+			);
+		}
 		const currentTimeZone = this.currentTimeZone();
 		const confirmationPlan =
 			plan.timeZone === currentTimeZone
@@ -442,6 +471,68 @@ export class PlanningRuntime {
 			);
 		}
 		return this.analyzePlan(staged, "task-status", request.operationId, true);
+	}
+
+	/**
+	 * 用户对强/弱分级的即时改判：只写 durable override，不触发模型分析。
+	 * 下一次修订生成与所有投影都优先使用 override。
+	 */
+	async setTaskRelevance(
+		request: SetTaskRelevanceRequest,
+	): Promise<PlanningPlan> {
+		assertOperationId(request.operationId);
+		if (request.relevance !== "strong" && request.relevance !== "weak") {
+			throw new PlanStateError(
+				"invalid-relevance",
+				"Planning task relevance must be strong or weak.",
+			);
+		}
+		const replay = await this.repository.getOperationResult(
+			request.operationId,
+		);
+		if (replay) return replay;
+		const plan = await this.requireVersion(
+			request.planId,
+			request.expectedVersion,
+		);
+		if (plan.status === "archived" || plan.status === "completed") {
+			throw new PlanStateError(
+				"invalid-state",
+				"Task relevance can only be changed on an open plan.",
+			);
+		}
+		const displayed = plan.proposedRevisionId ?? plan.activeRevisionId;
+		const displayedRevision = plan.revisions.find(
+			(item) => item.id === displayed,
+		);
+		const displayedTaskIds = new Set(
+			displayedRevision?.tasks.map((task) => task.taskId) ?? [],
+		);
+		if (
+			!plan.tasks.some(
+				(task) =>
+					task.id === request.taskId && displayedTaskIds.has(task.id),
+			)
+		) {
+			throw new PlanStateError(
+				"task-not-found",
+				"Planning task was not found in the displayed revision.",
+			);
+		}
+		const now = this.now();
+		return this.saveNext(
+			{
+				...plan,
+				tasks: plan.tasks.map((task) =>
+					task.id === request.taskId
+						? { ...task, relevanceOverride: request.relevance }
+						: task,
+				),
+				updatedAt: now,
+			},
+			plan.version,
+			request.operationId,
+		);
 	}
 
 	async consumeObservations(
@@ -954,6 +1045,15 @@ export class PlanningRuntime {
 		try {
 			const useActiveBaseline =
 				automatic || options.forceActiveBaseline === true;
+			const memoryHints = await this.recallPlanMemory(plan);
+			const relevanceHints = deriveRelevanceHints(
+				relevanceSignalInputsForAnalysis(plan, useActiveBaseline),
+				{
+					memoryHints,
+					sessionMinutes:
+						activeSchedulingPreferences(plan)?.sessionMinutes ?? null,
+				},
+			);
 			const analysisRequest = {
 				planId: plan.id,
 				analysisMode: automatic
@@ -969,6 +1069,8 @@ export class PlanningRuntime {
 				currentSchedulingPreferences: activeSchedulingPreferences(plan),
 				observationEvidence: plan.observationEvidence,
 				calendarEvents,
+				memoryHints,
+				relevanceHints,
 			};
 			output = await this.model.analyze(analysisRequest, {
 				requestId: `planning-analysis:${operationId}`,
@@ -1076,6 +1178,18 @@ export class PlanningRuntime {
 		}
 	}
 
+	/** 计划记忆召回：仓库读取失败不阻断分析（记忆按可用性存在）。 */
+	private async recallPlanMemory(
+		plan: PlanningPlan,
+	): Promise<PlanMemoryHints | null> {
+		try {
+			const plans = await this.repository.listPlans();
+			return this.planMemory(plans, plan.id, plan.goal);
+		} catch {
+			return null;
+		}
+	}
+
 	private async materializeModelProposal(
 		plan: PlanningPlan,
 		output: PlanningModelProposal,
@@ -1180,6 +1294,10 @@ export class PlanningRuntime {
 			schedule: scheduled.schedule,
 			unscheduledTaskIds: scheduled.unscheduledTaskIds,
 			createdAt: now,
+			evaluations: mapModelEvaluations(
+				output.evaluations,
+				mapped.revisionTasks,
+			),
 		};
 		return { revision, estimate, tasks: mapped.tasks, calendarEvents };
 	}
@@ -1732,6 +1850,51 @@ interface PreparedRevision {
 	reuseEstimate?: boolean;
 }
 
+/** 提案相对已确认版本是否把既有强关联任务降级为弱关联（含用户 override）。 */
+function revisionDemotesStrongTasks(
+	plan: PlanningPlan,
+	proposal: PlanRevision,
+): boolean {
+	const active = plan.revisions.find(
+		(item) => item.id === plan.activeRevisionId,
+	);
+	if (!active) return false;
+	const overrideById = new Map(
+		plan.tasks.map((task) => [task.id, task.relevanceOverride ?? null]),
+	);
+	const relevanceOf = (
+		revisionTask: PlanRevision["tasks"][number],
+	): "strong" | "weak" =>
+		overrideById.get(revisionTask.taskId) ?? revisionTask.relevance ?? "strong";
+	const activeBySource = new Map(
+		active.tasks.map((task) => [task.sourceKey, task]),
+	);
+	return proposal.tasks.some((task) => {
+		const previous = activeBySource.get(task.sourceKey);
+		return previous !== undefined && relevanceOf(previous) === "strong" &&
+			relevanceOf(task) === "weak";
+	});
+}
+
+/** 模型评定里的 taskKey 换算成本修订的 taskId；旧结构无 evaluations 时为 undefined。 */
+function mapModelEvaluations(
+	evaluations: PlanningModelProposal["evaluations"] | undefined,
+	revisionTasks: readonly RevisionTask[],
+): PlanRevisionEvaluation[] | undefined {
+	if (!evaluations) return undefined;
+	const idBySourceKey = new Map(
+		revisionTasks.map((task) => [task.sourceKey, task.taskId]),
+	);
+	return evaluations.map((item) => ({
+		angle: item.angle,
+		verdict: item.verdict,
+		summary: item.summary,
+		affectedTaskIds: item.affectedTaskKeys
+			.map((key) => idBySourceKey.get(key))
+			.filter((id): id is string => id !== undefined),
+	}));
+}
+
 function mapModelTasks(
 	plan: PlanningPlan,
 	modelTasks: PlanningModelProposal["tasks"],
@@ -1788,6 +1951,9 @@ function mapModelTasks(
 	}
 	const modelRevisionTasks = modelTasks.map<RevisionTask>((modelTask) => {
 		const task = projectTask(modelTask);
+		// 用户改判优先于模型分级：新修订继承 override，保证改判跨修订稳定。
+		const override = existingBySourceKey.get(modelTask.taskKey)
+			?.relevanceOverride;
 		return {
 			taskId: task.id,
 			sourceKey: task.sourceKey,
@@ -1796,6 +1962,11 @@ function mapModelTasks(
 			description: task.description,
 			estimatedMinutes: task.estimatedMinutes,
 			dependencyTaskIds: [...task.dependencyTaskIds],
+			relevance: override ?? modelTask.relevance,
+			relevanceReason:
+				override === "strong" || override === "weak"
+					? "用户改判"
+					: modelTask.relevanceReason,
 		};
 	});
 	if (!automatic) return { tasks, revisionTasks: modelRevisionTasks };
@@ -2199,6 +2370,53 @@ function currentTypeForAnalysis(
 		plan.revisions.find((item) => item.id === plan.proposedRevisionId)?.type ??
 		plan.type
 	);
+}
+
+interface RelevanceSignalTaskSource {
+	taskId: string;
+	sourceKey: string;
+	estimatedMinutes: number;
+	dependencyTaskIds: readonly string[];
+	relevance: "strong" | "weak" | null;
+}
+
+/** 与 currentTasksForAnalysis 同源：把有效基线分级（override ?? 模型 ?? strong）带进 relevance 信号输入。 */
+function relevanceSignalInputsForAnalysis(
+	plan: PlanningPlan,
+	automatic: boolean,
+): readonly RelevanceSignalTaskInput[] {
+	const revisionId = automatic
+		? plan.activeRevisionId
+		: (plan.proposedRevisionId ?? plan.activeRevisionId);
+	const revision = plan.revisions.find((item) => item.id === revisionId);
+	const overrideById = new Map(
+		plan.tasks.map((task) => [task.id, task.relevanceOverride ?? null]),
+	);
+	const statusById = new Map(plan.tasks.map((task) => [task.id, task.status]));
+	const source: readonly RelevanceSignalTaskSource[] = revision
+		? revision.tasks.map((task) => ({
+				taskId: task.taskId,
+				sourceKey: task.sourceKey,
+				estimatedMinutes: task.estimatedMinutes,
+				dependencyTaskIds: task.dependencyTaskIds,
+				relevance: task.relevance ?? null,
+			}))
+		: plan.tasks.map((task) => ({
+				taskId: task.id,
+				sourceKey: task.sourceKey,
+				estimatedMinutes: task.estimatedMinutes,
+				dependencyTaskIds: task.dependencyTaskIds,
+				relevance: null,
+			}));
+	return source.map((task) => ({
+		taskId: task.taskId,
+		sourceKey: task.sourceKey,
+		estimatedMinutes: task.estimatedMinutes,
+		dependencyTaskIds: task.dependencyTaskIds,
+		status: statusById.get(task.taskId) ?? "pending",
+		baseRelevance:
+			overrideById.get(task.taskId) ?? task.relevance ?? "strong",
+	}));
 }
 
 function currentTasksForAnalysis(

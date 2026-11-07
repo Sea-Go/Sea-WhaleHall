@@ -67,7 +67,7 @@ export function PetPlanPanel({ plan, onCheckin }: PetPlanPanelProps) {
 		>
 			{!plan ? (
 				<div className="pet-plan-panel__empty" role="status">
-					还没有进行中的计划。和小鲸聊聊，先出一份草稿。
+					暂无进行中的计划。输入目标即可生成计划草稿。
 				</div>
 			) : (
 				<>

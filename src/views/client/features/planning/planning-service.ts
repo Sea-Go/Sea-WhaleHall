@@ -1,3 +1,4 @@
+import type { PlanningProgressStep } from "../../../../shared/planning";
 import type {
 	PlanningAuthoritySnapshot,
 	PlanningCommitResult,
@@ -71,12 +72,20 @@ export interface SendPlanMessageRequest extends PlanningWriteContext {
 export interface ConfirmPlanRevisionRequest extends PlanningWriteContext {
 	planId: string;
 	revisionId: string;
+	/** 提案将强关联任务降级为弱关联时必须为 true。 */
+	acknowledgeRelevanceDemotion?: boolean;
 }
 
 export interface SetPlanTaskStatusRequest extends PlanningWriteContext {
 	planId: string;
 	taskId: string;
 	status: PlanTaskStatus;
+}
+
+export interface SetPlanTaskRelevanceRequest extends PlanningWriteContext {
+	planId: string;
+	taskId: string;
+	relevance: "strong" | "weak";
 }
 
 export interface ConfirmObservationAttributionRequest
@@ -102,6 +111,10 @@ export interface UndoPlanAdjustmentRequest extends PlanningWriteContext {
  */
 export interface PlanningService {
 	subscribe(listener: (event: PlanningServiceEvent) => void): () => void;
+	/** 计划分析步骤时间线（思考块+工具块）。 */
+	onPlanningProgress(
+		listener: (event: { steps: PlanningProgressStep[] }) => void,
+	): () => void;
 	listPlans(): Promise<readonly PlanSummaryView[]>;
 	getPlan(planId: string): Promise<PlanView>;
 	createPlanDraft(
@@ -110,6 +123,7 @@ export interface PlanningService {
 	sendPlanMessage(request: SendPlanMessageRequest): Promise<void>;
 	confirmPlanRevision(request: ConfirmPlanRevisionRequest): Promise<void>;
 	setTaskStatus(request: SetPlanTaskStatusRequest): Promise<void>;
+	setTaskRelevance(request: SetPlanTaskRelevanceRequest): Promise<void>;
 	confirmObservationAttribution(
 		request: ConfirmObservationAttributionRequest,
 	): Promise<void>;

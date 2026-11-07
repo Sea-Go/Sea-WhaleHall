@@ -230,6 +230,11 @@ export class NativePlanningCalendar implements PlanningCalendarPort {
 				throw new PlanOperationConflictError(changeSet.operationId);
 			}
 			const reason = nativeErrorReason(error);
+			// 诊断出口：原生日历拒绝的具体原因（原生错误码+信息）直接可见，
+			// 否则失败码被密封进 adjustment，排查要靠猜。
+			console.warn(
+				`[planning-calendar] changeSet ${changeSet.id} rejected: reason=${reason} code=${nativeErrorCode(error)} message=${error instanceof Error ? error.message : String(error)}`,
+			);
 			return {
 				ok: false,
 				changeSetId: changeSet.id,

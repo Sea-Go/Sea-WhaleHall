@@ -106,6 +106,8 @@ export class PlanStateError extends Error {
 		public readonly code:
 			| "invalid-input"
 			| "invalid-state"
+			| "invalid-relevance"
+			| "relevance-demotion-unacknowledged"
 			| "revision-not-found"
 			| "task-not-found"
 			| "observation-not-found"

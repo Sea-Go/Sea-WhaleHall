@@ -11,8 +11,10 @@ import {
 } from "../agent/planning/model";
 import { MastraSidecarError } from "./mastra-sidecar-client";
 
-/** Model deadline plus bounded private-stdio and Mastra structured-output overhead. */
-export const DEFAULT_MASTRA_PLANNING_ANALYSIS_TIMEOUT_MS = 130_000;
+/** Model deadline plus bounded private-stdio and Mastra structured-output overhead.
+ *  计划分析可带网关服务端调研工具环（多轮上游生成），预算需覆盖多轮。
+ *  需覆盖 sidecar 降级梯全时长（首轮 450s + 降级 150s）+ 有界开销。 */
+export const DEFAULT_MASTRA_PLANNING_ANALYSIS_TIMEOUT_MS = 620_000;
 
 export interface PlanningAnalysisSidecar {
 	request<TResult = unknown>(

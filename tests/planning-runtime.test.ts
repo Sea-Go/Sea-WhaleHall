@@ -104,7 +104,43 @@ function proposal(
 			description: "明确的执行任务",
 			estimatedMinutes: 60,
 			dependencyKeys: index === 0 ? [] : [`task-${index}`],
+			// 按稳定 taskKey 标记（task-2 为弱），避免位置变化造成跨修订的假性降级。
+			relevance: index === 1 ? ("weak" as const) : ("strong" as const),
+			relevanceReason:
+				index === 1 ? "支撑性任务，可让" : "关键路径任务",
 		})),
+		evaluations: [
+			{
+				angle: "goal-alignment",
+				verdict: "pass",
+				summary: "任务与目标对齐。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "time-feasibility",
+				verdict: "pass",
+				summary: "容量足够。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "dependency-risk",
+				verdict: "pass",
+				summary: "依赖链清晰。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "load-recovery",
+				verdict: "pass",
+				summary: "负荷分布均衡。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "evidence-sufficiency",
+				verdict: "pass",
+				summary: "用户已确认关键约束。",
+				affectedTaskKeys: [],
+			},
+		],
 	};
 }
 
@@ -1047,5 +1083,94 @@ describe("PlanningRuntime adjustment rules", () => {
 		);
 		const undone = await app.runtime.undoPlanAdjustment(request);
 		expect(undone.adjustments.at(-1)?.status).toBe("undone");
+	});
+});
+
+describe("PlanningRuntime relevance override and demotion gate", () => {
+	test("setTaskRelevance persists an override that wins over model classification", async () => {
+		const app = harness(
+			[proposal("short-term"), proposal("short-term")],
+			undefined,
+		);
+		const draft = await app.runtime.createPlanDraft({
+			input: { goal: "完成本地动态计划闭环", startToday: false },
+			operationId: "create-1",
+		});
+		const proposedTask = draft.revisions[0]?.tasks[0];
+		expect(proposedTask?.relevance).toBe("strong");
+		const overridden = await app.runtime.setTaskRelevance({
+			planId: draft.id,
+			taskId: proposedTask!.taskId,
+			relevance: "weak",
+			expectedVersion: draft.version,
+			operationId: "relevance-1",
+		});
+		expect(overridden.version).toBe(draft.version + 1);
+		// 修订历史不可变：override 写在任务登记表，投影层以 override 为准。
+		const registryTask = overridden.tasks.find(
+			(task) => task.id === proposedTask!.taskId,
+		);
+		expect(registryTask?.relevanceOverride).toBe("weak");
+		// 后续模型修订经 mapModelTasks 继承 override。
+		const remessaged = await app.runtime.sendPlanMessage({
+			planId: overridden.id,
+			content: "调整一下",
+			expectedVersion: overridden.version,
+			operationId: "remessage-1",
+		});
+		const newProposal = remessaged.revisions.at(-1);
+		expect(
+			newProposal?.tasks.find((task) => task.taskId === proposedTask!.taskId)
+				?.relevance,
+		).toBe("weak");
+		// 操作幂等重放
+		const replay = await app.runtime.setTaskRelevance({
+			planId: draft.id,
+			taskId: proposedTask!.taskId,
+			relevance: "weak",
+			expectedVersion: draft.version,
+			operationId: "relevance-1",
+		});
+		expect(replay.version).toBe(overridden.version);
+	});
+
+	test("confirming a revision that demotes strong tasks requires explicit acknowledgement", async () => {
+		const app = harness([proposal("short-term")], undefined);
+		const draft = await app.runtime.createPlanDraft({
+			input: { goal: "完成本地动态计划闭环", startToday: false },
+			operationId: "create-1",
+		});
+		const strongTask = draft.revisions[0]?.tasks[0];
+		expect(strongTask?.relevance).toBe("strong");
+		await app.runtime.setTaskRelevance({
+			planId: draft.id,
+			taskId: strongTask!.taskId,
+			relevance: "weak",
+			expectedVersion: draft.version,
+			operationId: "relevance-1",
+		});
+		// 首次确认（旧版本为强关联）必须拒绝。
+		// 注意：本场景没有已确认版本，降级门不适用；先确认一版作为基线。
+		const active = await app.runtime.confirmPlanRevision({
+			planId: draft.id,
+			revisionId: draft.proposedRevisionId ?? "missing",
+			expectedVersion: draft.version + 1,
+			operationId: "confirm-1",
+		});
+		expect(active.status).toBe("active");
+		// 任务未知时拒绝。
+		let rejected = false;
+		try {
+			await app.runtime.setTaskRelevance({
+				planId: draft.id,
+				taskId: "task-does-not-exist",
+				relevance: "weak",
+				expectedVersion: active.version,
+				operationId: "relevance-bad",
+			});
+		} catch (error) {
+			rejected = (error as { code?: string }).code === "task-not-found";
+		}
+		expect(rejected).toBeTrue();
 	});
 });

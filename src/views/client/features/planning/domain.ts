@@ -50,9 +50,14 @@ export interface PlanningTaskView {
 	purpose: PlanTaskPurpose;
 	status: PlanTaskStatus;
 	estimatedMinutes: number;
+	/** 观测证据按任务聚合的实际投入分钟数；无证据为 0。 */
+	actualMinutes: number;
 	dependencyIds: readonly string[];
 	schedules: readonly PlanningTaskSchedule[];
 	unplanned: PlanningUnplannedReason | null;
+	/** 旧数据为 null；强=关键路径必排，弱=容量不足时可让。 */
+	relevance: "strong" | "weak" | null;
+	relevanceReason: string | null;
 }
 
 export interface PlanScheduleWindow {
@@ -71,6 +76,18 @@ export interface PlanningSchedulingPreferencesView {
 	}[];
 }
 
+export interface PlanningEvaluationView {
+	angle:
+		| "goal-alignment"
+		| "time-feasibility"
+		| "dependency-risk"
+		| "load-recovery"
+		| "evidence-sufficiency";
+	verdict: "pass" | "adjust" | "block";
+	summary: string;
+	affectedTaskIds: readonly string[];
+}
+
 export interface PlanRevisionView {
 	revisionId: string;
 	version: number;
@@ -86,6 +103,8 @@ export interface PlanRevisionView {
 	assumptions: readonly string[];
 	questions: readonly string[];
 	tasks: readonly PlanningTaskView[];
+	/** 五角度自评；旧数据为 null。 */
+	evaluations: readonly PlanningEvaluationView[] | null;
 }
 
 export interface PlanningMessageView {

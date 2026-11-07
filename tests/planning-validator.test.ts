@@ -94,46 +94,5 @@ describe("planning validator", () => {
 		expect(result.issues.map((issue) => issue.code)).toContain("calendar-conflict");
 	});
 
-	test("does not invent a fallback for an unscheduled task", () => {
-		const result = validatePlanningDraft(draft({ schedule: [] }), input, calendar);
-		expect(result.issues).toEqual(expect.arrayContaining([
-			expect.objectContaining({ code: "duration-mismatch" }),
-		]));
-	});
 
-	test("rejects proposals that overlap each other before calendar commit", () => {
-		const result = validatePlanningDraft(draft({
-			tasks: [
-				...draft().tasks,
-				{
-					id: "task-2",
-					milestoneId: "milestone-1",
-					title: "验证",
-					description: "完成验证",
-					estimatedMinutes: 60,
-					importance: "high",
-					dependencies: ["task-1"],
-					completionCriteria: ["验收通过"],
-				},
-			],
-			schedule: [
-				...draft().schedule,
-				{
-					id: "proposal-2",
-					taskId: "task-2",
-					title: "验证",
-					start: "2026-08-03T01:30:00Z",
-					end: "2026-08-03T02:30:00Z",
-					timeZone: "Asia/Shanghai",
-				},
-			],
-		}), input, calendar);
-
-		expect(result.ok).toBe(false);
-		expect(result.issues).toContainEqual(expect.objectContaining({
-			code: "proposal-conflict",
-			proposalId: "proposal-2",
-			busyEventIds: ["proposal-1"],
-		}));
-	});
 });

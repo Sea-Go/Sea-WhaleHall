@@ -54,6 +54,31 @@ export function localDateAt(nowMs: number, timeZone: string): string {
 		.toString();
 }
 
+/** 计划本地时区下的当前时刻，"HH:mm"（零填充 24 小时制，可直接做字典序比较）。 */
+export function localTimeAt(nowMs: number, timeZone: string): string {
+	assertIanaTimeZone(timeZone);
+	const time = Temporal.Instant.fromEpochMilliseconds(Math.trunc(nowMs))
+		.toZonedDateTimeISO(timeZone)
+		.toPlainTime();
+	return `${String(time.hour).padStart(2, "0")}:${String(time.minute).padStart(2, "0")}`;
+}
+
+/**
+ * 每日结算钟点锚点门。anchor 为 null 时恒真（保持现行"日期翻转后首个维护
+ * tick 结算"行为）；给定时本地时刻未到锚点则本次不结算（推迟到锚点后的
+ * 首 tick）。真值不代表当天未结算过——幂等去重仍由调用方的 dailySummaryDates
+ * 承担。锚点必须已通过 assertLocalMinute 校验。
+ */
+export function dailySettlementDue(
+	nowMs: number,
+	timeZone: string,
+	anchor: string | null,
+): boolean {
+	if (anchor === null) return true;
+	assertLocalMinute(anchor, "settlement anchor");
+	return localTimeAt(nowMs, timeZone) >= anchor;
+}
+
 /** The start date is intentionally evaluated at confirmation time. */
 export function effectivePlanStartDate(
 	nowMs: number,

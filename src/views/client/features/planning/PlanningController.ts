@@ -1,3 +1,4 @@
+import type { PlanningProgressStep } from "../../../../shared/planning";
 import {
 	emptyPlanCreateInput,
 	isPlanRevisionConfirmable,
@@ -25,6 +26,7 @@ export type PlanningOperation =
 	| "send-message"
 	| "confirm-revision"
 	| "set-task-status"
+	| "set-task-relevance"
 	| "confirm-observation"
 	| "pause"
 	| "resume"
@@ -32,6 +34,9 @@ export type PlanningOperation =
 	| "archive"
 	| "undo-adjustment"
 	| "retry-analysis";
+
+/** 挂起分析的无人值守重试退避（次数即会话内预算；每次启动重置）。 */
+const AUTO_RETRY_ANALYSIS_DELAYS_MS = [4_000, 30_000, 120_000, 600_000] as const;
 
 export type PlanningState =
 	| { status: "idle" }
@@ -51,6 +56,7 @@ export type PlanningState =
 			status: "creating";
 			input: PlanCreateInput;
 			existingPlans: readonly PlanSummaryView[];
+			thinking: readonly PlanningProgressStep[];
 	  }
 	| {
 			status: PlanStatus;
@@ -60,6 +66,7 @@ export type PlanningState =
 			status: "updating";
 			content: PlanningContent;
 			operation: Exclude<PlanningOperation, "create">;
+			thinking: readonly PlanningProgressStep[];
 	  }
 	| {
 			status: "model-unavailable";
@@ -85,8 +92,7 @@ export type PlanningState =
 			retryable: boolean;
 	  };
 
-function productErrorMessage(code: PlanningServiceErrorCode): string {
-	switch (code) {
+function productErrorMessage(code: PlanningServiceErrorCode): string {	switch (code) {
 		case "model-unavailable":
 			return "计划分析服务暂时不可用。你的消息已保留，可在服务恢复后继续分析。";
 		case "stale-version":
@@ -108,6 +114,7 @@ export class PlanningController {
 	private state: PlanningState = { status: "idle" };
 	private readonly listeners = new Set<() => void>();
 	private stopServiceSubscription: (() => void) | null = null;
+	private stopProgressSubscription: (() => void) | null = null;
 	private requestSequence = 0;
 	private operationSequence = 0;
 	private selectedPlanId: string | null = null;
@@ -117,10 +124,18 @@ export class PlanningController {
 		existingPlans: readonly PlanSummaryView[];
 		operationId: string;
 	} | null = null;
+	// 分析失败自动恢复：无人值守重跑挂起的分析（按计划版本记账，预算内
+	// 退避；会话内耗尽预算即停，下次启动重置）。
+	private autoRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	private autoRetryKey: string | null = null;
+	private autoRetryAttempts = 0;
 
 	constructor(
 		private readonly service: PlanningService,
 		private readonly createId: () => string = () => crypto.randomUUID(),
+		private readonly autoRetryDelaysMs: readonly number[] = [
+			...AUTO_RETRY_ANALYSIS_DELAYS_MS,
+		],
 	) {}
 
 	getSnapshot = (): PlanningState => this.state;
@@ -132,6 +147,20 @@ export class PlanningController {
 	};
 
 	async initialize(preferredPlanId?: string): Promise<void> {
+		if (!this.stopProgressSubscription) {
+			this.stopProgressSubscription = this.service.onPlanningProgress(
+				(event) => {
+					if (
+						this.state.status !== "creating" &&
+						this.state.status !== "updating"
+					) {
+						return;
+					}
+					// 步骤时间线（思考块+工具块）直接替换；服务端已做结构化收敛。
+					this.setState({ ...this.state, thinking: event.steps });
+				},
+			);
+		}
 		if (!this.stopServiceSubscription) {
 			this.stopServiceSubscription = this.service.subscribe((event) => {
 				const content = this.currentContent();
@@ -154,10 +183,16 @@ export class PlanningController {
 	}
 
 	dispose(): void {
+		this.stopProgressSubscription?.();
+		this.stopProgressSubscription = null;
 		this.stopServiceSubscription?.();
 		this.stopServiceSubscription = null;
 		this.requestSequence += 1;
 		this.operationSequence += 1;
+		if (this.autoRetryTimer !== null) clearTimeout(this.autoRetryTimer);
+		this.autoRetryTimer = null;
+		this.autoRetryKey = null;
+		this.autoRetryAttempts = 0;
 	}
 
 	async load(preferredPlanId?: string): Promise<void> {
@@ -266,7 +301,9 @@ export class PlanningController {
 		);
 	}
 
-	async confirmLatestRevision(): Promise<void> {
+	async confirmLatestRevision(
+		acknowledgeRelevanceDemotion = false,
+	): Promise<void> {
 		const content = this.currentContent();
 		if (!content || !isPlanRevisionConfirmable(content.plan)) return;
 		const revision = content.plan.revision;
@@ -275,6 +312,25 @@ export class PlanningController {
 			this.service.confirmPlanRevision({
 				planId: plan.id,
 				revisionId: revision.revisionId,
+				operationId: this.createId(),
+				expectedVersion: plan.version,
+				...(acknowledgeRelevanceDemotion
+					? { acknowledgeRelevanceDemotion: true }
+					: {}),
+			}),
+		);
+	}
+
+	async setTaskRelevance(
+		taskId: string,
+		relevance: "strong" | "weak",
+	): Promise<void> {
+		if (!taskId.trim()) return;
+		await this.mutate("set-task-relevance", (plan) =>
+			this.service.setTaskRelevance({
+				planId: plan.id,
+				taskId,
+				relevance,
 				operationId: this.createId(),
 				expectedVersion: plan.version,
 			}),
@@ -379,6 +435,7 @@ export class PlanningController {
 			status: "creating",
 			input: pending.input,
 			existingPlans: pending.existingPlans,
+			thinking: [],
 		});
 		try {
 			const result = await this.service.createPlanDraft({
@@ -422,7 +479,7 @@ export class PlanningController {
 		const content = this.currentContent();
 		if (!content) return;
 		const sequence = ++this.operationSequence;
-		this.setState({ status: "updating", content, operation });
+		this.setState({ status: "updating", content, operation, thinking: [] });
 		try {
 			await action(content.plan);
 			if (sequence !== this.operationSequence) return;
@@ -486,6 +543,55 @@ export class PlanningController {
 
 	private setLoaded(content: PlanningContent): void {
 		this.setState({ status: content.plan.status, content });
+		this.scheduleAnalysisAutoRetry(content.plan);
+	}
+
+	/** 有挂起分析（pending-analysis 消息）即无人值守重跑；成功或预算耗尽自然停。 */
+	private scheduleAnalysisAutoRetry(plan: PlanView): void {
+		const owed = plan.messages.some(
+			(message) => message.status === "pending-analysis",
+		);
+		const key = `${plan.id}:${plan.version}`;
+		if (!owed) {
+			if (this.autoRetryTimer !== null && this.autoRetryKey === key) {
+				clearTimeout(this.autoRetryTimer);
+				this.autoRetryTimer = null;
+			}
+			return;
+		}
+		if (this.autoRetryKey !== key) {
+			// 新计划或新版本（含用户主动发消息）：预算重新计算。
+			if (this.autoRetryTimer !== null) clearTimeout(this.autoRetryTimer);
+			this.autoRetryTimer = null;
+			this.autoRetryKey = key;
+			this.autoRetryAttempts = 0;
+		}
+		if (this.autoRetryTimer !== null) return;
+		if (this.autoRetryAttempts >= this.autoRetryDelaysMs.length) return;
+		const delayMs = this.autoRetryDelaysMs[
+			Math.min(this.autoRetryAttempts, this.autoRetryDelaysMs.length - 1)
+		];
+		this.autoRetryTimer = setTimeout(() => {
+			this.autoRetryTimer = null;
+			void this.runScheduledAnalysisRetry(plan.id);
+		}, delayMs);
+	}
+
+	private async runScheduledAnalysisRetry(planId: string): Promise<void> {
+		const content = this.currentContent();
+		if (content === null || content.plan.id !== planId) return;
+		if (this.state.status === "updating" || this.state.status === "creating")
+			return;
+		const owed = content.plan.messages.some(
+			(message) => message.status === "pending-analysis",
+		);
+		if (!owed) return;
+		this.autoRetryAttempts += 1;
+		try {
+			await this.retryPendingAnalysis();
+		} catch {
+			// mutate 的失败路径已落 state；重试链由随后的 setLoaded/setFailure 接续。
+		}
 	}
 
 	private setFailure(reason: unknown, cached: PlanningContent | null): void {
@@ -495,7 +601,12 @@ export class PlanningController {
 				: new PlanningServiceError("unknown", "Unknown planning failure", {
 						cause: reason,
 					});
-		const message = productErrorMessage(error.code);
+		// model-unavailable 的消息由服务层按诊断码生成（invalid-output ≠ 服务
+		// 不可用），其余错误码用产品文案兜底。
+		const message =
+			error.code === "model-unavailable" && error.message
+				? error.message
+				: productErrorMessage(error.code);
 		if (error.code === "model-unavailable") {
 			this.setState({
 				status: "model-unavailable",
@@ -503,6 +614,7 @@ export class PlanningController {
 				message,
 				retryable: error.retryable,
 			});
+			if (cached !== null) this.scheduleAnalysisAutoRetry(cached.plan);
 			return;
 		}
 		if (error.code === "stale-version" && cached) {

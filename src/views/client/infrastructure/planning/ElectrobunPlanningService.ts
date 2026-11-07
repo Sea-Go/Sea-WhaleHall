@@ -1,4 +1,5 @@
 import { Temporal } from "temporal-polyfill";
+import type { PlanningProgressStep } from "../../../../shared/planning";
 import type {
 	PlanningPlanProjection,
 	PlanningPlanSummaryProjection,
@@ -25,6 +26,7 @@ export type PlanningRpcClient = Pick<
 	| "sendPlanMessage"
 	| "confirmPlanRevision"
 	| "setPlanningTaskStatus"
+	| "setPlanningTaskRelevance"
 	| "confirmPlanningObservation"
 	| "pausePlan"
 	| "resumePlan"
@@ -33,6 +35,7 @@ export type PlanningRpcClient = Pick<
 	| "undoPlanAdjustment"
 	| "retryPendingPlanAnalysis"
 	| "onPlanChanged"
+	| "onPlanningProgress"
 	| "onCalendarChanged"
 >;
 
@@ -40,7 +43,25 @@ export type PlanningRpcLoader = () => Promise<PlanningRpcClient>;
 
 /** Renderer adapter for the Bun-owned PlanningRuntime. */
 export class ElectrobunPlanningService implements PlanningService {
+	private readonly progressListeners = new Set<
+		(event: { steps: PlanningProgressStep[] }) => void
+	>();
+
 	constructor(private readonly loadApi: PlanningRpcLoader = planningApi) {}
+
+	private progressBound = false;
+	private boundListeners = new Set<(event: { text: string; done: boolean }) => void>();
+
+	private ensureProgressBound(): void {
+		if (this.progressBound) return;
+		this.progressBound = true;
+		// 复用既有 rpc loader：测试环境不触发 electrobun 浏览器 API。
+		void this.loadApi().then((api) => {
+			api.onPlanningProgress((event) => {
+				for (const listener of this.progressListeners) listener(event);
+			});
+		});
+	}
 
 	subscribe(listener: (event: PlanningServiceEvent) => void): () => void {
 		let disposed = false;
@@ -65,6 +86,14 @@ export class ElectrobunPlanningService implements PlanningService {
 			disposed = true;
 			for (const stop of stops) stop();
 		};
+	}
+
+	onPlanningProgress(
+		listener: (event: { steps: PlanningProgressStep[] }) => void,
+	): () => void {
+		this.ensureProgressBound();
+		this.progressListeners.add(listener);
+		return () => this.progressListeners.delete(listener);
 	}
 
 	async listPlans(): Promise<readonly PlanSummaryView[]> {
@@ -107,6 +136,12 @@ export class ElectrobunPlanningService implements PlanningService {
 		request: Parameters<PlanningService["setTaskStatus"]>[0],
 	) {
 		await this.write((api) => api.setPlanningTaskStatus(request));
+	}
+
+	async setTaskRelevance(
+		request: Parameters<PlanningService["setTaskRelevance"]>[0],
+	) {
+		await this.write((api) => api.setPlanningTaskRelevance(request));
 	}
 	async confirmObservationAttribution(
 		request: Parameters<PlanningService["confirmObservationAttribution"]>[0],
@@ -225,6 +260,13 @@ function fromPlan(plan: PlanningPlanProjection): PlanView {
 					assumptions: displayedRevision.assumptions,
 					questions: displayedRevision.clarifyingQuestions,
 					tasks: displayedRevision.tasks.map(fromTask),
+					evaluations:
+						displayedRevision.evaluations?.map((item) => ({
+							angle: item.angle,
+							verdict: item.verdict,
+							summary: item.summary,
+							affectedTaskIds: [...item.affectedTaskIds],
+						})) ?? null,
 				}
 			: null,
 		messages: plan.messages.map((message) => ({
@@ -265,6 +307,7 @@ function fromTask(
 		purpose: task.purpose,
 		status: task.status,
 		estimatedMinutes: task.estimatedMinutes,
+		actualMinutes: task.actualMinutes ?? 0,
 		dependencyIds: task.dependsOnTaskIds,
 		schedules: task.schedules.flatMap((schedule) =>
 			schedule.eventId && schedule.start && schedule.end
@@ -285,6 +328,8 @@ function fromTask(
 		unplanned: task.unscheduledReason
 			? { kind: "other", message: task.unscheduledReason }
 			: null,
+		relevance: task.relevance ?? null,
+		relevanceReason: task.relevanceReason ?? null,
 	};
 }
 
@@ -339,6 +384,18 @@ function confidenceLabel(value: number): "high" | "medium" | "low" {
 	return value >= 0.75 ? "high" : value > 0.5 ? "medium" : "low";
 }
 
+/** 把 MODEL_UNAVAILABLE:<diagnostic> 翻译成与事实一致的提示文案。 */
+function modelUnavailableMessage(normalized: string): string {
+	const detail = normalized.split("model_unavailable")[1] ?? "";
+	if (detail.includes("invalid-output")) {
+		return "这一版计划生成结果没有通过校验。你的消息已保留，点重试会重新生成。";
+	}
+	if (detail.includes("request-timeout")) {
+		return "模型响应超时。你的消息已保留，可稍后重试。";
+	}
+	return "计划分析服务暂时不可用。你的消息已保留，可在服务恢复后继续分析。";
+}
+
 function titleForGoal(goal: string): string {
 	return Array.from(goal.trim()).slice(0, 24).join("") || "未命名计划";
 }
@@ -357,7 +414,10 @@ function serviceError(error: unknown): PlanningServiceError {
 		error instanceof Error ? error.message : "Planning request failed.";
 	const normalized = message.toLowerCase();
 	if (normalized.includes("model_unavailable")) {
-		return new PlanningServiceError("model-unavailable", message);
+		return new PlanningServiceError(
+			"model-unavailable",
+			modelUnavailableMessage(normalized),
+		);
 	}
 	if (
 		normalized.includes("stale_version") ||
