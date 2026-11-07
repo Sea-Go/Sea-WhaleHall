@@ -47,7 +47,6 @@ export function ProactiveFeedbackHistoryPage({
 			<PageHeader
 				eyebrow="主动反馈"
 				title="历史记录"
-				description="查看 WhaleHall 根据活动事件流生成的反馈。这里只显示生成时间和最终消息。"
 			/>
 
 			{state.status === "idle" || state.status === "loading" ? (

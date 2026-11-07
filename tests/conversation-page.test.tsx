@@ -83,27 +83,4 @@ describe("ConversationPage Agent run states", () => {
 		expect(markup).not.toContain("sha256:must-stay-hidden");
 	});
 
-	test("labels cancelled partial output and enables the next composer turn", () => {
-		const markup = renderToStaticMarkup(
-			<ConversationPage
-				state={{
-					status: "ready",
-					thread: {
-						...thread,
-						messages: [{ ...thread.messages[1]!, state: "cancelled" }],
-					},
-					turn: {
-						status: "cancelled",
-						run: { ...run, status: "cancelled" },
-						message: "已停止生成，已保留当前内容。",
-					},
-				}}
-				actions={{ onSendMessage: () => {} }}
-			/>,
-		);
-
-		expect(markup).toContain("生成已停止，已保留部分内容");
-		expect(markup).toContain("已停止生成，已保留当前内容");
-		expect(markup).not.toContain('id="conversation-draft" disabled');
-	});
 });

@@ -6,7 +6,6 @@ import {
 	LoaderCircle,
 	ServerOff,
 	ShieldCheck,
-	Sparkles,
 	Waves,
 	WifiOff,
 } from "lucide-react";
@@ -78,31 +77,15 @@ export function AuthPage({ state, onSubmit, onRetry }: AuthPageProps) {
 
 	return (
 		<main className="auth-page">
-			<section className="auth-atmosphere" aria-labelledby="auth-brand-title">
-				<div className="auth-atmosphere__glow" aria-hidden="true" />
+			<section className="auth-atmosphere" aria-hidden="true">
+				<div className="auth-atmosphere__glow" />
 				<div className="auth-brand">
-					<span className="auth-brand__mark" aria-hidden="true">
+					<span className="auth-brand__mark">
 						<Waves size={22} strokeWidth={2} />
 					</span>
-					<div>
-						<strong>WhaleHall</strong>
-						<span>把时间留给重要的事</span>
-					</div>
 				</div>
 
-				<div className="auth-atmosphere__copy">
-					<p>
-						<Sparkles size={14} aria-hidden="true" />
-						个人计划与成长空间
-					</p>
-					<h1 id="auth-brand-title">把模糊的目标，放进清晰的一周</h1>
-					<span>
-						从计划到日程，再到每一次回顾。WhaleHall
-						帮助你把注意力放回真正重要的事情。
-					</span>
-				</div>
-
-				<div className="auth-ocean" aria-hidden="true">
+				<div className="auth-ocean">
 					<div className="auth-ocean__whale">
 						<Waves size={34} strokeWidth={1.45} />
 					</div>
@@ -111,16 +94,6 @@ export function AuthPage({ state, onSubmit, onRetry }: AuthPageProps) {
 					<span className="auth-ocean__orbit auth-ocean__orbit--three" />
 					<i className="auth-ocean__point auth-ocean__point--one" />
 					<i className="auth-ocean__point auth-ocean__point--two" />
-				</div>
-
-				<div className="auth-privacy-note">
-					<ShieldCheck size={17} aria-hidden="true" />
-					<div>
-						<strong>登录信息由安全边界处理</strong>
-						<span>
-							密码只用于已配置的安全登录服务，不会发送给模型或写入本地日志。
-						</span>
-					</div>
 				</div>
 			</section>
 

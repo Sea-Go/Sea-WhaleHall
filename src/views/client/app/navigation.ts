@@ -1,6 +1,5 @@
 export const PAGE_IDS = [
 	"conversation",
-	"planning",
 	"calendar",
 	"history",
 	"reports",
@@ -11,7 +10,6 @@ export type PageId = (typeof PAGE_IDS)[number];
 
 export const PAGE_LABELS: Record<PageId, string> = {
 	conversation: "对话",
-	planning: "计划",
 	calendar: "日程",
 	history: "历史记录",
 	reports: "成长报告",

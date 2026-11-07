@@ -17,6 +17,7 @@ import {
 import {
 	type FormEvent,
 	type KeyboardEvent,
+	type ReactNode,
 	useEffect,
 	useMemo,
 	useRef,
@@ -25,6 +26,11 @@ import {
 } from "react";
 import { Button } from "../../shared/ui/Button";
 import { IconButton } from "../../shared/ui/IconButton";
+import type { PlanningController } from "../planning/PlanningController";
+import {
+	PlanStatusCard,
+	SmartScheduleComposer,
+} from "../planning/PlanningPanels";
 import { CalendarController } from "./CalendarController";
 import type { CalendarService } from "./calendar-service";
 import {
@@ -33,12 +39,13 @@ import {
 	calendarRangeLabel,
 	durationMinutes,
 	instantToLocalParts,
-	miniCalendarDayFlags,
 	miniCalendarDays,
 	monthLabel,
 	moveMonth,
 	resolveLocalDateTime,
+	systemTimeZone,
 	timeZoneOffsetLabel,
+	todayInZone,
 } from "./date-time";
 import {
 	type CalendarEvent,
@@ -50,7 +57,6 @@ import {
 	withOccurrenceException,
 } from "./domain";
 import {
-	CALENDAR_REFERENCE_DATE,
 	CALENDAR_SCENARIOS,
 	type CalendarScenarioId,
 } from "./fixtures";
@@ -104,11 +110,15 @@ interface EditorForm {
 	disambiguation: "earlier" | "later";
 }
 
-function initialEditorForm(editor: EditorState, timeZone: string): EditorForm {
+function initialEditorForm(
+	editor: EditorState,
+	timeZone: string,
+	today: string,
+): EditorForm {
 	const event = editor.event;
 	const schedule = event?.schedule ?? editor.selection?.schedule;
-	let startDate = CALENDAR_REFERENCE_DATE;
-	let endDate = CALENDAR_REFERENCE_DATE;
+	let startDate = today;
+	let endDate = today;
 	let startTime = "09:00";
 	let endTime = "10:00";
 	let allDay = false;
@@ -171,6 +181,10 @@ interface EventEditorProps {
 		setError: (message: string) => void,
 	) => Promise<void>;
 	onUnlock?: (setError: (message: string) => void) => Promise<void>;
+	/** 新建日程时的智能安排主体；存在时替换手动表单。 */
+	bodyOverride?: ReactNode;
+	/** 手动表单底部追加的动作（如切回智能安排）。 */
+	secondaryAction?: ReactNode;
 }
 
 export function EventEditor({
@@ -181,8 +195,12 @@ export function EventEditor({
 	onSave,
 	onDelete,
 	onUnlock,
+	bodyOverride,
+	secondaryAction,
 }: EventEditorProps) {
-	const [form, setForm] = useState(() => initialEditorForm(editor, timeZone));
+	const [form, setForm] = useState(() =>
+		initialEditorForm(editor, timeZone, todayInZone(systemTimeZone())),
+	);
 	const [error, setError] = useState<string | null>(null);
 	const titleRef = useRef<HTMLInputElement>(null);
 	const dialogRef = useRef<HTMLDivElement>(null);
@@ -279,6 +297,9 @@ export function EventEditor({
 					</div>
 				) : null}
 
+				{bodyOverride ? (
+					bodyOverride
+				) : (
 				<form onSubmit={submit}>
 					<label className="calendar-field calendar-field--wide">
 						<span>标题</span>
@@ -547,6 +568,7 @@ export function EventEditor({
 							) : (
 								<span />
 							)}
+							{editor.event === null && secondaryAction ? secondaryAction : null}
 							{editor.event &&
 							canUserUnlockPlanEvent(editor.event) &&
 							onUnlock ? (
@@ -582,11 +604,12 @@ export function EventEditor({
 								</Button>
 							) : null}
 						</div>
-					</footer>
-				</form>
+						</footer>
+					</form>
+				)}
+				</div>
 			</div>
-		</div>
-	);
+		);
 }
 
 export interface CalendarPageProps {
@@ -595,6 +618,8 @@ export interface CalendarPageProps {
 	controller?: CalendarController;
 	initialScenario?: CalendarScenarioId | null;
 	showScenarioControl?: boolean;
+	/** 传入后「创建日程」默认进入智能安排（动态计划），侧栏显示计划状态卡。 */
+	planningController?: PlanningController;
 }
 
 export function CalendarPage({
@@ -603,6 +628,7 @@ export function CalendarPage({
 	controller: suppliedController,
 	initialScenario = "normal",
 	showScenarioControl = false,
+	planningController,
 }: CalendarPageProps) {
 	const controller = useMemo(
 		() => suppliedController ?? new CalendarController(service),
@@ -615,21 +641,30 @@ export function CalendarPage({
 	);
 	const calendarRef = useRef<WhaleCalendarHandle>(null);
 	const createButtonRef = useRef<HTMLButtonElement>(null);
+	const [today] = useState(() => todayInZone(systemTimeZone()));
 	const [view, setView] = useState<CalendarView>("week");
-	const [range, setRange] = useState<CalendarRange>({
-		title: "2026年7月27日 – 8月2日",
-		start: CALENDAR_REFERENCE_DATE,
-		end: "2026-08-03",
-		currentDate: CALENDAR_REFERENCE_DATE,
+	const [range, setRange] = useState<CalendarRange>(() => ({
+		title: "",
+		start: today,
+		end: today,
+		currentDate: today,
 		view: "week",
-	});
-	const [miniAnchor, setMiniAnchor] = useState(CALENDAR_REFERENCE_DATE);
+	}));
+	const [miniAnchor, setMiniAnchor] = useState(today);
 	const [query, setQuery] = useState("");
 	const [visibleKinds, setVisibleKinds] = useState<Set<CalendarEventKind>>(
 		() => new Set(sourceOptions.map((source) => source.id)),
 	);
 	const [editor, setEditor] = useState<EditorState | null>(null);
 	const [editorPending, setEditorPending] = useState(false);
+	const [contextMenu, setContextMenu] = useState<{
+		x: number;
+		y: number;
+		event: CalendarEvent;
+		occurrenceStart: string | null;
+	} | null>(null);
+	// 新建日程的默认形态：无预设时间段时优先智能安排；拖选/点选时间段保持手动。
+	const [editorSmart, setEditorSmart] = useState(true);
 
 	useEffect(() => {
 		void controller.load(initialScenario ?? undefined);
@@ -638,7 +673,9 @@ export function CalendarPage({
 	useEffect(() => {
 		if (!service.subscribe) return;
 		return service.subscribe(() => {
-			void controller.load();
+			// 变更推送（删除/计划调整等）走后台重载：保留现有数据，
+			// 不让整板闪现"正在同步日程"占位。
+			void controller.load(undefined, { background: true });
 		});
 	}, [controller, service]);
 
@@ -646,8 +683,8 @@ export function CalendarPage({
 		if (range.currentDate) setMiniAnchor(range.currentDate.slice(0, 10));
 	}, [range.currentDate]);
 
-	const miniDays = useMemo(() => miniCalendarDays(miniAnchor), [miniAnchor]);
 	const selectedDate = range.currentDate.slice(0, 10);
+	const miniDays = useMemo(() => miniCalendarDays(miniAnchor), [miniAnchor]);
 	const filteredEvents = useMemo(() => {
 		const normalized = query.trim().toLocaleLowerCase("zh-CN");
 		return calendar.events.filter(
@@ -664,6 +701,7 @@ export function CalendarPage({
 	function openEditor(
 		options: Partial<EditorState> & Pick<EditorState, "presetKind">,
 	) {
+		setEditorSmart(options.selection == null);
 		setEditor({
 			event: null,
 			selection: null,
@@ -680,6 +718,67 @@ export function CalendarPage({
 		const focusTarget = editor?.returnFocus ?? createButtonRef.current;
 		setEditor(null);
 		window.requestAnimationFrame(() => focusTarget?.focus());
+	}
+
+	function openEventContextMenu(
+		selection: CalendarOccurrenceSelection,
+		position: { x: number; y: number },
+	) {
+		const event = calendar.events.find(
+			(candidate) => candidate.id === selection.eventId,
+		);
+		if (!event) return;
+		setContextMenu({
+			x: position.x,
+			y: position.y,
+			event: cloneCalendarEvent(event),
+			occurrenceStart:
+				event.recurrence && !event.occurrenceId
+					? selection.occurrenceStart
+					: null,
+		});
+	}
+
+	async function deleteFromContextMenu() {
+		const target = contextMenu;
+		console.info(
+			"[calendar][ctx] delete requested",
+			target?.event.id,
+			target?.event.kind,
+			target?.event.editable,
+		);
+		if (!target) return;
+		setContextMenu(null);
+		setEditorPending(true);
+		try {
+			const result = await controller.delete(
+				target.event.id,
+				target.event.recurrence ? "series" : null,
+			);
+			console.info(
+				"[calendar][ctx] delete result",
+				target.event.id,
+				result.ok,
+				result.ok ? "" : JSON.stringify(result.conflict).slice(0, 200),
+			);
+			if (!result.ok) {
+				onNotify(
+					`删除失败：${result.conflict.message}`,
+				);
+				return;
+			}
+			onNotify(
+				target.event.recurrence
+					? "整个循环日程已删除。"
+					: "日程已删除，可撤销。",
+			);
+		} catch (error) {
+			onNotify(
+				`删除请求异常：${error instanceof Error ? error.message : String(error)}`,
+			);
+		} finally {
+			setEditorPending(false);
+		}
 	}
 
 	function selectEvent(selection: CalendarOccurrenceSelection) {
@@ -1000,31 +1099,30 @@ export function CalendarPage({
 							))}
 						</div>
 						<div className="mini-calendar__days">
-							{miniDays.map((day) => {
-								const flags = miniCalendarDayFlags(
-									day.date,
-									CALENDAR_REFERENCE_DATE,
-									selectedDate,
-								);
-								return (
-									<button
-										type="button"
-										key={day.date}
-										className={[
-											!day.inMonth ? "mini-calendar__adjacent" : "",
-											flags.isToday ? "mini-calendar__today" : "",
-											flags.isSelected ? "mini-calendar__selected" : "",
-										]
-											.filter(Boolean)
-											.join(" ")}
-										aria-label={day.date}
-										aria-current={flags.isSelected ? "date" : undefined}
-										onClick={() => calendarRef.current?.goToDate(day.date)}
-									>
-										{day.day}
-									</button>
-								);
-							})}
+							{miniDays.map((day) => (
+								<button
+									type="button"
+									key={day.date}
+									className={[
+										!day.inMonth ? "mini-calendar__adjacent" : "",
+										day.date === today
+											? "mini-calendar__today"
+											: "",
+										day.date === selectedDate
+											? "mini-calendar__selected"
+											: "",
+									]
+										.filter(Boolean)
+										.join(" ")}
+									aria-label={day.date}
+									aria-current={
+										day.date === today ? "date" : undefined
+									}
+									onClick={() => calendarRef.current?.goToDate(day.date)}
+								>
+									{day.day}
+								</button>
+							))}
 						</div>
 					</section>
 
@@ -1051,7 +1149,10 @@ export function CalendarPage({
 							<IconButton
 								label="创建手动占用"
 								icon={<SquarePen size={14} />}
-								onClick={() => openEditor({ presetKind: "manual-block" })}
+								onClick={() => {
+									openEditor({ presetKind: "manual-block" });
+									setEditorSmart(false);
+								}}
 							/>
 						</div>
 						{sourceOptions.map((source) => (
@@ -1067,6 +1168,9 @@ export function CalendarPage({
 								<span>{source.label}</span>
 							</label>
 						))}
+						{planningController ? (
+							<PlanStatusCard controller={planningController} />
+						) : null}
 					</section>
 
 					{proposedIds.length > 0 ? (
@@ -1128,13 +1232,17 @@ export function CalendarPage({
 						events={filteredEvents}
 						view={view}
 						timeZone={calendar.timeZone}
-						initialDate={CALENDAR_REFERENCE_DATE}
+						initialDate={today}
 						pendingEventIds={calendar.pendingEventIds}
 						onRangeChange={handleRangeChange}
 						onSelect={(selection) =>
 							openEditor({ presetKind: "manual-block", selection })
 						}
-						onEventClick={selectEvent}
+						onDayClick={(selection) =>
+						openEditor({ presetKind: "manual-block", selection })
+					}
+					onEventClick={selectEvent}
+					onEventContextMenu={openEventContextMenu}
 						onMove={(_before, after) => controller.update(after)}
 						onResize={(_before, after) => controller.update(after)}
 					/>
@@ -1214,18 +1322,132 @@ export function CalendarPage({
 				</section>
 			</div>
 
-			{editor ? (
-				<EventEditor
-					key={`${editor.event?.id ?? "new"}-${editor.occurrenceStart ?? "base"}`}
-					editor={editor}
-					timeZone={calendar.timeZone}
+				{editor ? (
+					<EventEditor
+						key={`${editor.event?.id ?? "new"}-${editor.occurrenceStart ?? "base"}`}
+						editor={editor}
+						timeZone={calendar.timeZone}
+						pending={editorPending}
+						onClose={closeEditor}
+						onSave={saveEditor}
+						onDelete={deleteEditor}
+						onUnlock={unlockEditor}
+						bodyOverride={
+							editor.event === null &&
+							editorSmart &&
+							planningController ? (
+								<SmartScheduleComposer
+									controller={planningController}
+									onOpenManual={() => setEditorSmart(false)}
+									onPlanned={() => {
+										closeEditor();
+										onNotify("已确认计划安排，日程已写入日历。");
+									}}
+								/>
+							) : undefined
+						}
+						secondaryAction={
+							editor.event === null &&
+							planningController &&
+							!editorSmart ? (
+								<Button
+									type="button"
+									variant="ghost"
+									size="small"
+									onClick={() => setEditorSmart(true)}
+								>
+									✨ 智能安排
+								</Button>
+							) : undefined
+						}
+					/>
+				) : null}
+
+			{contextMenu ? (
+				<EventContextMenu
+					x={contextMenu.x}
+					y={contextMenu.y}
+					title={contextMenu.event.title}
+					recurring={contextMenu.event.recurrence !== null}
 					pending={editorPending}
-					onClose={closeEditor}
-					onSave={saveEditor}
-					onDelete={deleteEditor}
-					onUnlock={unlockEditor}
+					onClose={() => setContextMenu(null)}
+					onDelete={() => void deleteFromContextMenu()}
+					onEdit={() => {
+						const target = contextMenu;
+						setContextMenu(null);
+						if (!target) return;
+						openEditor({
+							presetKind: target.event.kind,
+							event: cloneCalendarEvent(target.event),
+							occurrenceStart: target.occurrenceStart,
+						});
+					}}
 				/>
 			) : null}
 		</div>
+	);
+}
+
+export function EventContextMenu({
+	x,
+	y,
+	title,
+	recurring,
+	pending,
+	onClose,
+	onDelete,
+	onEdit,
+}: {
+	x: number;
+	y: number;
+	title: string;
+	recurring: boolean;
+	pending: boolean;
+	onClose: () => void;
+	onDelete: () => void;
+	onEdit: () => void;
+}) {
+	useEffect(() => {
+		const onKey = (event: globalThis.KeyboardEvent) => {
+			if (event.key === "Escape") onClose();
+		};
+		window.addEventListener("keydown", onKey);
+		return () => {
+			window.removeEventListener("keydown", onKey);
+		};
+	}, [onClose]);
+	return (
+		<>
+			{/* 全屏背板：外部点击/右键在这里关闭菜单。不用 window click 监听——
+			    事件顺序竞态在真实 webview 里会让菜单项点击失效。 */}
+			<div
+				className="calendar-context-menu__backdrop"
+				onClick={onClose}
+				onContextMenu={(event) => {
+					event.preventDefault();
+					onClose();
+				}}
+			/>
+			<div
+				className="calendar-context-menu"
+				role="menu"
+				aria-label="日程操作"
+				style={{ left: x, top: y }}
+				onContextMenu={(event) => event.preventDefault()}
+			>
+				<p className="calendar-context-menu__title">{title}</p>
+				<button type="button" role="menuitem" onClick={onEdit}>
+					编辑
+				</button>
+				<button
+					type="button"
+					role="menuitem"
+					className="calendar-context-menu__danger"
+					onClick={onDelete}
+				>
+					{recurring ? "删除整个循环" : "删除"}
+				</button>
+			</div>
+		</>
 	);
 }

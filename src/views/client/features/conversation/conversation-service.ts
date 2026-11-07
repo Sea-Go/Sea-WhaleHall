@@ -72,6 +72,7 @@ export type ConversationRunEvent =
 			startOffset: number;
 			delta: string;
 	  }
+	| { type: "reasoning.delta"; delta: string }
 	| {
 			type: "message.completed";
 			conversationId: string;

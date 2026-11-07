@@ -112,11 +112,4 @@ describe("one-time content-vault setup UI", () => {
 		expect(markup).not.toContain("开始一次性设置");
 	});
 
-	test("shows a compact button-free state once encrypted storage is ready", async () => {
-		const markup = await renderVault(false, "available");
-		expect(markup).toContain("本机监测已设置");
-		expect(markup).toContain("2/2 项完成");
-		expect(markup).not.toContain("<ol");
-		expect(markup).not.toContain("<button");
-	});
 });

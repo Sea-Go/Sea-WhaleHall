@@ -36,7 +36,7 @@ import { ElectrobunPetPresentationBridge } from "./infrastructure/pet-bridge/Ele
 import { ElectrobunPlanningService } from "./infrastructure/planning/ElectrobunPlanningService";
 import { ElectrobunProactiveFeedbackService } from "./infrastructure/proactive-feedback/ElectrobunProactiveFeedbackService";
 import { InMemoryProactiveFeedbackService } from "./infrastructure/proactive-feedback/InMemoryProactiveFeedbackService";
-import { MockReportService } from "./infrastructure/reports/MockReportService";
+import { RemoteReportService } from "./infrastructure/reports/RemoteReportService";
 import { ElectrobunAgentPermissionsService } from "./infrastructure/settings/ElectrobunAgentPermissionsService";
 import { MockAgentPermissionsService } from "./infrastructure/settings/MockAgentPermissionsService";
 import { MockPreferencesService } from "./infrastructure/settings/MockPreferencesService";
@@ -54,7 +54,7 @@ const planningTimeZone =
 const currentDate = () =>
 	Temporal.Now.zonedDateTimeISO(planningTimeZone).toPlainDate().toString();
 const reportController = new ReportController(
-	new MockReportService(),
+	new RemoteReportService(),
 	currentDate,
 );
 const preferencesController = new PreferencesController(

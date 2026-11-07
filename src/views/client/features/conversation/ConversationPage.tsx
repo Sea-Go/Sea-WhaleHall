@@ -79,7 +79,6 @@ export function ConversationPage({ state, actions = {} }: ConversationPageProps)
 			<PageHeader
 				eyebrow="陪伴与协作"
 				title="对话"
-				description="在这里和 WhaleHall 沟通想法、计划与下一步。"
 				action={
 					<Button
 						variant="secondary"
@@ -363,6 +362,12 @@ function ConversationRunBanner({
 			<div>
 				<strong>{runStatusTitle(turn)}</strong>
 				<span>{runStatusDescription(turn)}</span>
+				{turn.status === "running" && turn.reasoning ? (
+					<details className="conversation-run-banner__reasoning" open>
+						<summary>思考过程（实时）</summary>
+						<p>{turn.reasoning.slice(-4000)}</p>
+					</details>
+				) : null}
 			</div>
 			<div className="conversation-run-banner__actions">
 				{turn.status === "failed" && turn.retryable && actions.onRetry ? (

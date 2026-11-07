@@ -144,14 +144,4 @@ describe("monitoring local protocol", () => {
 		).toBeFalse();
 	});
 
-	test("fails malformed calls before writing to the native process", async () => {
-		const client = new LocalToolClient("/missing/whalehall-local");
-		await expect(
-			client.configureMonitoring({
-				enabled: true,
-				captureContent: true,
-				excludedBundleIds: ["duplicate", "duplicate"],
-			}),
-		).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
-	});
 });

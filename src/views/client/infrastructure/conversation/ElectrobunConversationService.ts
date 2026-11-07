@@ -260,6 +260,8 @@ function mapEvent(event: AgentRunEventEnvelope["event"]): ConversationRunEvent |
 			return { type: "message.started", ...withoutType(event) };
 		case "conversation.message.delta":
 			return { type: "message.delta", ...withoutType(event) };
+		case "conversation.reasoning.delta":
+			return { type: "reasoning.delta", delta: event.delta };
 		case "conversation.message.completed":
 			return { type: "message.completed", ...withoutType(event) };
 		case "tool.call.proposed":

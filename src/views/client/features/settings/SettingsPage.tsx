@@ -982,7 +982,6 @@ function AboutSettings({
 				control={<span className="settings-badge">本地优先</span>}
 			/>
 			<div className="settings-about-copy">
-				<strong>把时间留给重要的事。</strong>
 				<p>
 					WhaleHall
 					帮助你制定计划、安排时间并诚实回顾投入。远端主动反馈是否启用及其数据范围会在隐私设置中明确显示。

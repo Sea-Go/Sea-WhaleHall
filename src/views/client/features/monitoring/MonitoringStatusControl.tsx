@@ -100,7 +100,7 @@ export function MonitoringStatusControl({
 									: setup.phase === "unavailable"
 										? "本机监测设置当前不可用"
 										: snapshot.state === "running"
-											? "前台可见内容 · 本地加密"
+											? ""
 											: snapshot.state === "starting"
 												? "正在连接内置 macOS 观察器"
 												: snapshot.state === "degraded"

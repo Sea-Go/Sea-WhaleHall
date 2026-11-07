@@ -22,6 +22,7 @@ import type {
 	PetPresentationEvent,
 	PlanningCalendarMutationProjection,
 	PlanningChangeProjection,
+	PlanningProgressStep,
 	PlanningWriteCommand,
 	PrivateTrainingWindowExportRequest,
 	ProactiveFeedbackAvailable,
@@ -29,6 +30,7 @@ import type {
 	SendPlanMessageCommand,
 	SetAgentReadPermissionsRequest,
 	SetPlanningTaskStatusCommand,
+	SetPlanningTaskRelevanceCommand,
 	SetProactiveFeedbackPolicyRequest,
 	StartConversationTurnRequest,
 	StartTaskPlanningRunRequest,
@@ -45,6 +47,9 @@ type ProactiveFeedbackAvailableListener = (
 ) => void;
 type AppUpdateStatusListener = (snapshot: AppUpdateSnapshot) => void;
 type PlanChangeListener = (change: PlanningChangeProjection) => void;
+type PlanningProgressListener = (event: {
+	steps: PlanningProgressStep[];
+}) => void;
 type CalendarChangeListener = (version: number) => void;
 
 const statusListeners = new Set<StatusListener>();
@@ -55,6 +60,7 @@ const proactiveFeedbackAvailableListeners =
 	new Set<ProactiveFeedbackAvailableListener>();
 const appUpdateStatusListeners = new Set<AppUpdateStatusListener>();
 const planChangeListeners = new Set<PlanChangeListener>();
+const planningProgressListeners = new Set<PlanningProgressListener>();
 const calendarChangeListeners = new Set<CalendarChangeListener>();
 
 const rpc = Electroview.defineRPC<ClientRPC>({
@@ -88,6 +94,9 @@ const rpc = Electroview.defineRPC<ClientRPC>({
 			planChanged: (change) => {
 				for (const listener of planChangeListeners) listener(change);
 			},
+			planningProgress: ({ steps }) => {
+				for (const listener of planningProgressListeners) listener({ steps });
+			},
 			calendarChanged: ({ version }) => {
 				for (const listener of calendarChangeListeners) listener(version);
 			},
@@ -108,6 +117,8 @@ export const clientApi = {
 		rpc.request.confirmPlanRevision(command),
 	setPlanningTaskStatus: (command: SetPlanningTaskStatusCommand) =>
 		rpc.request.setPlanningTaskStatus(command),
+	setPlanningTaskRelevance: (command: SetPlanningTaskRelevanceCommand) =>
+		rpc.request.setPlanningTaskRelevance(command),
 	confirmPlanningObservation: (command: ConfirmPlanningObservationCommand) =>
 		rpc.request.confirmPlanningObservation(command),
 	pausePlan: (command: PlanningWriteCommand) => rpc.request.pausePlan(command),
@@ -232,6 +243,10 @@ export const clientApi = {
 	onAppUpdateStatus(listener: AppUpdateStatusListener): () => void {
 		appUpdateStatusListeners.add(listener);
 		return () => appUpdateStatusListeners.delete(listener);
+	},
+	onPlanningProgress(listener: PlanningProgressListener): () => void {
+		planningProgressListeners.add(listener);
+		return () => planningProgressListeners.delete(listener);
 	},
 	onPlanChanged(listener: PlanChangeListener): () => void {
 		planChangeListeners.add(listener);

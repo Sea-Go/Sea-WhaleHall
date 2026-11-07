@@ -50,7 +50,6 @@
 	--color-calendar-warning-surface: rgba(137, 99, 34, 0.16);
 	--color-calendar-grid-line: rgba(145, 184, 193, 0.12);
 	--color-calendar-grid-minor: rgba(145, 184, 193, 0.065);
-	--color-calendar-now: #e58877;
 	--color-report-completed: #62c2c8;
 	--color-report-planned: #8292c9;
 	--color-report-building: #62c2c8;
@@ -186,7 +185,6 @@
 	--color-calendar-warning-surface: rgba(150, 99, 29, 0.09);
 	--color-calendar-grid-line: rgba(118, 75, 43, 0.15);
 	--color-calendar-grid-minor: rgba(118, 75, 43, 0.075);
-	--color-calendar-now: #c94f10;
 	--color-report-completed: #d75d18;
 	--color-report-planned: #596aa7;
 	--color-report-building: #d75d18;

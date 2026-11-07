@@ -83,7 +83,6 @@ export function ReportsPage({ controller }: ReportsPageProps) {
 			<PageHeader
 				eyebrow="成长回顾"
 				title="成长报告"
-				description="先看最重要的成果，再理解时间去了哪里，以及下一阶段值得调整什么。"
 			/>
 
 			<div className="reports-page__content">

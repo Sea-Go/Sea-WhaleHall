@@ -184,10 +184,10 @@ export class AuthController {
 
 	private handleSessionExpired(): void {
 		this.operationVersion += 1;
-		this.setState({
-			status: "expired",
-			message: "登录会话已过期。为保护你的数据，请重新登录。",
-		});
+		// 会话过期可能是瞬态竞争（例如刷新令牌被并发会话操作轮换）：
+		// 先静默恢复一次；刷新凭据确实失效时，恢复流程自身会落到
+		// 重新登录界面，不削弱失效保护。
+		void this.restore("restoring-session");
 	}
 
 	private isCurrent(

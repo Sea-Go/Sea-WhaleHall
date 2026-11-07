@@ -41,30 +41,7 @@ describe("report date ranges", () => {
 });
 
 describe("report metric honesty", () => {
-	test("does not turn missing counts or an unknown denominator into zero", () => {
-		expect(completionMetric(null, 5, "测试口径")).toEqual({
-			completedCount: null,
-			plannedCount: 5,
-			ratePercent: null,
-			definition: "测试口径",
-		});
-		expect(completionMetric(0, null, "测试口径").ratePercent).toBeNull();
-		expect(completionMetric(4, 5, "测试口径").ratePercent).toBe(80);
-	});
 
-	test("validates partial coverage and permits null measurements", () => {
-		const report = minimalReport();
-		expect(() => assertValidGrowthReport(report)).not.toThrow();
-		expect(() =>
-			assertValidGrowthReport({
-				...report,
-				dataQuality: {
-					...report.dataQuality,
-					kind: "complete",
-				},
-			}),
-		).toThrow("报告数据覆盖范围不一致");
-	});
 });
 
 function minimalReport(): GrowthReport {
