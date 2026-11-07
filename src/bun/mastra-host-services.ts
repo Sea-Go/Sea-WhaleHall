@@ -14,7 +14,19 @@ export interface ConversationMemoryService {
 	load(accountId: string, ownerRunId: string, conversationId: string): Promise<{
 		messages: readonly { role: "user" | "assistant"; content: string }[];
 		version: number;
+		thread: {
+			title: string;
+			metadata: Record<string, unknown> | null;
+		};
 	}>;
+	/** Mastra 线程元数据（标题/working memory）持久化：Sidecar 只发起，不落盘。 */
+	saveThread(input: {
+		accountId: string;
+		ownerRunId: string;
+		conversationId: string;
+		title?: string;
+		metadata?: Record<string, unknown>;
+	}): Promise<{ title: string; metadata: Record<string, unknown> | null }>;
 	append(input: {
 		accountId: string;
 		ownerRunId: string;
@@ -91,6 +103,8 @@ export class LocalAgentHostServices {
 				return this.loadMemory(accountId, ownerRunId, params);
 			case "memory/append":
 				return this.appendMemory(accountId, ownerRunId, params);
+			case "memory/thread.save":
+				return this.saveThread(accountId, ownerRunId, params);
 			case "workflow/start":
 				assertOwnerRun(ownerRunId, params);
 				return this.startWorkflow(accountId, params);
@@ -147,6 +161,30 @@ export class LocalAgentHostServices {
 			ownerRunId,
 			requiredId(params.threadId, "threadId"),
 		);
+	}
+
+	private async saveThread(
+		accountId: string,
+		ownerRunId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
+		assertResource(accountId, params);
+		const title =
+			typeof params.title === "string" && params.title.trim().length > 0
+				? params.title.trim().slice(0, 120)
+				: undefined;
+		const metadata =
+			params.metadata && typeof params.metadata === "object" &&
+			!Array.isArray(params.metadata)
+				? (params.metadata as Record<string, unknown>)
+				: undefined;
+		return this.options.memory.saveThread({
+			accountId,
+			ownerRunId,
+			conversationId: requiredId(params.threadId, "threadId"),
+			...(title !== undefined ? { title } : {}),
+			...(metadata !== undefined ? { metadata } : {}),
+		});
 	}
 
 	private async appendMemory(

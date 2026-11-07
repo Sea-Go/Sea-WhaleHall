@@ -431,10 +431,14 @@ macOSTest(
 		expect(observation?.observation?.schemaVersion).toBe("raw-observation.v2");
 		// A locked/non-interactive macOS session must fail closed with an
 		// explicit coverage gap. An unlocked session reports the foreground
-		// workspace observation. Both are valid privacy-safe startup outcomes.
-		expect(["workspace.foregroundChanged", "coverage.gap"]).toContain(
-			observation?.observation?.kind,
-		);
+		// workspace observation, and a frontmost browser can win the first
+		// frame with a privacy-safe page boundary. All are valid startup
+		// outcomes with captureContent disabled.
+		expect([
+			"workspace.foregroundChanged",
+			"coverage.gap",
+			"browser.visiblePageChanged",
+		]).toContain(observation?.observation?.kind);
 		expect(observation?.observation?.content).toBeUndefined();
 
 		child.stdin.write(

@@ -965,11 +965,20 @@ function isLocalPlanningOutboxPayload(
 			hasExactKeys(payload, [
 				"batchId",
 				"mutationCount",
+				"mutationKinds",
 				"planIds",
 				"requiresPlanningReestimate",
 			]) &&
 			isProtocolIdentifier(payload.batchId, 256) &&
 			isPositiveSafeInteger(payload.mutationCount) &&
+			Array.isArray(payload.mutationKinds) &&
+			payload.mutationKinds.length <= 10_000 &&
+			payload.mutationKinds.every((kind) =>
+				kind === "create" ||
+				kind === "update" ||
+				kind === "delete" ||
+				kind === "restore",
+			) &&
 			Array.isArray(payload.planIds) &&
 			payload.planIds.length <= 10_000 &&
 			payload.planIds.every((planId) => isProtocolIdentifier(planId, 256)) &&
