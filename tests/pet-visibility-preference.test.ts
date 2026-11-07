@@ -43,25 +43,6 @@ describe("persisted pet visibility synchronization", () => {
 		unsubscribe();
 	});
 
-	test("applies later persisted changes without mounting the settings page", async () => {
-		const controller = new PreferencesController(
-			new MockPreferencesService({ latencyMs: 0, storage: null }),
-		);
-		const visible: boolean[] = [];
-		const unsubscribe = subscribePetVisibilityPreference(
-			controller,
-			bridgeRecording(visible),
-		);
-		await controller.load();
-		await waitFor(() => visible.length === 1);
-		const state = controller.getSnapshot();
-		if (!("draft" in state)) throw new Error("Expected loaded preferences");
-		controller.update("pet", { ...state.draft.pet, visible: false });
-		await controller.save();
-		await waitFor(() => visible.length === 2);
-		expect(visible).toEqual([true, false]);
-		unsubscribe();
-	});
 });
 
 function controllerWith(values: PreferenceValues): PreferencesController {

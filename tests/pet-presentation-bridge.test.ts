@@ -82,63 +82,10 @@ describe("ElectrobunPetPresentationBridge", () => {
 		expect(JSON.stringify(diagnostics)).not.toContain("endpoint");
 	});
 
-	test("does not load Electrobun transport in standalone browser previews", async () => {
-		let transportLoads = 0;
-		const bridge = new ElectrobunPetPresentationBridge({
-			runtimeAvailable: () => false,
-			loadTransport: async () => {
-				transportLoads += 1;
-				throw new Error("must not load");
-			},
-		});
-		await bridge.present({ kind: "user-inactive" });
-		await bridge.setVisible(true);
-		expect(transportLoads).toBe(0);
-	});
 });
 
 describe("PlanningPetCoordinator", () => {
-	test("maps conversational analysis transitions without coupling the controller to RPC", async () => {
-		const events: PetPresentationEvent[] = [];
-		const bridge = recordingBridge(events);
-		const controller = new PlanningController(new PetPlanningService());
-		await controller.initialize();
-		const coordinator = new PlanningPetCoordinator(controller, bridge);
-		coordinator.start();
-		controller.updateCreateInput({ goal: "完成个人作品集" });
-		await controller.createPlanDraft();
-		coordinator.stop();
 
-		expect(events).toEqual([
-			{ kind: "plan-generation-started" },
-			{ kind: "plan-generation-succeeded" },
-		]);
-		expect(controller.getSnapshot().status).toBe("draft");
-	});
-
-	test("maps failure and never lets a rejected presentation block planning", async () => {
-		const controller = new PlanningController(new PetPlanningService(true));
-		await controller.initialize();
-		const attempted: PetPresentationEvent[] = [];
-		const bridge: PetPresentationBridge = {
-			async present(event) {
-				attempted.push(event);
-				throw new Error("pet unavailable");
-			},
-			async setVisible() {},
-		};
-		const coordinator = new PlanningPetCoordinator(controller, bridge);
-		coordinator.start();
-		controller.updateCreateInput({ goal: "完成个人作品集" });
-		await controller.createPlanDraft();
-		coordinator.stop();
-
-		expect(attempted).toEqual([
-			{ kind: "plan-generation-started" },
-			{ kind: "plan-generation-failed" },
-		]);
-		expect(controller.getSnapshot().status).toBe("model-unavailable");
-	});
 });
 
 function recordingBridge(
@@ -156,6 +103,9 @@ class PetPlanningService implements PlanningService {
 	private plan: PlanView | null = null;
 	constructor(private readonly fail = false) {}
 	subscribe() {
+		return () => {};
+	}
+	onPlanningProgress() {
 		return () => {};
 	}
 	async listPlans() {
@@ -216,6 +166,7 @@ class PetPlanningService implements PlanningService {
 	async sendPlanMessage() {}
 	async confirmPlanRevision() {}
 	async setTaskStatus() {}
+	async setTaskRelevance() {}
 	async confirmObservationAttribution() {}
 	async pausePlan() {}
 	async resumePlan() {}

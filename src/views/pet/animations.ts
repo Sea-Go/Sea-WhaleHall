@@ -679,7 +679,7 @@ function applyMotionTemplate(
       break;
     case 'jumpArc': {
       const arc = Math.sin(p * Math.PI);
-      frame.root.y = -arc * 68;
+      frame.root.y = -arc * 26;
       frame.pose.airborne = arc;
       frame.pose.crouch = p < 0.12 ? 1 - p / 0.12 : 0;
       frame.pose.squash = Math.sin(Math.min(1, p * 4) * Math.PI) * 0.4;
@@ -689,7 +689,7 @@ function applyMotionTemplate(
     }
     case 'takeOff':
       frame.pose.crouch = 1 - easeOut(p);
-      frame.root.y = -easeIn(p) * 30;
+      frame.root.y = -easeIn(p) * 14;
       frame.pose.airborne = easeIn(p);
       frame.pose.squash = Math.sin(p * Math.PI) * 0.55;
       break;
@@ -703,7 +703,7 @@ function applyMotionTemplate(
     }
     case 'tumble':
       frame.root.rotation = easeInOut(p) * Math.PI * direction;
-      frame.root.y = -Math.sin(p * Math.PI) * 22;
+      frame.root.y = -Math.sin(p * Math.PI) * 12;
       frame.pose.airborne = Math.sin(p * Math.PI);
       frame.pose.lie = easeInOut(p);
       break;

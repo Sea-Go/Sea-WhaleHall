@@ -40,6 +40,8 @@ export interface PetInteractionEvent {
   localPoint: Point | null;
   pointerId?: number;
   dragDelta?: Point;
+  /** pointerdown 时画布内的抓取点（CSS 像素，与窗口 DIP 同尺度）。 */
+  grabPoint?: Point;
 }
 
 export interface PetRenderSnapshot {
@@ -67,8 +69,12 @@ interface ExtendedPetState extends PetState {
   modelId?: string;
 }
 
-const BASE_X_RATIO = 0.52;
-const BASE_Y_RATIO = 0.54;
+const BASE_X_RATIO = 0.56;
+// 锚定鲸鱼身体中心。窗口 320×250（见 bun/index.ts petWidth/petHeight 注释）：
+// y：0.41*250≈102.5，鲸鱼(视觉高139)占 y≈33..172，顶部余量只够消息气泡
+// 与 ≤26px 的跳跃峰值（jumpArc 上限同步压到 26）；x：267 宽鲸鱼在 320 内
+// 近似水平居中。底部避开聊天面板——不与面板重叠。
+const BASE_Y_RATIO = 0.41;
 const PETTING_DISTANCE = 42;
 const RAPID_CLICK_WINDOW_MS = 2_400;
 const DOUBLE_CLICK_WINDOW_MS = 330;
@@ -288,6 +294,7 @@ export class CanvasPetRenderer implements PetRenderer {
     this.animationFrame = 0;
     this.hoverAmount = 0;
     this.pressAmount = 0;
+    this.messageBubble = null;
     this.pointerCanvas = null;
     this.pointerLocal = { x: 0, y: 0 };
     this.hoverZone = null;
@@ -346,7 +353,7 @@ export class CanvasPetRenderer implements PetRenderer {
         this.emit('dragStart', 'dragged', this.pressedZone, event.pointerId, {
           x: totalX,
           y: totalY,
-        });
+        }, this.pressStart ? { x: this.pressStart.x, y: this.pressStart.y } : undefined);
       } else if (
         this.dragging &&
         !this.struggleStarted &&
@@ -528,6 +535,7 @@ export class CanvasPetRenderer implements PetRenderer {
     zone: PetHitZone | null,
     pointerId?: number,
     dragDelta?: Point,
+    grabPoint?: Point,
   ): void {
     this.onInteract?.({
       kind,
@@ -538,6 +546,7 @@ export class CanvasPetRenderer implements PetRenderer {
       localPoint: this.pointerCanvas ? { ...this.pointerLocal } : null,
       pointerId,
       dragDelta,
+      grabPoint,
     });
   }
 
@@ -595,6 +604,16 @@ export class CanvasPetRenderer implements PetRenderer {
   }
 
   private readonly render = (now: number) => {
+    try {
+      this.drawFrame(now);
+    } catch (error) {
+      // 单帧异常不能杀死 rAF 循环：clearRect 之后抛错会让桌宠永久空白。
+      console.error('[pet] render frame failed', error);
+    }
+    this.animationFrame = requestAnimationFrame(this.render);
+  };
+
+  private drawFrame(now: number): void {
     if (!this.canvas || !this.context || !this.animator) return;
     const context = this.context;
     const width = this.canvas.clientWidth;
@@ -637,8 +656,7 @@ export class CanvasPetRenderer implements PetRenderer {
     this.drawMessage(context, width, height, origin, frame);
 
     this.onFrame?.({ action: frame.action.id, frame, modelId: this.model.id });
-    this.animationFrame = requestAnimationFrame(this.render);
-  };
+  }
 
   private buildAnimationContext(
     width: number,
@@ -1047,6 +1065,8 @@ export class CanvasPetRenderer implements PetRenderer {
     context.restore();
   }
 
+  private messageBubble: { key: string; canvas: HTMLCanvasElement } | null = null;
+
   private drawMessage(
     context: CanvasRenderingContext2D,
     width: number,
@@ -1063,22 +1083,52 @@ export class CanvasPetRenderer implements PetRenderer {
     const bubbleWidth = Math.max(56, Math.min(width - 24, measured + 28));
     const x = clamp(anchorCanvas.x - bubbleWidth / 2, 10, Math.max(10, width - bubbleWidth - 10));
     const y = clamp(anchorCanvas.y, 8, Math.max(8, height - 34));
-    context.save();
-    context.fillStyle = 'rgba(5, 22, 31, 0.84)';
-    context.shadowColor = 'rgba(0, 0, 0, 0.2)';
-    context.shadowBlur = 12;
-    context.beginPath();
-    context.roundRect(x, y, bubbleWidth, 28, 14);
-    context.fill();
-    context.shadowBlur = 0;
-    context.strokeStyle = 'rgba(220, 255, 255, 0.16)';
-    context.lineWidth = 1;
-    context.stroke();
-    context.fillStyle = 'rgba(232, 252, 255, 0.96)';
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillText(text, x + bubbleWidth / 2, y + 14, bubbleWidth - 16);
-    context.restore();
+    context.drawImage(
+      this.cachedMessageBubble(text, Math.round(bubbleWidth)),
+      x - 12,
+      y - 12,
+      bubbleWidth + 24,
+      28 + 24,
+    );
+  }
+
+  /**
+   * 气泡带 12px 阴影模糊，逐帧直绘会让 GPU 进程每帧做一次 CPU 高斯模糊
+   * （CA::CG::DrawPathShadow → vImageConvolve），实测能把渲染管线堵死到
+   * 画面冻结。这里只在文本或气泡宽度变化时重建一次位图，帧循环只 drawImage。
+   */
+  private cachedMessageBubble(
+    text: string,
+    bubbleWidth: number,
+  ): HTMLCanvasElement {
+    const key = `${bubbleWidth}|${text}`;
+    if (this.messageBubble?.key === key) return this.messageBubble.canvas;
+    const scale = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil((bubbleWidth + 24) * scale);
+    canvas.height = Math.ceil((28 + 24) * scale);
+    const bubble = canvas.getContext('2d');
+    if (bubble) {
+      bubble.scale(scale, scale);
+      bubble.translate(12, 12);
+      bubble.font = '600 12px ui-rounded, system-ui, sans-serif';
+      bubble.fillStyle = 'rgba(5, 22, 31, 0.84)';
+      bubble.shadowColor = 'rgba(0, 0, 0, 0.2)';
+      bubble.shadowBlur = 12;
+      bubble.beginPath();
+      bubble.roundRect(0, 0, bubbleWidth, 28, 14);
+      bubble.fill();
+      bubble.shadowBlur = 0;
+      bubble.strokeStyle = 'rgba(220, 255, 255, 0.16)';
+      bubble.lineWidth = 1;
+      bubble.stroke();
+      bubble.fillStyle = 'rgba(232, 252, 255, 0.96)';
+      bubble.textAlign = 'center';
+      bubble.textBaseline = 'middle';
+      bubble.fillText(text, bubbleWidth / 2, 14, bubbleWidth - 16);
+    }
+    this.messageBubble = { key, canvas };
+    return canvas;
   }
 }
 

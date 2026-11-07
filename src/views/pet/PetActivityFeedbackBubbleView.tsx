@@ -34,7 +34,7 @@ export function PetActivityFeedbackBubbleView({
 				aria-label="Agent 主动反馈"
 			>
 				<div className="pet-activity-feedback__header">
-					<span>小鲸的观察</span>
+					<span>大肥鱼的观察</span>
 					<span className="pet-activity-feedback__progress">
 						<span className="pet-visually-hidden">
 							第 {page.pageNumber} 段，共 {page.pageCount} 段
