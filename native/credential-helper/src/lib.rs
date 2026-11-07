@@ -11,6 +11,7 @@ pub const MAX_SECRET_BYTES: usize = 2_048;
 pub const SERVICE_NAMESPACE: &str = "com.seago.whalehall.auth";
 pub const AUTH_REFRESH_TOKEN_NAME: &str = "auth.refresh-token.production.v1";
 pub const LEGACY_AUTH_REFRESH_TOKEN_NAME: &str = "auth.refresh-token.current";
+pub const RTW_SESSION_NAME: &str = "rtw.session.production.v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -271,6 +272,7 @@ fn validate_request(parsed: &ParsedRequest) -> Result<CredentialTarget, &'static
             }
             let name = request.name.as_deref().ok_or("INVALID_REQUEST")?;
             if name != AUTH_REFRESH_TOKEN_NAME
+                && name != RTW_SESSION_NAME
                 && !(name == LEGACY_AUTH_REFRESH_TOKEN_NAME
                     && request.operation == CredentialOperation::Delete)
             {

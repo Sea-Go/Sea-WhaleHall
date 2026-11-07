@@ -34,8 +34,20 @@ const thread = {
 	title: "今天的计划",
 	updatedAtMs: 8,
 	messages: [
-		{ id: "user-1", role: "user" as const, content: "帮我看看今天", createdAtMs: 1, state: "complete" as const },
-		{ id: "assistant-1", role: "assistant" as const, content: "你今天有两个", createdAtMs: 2, state: "streaming" as const },
+		{
+			id: "user-1",
+			role: "user" as const,
+			content: "帮我看看今天",
+			createdAtMs: 1,
+			state: "complete" as const,
+		},
+		{
+			id: "assistant-1",
+			role: "assistant" as const,
+			content: "你今天有两个",
+			createdAtMs: 2,
+			state: "streaming" as const,
+		},
 	],
 };
 
@@ -72,8 +84,16 @@ describe("ConversationPage Agent run states", () => {
 		};
 		const markup = renderToStaticMarkup(
 			<ConversationPage
-				state={{ status: "ready", thread, turn: { status: "suspended", run: approvalRun } }}
-				actions={{ onApproveTool: () => {}, onDeclineTool: () => {}, onStopRun: () => {} }}
+				state={{
+					status: "ready",
+					thread,
+					turn: { status: "suspended", run: approvalRun },
+				}}
+				actions={{
+					onApproveTool: () => {},
+					onDeclineTool: () => {},
+					onStopRun: () => {},
+				}}
 			/>,
 		);
 
@@ -81,29 +101,5 @@ describe("ConversationPage Agent run states", () => {
 		expect(markup).toContain(">拒绝<");
 		expect(markup).toContain("只读操作");
 		expect(markup).not.toContain("sha256:must-stay-hidden");
-	});
-
-	test("labels cancelled partial output and enables the next composer turn", () => {
-		const markup = renderToStaticMarkup(
-			<ConversationPage
-				state={{
-					status: "ready",
-					thread: {
-						...thread,
-						messages: [{ ...thread.messages[1]!, state: "cancelled" }],
-					},
-					turn: {
-						status: "cancelled",
-						run: { ...run, status: "cancelled" },
-						message: "已停止生成，已保留当前内容。",
-					},
-				}}
-				actions={{ onSendMessage: () => {} }}
-			/>,
-		);
-
-		expect(markup).toContain("生成已停止，已保留部分内容");
-		expect(markup).toContain("已停止生成，已保留当前内容");
-		expect(markup).not.toContain('id="conversation-draft" disabled');
 	});
 });

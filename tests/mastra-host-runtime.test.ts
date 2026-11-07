@@ -52,23 +52,23 @@ describe("AgentHostRuntime activity analysis", () => {
 		});
 		Reflect.set(runtime, "agents", {
 			activitySupportSupervisor: {
-				generate: async () => ({
-					object: {
+				stream: async () => ({
+					object: Promise.resolve({
 						route: "momentum",
 						certainty: "medium",
 						situation: "近期有目标相关推进",
 						userNeed: "保护当前推进节奏",
-					},
+					}),
 				}),
 			},
 			activitySupportSpecialists: {
 				momentumCoach: {
-					generate: async () => ({
-						object: {
+					stream: async () => ({
+						object: Promise.resolve({
 							acknowledgement: "你似乎正在向目标靠近",
 							suggestion: "可以先完成眼前最小的一步",
 							question: null,
-						},
+						}),
 					}),
 				},
 			},
@@ -179,25 +179,25 @@ describe("AgentHostRuntime activity analysis", () => {
 		let checkInCalls = 0;
 		Reflect.set(runtime, "agents", {
 			activitySupportSupervisor: {
-				generate: async () => ({
-					object: {
+				stream: async () => ({
+					object: Promise.resolve({
 						route: "possible_blocker",
 						certainty: "high",
 						situation: "模型武断地声称用户卡住",
 						userNeed: "模型建议拆解卡点",
-					},
+					}),
 				}),
 			},
 			activitySupportSpecialists: {
 				checkInCompanion: {
-					generate: async () => {
+					stream: async () => {
 						checkInCalls += 1;
 						return {
-							object: {
+							object: Promise.resolve({
 								acknowledgement: "我还不能确定你此刻的状态",
 								suggestion: "可以按自己的节奏选择下一步",
 								question: "你想继续、拆小问题，还是先休息？",
-							},
+							}),
 						};
 					},
 				},
@@ -354,7 +354,17 @@ async function planningRuntime(
 			},
 		},
 	});
-	Reflect.set(runtime, "agents", { planningAnalysis: { generate } });
+	Reflect.set(runtime, "agents", {
+		planningAnalysis: {
+			// 真实路径用 .stream；测试桩用同构的 stream 形状（objectStream）。
+			stream: (prompt: string, options: { abortSignal: AbortSignal }) =>
+				Promise.resolve(generate(prompt, options)).then((value) => ({
+					objectStream: (async function* () {
+						if (value !== undefined) yield value;
+					})(),
+				})),
+		},
+	});
 	Reflect.set(runtime, "planningRelay", {
 		runInContext: async <TResult>(
 			_context: unknown,
@@ -390,6 +400,7 @@ function planningAnalyze(runtime: AgentHostRuntime): Promise<unknown> {
 				currentSchedulingPreferences: null,
 				observationEvidence: [],
 				calendarEvents: [],
+				memoryHints: null,
 			},
 		},
 	});

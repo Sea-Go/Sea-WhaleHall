@@ -29,6 +29,36 @@ export type PlanningScheduleProjection = {
 	unplannedReason: string | null;
 };
 
+export type PlanningTaskRelevance = "strong" | "weak";
+
+/** Claude Code 式计划分析步骤：思考块与工具调用块组成 DAG 时间线。 */
+export type PlanningProgressStep =
+	| {
+			kind: "thinking";
+			text: string;
+			startedAtMs: number;
+	  }
+	| {
+			kind: "tool";
+			tool: string;
+			args: string;
+			status: "running" | "done" | "failed";
+			result?: string;
+			startedAtMs: number;
+	  };
+
+export type PlanningEvaluationProjection = {
+	angle:
+		| "goal-alignment"
+		| "time-feasibility"
+		| "dependency-risk"
+		| "load-recovery"
+		| "evidence-sufficiency";
+	verdict: "pass" | "adjust" | "block";
+	summary: string;
+	affectedTaskIds: string[];
+};
+
 export type PlanningTaskProjection = {
 	id: string;
 	title: string;
@@ -36,9 +66,14 @@ export type PlanningTaskProjection = {
 	purpose: PlanningTaskPurpose;
 	status: PlanningTaskStatus;
 	estimatedMinutes: number;
+	/** 观测证据按任务聚合的实际投入分钟数；无证据为 0。 */
+	actualMinutes: number;
 	dependsOnTaskIds: string[];
 	schedules: PlanningScheduleProjection[];
 	unscheduledReason: string | null;
+	/** 旧数据可能缺失。 */
+	relevance: PlanningTaskRelevance | null;
+	relevanceReason: string | null;
 };
 
 export type PlanningEstimateProjection = {
@@ -89,6 +124,8 @@ export type PlanningRevisionProjection = {
 	schedulingPreferences: PlanningSchedulingPreferencesProjection;
 	scheduleWindow: { startDate: string; endDateExclusive: string };
 	tasks: PlanningTaskProjection[];
+	/** 旧数据可能缺失。 */
+	evaluations: PlanningEvaluationProjection[] | null;
 };
 
 export type PlanningObservationProjection = {
@@ -183,11 +220,18 @@ export type SendPlanMessageCommand = PlanningWriteCommand & {
 
 export type ConfirmPlanRevisionCommand = PlanningWriteCommand & {
 	revisionId: string;
+	/** 提案将强关联任务降级为弱关联时必须为 true。 */
+	acknowledgeRelevanceDemotion?: boolean;
 };
 
 export type SetPlanningTaskStatusCommand = PlanningWriteCommand & {
 	taskId: string;
 	status: PlanningTaskStatus;
+};
+
+export type SetPlanningTaskRelevanceCommand = PlanningWriteCommand & {
+	taskId: string;
+	relevance: "strong" | "weak";
 };
 
 export type ConfirmPlanningObservationCommand = PlanningWriteCommand & {

@@ -5,7 +5,10 @@ import type {
 	PlanView,
 } from "../src/views/client/features/planning/domain";
 import { PlanningController } from "../src/views/client/features/planning/PlanningController";
-import { PlanningPage } from "../src/views/client/features/planning/PlanningPage";
+import {
+	PlanStatusCard,
+	SmartScheduleComposer,
+} from "../src/views/client/features/planning/PlanningPanels";
 import {
 	type ChangePlanStatusRequest,
 	type ConfirmObservationAttributionRequest,
@@ -36,6 +39,7 @@ function planFixture(status: PlanView["status"]): PlanView {
 			purpose: "execution" as const,
 			status: "pending" as const,
 			estimatedMinutes: 180,
+			actualMinutes: 0,
 			dependencyIds: [],
 			schedules: [
 				{
@@ -48,18 +52,10 @@ function planFixture(status: PlanView["status"]): PlanView {
 					userLocked: false,
 					version: 1,
 				},
-				{
-					eventId: "session-2",
-					date: "2026-08-16",
-					start: "2026-08-16T01:00:00Z",
-					end: "2026-08-16T02:30:00Z",
-					timeZone: "Asia/Shanghai",
-					scheduleOrigin: "user" as const,
-					userLocked: true,
-					version: 4,
-				},
 			],
 			unplanned: null,
+			relevance: null,
+			relevanceReason: null,
 		},
 		{
 			id: "task-2",
@@ -68,23 +64,15 @@ function planFixture(status: PlanView["status"]): PlanView {
 			purpose: "validation" as const,
 			status: "pending" as const,
 			estimatedMinutes: 60,
+			actualMinutes: 0,
 			dependencyIds: ["task-1"],
 			schedules: [],
 			unplanned: {
 				kind: "capacity" as const,
 				message: "未来 7 天剩余容量不足",
 			},
-		},
-		{
-			id: "task-3",
-			title: "周末复盘验证结果",
-			description: "决定下周继续、缩小范围或更换路径。",
-			purpose: "review" as const,
-			status: "pending" as const,
-			estimatedMinutes: 30,
-			dependencyIds: ["task-2"],
-			schedules: [],
-			unplanned: null,
+			relevance: null,
+			relevanceReason: null,
 		},
 	];
 	return {
@@ -124,6 +112,7 @@ function planFixture(status: PlanView["status"]): PlanView {
 			assumptions: ["每周至少可投入 4 小时"],
 			questions: ["周末是否可以安排一次 90 分钟专注时段？"],
 			tasks,
+			evaluations: null,
 		},
 		messages: [
 			{
@@ -151,52 +140,9 @@ function planFixture(status: PlanView["status"]): PlanView {
 			coverage: "unavailable",
 			message: "可以在设置中授权。",
 		},
-		pendingObservations: [
-			{
-				id: "observation-1",
-				occurredAt: "2026-08-14T03:00:00Z",
-				durationMinutes: 45,
-				summary: "检测到可能相关的 45 分钟投入",
-				confidence: "medium",
-				candidateTaskIds: ["task-1", "task-2"],
-				version: 1,
-			},
-		],
-		adjustments: [
-			{
-				id: "adjustment-1",
-				createdAt: "2026-08-14T04:00:00Z",
-				trigger: "daily-rollover",
-				summary: "根据昨日进度，后移一次案例整理",
-				previousEstimatedCompletionDate: "2027-06-27",
-				nextEstimatedCompletionDate: "2027-06-30",
-				movedCount: 1,
-				addedCount: 0,
-				cancelledCount: 0,
-				canUndo: true,
-				undoUnavailableReason: null,
-				undoneAt: null,
-				version: 2,
-			},
-		],
-		notifications:
-			status === "awaiting-confirmation"
-				? [
-						{
-							id: "notification-analysis",
-							kind: "analysis-ready" as const,
-							message: "本地分析已完成，有一版新提案等待你确认。",
-							createdAt: "2026-08-13T02:00:00Z",
-						},
-					]
-				: [
-						{
-							id: "notification-adjustment",
-							kind: "schedule-adjusted" as const,
-							message: "计划已动态调整：移动 1、新增 1、取消 0 项。",
-							createdAt: "2026-08-14T04:00:00Z",
-						},
-					],
+		pendingObservations: [],
+		adjustments: [],
+		notifications: [],
 		updatedAt: "2026-08-14T04:00:00Z",
 	};
 }
@@ -218,9 +164,6 @@ function summary(plan: PlanView): PlanSummaryView {
 class StaticPlanningService implements PlanningService {
 	plan: PlanView | null;
 	listError: PlanningServiceError | null = null;
-	messageError: PlanningServiceError | null = null;
-	pauseError: PlanningServiceError | null = null;
-	undoError: PlanningServiceError | null = null;
 
 	constructor(plan: PlanView | null) {
 		this.plan = plan;
@@ -244,26 +187,7 @@ class StaticPlanningService implements PlanningService {
 		return { planId: "plan-1" };
 	}
 
-	async sendPlanMessage(request: SendPlanMessageRequest): Promise<void> {
-		if (!this.plan) return;
-		this.plan = {
-			...this.plan,
-			version: this.plan.version + 1,
-			messages: [
-				...this.plan.messages,
-				{
-					id: "pending-message",
-					role: "user",
-					content: request.content,
-					createdAt: "2026-08-14T05:00:00Z",
-					status: this.messageError ? "pending-analysis" : "complete",
-					revisionId: null,
-				},
-			],
-		};
-		if (this.messageError) throw this.messageError;
-	}
-
+	async sendPlanMessage(_request: SendPlanMessageRequest): Promise<void> {}
 	async confirmPlanRevision(
 		_request: ConfirmPlanRevisionRequest,
 	): Promise<void> {}
@@ -271,236 +195,242 @@ class StaticPlanningService implements PlanningService {
 	async confirmObservationAttribution(
 		_request: ConfirmObservationAttributionRequest,
 	): Promise<void> {}
-	async pausePlan(_request: ChangePlanStatusRequest): Promise<void> {
-		if (this.pauseError) throw this.pauseError;
-	}
+	async pausePlan(_request: ChangePlanStatusRequest): Promise<void> {}
 	async resumePlan(_request: ChangePlanStatusRequest): Promise<void> {}
 	async completePlan(_request: ChangePlanStatusRequest): Promise<void> {}
 	async archivePlan(_request: ChangePlanStatusRequest): Promise<void> {}
-	async undoPlanAdjustment(_request: UndoPlanAdjustmentRequest): Promise<void> {
-		if (this.undoError) throw this.undoError;
-	}
+	async undoPlanAdjustment(
+		_request: UndoPlanAdjustmentRequest,
+	): Promise<void> {}
 	async retryPendingAnalysis(
 		_request: ChangePlanStatusRequest,
 	): Promise<void> {}
+	async setTaskRelevance(_request: unknown): Promise<void> {}
+	onPlanningProgress() {
+		return () => {};
+	}
 }
 
-function render(controller: PlanningController) {
-	return renderToStaticMarkup(<PlanningPage controller={controller} />);
+async function composer(service: StaticPlanningService) {
+	const controller = new PlanningController(service);
+	await controller.initialize();
+	return renderToStaticMarkup(
+		<SmartScheduleComposer
+			controller={controller}
+			onOpenManual={() => {}}
+			onPlanned={() => {}}
+		/>,
+	);
 }
 
-describe("dynamic planning UI", () => {
-	test("idle boot renders an announced loading state", () => {
-		const controller = new PlanningController(new StaticPlanningService(null));
-		const markup = render(controller);
-		expect(markup).toContain('role="status"');
-		expect(markup).toContain("正在载入本地计划");
-	});
+async function statusCard(service: StaticPlanningService) {
+	const controller = new PlanningController(service);
+	await controller.initialize();
+	return renderToStaticMarkup(<PlanStatusCard controller={controller} />);
+}
 
-	test("empty state asks only for a goal and the default-off today switch", async () => {
-		const controller = new PlanningController(new StaticPlanningService(null));
-		await controller.initialize();
-		const markup = render(controller);
-		expect(markup).toContain("你想推进什么？");
-		expect(markup).toContain("目标描述");
-		expect(markup).toContain("今天开始");
-		expect(markup).toContain("默认关闭；确认计划后，从明天开始安排");
+describe("smart schedule composer", () => {
+	test("empty plan state offers one goal input, smart action, and manual escape", async () => {
+		const markup = await composer(new StaticPlanningService(null));
+		expect(markup).toContain("安排什么？");
+		expect(markup).toContain('id="smart-goal"');
+		expect(markup).toContain("智能安排");
+		expect(markup).toContain("手动设置");
+		expect(markup).toContain("今天就开始");
 		expect(markup).not.toContain('type="date"');
-		expect(markup).not.toContain("截止日期");
-		expect(markup).not.toContain('checked=""');
+		expect(markup).not.toContain("保存日程");
 	});
 
-	test("shows fuzzy suggestion, low-confidence ETA, exact seven days and every session", async () => {
-		const controller = new PlanningController(
+	test("proposed revision renders the entry list with times and a confirm action", async () => {
+		const markup = await composer(
 			new StaticPlanningService(planFixture("awaiting-confirmation")),
 		);
-		await controller.initialize();
-		const markup = render(controller);
-		expect(markup).toContain("模型建议");
-		expect(markup).toContain("新提案已就绪");
-		expect(markup).toContain("模糊计划");
-		expect(markup).toContain("低置信度 · 仍需验证");
-		expect(markup).toContain("证据截至 2026年8月12日");
-		expect(markup).toContain("2026年8月14日 – 2026年8月20日");
-		expect(markup).toContain("第 1 次");
-		expect(markup).toContain("第 2 次");
-		expect(markup).toContain("用户已锁定");
-		expect(markup).toContain("未排程：未来 7 天剩余容量不足");
-		expect(markup).toContain("每周 4 小时");
-		expect(markup).toContain("周三 19:00–21:30");
-		expect(markup).toContain("周六 09:00–12:00");
-		expect(markup).toContain("可在下方对话中修改");
-		expect(markup).toContain("验证");
-		expect(markup).toContain("复盘");
-		expect(markup).toContain("确认并开始");
-		expect(markup).toContain("计划对话");
-		expect(markup).toContain("按 ⌘/Ctrl + Enter 发送");
-	});
-
-	test("keeps live tasks visible while an active plan previews a new proposal", async () => {
-		const plan = planFixture("active");
-		if (!plan.revision) throw new Error("Expected revision fixture");
-		const firstRevisionTask = plan.revision.tasks[0];
-		if (!firstRevisionTask) throw new Error("Expected revision task fixture");
-		const proposalTask = {
-			...firstRevisionTask,
-			id: "proposal-task",
-			title: "下一版验证任务",
-			purpose: "validation" as const,
-			schedules: [],
-		};
-		const controller = new PlanningController(
-			new StaticPlanningService({
-				...plan,
-				revision: {
-					...plan.revision,
-					revisionId: "proposal-revision",
-					status: "proposed",
-					goal: "先完成一个可以面试演示的完整案例，再扩展作品集",
-					tasks: [proposalTask],
-				},
-			}),
-		);
-		await controller.initialize();
-		const markup = render(controller);
-
-		expect(markup).toContain("执行中");
+		expect(markup).toContain("十个月内形成一套可以持续迭代的个人作品集");
 		expect(markup).toContain("完成第一个案例页面");
-		expect(markup).toContain("下一版验证任务");
-		expect(markup).toContain("新目标");
-		expect(markup).toContain("先完成一个可以面试演示的完整案例，再扩展作品集");
-		expect(markup).toContain("当前计划会继续执行");
-		expect(markup).toContain("确认并应用");
-		expect(markup).not.toContain("只有你确认后才会开始执行");
+		expect(markup).toContain("8月14日 09:00–10:30");
+		expect(markup).toContain("未排程 · 未来 7 天剩余容量不足");
+		expect(markup).toContain("待确认：");
+		expect(markup).toContain("周末是否可以安排一次 90 分钟专注时段？");
+		expect(markup).toContain("确认安排");
+		// 可确认：主按钮不带 disabled（disabled 只出现在空输入的发送钮上）。
+		expect(markup).toContain("><span>确认安排</span></button>");
+		expect(markup).toContain("输入调整意见");
 	});
 
-	test("renders all three model-suggested plan types without auto-confirming one", async () => {
-		for (const [type, label] of [
-			["short-term", "短期计划"],
-			["long-term", "长期计划"],
-			["fuzzy", "模糊计划"],
-		] as const) {
-			const plan = planFixture("awaiting-confirmation");
-			const revision = plan.revision;
-			if (!revision) throw new Error("Expected revision fixture");
-			const controller = new PlanningController(
-				new StaticPlanningService({
-					...plan,
-					revision: { ...revision, planType: type },
-				}),
-			);
-			await controller.initialize();
-			const markup = render(controller);
-			expect(markup).toContain(label);
-			expect(markup).toContain("只有你确认后才会开始执行");
-		}
+	test("confirmed draft stays conversational and shows the assistant reply", async () => {
+		const draft = planFixture("draft");
+		const markup = await composer(new StaticPlanningService(draft));
+		expect(markup).toContain("完善中");
+		expect(markup).toContain("当前版本已确认，调整会生成新的提案");
+		expect(markup).toContain("现在更适合作为模糊计划");
+		expect(markup).toContain("输入调整意见");
+		expect(markup).not.toContain("<span>确认安排</span>");
 	});
 
-	test("active view keeps task, monitoring, attribution and undo actions explicit", async () => {
-		const controller = new PlanningController(
-			new StaticPlanningService(planFixture("active")),
-		);
-		await controller.initialize();
-		const markup = render(controller);
-		expect(markup).toContain("执行中");
-		expect(markup).toContain("完成只由你确认");
-		expect(markup).toContain("监测已关闭，仅使用手动进度");
-		expect(markup).toContain("观测只提供证据，绝不会自动完成任务");
-		expect(markup).toContain("计入“完成第一个案例页面”");
-		expect(markup).toContain("不计入计划");
-		expect(markup).toContain("动态调整记录");
-		expect(markup).toContain("日程与预计完成日已检查");
-		expect(markup).toContain("撤销");
-		expect(markup).toContain("确认计划已完成");
+	test("plan without any revision yet prompts to keep talking", async () => {
+		const draft = { ...planFixture("draft"), revision: null };
+		const markup = await composer(new StaticPlanningService(draft));
+		// draft 且已有助手答复：明确展示"在等你补充"，而不是含糊的"说句话推进"。
+		expect(markup).toContain("需要你补充以下信息");
+		expect(markup).toContain("可一次性回答");
 	});
+});
 
-	test("exposes every runtime-supported completion and archive transition", async () => {
-		const paused = new PlanningController(
-			new StaticPlanningService(planFixture("paused")),
-		);
-		await paused.initialize();
-		const pausedMarkup = render(paused);
-		expect(pausedMarkup).toContain("恢复计划");
-		expect(pausedMarkup).toContain("确认计划已完成");
-
-		const draft = new PlanningController(
-			new StaticPlanningService(planFixture("draft")),
-		);
-		await draft.initialize();
-		expect(render(draft)).toContain("归档计划");
-
-		const completed = new PlanningController(
-			new StaticPlanningService(planFixture("completed")),
-		);
-		await completed.initialize();
-		expect(render(completed)).toContain("归档");
-	});
-
-	test("keeps long Chinese content readable instead of truncating plan evidence", async () => {
+describe("smart composer confirmed task list", () => {
+	test("active plan renders grouped tasks sorted by next schedule with completion markers", async () => {
 		const plan = planFixture("active");
-		const longGoal =
-			"完成一套能够清楚解释复杂项目背景、关键判断、取舍过程与最终影响的个人作品集".repeat(
-				5,
-			);
-		const controller = new PlanningController(
-			new StaticPlanningService({ ...plan, goal: longGoal }),
+		const revision = plan.revision;
+		if (!revision) throw new Error("Active fixture must carry a revision");
+		const base = {
+			description: null,
+			purpose: "execution" as const,
+			estimatedMinutes: 60,
+			actualMinutes: 0,
+			dependencyIds: [] as string[],
+			unplanned: null,
+			relevance: null,
+			relevanceReason: null,
+		};
+		const scheduled = (id: string, start: string) => ({
+			eventId: `event-${id}`,
+			date: start.slice(0, 10),
+			start,
+			end: start,
+			timeZone: "Asia/Shanghai",
+			scheduleOrigin: "model" as const,
+			userLocked: false,
+			version: 1,
+		});
+		revision.tasks = [
+			{
+				...base,
+				id: "task-late",
+				title: "较晚的排程任务",
+				status: "pending" as const,
+				actualMinutes: 60,
+				schedules: [scheduled("late", "2026-08-16T02:00:00Z")],
+			},
+			{
+				...base,
+				id: "task-early",
+				title: "较早的排程任务",
+				status: "pending" as const,
+				actualMinutes: 30,
+				schedules: [scheduled("early", "2026-08-14T01:00:00Z")],
+			},
+			{
+				...base,
+				id: "task-done",
+				title: "已经做完的任务",
+				status: "completed" as const,
+				actualMinutes: 55,
+				schedules: [],
+			},
+			{
+				...base,
+				id: "task-skip",
+				title: "被跳过的任务",
+				status: "skipped" as const,
+				actualMinutes: 0,
+				schedules: [],
+			},
+		];
+		plan.tasks = revision.tasks;
+		const markup = await composer(new StaticPlanningService(plan));
+		expect(markup).toContain("任务清单");
+		expect(markup).toContain("已完成 1/4");
+		// 完成进度降序：投入占比 100% 的较晚任务排在 50% 的较早任务之前。
+		expect(markup.indexOf("较晚的排程任务")).toBeLessThan(
+			markup.indexOf("较早的排程任务"),
 		);
-		await controller.initialize();
-		const markup = render(controller);
-		expect(markup).toContain(longGoal);
-		expect(markup).toContain("整理背景、过程与结果");
-	});
-
-	test("shows an explicit conflict when an automatic adjustment cannot be undone", async () => {
-		const service = new StaticPlanningService(planFixture("active"));
-		service.undoError = new PlanningServiceError(
-			"conflict",
-			"calendar changed",
+		expect(markup).toContain("已投入 60m（100%）");
+		expect(markup).toContain("已投入 30m（50%）");
+		// 已完成单独分组，排在活跃任务之后；完成态有独立徽标与样式。
+		expect(markup.indexOf("smart-composer__item--completed")).toBeGreaterThan(
+			markup.indexOf("较晚的排程任务"),
 		);
-		const controller = new PlanningController(service);
-		await controller.initialize();
-		await controller.undoAdjustment("adjustment-1");
-		const markup = render(controller);
-		expect(markup).toContain("这次调整与已确认安排冲突");
-		expect(markup).toContain("原计划没有被覆盖");
-		expect(markup).toContain("动态调整记录");
+		expect(markup).toContain("smart-composer__item--completed");
+		expect(markup).toContain("已跳过");
+		// 活跃计划不走提案确认分支。
+		expect(markup).not.toContain("确认安排");
 	});
+});
 
-	test("model outage renders persisted pending analysis and a recovery action", async () => {
-		const service = new StaticPlanningService(planFixture("draft"));
-		service.messageError = new PlanningServiceError(
-			"model-unavailable",
-			"model unavailable",
+describe("plan status card task list", () => {
+	test("active plan renders grouped tasks sorted by next schedule with completion markers", async () => {
+		const plan = planFixture("active");
+		const revision = plan.revision;
+		if (!revision) throw new Error("Active fixture must carry a revision");
+		const base = {
+			description: null,
+			purpose: "execution" as const,
+			estimatedMinutes: 60,
+			dependencyIds: [] as string[],
+			unplanned: null,
+			relevance: null,
+			relevanceReason: null,
+		};
+		const scheduled = (id: string, start: string) => ({
+			eventId: `event-${id}`,
+			date: start.slice(0, 10),
+			start,
+			end: start,
+			timeZone: "Asia/Shanghai",
+			scheduleOrigin: "model" as const,
+			userLocked: false,
+			version: 1,
+		});
+		revision.tasks = [
+			{
+				...base,
+				id: "task-late",
+				title: "较晚的排程任务",
+				status: "pending" as const,
+				actualMinutes: 60,
+				schedules: [scheduled("late", "2026-08-16T02:00:00Z")],
+			},
+			{
+				...base,
+				id: "task-early",
+				title: "较早的排程任务",
+				status: "pending" as const,
+				actualMinutes: 30,
+				schedules: [scheduled("early", "2026-08-14T01:00:00Z")],
+			},
+			{
+				...base,
+				id: "task-done",
+				title: "已经做完的任务",
+				status: "completed" as const,
+				actualMinutes: 55,
+				schedules: [],
+			},
+			{
+				...base,
+				id: "task-skip",
+				title: "被跳过的任务",
+				status: "skipped" as const,
+				actualMinutes: 0,
+				schedules: [],
+			},
+		];
+		plan.tasks = revision.tasks;
+		const markup = await statusCard(new StaticPlanningService(plan));
+		expect(markup).toContain("任务清单");
+		expect(markup).toContain("已完成 1/4");
+		// 完成进度降序：投入占比 100% 的较晚任务排在 50% 的较早任务之前。
+		expect(markup.indexOf("较晚的排程任务")).toBeLessThan(
+			markup.indexOf("较早的排程任务"),
 		);
-		const controller = new PlanningController(service, () => "operation-1");
-		await controller.initialize();
-		await controller.sendMessage("请重新评估每周投入");
-		const markup = render(controller);
-		expect(markup).toContain("计划分析服务暂时不可用");
-		expect(markup).toContain("请重新评估每周投入");
-		expect(markup).toContain("待分析");
-		expect(markup).toContain("重试分析");
-	});
-
-	test("offline state never renders a blank page", async () => {
-		const service = new StaticPlanningService(null);
-		service.listError = new PlanningServiceError("offline", "offline");
-		const controller = new PlanningController(service);
-		await controller.initialize();
-		const markup = render(controller);
-		expect(markup).toContain("本地计划服务离线");
-		expect(markup).toContain("重新连接");
-	});
-
-	test("stale version disables mutations and offers an authoritative reload", async () => {
-		const service = new StaticPlanningService(planFixture("active"));
-		service.pauseError = new PlanningServiceError("stale-version", "stale");
-		const controller = new PlanningController(service);
-		await controller.initialize();
-		await controller.pausePlan();
-		const markup = render(controller);
-		expect(markup).toContain("计划已在别处更新");
-		expect(markup).toContain("载入最新版本");
-		expect(markup).toContain('disabled=""');
+		expect(markup).toContain("已投入 60m（100%）");
+		expect(markup).toContain("已投入 30m（50%）");
+		// 已完成单独分组，排在活跃任务之后；完成态有删除线样式与文字标注。
+		expect(markup.indexOf("smart-composer__item--completed")).toBe(-1);
+		expect(markup.indexOf("plan-status-card__task--completed")).toBeGreaterThan(
+			markup.indexOf("较晚的排程任务"),
+		);
+		expect(markup).toContain("已跳过");
+		// 活跃计划不显示提案确认按钮。
+		expect(markup).not.toContain("确认安排");
 	});
 });

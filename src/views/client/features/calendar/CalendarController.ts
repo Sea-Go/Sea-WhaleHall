@@ -73,9 +73,45 @@ export class CalendarController {
 		return () => this.listeners.delete(listener);
 	};
 
-	async load(scenario?: CalendarScenarioId): Promise<void> {
+	async load(
+		scenario?: CalendarScenarioId,
+		options?: { background?: boolean },
+	): Promise<void> {
 		const sequence = ++this.loadSequence;
 		const requestedScenario = scenario ?? this.state.scenario;
+		if (options?.background) {
+			// 变更推送（删除、计划调整等）触发的后台重载：保留现有数据与状态，
+			// 不把整板切成"正在同步"占位。乐观变更进行中的事件按本地版本合并
+			// （本地已删除的保持缺席）；失败时静默保留现状，下一次变更推送会再触发。
+			const accountGeneration = this.accountGeneration;
+			try {
+				const result = await this.service.load(requestedScenario);
+				if (
+					sequence !== this.loadSequence ||
+					accountGeneration !== this.accountGeneration
+				) {
+					return;
+				}
+				// 合并点读取最新 pending：乐观变更进行中的事件以本地版本为准
+				// （删除中的保持缺席），其余以权威读取为准。
+				const pending = this.state.pendingEventIds;
+				const optimistic = this.state.events.filter((event) =>
+					pending.has(event.id),
+				);
+				const authoritative = result.events.filter(
+					(event) => !pending.has(event.id),
+				);
+				this.patch({
+					loadState: "ready",
+					events: [...authoritative, ...optimistic].map(cloneCalendarEvent),
+					timeZone: result.timeZone,
+					scenario: result.scenario,
+				});
+			} catch {
+				// 保留当前数据与状态；加载失败不覆盖用户正在看的内容。
+			}
+			return;
+		}
 		this.patch({
 			loadState: "loading",
 			events: [],

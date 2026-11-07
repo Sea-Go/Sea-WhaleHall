@@ -10,7 +10,12 @@ export const AUTH_REFRESH_TOKEN_CREDENTIAL = "auth.refresh-token.production.v1";
 /** Compatibility-only deletion target used by the production-origin cutover. */
 export const LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL =
 	"auth.refresh-token.current";
-const CURRENT_SECRET_NAMES = new Set([AUTH_REFRESH_TOKEN_CREDENTIAL]);
+/** RTW 用户会话令牌；与 DC refresh token 相同的命名密钥纪律。 */
+export const RTW_SESSION_CREDENTIAL = "rtw.session.production.v1";
+const CURRENT_SECRET_NAMES = new Set([
+	AUTH_REFRESH_TOKEN_CREDENTIAL,
+	RTW_SESSION_CREDENTIAL,
+]);
 
 export type CredentialKeyReference = {
 	installationId: string;

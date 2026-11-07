@@ -61,8 +61,10 @@ import type {
 	PlanningNotificationProjection,
 	PlanningPlanProjection,
 	PlanningPlanSummaryProjection,
+	PlanningProgressStep,
 	PlanningWriteCommand,
 	SendPlanMessageCommand,
+	SetPlanningTaskRelevanceCommand,
 	SetPlanningTaskStatusCommand,
 	UndoPlanningAdjustmentCommand,
 } from "./planning";
@@ -140,6 +142,7 @@ export type {
 	PlanningNotificationProjection,
 	PlanningPlanProjection,
 	PlanningPlanSummaryProjection,
+	PlanningProgressStep,
 	PlanningWriteCommand,
 	ProactiveFeedbackAvailable,
 	ProactiveFeedbackPage,
@@ -148,6 +151,7 @@ export type {
 	SavePlanningDraftRequest,
 	SendPlanMessageCommand,
 	SetAgentReadPermissionsRequest,
+	SetPlanningTaskRelevanceCommand,
 	SetPlanningTaskStatusCommand,
 	SetProactiveFeedbackPolicyRequest,
 	StartConversationTurnRequest,
@@ -199,6 +203,8 @@ export type PetInteractionMessage = {
 	zone?: "head" | "face" | "body" | "tail" | "limb" | null;
 	pointerId?: number;
 	dragDelta?: { x: number; y: number };
+	/** dragStart 时 pointerdown 在画布内的抓取点（CSS 像素，与窗口 DIP 同尺度）。 */
+	grabPoint?: { x: number; y: number };
 };
 
 export type NativePetDragState = {
@@ -323,6 +329,10 @@ export type ClientRPC = {
 			};
 			setPlanningTaskStatus: {
 				params: SetPlanningTaskStatusCommand;
+				response: { plan: PlanningPlanProjection };
+			};
+			setPlanningTaskRelevance: {
+				params: SetPlanningTaskRelevanceCommand;
 				response: { plan: PlanningPlanProjection };
 			};
 			confirmPlanningObservation: {
@@ -583,6 +593,8 @@ export type ClientRPC = {
 			localStatusChanged: LocalRuntimeStatus;
 			petVisibilityChanged: { visible: boolean };
 			planChanged: PlanningChangeProjection;
+			/** 计划分析的结构化步骤时间线（思考块+工具块，Claude Code 式 DAG 排列）。 */
+			planningProgress: { steps: PlanningProgressStep[] };
 			calendarChanged: { version: number };
 		};
 	}>;

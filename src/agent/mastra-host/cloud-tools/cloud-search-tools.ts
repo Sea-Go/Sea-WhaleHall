@@ -6,6 +6,8 @@ import { z } from "zod";
 const identifier = z.string().trim().min(1).max(256);
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
 const intelligence = z.enum(["low", "medium", "high"]);
+/** H02 生产当前唯一开放的执行档；见 search() 的档位钉扎注释。 */
+const PRODUCTION_INTELLIGENCE = "low" as const;
 const searchInput = z
 	.object({
 		query: z.string().trim().min(1).max(4096),
@@ -281,6 +283,12 @@ export class CloudSearchToolSession {
 			);
 		}
 		const input = parsedInput.data;
+		// 生产执行档钉扎：H02 生产当前唯一开放档是快搜 low。模型传入的更高
+		// 档请求在执行边界归一到 low（等价 allow-lower-intelligence 语义），
+		// 上游请求/收据按归一后档位校验。生产开放更多档位后删除钉扎。
+		if (input.intelligence !== PRODUCTION_INTELLIGENCE) {
+			input.intelligence = PRODUCTION_INTELLIGENCE;
+		}
 		const requestKey = this.requestKey(`search_${depth}`, toolCallId);
 		return this.exclusive(async () => {
 			const signal = this.callSignal(toolSignal);
@@ -608,7 +616,8 @@ export class CloudSearchToolSession {
 		return {
 			search_fast: createTool({
 				id: "search_fast",
-				description: "一次有界快搜，返回同版证据和引用收据，不生成最终回答。",
+				description:
+					'一次有界快搜，返回同版证据和引用收据，不生成最终回答。生产当前仅支持 intelligence=low，调用时传 "low"。',
 				inputSchema: searchInput,
 				strict: true,
 				execute: (input, context) =>
@@ -621,7 +630,8 @@ export class CloudSearchToolSession {
 			}),
 			search_detailed: createTool({
 				id: "search_detailed",
-				description: "有界详搜，返回结构化证据、缺口和停止原因。",
+				description:
+					"有界详搜，返回结构化证据、缺口和停止原因。生产当前暂未开放详搜档位；需要资料时改用 search_fast。",
 				inputSchema: searchInput,
 				strict: true,
 				execute: (input, context) =>

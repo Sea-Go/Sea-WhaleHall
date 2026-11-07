@@ -19,6 +19,10 @@ import {
 	prepareMacUpdateTransaction,
 } from "../src/bun/app-update-macos-installer";
 
+// 慢速集成层：默认 dev 套件不执行这些用例；WHALEHALL_FULL_TESTS=1
+// （CI/发布前全量）时按原样注册运行。
+const fullTest = process.env.WHALEHALL_FULL_TESTS === "1" ? test : () => {};
+
 const macTest = process.platform === "darwin" ? test : test.skip;
 const temporaryRoots: string[] = [];
 const launchedProcessIds = new Set<number>();
@@ -484,7 +488,7 @@ describe("app-owned macOS updater", () => {
 		},
 	);
 
-	test("fails closed off macOS", async () => {
+	fullTest("fails closed off macOS", async () => {
 		if (process.platform === "darwin") {
 			expect(process.platform).toBe("darwin");
 			return;

@@ -46,7 +46,7 @@ import {
 	planningDraftDigest,
 } from "./planning-authority-digest";
 
-const DATABASE_SCHEMA_VERSION = 8;
+const DATABASE_SCHEMA_VERSION = 9;
 // Database schema version 2 was never published or used by a released build,
 // so no schema-2 ciphertext exists to migrate. Existing ciphertext remains
 // bound to schema=1; table evolution must not make account records undecryptable.
@@ -64,6 +64,8 @@ export interface AgentConversationRecord {
 	accountId: string;
 	id: string;
 	title: string;
+	/** 线程元数据（Mastra working memory 等）。JSON 加密落库；null=未设置。 */
+	metadata: Record<string, unknown> | null;
 	createdAtMs: number;
 	updatedAtMs: number;
 }
@@ -398,6 +400,10 @@ type ConversationRow = CipherRow & {
 	conversation_id: string;
 	created_at_ms: number;
 	updated_at_ms: number;
+	metadata_key_version?: number | null;
+	metadata_cipher_version?: number | null;
+	metadata_nonce?: Uint8Array | null;
+	metadata_ciphertext?: Uint8Array | null;
 };
 
 type MessageRow = CipherRow & {
@@ -1283,17 +1289,34 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			"title",
 			record.title,
 		);
+		const metadataText =
+			record.metadata === null ? null : JSON.stringify(record.metadata);
+		const metadata =
+			metadataText === null
+				? null
+				: await this.encryptText(
+						record.accountId,
+						"conversations",
+						record.id,
+						"metadata",
+						metadataText,
+					);
 		this.database
 			.query(
 				`INSERT INTO conversations
 				 (account_id, conversation_id, key_version, cipher_version, title_nonce,
-				  title_ciphertext, created_at_ms, updated_at_ms)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				  title_ciphertext, metadata_key_version, metadata_cipher_version,
+				  metadata_nonce, metadata_ciphertext, created_at_ms, updated_at_ms)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				 ON CONFLICT(account_id, conversation_id) DO UPDATE SET
 				  key_version = excluded.key_version,
 				  cipher_version = excluded.cipher_version,
 				  title_nonce = excluded.title_nonce,
 				  title_ciphertext = excluded.title_ciphertext,
+				  metadata_key_version = excluded.metadata_key_version,
+				  metadata_cipher_version = excluded.metadata_cipher_version,
+				  metadata_nonce = excluded.metadata_nonce,
+				  metadata_ciphertext = excluded.metadata_ciphertext,
 				  created_at_ms = excluded.created_at_ms,
 				  updated_at_ms = excluded.updated_at_ms`,
 			)
@@ -1304,6 +1327,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				title.cipherVersion,
 				title.nonce,
 				title.ciphertext,
+				metadata?.keyVersion ?? null,
+				metadata?.cipherVersion ?? null,
+				metadata?.nonce ?? null,
+				metadata?.ciphertext ?? null,
 				record.createdAtMs,
 				record.updatedAtMs,
 			);
@@ -1320,6 +1347,8 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			.query(
 				`SELECT conversation_id, key_version, cipher_version,
 				        title_nonce AS nonce, title_ciphertext AS ciphertext,
+				metadata_key_version, metadata_cipher_version,
+				metadata_nonce, metadata_ciphertext,
 				        created_at_ms, updated_at_ms
 				 FROM conversations WHERE account_id = ? AND conversation_id = ?`,
 			)
@@ -1337,6 +1366,8 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 			.query(
 				`SELECT conversation_id, key_version, cipher_version,
 				        title_nonce AS nonce, title_ciphertext AS ciphertext,
+				metadata_key_version, metadata_cipher_version,
+				metadata_nonce, metadata_ciphertext,
 				        created_at_ms, updated_at_ms
 				 FROM conversations WHERE account_id = ?
 				 ORDER BY updated_at_ms DESC, conversation_id DESC LIMIT ?`,
@@ -3347,6 +3378,35 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 		accountId: string,
 		row: ConversationRow,
 	): Promise<AgentConversationRecord> {
+		const metadataText =
+			row.metadata_ciphertext == null ||
+			row.metadata_nonce == null ||
+			row.metadata_key_version == null ||
+			row.metadata_cipher_version == null
+				? null
+				: await this.decryptText(
+						accountId,
+						"conversations",
+						row.conversation_id,
+						"metadata",
+						{
+							key_version: row.metadata_key_version,
+							cipher_version: row.metadata_cipher_version,
+							nonce: row.metadata_nonce,
+							ciphertext: row.metadata_ciphertext,
+						},
+					);
+		let metadata: Record<string, unknown> | null = null;
+		if (metadataText !== null) {
+			try {
+				const parsed = JSON.parse(metadataText) as unknown;
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+					metadata = parsed as Record<string, unknown>;
+				}
+			} catch {
+				metadata = null;
+			}
+		}
 		return {
 			accountId,
 			id: row.conversation_id,
@@ -3357,6 +3417,7 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 				"title",
 				row,
 			),
+			metadata,
 			createdAtMs: row.created_at_ms,
 			updatedAtMs: row.updated_at_ms,
 		};
@@ -4070,6 +4131,10 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 					cipher_version INTEGER NOT NULL,
 					title_nonce BLOB NOT NULL,
 					title_ciphertext BLOB NOT NULL,
+					metadata_key_version INTEGER,
+					metadata_cipher_version INTEGER,
+					metadata_nonce BLOB,
+					metadata_ciphertext BLOB,
 					created_at_ms INTEGER NOT NULL,
 					updated_at_ms INTEGER NOT NULL,
 					PRIMARY KEY (account_id, conversation_id),
@@ -4437,6 +4502,19 @@ export class EncryptedAgentRepository implements ToolApprovalRepository {
 					)
 				);
 			`);
+			// schema 9：conversations 增加 metadata 密文列（旧库补列；新库建表已含）。
+			for (const column of [
+				"ALTER TABLE conversations ADD COLUMN metadata_key_version INTEGER",
+				"ALTER TABLE conversations ADD COLUMN metadata_cipher_version INTEGER",
+				"ALTER TABLE conversations ADD COLUMN metadata_nonce BLOB",
+				"ALTER TABLE conversations ADD COLUMN metadata_ciphertext BLOB",
+			]) {
+				try {
+					this.database.query(column).run();
+				} catch {
+					// 列已存在（新库或重复迁移）：忽略 duplicate column。
+				}
+			}
 			if (!schema) {
 				this.database
 					.query(

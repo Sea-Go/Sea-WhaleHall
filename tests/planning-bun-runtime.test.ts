@@ -34,6 +34,7 @@ describe("WhaleHallPlanningRuntime durable invalidations", () => {
 				payload: {
 					batchId: "batch-1",
 					mutationCount: 1,
+					mutationKinds: ["update"],
 					planIds: [],
 					requiresPlanningReestimate: false,
 				},

@@ -290,7 +290,13 @@ function topologicalTasks(tasks: readonly RevisionTask[]): RevisionTask[] {
 	};
 	for (const task of [...tasks].sort((left, right) => {
 		const purposeOrder = { validation: 0, review: 1, execution: 2 } as const;
-		return purposeOrder[left.purpose] - purposeOrder[right.purpose];
+		const byPurpose = purposeOrder[left.purpose] - purposeOrder[right.purpose];
+		if (byPurpose !== 0) return byPurpose;
+		// 同层内强关联先安排：关键路径优先占用保护时段；弱关联填剩余容量。
+		// 缺失（旧修订）按 strong 对待，保持既有排程行为不变。
+		const relevanceOrder = (relevance: "strong" | "weak" | undefined) =>
+			relevance === "weak" ? 1 : 0;
+		return relevanceOrder(left.relevance) - relevanceOrder(right.relevance);
 	})) {
 		visit(task);
 	}

@@ -43,10 +43,11 @@ export {
 	type PlanningState,
 } from "./PlanningController";
 export {
-	PlanningPage,
-	type PlanningPageProps,
-	type PlanningSchedulePreviewProps,
-} from "./PlanningPage";
+	PlanStatusCard,
+	type PlanStatusCardProps,
+	SmartScheduleComposer,
+	type SmartScheduleComposerProps,
+} from "./PlanningPanels";
 export type {
 	ChangePlanStatusRequest,
 	ConfirmObservationAttributionRequest,

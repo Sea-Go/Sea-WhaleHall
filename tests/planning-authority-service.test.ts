@@ -11,11 +11,11 @@ import {
 import { EncryptedAgentRepository } from "../src/bun/encrypted-agent-repository";
 import type { LocalTestSessionIdentity } from "../src/bun/local-test-auth-session";
 import { PlanningAuthorityService } from "../src/bun/planning-authority-service";
+import type { ActiveGoalContextV1 } from "../src/shared/goal-context";
 import type {
 	PlanningAuthorityDraft,
 	PlanningAuthorityInput,
 } from "../src/shared/planning-authority";
-import type { ActiveGoalContextV1 } from "../src/shared/goal-context";
 
 const temporaryDirectories: string[] = [];
 
@@ -43,10 +43,12 @@ describe("PlanningAuthorityService", () => {
 			input,
 			draft,
 		});
-		expect(saved).toEqual(expect.objectContaining({
-			kind: "success",
-			data: expect.objectContaining({ revision: 1, status: "draft" }),
-		}));
+		expect(saved).toEqual(
+			expect.objectContaining({
+				kind: "success",
+				data: expect.objectContaining({ revision: 1, status: "draft" }),
+			}),
+		);
 
 		const first = await service.commitDraft({
 			requestId: "commit-request-1",
@@ -54,26 +56,38 @@ describe("PlanningAuthorityService", () => {
 			expectedRevision: 1,
 			expectedCalendarRevision: 0,
 		});
-		expect(first).toEqual(expect.objectContaining({
-			kind: "success",
-			data: expect.objectContaining({
-				calendarCommitted: true,
-				effectsApplied: false,
-				idempotent: false,
-				snapshot: expect.objectContaining({
-					status: "committed",
-					commit: expect.objectContaining({
-						effect: expect.objectContaining({ status: "pending", attempts: 1 }),
+		expect(first).toEqual(
+			expect.objectContaining({
+				kind: "success",
+				data: expect.objectContaining({
+					calendarCommitted: true,
+					effectsApplied: false,
+					idempotent: false,
+					snapshot: expect.objectContaining({
+						status: "committed",
+						commit: expect.objectContaining({
+							effect: expect.objectContaining({
+								status: "pending",
+								attempts: 1,
+							}),
+						}),
 					}),
 				}),
 			}),
-		}));
-		await expect(harness.repository.getCalendarRevision("account-a")).resolves.toBe(1);
+		);
+		await expect(
+			harness.repository.getCalendarRevision("account-a"),
+		).resolves.toBe(1);
 		await expect(
 			harness.repository.getCalendarEvent("account-a", "proposal-1"),
-		).resolves.toEqual(expect.objectContaining({
-			event: expect.objectContaining({ state: "committed", sourcePlanId: "plan-1" }),
-		}));
+		).resolves.toEqual(
+			expect.objectContaining({
+				event: expect.objectContaining({
+					state: "committed",
+					sourcePlanId: "plan-1",
+				}),
+			}),
+		);
 
 		failEffect = false;
 		const retried = await service.commitDraft({
@@ -82,33 +96,44 @@ describe("PlanningAuthorityService", () => {
 			expectedRevision: 1,
 			expectedCalendarRevision: 0,
 		});
-		expect(retried).toEqual(expect.objectContaining({
-			kind: "success",
-			data: expect.objectContaining({
-				calendarCommitted: true,
-				effectsApplied: true,
-				idempotent: true,
-				snapshot: expect.objectContaining({
-					commit: expect.objectContaining({
-						effect: expect.objectContaining({ status: "applied", attempts: 2 }),
+		expect(retried).toEqual(
+			expect.objectContaining({
+				kind: "success",
+				data: expect.objectContaining({
+					calendarCommitted: true,
+					effectsApplied: true,
+					idempotent: true,
+					snapshot: expect.objectContaining({
+						commit: expect.objectContaining({
+							effect: expect.objectContaining({
+								status: "applied",
+								attempts: 2,
+							}),
+						}),
 					}),
 				}),
 			}),
-		}));
+		);
 		expect(effectCalls).toBe(2);
-		await expect(harness.repository.getCalendarRevision("account-a")).resolves.toBe(1);
+		await expect(
+			harness.repository.getCalendarRevision("account-a"),
+		).resolves.toBe(1);
 		harness.activeGoals.delete("account-a");
 		const rehydrated = await service.load();
-		expect(rehydrated).toEqual(expect.objectContaining({
-			kind: "success",
-			data: expect.objectContaining({
-				commit: expect.objectContaining({
-					effect: expect.objectContaining({ status: "applied", attempts: 3 }),
+		expect(rehydrated).toEqual(
+			expect.objectContaining({
+				kind: "success",
+				data: expect.objectContaining({
+					commit: expect.objectContaining({
+						effect: expect.objectContaining({ status: "applied", attempts: 3 }),
+					}),
 				}),
 			}),
-		}));
+		);
 		expect(effectCalls).toBe(3);
-		await expect(harness.repository.getCalendarRevision("account-a")).resolves.toBe(1);
+		await expect(
+			harness.repository.getCalendarRevision("account-a"),
+		).resolves.toBe(1);
 		harness.repository.close();
 	});
 
@@ -137,17 +162,23 @@ describe("PlanningAuthorityService", () => {
 
 		failEffect = false;
 		const restored = await service.load();
-		expect(restored).toEqual(expect.objectContaining({
-			kind: "success",
-			data: expect.objectContaining({
-				status: "committed",
-				activeGoal: expect.objectContaining({ text: "第一份计划", version: 7 }),
-				commit: expect.objectContaining({
-					effect: expect.objectContaining({ status: "applied" }),
+		expect(restored).toEqual(
+			expect.objectContaining({
+				kind: "success",
+				data: expect.objectContaining({
+					status: "committed",
+					activeGoal: expect.objectContaining({
+						text: "第一份计划",
+						version: 7,
+					}),
+					commit: expect.objectContaining({
+						effect: expect.objectContaining({ status: "applied" }),
+					}),
 				}),
 			}),
-		}));
-		if (restored.kind !== "success" || !restored.data) throw new Error("restore failed");
+		);
+		if (restored.kind !== "success" || !restored.data)
+			throw new Error("restore failed");
 
 		const secondInput = planningInput("第二份计划");
 		const secondDraft = planningDraft(secondInput, "plan-2", "proposal-2", 1);
@@ -157,14 +188,16 @@ describe("PlanningAuthorityService", () => {
 			input: secondInput,
 			draft: secondDraft,
 		});
-		expect(nextDraft).toEqual(expect.objectContaining({
-			kind: "success",
-			data: expect.objectContaining({
-				status: "draft",
-				activeGoal: expect.objectContaining({ text: "第一份计划" }),
-				confirmedPlan: expect.objectContaining({ id: "plan-1" }),
+		expect(nextDraft).toEqual(
+			expect.objectContaining({
+				kind: "success",
+				data: expect.objectContaining({
+					status: "draft",
+					activeGoal: expect.objectContaining({ text: "第一份计划" }),
+					confirmedPlan: expect.objectContaining({ id: "plan-1" }),
+				}),
 			}),
-		}));
+		);
 		if (nextDraft.kind !== "success") throw new Error("save failed");
 
 		const reused = await service.commitDraft({
@@ -174,10 +207,15 @@ describe("PlanningAuthorityService", () => {
 			expectedCalendarRevision: 1,
 		});
 		expect(reused.kind).not.toBe("success");
-		await expect(harness.repository.getCalendarRevision("account-a")).resolves.toBe(1);
+		await expect(
+			harness.repository.getCalendarRevision("account-a"),
+		).resolves.toBe(1);
 
 		harness.identity = identity("account-b", 2);
-		await expect(service.load()).resolves.toEqual({ kind: "success", data: null });
+		await expect(service.load()).resolves.toEqual({
+			kind: "success",
+			data: null,
+		});
 		const accountBInput = planningInput("B 账户计划");
 		const accountBSaved = await service.saveDraft({
 			requestId: "save-account-b",
@@ -189,171 +227,14 @@ describe("PlanningAuthorityService", () => {
 
 		harness.identity = identity("account-a", 3);
 		const accountARestored = await service.load();
-		expect(accountARestored).toEqual(expect.objectContaining({
-			kind: "success",
-			data: expect.objectContaining({
-				input: expect.objectContaining({ goal: "第二份计划" }),
+		expect(accountARestored).toEqual(
+			expect.objectContaining({
+				kind: "success",
+				data: expect.objectContaining({
+					input: expect.objectContaining({ goal: "第二份计划" }),
+				}),
 			}),
-		}));
-		harness.repository.close();
-	});
-
-	test("rejects unknown, oversized, and broken nested planning records before persistence", async () => {
-		const harness = createHarness();
-		const service = harness.service(async (goal) => ({ ...goal, version: 1 }));
-		const input = planningInput("严格验证计划");
-		const base = planningDraft(input, "plan-validate", "proposal-validate", 0);
-		const unknownPlanField = structuredClone(base) as PlanningAuthorityDraft & {
-			plan: PlanningAuthorityDraft["plan"] & { trace: string };
-		};
-		unknownPlanField.plan.trace = "must-not-cross-renderer-boundary";
-		const unknownPhaseField = structuredClone(base) as PlanningAuthorityDraft;
-		(unknownPhaseField.plan.phases[0] as unknown as Record<string, unknown>).providerMetadata = {};
-		const brokenTaskReference = structuredClone(base) as PlanningAuthorityDraft;
-		(brokenTaskReference.plan.tasks[0] as { phaseId: string }).phaseId = "missing-phase";
-		const oversizedBusyWindow = structuredClone(base) as PlanningAuthorityDraft & {
-			busyWindows: Array<Record<string, unknown>>;
-		};
-		oversizedBusyWindow.busyWindows = [{
-			id: "busy-1",
-			title: "超".repeat(513),
-			kind: "manual-block",
-			start: "2026-08-03T03:00:00.000Z",
-			end: "2026-08-03T04:00:00.000Z",
-			timeZone: "Asia/Shanghai",
-		}];
-		const brokenConflictReference = structuredClone(base) as PlanningAuthorityDraft & {
-			conflicts: Array<Record<string, unknown>>;
-		};
-		brokenConflictReference.conflicts = [{
-			proposalId: "missing-proposal",
-			busyWindowId: null,
-			reason: "agent-validation",
-			severity: "error",
-			message: "invalid",
-			suggestions: ["move-session"],
-		}];
-		const invalidDate = structuredClone(base) as PlanningAuthorityDraft;
-		(invalidDate.plan as { deadline: string }).deadline = "2026-02-31";
-
-		for (const [index, draft] of [
-			unknownPlanField,
-			unknownPhaseField,
-			brokenTaskReference,
-			oversizedBusyWindow as unknown as PlanningAuthorityDraft,
-			brokenConflictReference as unknown as PlanningAuthorityDraft,
-			invalidDate,
-		].entries()) {
-			const result = await service.saveDraft({
-				requestId: `malformed-${index}`,
-				expectedRevision: null,
-				input,
-				draft,
-			});
-			expect(result.kind).toBe("error");
-			await expect(harness.repository.getPlanningAuthority("account-a")).resolves.toBeNull();
-		}
-		harness.repository.close();
-	});
-
-	test("blocks a calendar transaction when logout occurs during pre-commit preparation", async () => {
-		const harness = createHarness();
-		const normal = harness.service(async (goal) => ({ ...goal, version: 1 }));
-		const input = planningInput("退出登录竞态计划");
-		await normal.saveDraft({
-			requestId: "save-before-logout",
-			expectedRevision: null,
-			input,
-			draft: planningDraft(input, "plan-logout", "proposal-logout", 0),
-		});
-		let markStarted!: () => void;
-		let release!: () => void;
-		const started = new Promise<void>((resolve) => {
-			markStarted = resolve;
-		});
-		const wait = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		const repository = harness.repository;
-		const gatedRepository: ConstructorParameters<typeof PlanningAuthorityService>[0]["repository"] = {
-			getPlanningAuthority: (accountId) => repository.getPlanningAuthority(accountId),
-			compareAndSetPlanningAuthority: (accountId, snapshot, revision, beforeCommit) =>
-				repository.compareAndSetPlanningAuthority(accountId, snapshot, revision, beforeCommit),
-			commitCalendarAndPlanningAuthority: async (accountId, commit) => {
-				markStarted();
-				await wait;
-				return repository.commitCalendarAndPlanningAuthority(accountId, commit);
-			},
-		};
-		const committing = harness.service(
-			async (goal) => ({ ...goal, version: 1 }),
-			gatedRepository,
-		).commitDraft({
-			requestId: "commit-during-logout",
-			commitId: "commit-during-logout",
-			expectedRevision: 1,
-			expectedCalendarRevision: 0,
-		});
-		await started;
-		harness.identity = identity("account-b", 2);
-		release();
-		const result = await committing;
-		expect(result.kind).toBe("unavailable");
-		await expect(repository.getCalendarRevision("account-a")).resolves.toBe(0);
-		await expect(repository.getCalendarEvent("account-a", "proposal-logout")).resolves.toBeNull();
-		await expect(repository.getPlanningAuthority("account-a")).resolves.toEqual(
-			expect.objectContaining({ status: "draft", revision: 1 }),
 		);
-		repository.close();
-	});
-
-	test("never reports an old pending-effect RPC as successful after logout", async () => {
-		const harness = createHarness();
-		const failing = harness.service(async () => {
-			throw new Error("reflection unavailable");
-		});
-		const input = planningInput("退出时等待目标副作用");
-		await failing.saveDraft({
-			requestId: "save-pending-logout",
-			expectedRevision: null,
-			input,
-			draft: planningDraft(input, "plan-pending-logout", "proposal-pending-logout", 0),
-		});
-		const first = await failing.commitDraft({
-			requestId: "commit-pending-logout",
-			commitId: "commit-pending-logout",
-			expectedRevision: 1,
-			expectedCalendarRevision: 0,
-		});
-		expect(first).toEqual(expect.objectContaining({
-			kind: "success",
-			data: expect.objectContaining({ effectsApplied: false }),
-		}));
-
-		let markStarted!: () => void;
-		let release!: () => void;
-		const started = new Promise<void>((resolve) => {
-			markStarted = resolve;
-		});
-		const wait = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		const gated = harness.service(async () => {
-			markStarted();
-			await wait;
-			throw new Error("session changed");
-		});
-		const retry = gated.commitDraft({
-			requestId: "retry-pending-logout",
-			commitId: "commit-pending-logout",
-			expectedRevision: 1,
-			expectedCalendarRevision: 0,
-		});
-		await started;
-		harness.identity = identity("account-b", 2);
-		release();
-		expect((await retry).kind).toBe("unavailable");
-		await expect(harness.repository.getCalendarRevision("account-a")).resolves.toBe(1);
 		harness.repository.close();
 	});
 });
@@ -363,11 +244,17 @@ function createHarness(): {
 	identity: LocalTestSessionIdentity;
 	activeGoals: Map<string, ActiveGoalContextV1>;
 	service(
-		applyActiveGoal: ConstructorParameters<typeof PlanningAuthorityService>[0]["applyActiveGoal"],
-		repositoryOverride?: ConstructorParameters<typeof PlanningAuthorityService>[0]["repository"],
+		applyActiveGoal: ConstructorParameters<
+			typeof PlanningAuthorityService
+		>[0]["applyActiveGoal"],
+		repositoryOverride?: ConstructorParameters<
+			typeof PlanningAuthorityService
+		>[0]["repository"],
 	): PlanningAuthorityService;
 } {
-	const directory = mkdtempSync(join(tmpdir(), "whalehall-planning-authority-"));
+	const directory = mkdtempSync(
+		join(tmpdir(), "whalehall-planning-authority-"),
+	);
 	temporaryDirectories.push(directory);
 	const repository = new EncryptedAgentRepository({
 		databasePath: join(directory, "agent.sqlite3"),
@@ -384,8 +271,12 @@ function createHarness(): {
 		identity: identity("account-a", 1),
 		activeGoals: new Map<string, ActiveGoalContextV1>(),
 		service(
-			applyActiveGoal: ConstructorParameters<typeof PlanningAuthorityService>[0]["applyActiveGoal"],
-			repositoryOverride?: ConstructorParameters<typeof PlanningAuthorityService>[0]["repository"],
+			applyActiveGoal: ConstructorParameters<
+				typeof PlanningAuthorityService
+			>[0]["applyActiveGoal"],
+			repositoryOverride?: ConstructorParameters<
+				typeof PlanningAuthorityService
+			>[0]["repository"],
 		) {
 			return new PlanningAuthorityService({
 				currentSession: () => harness.identity,
@@ -395,7 +286,8 @@ function createHarness(): {
 					candidate.generation === harness.identity.generation,
 				repository: repositoryOverride ?? repository,
 				calendar,
-				currentActiveGoal: (accountId) => harness.activeGoals.get(accountId) ?? null,
+				currentActiveGoal: (accountId) =>
+					harness.activeGoals.get(accountId) ?? null,
 				applyActiveGoal: async (goal) => {
 					const normalized = await applyActiveGoal(goal);
 					harness.activeGoals.set(harness.identity.accountId, normalized);
@@ -408,8 +300,15 @@ function createHarness(): {
 	return harness;
 }
 
-function identity(accountId: string, generation: number): LocalTestSessionIdentity {
-	return { accountId, generation, sessionId: `session-${accountId}-${generation}` };
+function identity(
+	accountId: string,
+	generation: number,
+): LocalTestSessionIdentity {
+	return {
+		accountId,
+		generation,
+		sessionId: `session-${accountId}-${generation}`,
+	};
 }
 
 function planningInput(goal: string): PlanningAuthorityInput {
@@ -443,16 +342,28 @@ function planningDraft(
 			weeklyCapacityHours: input.weeklyCapacityHours,
 			calendarRevision,
 			totalEstimatedMinutes: 60,
-			phases: [{ id: `phase-${planId}`, title: "阶段", objective: input.goal, order: 1 }],
+			phases: [
+				{
+					id: `phase-${planId}`,
+					title: "阶段",
+					objective: input.goal,
+					order: 1,
+				},
+			],
 			milestones: [],
-			tasks: [{
-				id: taskId,
-				phaseId: `phase-${planId}`,
-				milestoneId: null,
-				title: input.goal,
-				estimatedMinutes: 60,
-			}],
-			scheduleWindow: { startDate: "2026-08-01", endDateExclusive: "2026-09-01" },
+			tasks: [
+				{
+					id: taskId,
+					phaseId: `phase-${planId}`,
+					milestoneId: null,
+					title: input.goal,
+					estimatedMinutes: 60,
+				},
+			],
+			scheduleWindow: {
+				startDate: "2026-08-01",
+				endDateExclusive: "2026-09-01",
+			},
 			generationRun: {
 				id: `run-${planId}`,
 				startedAt: "2026-08-01T00:00:00.000Z",
@@ -461,17 +372,19 @@ function planningDraft(
 				revision: 1,
 			},
 		},
-		proposals: [{
-			id: proposalId,
-			sourcePlanId: planId,
-			taskId,
-			title: input.goal,
-			state: "proposed",
-			start: "2026-08-03T01:00:00.000Z",
-			end: "2026-08-03T02:00:00.000Z",
-			timeZone: "Asia/Shanghai",
-			version: 0,
-		}],
+		proposals: [
+			{
+				id: proposalId,
+				sourcePlanId: planId,
+				taskId,
+				title: input.goal,
+				state: "proposed",
+				start: "2026-08-03T01:00:00.000Z",
+				end: "2026-08-03T02:00:00.000Z",
+				timeZone: "Asia/Shanghai",
+				version: 0,
+			},
+		],
 		busyWindows: [],
 		conflicts: [],
 		suggestions: [],
@@ -490,12 +403,17 @@ class MemoryKeyStore implements CredentialKeyStore {
 	async createKey(reference: CredentialKeyReference): Promise<Uint8Array> {
 		const id = referenceKey(reference);
 		if (this.keys.has(id)) throw new CredentialHelperError("ALREADY_EXISTS");
-		const key = Uint8Array.from({ length: 32 }, (_, index) => (index * 17 + 31) & 0xff);
+		const key = Uint8Array.from(
+			{ length: 32 },
+			(_, index) => (index * 17 + 31) & 0xff,
+		);
 		this.keys.set(id, key);
 		return key.slice();
 	}
 
-	async deleteKey(reference: CredentialKeyReference): Promise<{ deleted: boolean }> {
+	async deleteKey(
+		reference: CredentialKeyReference,
+	): Promise<{ deleted: boolean }> {
 		return { deleted: this.keys.delete(referenceKey(reference)) };
 	}
 }

@@ -1,0 +1,671 @@
+/* 智能安排主体（创建日程对话框内）与侧栏计划状态卡。
+   刻意保持极简：一条输入、一个列表、一行动作。 */
+
+.smart-create {
+	display: grid;
+	gap: 14px;
+	padding: 4px 2px 2px;
+}
+
+.smart-create textarea {
+	min-height: 120px;
+	resize: vertical;
+}
+
+.smart-create__error {
+	margin: 0;
+	color: var(--color-danger, #b3261e);
+	font-size: 12.5px;
+}
+
+.smart-create__toggle {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12.5px;
+	color: var(--color-text-secondary);
+}
+
+.smart-create__actions {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 10px;
+}
+
+.smart-composer {
+	display: grid;
+	gap: 12px;
+	padding: 2px;
+}
+
+.smart-composer__goal {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13.5px;
+}
+
+.smart-composer__goal strong {
+	flex: 1;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.smart-composer__state {
+	flex: none;
+	font-size: 11px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	background: var(--color-surface-muted, #eef2f6);
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__state--active {
+	background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+	color: var(--color-accent);
+}
+
+.smart-composer__state--paused {
+	background: color-mix(in srgb, #d97706 16%, transparent);
+	color: #b45309;
+}
+
+.smart-composer__notice {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0;
+	font-size: 12.5px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__notice--warning {
+	color: #b45309;
+}
+
+.smart-composer__notice-action {
+	border: none;
+	background: none;
+	padding: 0;
+	font: inherit;
+	color: var(--color-accent);
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+.smart-composer__proposal {
+	display: grid;
+	gap: 8px;
+}
+
+.smart-composer__summary {
+	margin: 0;
+	font-size: 13px;
+	color: var(--color-text-primary);
+}
+
+.smart-composer__eta {
+	margin: 0;
+	font-size: 12px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	gap: 6px;
+	max-height: 220px;
+	overflow-y: auto;
+}
+
+.smart-composer__list li {
+	display: grid;
+	gap: 2px;
+	padding: 8px 10px;
+	border: 1px solid var(--color-border);
+	border-radius: 10px;
+	background: var(--color-surface);
+}
+
+.smart-composer__list li.smart-composer__item--weak {
+	border-style: dashed;
+	opacity: 0.85;
+}
+
+.smart-composer__relevance {
+	margin-right: 6px;
+	padding: 0 2px;
+	border: none;
+	background: none;
+	font-size: inherit;
+	color: var(--color-accent);
+	cursor: pointer;
+	line-height: 1;
+}
+
+.smart-composer__relevance:disabled {
+	cursor: default;
+	opacity: 0.6;
+}
+
+.smart-composer__item--weak .smart-composer__relevance {
+	color: var(--color-text-secondary, var(--muted-foreground));
+}
+
+.smart-composer__list strong {
+	font-size: 13px;
+}
+
+.smart-composer__list span {
+	font-size: 12px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__tasks {
+	display: grid;
+	gap: 8px;
+	padding-top: 10px;
+	border-top: 1px solid var(--color-border);
+}
+
+.smart-composer__tasks-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+}
+
+.smart-composer__tasks-head span:first-child {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--color-text-primary);
+}
+
+.smart-composer__tasks-head span:last-child {
+	font-size: 12px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__tasks-group {
+	display: grid;
+	gap: 4px;
+}
+
+.smart-composer__tasks-group-title {
+	margin: 0;
+	font-size: 12px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__list li.smart-composer__item--completed strong {
+	text-decoration: line-through;
+	text-decoration-thickness: 1px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__list li.smart-composer__item--skipped {
+	opacity: 0.7;
+}
+
+.smart-composer__list li.smart-composer__item--skipped strong {
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__task-state {
+	font-size: 12px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__questions {
+	display: grid;
+	gap: 4px;
+	font-size: 12.5px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__questions ul {
+	margin: 0;
+	padding-left: 18px;
+	display: grid;
+	gap: 2px;
+}
+
+.smart-composer__confirm {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.smart-composer__confirm small {
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__settled {
+	margin: 0;
+	font-size: 13px;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__reply {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	margin: 0;
+	padding: 8px 10px;
+	border-radius: 10px;
+	background: var(--color-surface-muted, #eef2f6);
+	font-size: 12.5px;
+	color: var(--color-text-secondary);
+}
+
+/* 等待用户回答：澄清问题完整可见（可滚动），绝不截断——
+   截断会让"在等你回答"看起来像"卡住了"。 */
+.smart-composer__questions {
+	margin: 0;
+	padding: 8px 10px;
+	border-radius: 10px;
+	background: var(--color-surface-muted, #eef2f6);
+}
+
+.smart-composer__questions-title {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 0 0 6px;
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--color-text-primary);
+}
+
+.smart-composer__questions-body {
+	max-height: 180px;
+	overflow-y: auto;
+	white-space: pre-wrap;
+	font-size: 12.5px;
+	line-height: 1.55;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__adjust {
+	display: flex;
+	gap: 8px;
+}
+
+.smart-composer__adjust input {
+	flex: 1;
+	min-width: 0;
+}
+
+.smart-composer__loading,
+.smart-composer__failure {
+	display: grid;
+	justify-items: center;
+	gap: 8px;
+	padding: 26px 10px;
+	text-align: center;
+	color: var(--color-text-secondary);
+}
+
+.smart-composer__failure h3 {
+	margin: 0;
+	font-size: 14px;
+	color: var(--color-text-primary);
+}
+
+.smart-composer__failure p {
+	margin: 0;
+	font-size: 12.5px;
+}
+
+.smart-composer__failure > div {
+	display: flex;
+	gap: 8px;
+}
+
+.plan-status-card {
+	display: grid;
+	gap: 8px;
+	margin-top: 6px;
+	padding: 10px;
+	border: 1px solid var(--color-border);
+	border-radius: 12px;
+	background: var(--color-surface);
+	font-size: 12.5px;
+}
+
+.plan-status-card__head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.plan-status-card__head strong {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12.5px;
+}
+
+.plan-status-card__state {
+	flex: none;
+	font-size: 10.5px;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: var(--color-surface-muted, #eef2f6);
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__state--active {
+	background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+	color: var(--color-accent);
+}
+
+.plan-status-card__state--paused {
+	background: color-mix(in srgb, #d97706 16%, transparent);
+	color: #b45309;
+}
+
+.plan-status-card__tasks {
+	display: grid;
+	gap: 6px;
+	margin-top: 2px;
+	padding-top: 8px;
+	border-top: 1px solid var(--color-border);
+}
+
+.plan-status-card__tasks-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+}
+
+.plan-status-card__tasks-head span:first-child {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--color-text-primary);
+}
+
+.plan-status-card__tasks-head span:last-child {
+	font-size: 11.5px;
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__tasks-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	gap: 4px;
+	max-height: 180px;
+	overflow-y: auto;
+}
+
+.plan-status-card__task {
+	display: grid;
+	grid-template-columns: auto 1fr auto;
+	gap: 4px;
+	align-items: baseline;
+	padding: 5px 8px;
+	border: 1px solid var(--color-border);
+	border-radius: 8px;
+	background: var(--color-surface);
+	font-size: 12px;
+}
+
+.plan-status-card__task--weak {
+	border-style: dashed;
+	opacity: 0.85;
+}
+
+.plan-status-card__task-relevance {
+	color: var(--color-accent);
+	line-height: 1;
+}
+
+.plan-status-card__task--weak .plan-status-card__task-relevance {
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__task-title {
+	color: var(--color-text-primary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.plan-status-card__task--completed .plan-status-card__task-title {
+	text-decoration: line-through;
+	text-decoration-thickness: 1px;
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__task--skipped {
+	opacity: 0.7;
+}
+
+.plan-status-card__task--skipped .plan-status-card__task-title {
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__task-time {
+	color: var(--color-text-secondary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.plan-status-card__tasks-group {
+	display: grid;
+	gap: 4px;
+}
+
+.plan-status-card__tasks-group-title {
+	margin: 0;
+	font-size: 11.5px;
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__task-state {
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__confirm {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.plan-status-card__confirm small {
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__notice {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 0;
+	color: var(--color-text-secondary);
+}
+
+.plan-status-card__adjust {
+	display: flex;
+	gap: 6px;
+}
+
+.plan-status-card__adjust input {
+	flex: 1;
+	min-width: 0;
+	font-size: 12px;
+}
+
+.plan-status-card__adjust button,
+.plan-status-card__actions button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text-secondary);
+	border-radius: 8px;
+	cursor: pointer;
+}
+
+.plan-status-card__adjust button {
+	width: 28px;
+	height: 28px;
+	flex: none;
+}
+
+.plan-status-card__actions {
+	display: flex;
+	gap: 6px;
+}
+
+.plan-status-card__actions button {
+	width: 26px;
+	height: 24px;
+}
+
+.plan-status-card__adjust button:disabled,
+.plan-status-card__actions button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.planning-spin {
+	animation: planning-spin 1s linear infinite;
+}
+
+@keyframes planning-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.smart-composer__thinking {
+	margin: 8px 0 0;
+	padding: 10px 12px;
+	border: 1px solid var(--color-border);
+	border-radius: 10px;
+	background: var(--color-surface-muted, #eef2f6);
+	font-size: 12px;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 220px;
+	overflow-y: auto;
+	color: var(--color-text-secondary);
+	font-family: inherit;
+}
+
+/* Claude Code 式步骤时间线（DAG 排列）：⏺ 调用行 / ⎿ 结果行 / 状态点。 */
+.progress-steps {
+	margin-top: 8px;
+	display: grid;
+	gap: 6px;
+	max-height: 240px;
+	overflow-y: auto;
+	padding: 10px 12px;
+	border: 1px solid var(--color-border);
+	border-radius: 10px;
+	background: var(--color-surface-muted, #eef2f6);
+	font-size: 12px;
+}
+
+.progress-step {
+	display: grid;
+	gap: 2px;
+}
+
+.progress-step__head {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-width: 0;
+}
+
+.progress-step__dot {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--muted-foreground);
+	align-self: center;
+}
+
+.progress-step__dot--done {
+	background: #16a34a;
+}
+
+.progress-step__dot--failed {
+	background: #dc2626;
+}
+
+.progress-step__glyph {
+	flex: none;
+	color: var(--color-text-secondary);
+}
+
+.progress-step__tool {
+	flex: none;
+	font-weight: 600;
+}
+
+.progress-step__args {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--color-text-secondary);
+	background: none;
+	font-size: 11.5px;
+}
+
+.progress-step__result {
+	display: flex;
+	gap: 6px;
+	padding-left: 20px;
+	color: var(--color-text-secondary);
+}
+
+.progress-step__running {
+	color: var(--muted-foreground);
+}
+
+.progress-step__result--failed {
+	color: #dc2626;
+}
+
+.progress-step__branch {
+	color: var(--muted-foreground);
+}
+
+.progress-step__thinking-toggle {
+	border: none;
+	background: none;
+	padding: 0;
+	font: inherit;
+	font-size: 12px;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	text-align: left;
+}
+
+.progress-step__thinking-text {
+	margin: 4px 0 0 20px;
+	padding: 8px 10px;
+	border-left: 2px solid var(--color-border);
+	font-size: 11.5px;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 160px;
+	overflow-y: auto;
+	color: var(--color-text-secondary);
+	font-family: inherit;
+}

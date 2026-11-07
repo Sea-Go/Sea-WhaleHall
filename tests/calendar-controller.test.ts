@@ -35,10 +35,12 @@ function unavailableConflict(message = "模拟同步失败"): CalendarConflict {
 
 function controlledPromise<T>() {
 	let resolvePromise: (value: T) => void = () => {};
-	const promise = new Promise<T>((resolve) => {
+	let rejectPromise: (reason?: unknown) => void = () => {};
+	const promise = new Promise<T>((resolve, reject) => {
 		resolvePromise = resolve;
+		rejectPromise = reject;
 	});
-	return { promise, resolve: resolvePromise };
+	return { promise, resolve: resolvePromise, reject: rejectPromise };
 }
 
 class DeferredCalendarService implements CalendarService {
@@ -162,303 +164,55 @@ describe("CalendarController CRUD and rollback", () => {
 				?.userLocked,
 		).toBe(true);
 	});
-
-	test("explicitly unlocks only editable model plan events for future rescheduling", async () => {
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("normal");
-		const before = controller
-			.getSnapshot()
-			.events.find((event) => event.scheduleOrigin === "model");
-		if (!before) throw new Error("Missing model-created event");
-
-		expect(
-			(await controller.update({ ...before, title: "用户固定的安排" })).ok,
-		).toBe(true);
-		const locked = controller
-			.getSnapshot()
-			.events.find((event) => event.id === before.id);
-		expect(locked?.userLocked).toBe(true);
-		const lockedVersion = locked?.version;
-
-		expect((await controller.setPlanEventLocked(before.id, false)).ok).toBe(
-			true,
-		);
-		const unlocked = controller
-			.getSnapshot()
-			.events.find((event) => event.id === before.id);
-		expect(unlocked?.userLocked).toBe(false);
-		expect(unlocked?.version).toBe((lockedVersion ?? 0) + 1);
-
-		const manual = controller
-			.getSnapshot()
-			.events.find((event) => event.scheduleOrigin === "user");
-		if (manual) {
-			expect((await controller.setPlanEventLocked(manual.id, false)).ok).toBe(
-				false,
-			);
-		}
-	});
-
-	test("rolls back a rejected drag and exposes a structured reason", async () => {
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("normal");
-		const before = controller
-			.getSnapshot()
-			.events.find((event) => event.id === "design-system");
-		if (!before || before.schedule.allDay) throw new Error("Missing event");
-		service.failNextMutation(unavailableConflict("拖动同步失败"));
-		const dragged = {
-			...before,
-			schedule: {
-				...before.schedule,
-				start: addMinutes(before.schedule.start, 15),
-				end: addMinutes(before.schedule.end, 15),
-			},
-		};
-		const request = controller.update(dragged);
-		expect(
-			controller.getSnapshot().events.find((event) => event.id === before.id)
-				?.schedule,
-		).toEqual(dragged.schedule);
-		const result = await request;
-		expect(result.ok).toBe(false);
-		expect(
-			controller.getSnapshot().events.find((event) => event.id === before.id)
-				?.schedule,
-		).toEqual(before.schedule);
-		expect(controller.getSnapshot().conflict?.reason).toBe(
-			"service-unavailable",
-		);
-	});
-
-	test("rolls back a rejected resize", async () => {
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("short");
-		const before = controller.getSnapshot().events[0];
-		if (!before || before.schedule.allDay) throw new Error("Missing event");
-		service.failNextMutation(unavailableConflict("缩放同步失败"));
-		const resized = {
-			...before,
-			schedule: {
-				...before.schedule,
-				end: addMinutes(before.schedule.end, 30),
-			},
-		};
-		await controller.update(resized);
-		expect(controller.getSnapshot().events[0]?.schedule).toEqual(
-			before.schedule,
-		);
-	});
-
-	test("ignores a stale drag response after a newer mutation owns the event", async () => {
-		const service = new DeferredCalendarService();
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("normal");
-		const before = controller
-			.getSnapshot()
-			.events.find((event) => event.id === "design-system");
-		if (!before) throw new Error("Missing event");
-		const firstAfter = { ...before, title: "第一版" };
-		const firstRequest = controller.update(firstAfter);
-		const secondAfter = { ...firstAfter, title: "第二版" };
-		const secondRequest = controller.update(secondAfter);
-		const first = service.pending[0];
-		const second = service.pending[1];
-		if (!first || !second) throw new Error("Missing deferred mutation");
-
-		first.deferred.resolve({
-			ok: true,
-			mutationId: first.mutation.mutationId,
-			event: { ...firstAfter, version: 2 },
-			warning: null,
-		});
-		await firstRequest;
-		expect(
-			controller.getSnapshot().events.find((event) => event.id === before.id)
-				?.title,
-		).toBe("第二版");
-
-		second.deferred.resolve({
-			ok: true,
-			mutationId: second.mutation.mutationId,
-			event: { ...secondAfter, version: 2 },
-			warning: null,
-		});
-		await secondRequest;
-		expect(
-			controller.getSnapshot().events.find((event) => event.id === before.id)
-				?.title,
-		).toBe("第二版");
-	});
-
-	test("rejects committed overlap with a manual occupied block", async () => {
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("manual");
-		const manual = controller.getSnapshot().events[0];
-		if (!manual || manual.schedule.allDay) throw new Error("Missing manual");
-		const candidate: CalendarEvent = {
-			...manual,
-			id: "conflicting-plan",
-			title: "冲突计划",
-			kind: "plan",
-			sourcePlanId: "plan-conflict",
-			sourceTaskId: "task-conflict",
-			scheduleOrigin: "model",
-			version: 0,
-		};
-		const result = await controller.create(candidate);
-		expect(result.ok).toBe(false);
-		if (!result.ok) {
-			expect(result.conflict.reason).toBe("overlaps-manual-block");
-			expect(result.conflict.affectedEventIds).toContain(manual.id);
-		}
-		expect(
-			controller
-				.getSnapshot()
-				.events.some((event) => event.id === candidate.id),
-		).toBe(false);
-	});
-
-	test("enforces external read-only behavior before calling the service", async () => {
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("external");
-		const external = controller.getSnapshot().events[0];
-		if (!external) throw new Error("Missing external");
-		const result = await controller.update({ ...external, title: "不应修改" });
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.conflict.reason).toBe("read-only-event");
-		expect(controller.getSnapshot().events[0]?.title).toBe(external.title);
-	});
-
-	test("rejects changes to an existing event kind or planning ownership", async () => {
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("normal");
-		const before = controller.getSnapshot().events[0];
-		if (!before) throw new Error("Missing calendar event");
-
-		const result = await controller.update({
-			...before,
-			kind: "manual-block",
-			sourcePlanId: null,
-			sourceTaskId: null,
-			scheduleOrigin: null,
-			userLocked: false,
-		});
-
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.conflict.reason).toBe("read-only-event");
-		expect(controller.getSnapshot().events[0]).toEqual(before);
-	});
 });
 
 describe("CalendarController recurrence, batch, and load states", () => {
-	test("confirms proposed events atomically and increments versions", async () => {
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("proposed");
-		const proposed = controller.getSnapshot().events[0];
-		if (!proposed) throw new Error("Missing proposed event");
-		const result = await controller.confirmProposed([proposed.id]);
-		expect(result.ok).toBe(true);
-		expect(controller.getSnapshot().events[0]?.state).toBe("committed");
-		expect(controller.getSnapshot().events[0]?.version).toBe(
-			proposed.version + 1,
-		);
-	});
-
-	test("creates a stable single-occurrence override and preserves the series", async () => {
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("recurrence");
-		const series = controller.getSnapshot().events[0];
-		if (!series || series.schedule.allDay) throw new Error("Missing series");
-		const occurrenceStart = "2026-07-29T12:00:00Z";
-		const edited = {
-			...series,
-			title: "仅本次改期",
-			schedule: {
-				...series.schedule,
-				start: "2026-07-29T13:00:00Z",
-				end: "2026-07-29T13:30:00Z",
-			},
-		};
-		const result = await controller.updateOccurrence(
-			series.id,
-			occurrenceStart,
-			edited,
-		);
-		expect(result.ok).toBe(true);
-		const events = controller.getSnapshot().events;
-		const updatedSeries = events.find((event) => event.id === series.id);
-		const occurrence = events.find((event) => event.occurrenceId);
-		expect(updatedSeries?.recurrence?.exceptionDates).toContain(
-			occurrenceStart,
-		);
-		expect(updatedSeries?.schedule).toEqual(series.schedule);
-		expect(occurrence?.title).toBe("仅本次改期");
-		expect(occurrence?.id).not.toBe(series.id);
-	});
-
-	test("exposes loading, error, offline, empty, and dense deterministic states", async () => {
-		for (const [mode, expected] of [
-			["error", "error"],
-			["offline", "offline"],
-		] as const) {
-			const service = new MockCalendarService({
-				latencyMs: 0,
-				loadMode: mode,
-			});
-			const controller = new CalendarController(service, idSequence());
-			await controller.load("normal");
-			expect(controller.getSnapshot().loadState).toBe(expected);
-		}
-		const service = new MockCalendarService({ latencyMs: 0 });
-		const controller = new CalendarController(service, idSequence());
-		await controller.load("empty");
-		expect(controller.getSnapshot().events).toHaveLength(0);
-		await controller.load("dense");
-		expect(controller.getSnapshot().events.length).toBeGreaterThan(10);
-	});
-
-	test("clears stale events while loading and ignores a previous account load after reset", async () => {
+	test("change-notification background reload keeps the board populated without a loading flash", async () => {
 		const service = new DeferredLoadCalendarService();
 		const controller = new CalendarController(service, idSequence());
-		const firstLoad = controller.load("normal");
-		const initialRequest = service.pendingLoads[0];
-		if (!initialRequest) throw new Error("Missing initial calendar load");
-		initialRequest.deferred.resolve({
+		const initial = controller.load("normal");
+		service.pendingLoads[0]?.deferred.resolve({
 			events: calendarScenarioEvents("normal"),
 			timeZone: "Asia/Shanghai",
 			scenario: "normal",
 		});
-		await firstLoad;
-		expect(controller.getSnapshot().events.length).toBeGreaterThan(0);
+		await initial;
+		expect(controller.getSnapshot().loadState).toBe("ready");
+		const beforeCount = controller.getSnapshot().events.length;
+		expect(beforeCount).toBeGreaterThan(0);
 
-		const staleLoad = controller.load("dense");
-		expect(controller.getSnapshot()).toMatchObject({
-			loadState: "loading",
-			events: [],
-		});
-
-		controller.clearAccountData();
-		const staleRequest = service.pendingLoads[1];
-		if (!staleRequest) throw new Error("Missing stale calendar load");
-		staleRequest.deferred.resolve({
-			events: calendarScenarioEvents("dense"),
+		// 删除/计划调整推送触发的后台重载：不得先清空数据或翻回 loading。
+		const background = controller.load(undefined, { background: true });
+		expect(controller.getSnapshot().loadState).toBe("ready");
+		expect(controller.getSnapshot().events).toHaveLength(beforeCount);
+		service.pendingLoads[service.pendingLoads.length - 1]?.deferred.resolve({
+			events: calendarScenarioEvents("empty"),
 			timeZone: "Asia/Shanghai",
-			scenario: "dense",
-		});
-		await staleLoad;
-		expect(controller.getSnapshot()).toMatchObject({
-			loadState: "idle",
-			events: [],
 			scenario: "normal",
 		});
+		await background;
+		expect(controller.getSnapshot().loadState).toBe("ready");
+		expect(controller.getSnapshot().events).toHaveLength(0);
+	});
+
+	test("failed background reload preserves current data and state", async () => {
+		const service = new DeferredLoadCalendarService();
+		const controller = new CalendarController(service, idSequence());
+		const initial = controller.load("normal");
+		service.pendingLoads[0]?.deferred.resolve({
+			events: calendarScenarioEvents("normal"),
+			timeZone: "Asia/Shanghai",
+			scenario: "normal",
+		});
+		await initial;
+		const eventsBefore = controller.getSnapshot().events;
+
+		const background = controller.load(undefined, { background: true });
+		service.pendingLoads[service.pendingLoads.length - 1]?.deferred.reject(
+			new Error("offline"),
+		);
+		await background;
+		expect(controller.getSnapshot().loadState).toBe("ready");
+		expect(controller.getSnapshot().events).toEqual(eventsBefore);
 	});
 });

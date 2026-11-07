@@ -27,7 +27,9 @@ describe("LocalAgentHostServices workflow storage", () => {
 		const host = new LocalAgentHostServices({
 			runBound: (_ownerRunId, operation) => operation("account-a"),
 			repository,
-			calendar: new CalendarRepository(repository, { timeZone: () => "Asia/Shanghai" }),
+			calendar: new CalendarRepository(repository, {
+				timeZone: () => "Asia/Shanghai",
+			}),
 			toolPolicy: {
 				async assertReadAllowed(_accountId, toolName) {
 					return toolName as "calendar.list_events";
@@ -35,16 +37,29 @@ describe("LocalAgentHostServices workflow storage", () => {
 			},
 			memory: {
 				async load() {
-					return { messages: [], version: 0 };
+					return {
+						messages: [],
+						version: 0,
+						thread: { title: "", metadata: null },
+					};
 				},
 				async append() {
 					return { version: 1 };
 				},
+				async saveThread() {
+					return { title: "", metadata: null };
+				},
 			},
 			tools: {
-				async propose() { return {}; },
-				async call() { return {}; },
-				async cancel() { return {}; },
+				async propose() {
+					return {};
+				},
+				async call() {
+					return {};
+				},
+				async cancel() {
+					return {};
+				},
 			},
 			now: () => now++,
 		});
@@ -97,13 +112,17 @@ describe("LocalAgentHostServices workflow storage", () => {
 				requestContext: { requestB: true },
 			}),
 		]);
-		expect(firstContext).toEqual(expect.objectContaining({
-			"step-a": expect.any(Object),
-		}));
-		expect(secondContext).toEqual(expect.objectContaining({
-			"step-a": expect.any(Object),
-			"step-b": expect.any(Object),
-		}));
+		expect(firstContext).toEqual(
+			expect.objectContaining({
+				"step-a": expect.any(Object),
+			}),
+		);
+		expect(secondContext).toEqual(
+			expect.objectContaining({
+				"step-a": expect.any(Object),
+				"step-b": expect.any(Object),
+			}),
+		);
 
 		await handle("workflow/snapshot.update-results", {
 			workflowName,
@@ -111,10 +130,7 @@ describe("LocalAgentHostServices workflow storage", () => {
 			stepId: "parallel",
 			result: {
 				status: "running",
-				output: [
-					{ __mastra_pending__: true },
-					{ __mastra_pending__: true },
-				],
+				output: [{ __mastra_pending__: true }, { __mastra_pending__: true }],
 			},
 			requestContext: {},
 		});
@@ -128,21 +144,23 @@ describe("LocalAgentHostServices workflow storage", () => {
 		});
 		expect(state).toEqual(expect.objectContaining({ status: "suspended" }));
 
-		const loaded = await handle("workflow/snapshot.load", { workflowName, runId });
-		expect(loaded).toEqual(expect.objectContaining({
-			status: "suspended",
-			requestContext: { requestA: true, requestB: true },
-			context: {
-				parallel: expect.objectContaining({
-					output: [
-						{ status: "success", output: "keep" },
-						null,
-					],
-				}),
-				"step-a": expect.any(Object),
-				"step-b": expect.any(Object),
-			},
-		}));
+		const loaded = await handle("workflow/snapshot.load", {
+			workflowName,
+			runId,
+		});
+		expect(loaded).toEqual(
+			expect.objectContaining({
+				status: "suspended",
+				requestContext: { requestA: true, requestB: true },
+				context: {
+					parallel: expect.objectContaining({
+						output: [{ status: "success", output: "keep" }, null],
+					}),
+					"step-a": expect.any(Object),
+					"step-b": expect.any(Object),
+				},
+			}),
+		);
 		const listed = await handle("workflow/snapshot.list", {
 			workflowName,
 			resourceId: "account-a",
@@ -150,13 +168,21 @@ describe("LocalAgentHostServices workflow storage", () => {
 			page: 0,
 			perPage: 10,
 		});
-		expect(listed).toEqual(expect.objectContaining({
-			total: 1,
-			runs: [expect.objectContaining({ workflowName, runId, resourceId: "account-a" })],
-		}));
-		await expect(
-			handle("workflow/snapshot.get", { runId }),
-		).resolves.toEqual(expect.objectContaining({ workflowName, runId }));
+		expect(listed).toEqual(
+			expect.objectContaining({
+				total: 1,
+				runs: [
+					expect.objectContaining({
+						workflowName,
+						runId,
+						resourceId: "account-a",
+					}),
+				],
+			}),
+		);
+		await expect(handle("workflow/snapshot.get", { runId })).resolves.toEqual(
+			expect.objectContaining({ workflowName, runId }),
+		);
 		await expect(
 			handle("workflow/snapshot.list", { resourceId: "account-b" }),
 		).rejects.toThrow("does not match");
@@ -188,7 +214,9 @@ class MemoryKeyStore implements CredentialKeyStore {
 		return value;
 	}
 
-	async deleteKey(reference: CredentialKeyReference): Promise<{ deleted: boolean }> {
+	async deleteKey(
+		reference: CredentialKeyReference,
+	): Promise<{ deleted: boolean }> {
 		return { deleted: this.keys.delete(keyId(reference)) };
 	}
 }

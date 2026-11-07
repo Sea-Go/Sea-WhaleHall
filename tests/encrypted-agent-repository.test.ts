@@ -89,6 +89,7 @@ describe("EncryptedAgentRepository", () => {
 			accountId: "account-a",
 			id: "conversation-1",
 			title: "会话-plaintext-sentinel",
+			metadata: { workingMemory: "# 用户偏好\n- 喜欢简短回答" },
 			createdAtMs: 1_000,
 			updatedAtMs: 1_100,
 		};
@@ -270,6 +271,7 @@ describe("EncryptedAgentRepository", () => {
 			accountId: "account-a",
 			id: "retained-conversation",
 			title: "保留本地会话",
+			metadata: null,
 			createdAtMs: 12_200,
 			updatedAtMs: 12_200,
 		};
@@ -580,6 +582,7 @@ describe("EncryptedAgentRepository", () => {
 			accountId: "account-a",
 			id: "conversation-1",
 			title: "标题",
+			metadata: null,
 			createdAtMs: 1,
 			updatedAtMs: 1,
 		});
@@ -1015,6 +1018,7 @@ describe("EncryptedAgentRepository", () => {
 				accountId,
 				id: "conversation-1",
 				title: "相同明文",
+				metadata: null,
 				createdAtMs: 1,
 				updatedAtMs: 1,
 			});
@@ -1406,7 +1410,7 @@ describe("EncryptedAgentRepository", () => {
 			verified
 				.query("SELECT version FROM encrypted_agent_schema WHERE singleton = 1")
 				.get(),
-		).toEqual({ version: 8 });
+		).toEqual({ version: 9 });
 		verified.close();
 	});
 
@@ -1458,7 +1462,7 @@ describe("EncryptedAgentRepository", () => {
 			verified
 				.query("SELECT version FROM encrypted_agent_schema WHERE singleton = 1")
 				.get(),
-		).toEqual({ version: 8 });
+		).toEqual({ version: 9 });
 		expect(
 			verified
 				.query(

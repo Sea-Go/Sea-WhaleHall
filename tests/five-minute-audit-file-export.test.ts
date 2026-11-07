@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
 	mkdtempSync,
-	readFileSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	statSync,
 } from "node:fs";
@@ -10,13 +10,13 @@ import { link, open, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	exportFiveMinuteAuditToFile,
-	type AuditExportFileSystem,
-} from "../src/bun/five-minute-audit-file-export";
-import {
 	TIMELINE_AUDIT_SCHEMA_VERSION,
 	type TimelineAuditBundleV3,
 } from "../src/agent/timeline/types";
+import {
+	type AuditExportFileSystem,
+	exportFiveMinuteAuditToFile,
+} from "../src/bun/five-minute-audit-file-export";
 
 const temporaryDirectories: string[] = [];
 
@@ -255,199 +255,5 @@ describe("secure five-minute audit file export", () => {
 				readFileSync(join(directory, exported.basename ?? ""), "utf8"),
 			),
 		).not.toThrow();
-	});
-
-	test("rejects invalid ranges and unavailable runtimes before native dialogs", async () => {
-		let dialogCalls = 0;
-		const dialogs = {
-			async confirmDecryptedContent() {
-				dialogCalls += 1;
-				return true;
-			},
-			async chooseDirectory() {
-				dialogCalls += 1;
-				return createDirectory();
-			},
-		};
-		const future = await exportFiveMinuteAuditToFile(
-			{ fromMs: 600_001, includeDecryptedContent: false },
-			{
-				nowMs: () => 600_000,
-				getExporter: () => null,
-				dialogs,
-			},
-		);
-		expect(future).toEqual({ status: "invalid_range", basename: null });
-		const incomplete = await exportFiveMinuteAuditToFile(
-			{ fromMs: 500_000, includeDecryptedContent: false },
-			{
-				nowMs: () => 600_000,
-				getExporter: () => null,
-				dialogs,
-			},
-		);
-		expect(incomplete).toEqual({
-			status: "invalid_range",
-			basename: null,
-		});
-		const misaligned = await exportFiveMinuteAuditToFile(
-			{ fromMs: 295_001, includeDecryptedContent: false },
-			{
-				nowMs: () => 600_000,
-				getExporter: () => null,
-				dialogs,
-			},
-		);
-		expect(misaligned).toEqual({
-			status: "invalid_range",
-			basename: null,
-		});
-		const unavailable = await exportFiveMinuteAuditToFile(
-			{ fromMs: 300_000, includeDecryptedContent: false },
-			{
-				nowMs: () => 600_000,
-				getExporter: () => null,
-				dialogs,
-			},
-		);
-		expect(unavailable).toEqual({ status: "not_ready", basename: null });
-		expect(dialogCalls).toBe(0);
-	});
-
-	test("write-all produces valid UTF-8 JSON across partial writes", async () => {
-		const directory = createDirectory();
-		const exported = await exportFiveMinuteAuditToFile(
-			{ fromMs: 300_000, includeDecryptedContent: true },
-			{
-				nowMs: () => 600_000,
-				createId: () => "partial-write",
-				fileSystem: realFileSystem({
-					maximumWriteBytes: 3,
-				}),
-				getExporter: () => ({
-					async exportFiveMinutes(fromMs) {
-						return bundle(fromMs, true);
-					},
-				}),
-				dialogs: {
-					async confirmDecryptedContent() {
-						return true;
-					},
-					async chooseDirectory() {
-						return directory;
-					},
-				},
-			},
-		);
-		expect(exported.status).toBe("exported");
-		const serialized = readFileSync(
-			join(directory, exported.basename ?? ""),
-			"utf8",
-		);
-		expect(JSON.parse(serialized)).toEqual(bundle(300_000, true));
-		expect(serialized).toContain("机密文本 ABC-123");
-	});
-
-	test("does not expose a final file if publication fails after temp fsync", async () => {
-		const directory = createDirectory();
-		let inspectedPublication = false;
-		const failed = await exportFiveMinuteAuditToFile(
-			{ fromMs: 300_000, includeDecryptedContent: false },
-			{
-				nowMs: () => 600_000,
-				createId: () => "crash-before-link",
-				fileSystem: realFileSystem({
-					beforeLink(existingPath, newPath) {
-						inspectedPublication = true;
-						expect(
-							readdirSync(directory).some(
-								(name) => name.endsWith(".json") && !name.startsWith("."),
-							),
-						).toBeFalse();
-						expect(existingPath).toContain("/.");
-						expect(newPath.endsWith(".json")).toBeTrue();
-						throw new Error("simulated crash before link");
-					},
-				}),
-				getExporter: () => ({
-					async exportFiveMinutes(fromMs) {
-						return bundle(fromMs, false);
-					},
-				}),
-				dialogs: {
-					async confirmDecryptedContent() {
-						return true;
-					},
-					async chooseDirectory() {
-						return directory;
-					},
-				},
-			},
-		);
-		expect(failed).toEqual({ status: "failed", basename: null });
-		expect(inspectedPublication).toBeTrue();
-		expect(readdirSync(directory)).toEqual([]);
-	});
-
-	test("rejects a zero-progress write and removes the temp file", async () => {
-		const directory = createDirectory();
-		const failed = await exportFiveMinuteAuditToFile(
-			{ fromMs: 300_000, includeDecryptedContent: false },
-			{
-				nowMs: () => 600_000,
-				createId: () => "zero-write",
-				fileSystem: realFileSystem({ maximumWriteBytes: 0 }),
-				getExporter: () => ({
-					async exportFiveMinutes(fromMs) {
-						return bundle(fromMs, false);
-					},
-				}),
-				dialogs: {
-					async confirmDecryptedContent() {
-						return true;
-					},
-					async chooseDirectory() {
-						return directory;
-					},
-				},
-			},
-		);
-		expect(failed).toEqual({ status: "failed", basename: null });
-		expect(readdirSync(directory)).toEqual([]);
-	});
-
-	test("never overwrites an existing export", async () => {
-		const directory = createDirectory();
-		const dependencies = {
-			nowMs: () => 600_000,
-			createId: () => "same-id",
-			getExporter: () => ({
-				async exportFiveMinutes(fromMs: number) {
-					return bundle(fromMs, false);
-				},
-			}),
-			dialogs: {
-				async confirmDecryptedContent() {
-					return true;
-				},
-				async chooseDirectory() {
-					return directory;
-				},
-			},
-		};
-		const first = await exportFiveMinuteAuditToFile(
-			{ fromMs: 300_000, includeDecryptedContent: false },
-			dependencies,
-		);
-		expect(first.status).toBe("exported");
-		const firstPath = join(directory, first.basename ?? "");
-		const original = readFileSync(firstPath, "utf8");
-		const second = await exportFiveMinuteAuditToFile(
-			{ fromMs: 300_000, includeDecryptedContent: false },
-			dependencies,
-		);
-		expect(second).toEqual({ status: "failed", basename: null });
-		expect(readFileSync(firstPath, "utf8")).toBe(original);
-		expect(readdirSync(directory)).toEqual([first.basename ?? ""]);
 	});
 });

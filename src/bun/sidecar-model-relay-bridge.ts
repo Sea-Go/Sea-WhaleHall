@@ -21,6 +21,8 @@ export interface SidecarModelRelayBridgeOptions {
 	send(event: ModelRelayEventFrame): Promise<void>;
 	modelId: string;
 	now?: () => number;
+	/** 可选的响应字节观察者：网关思考/调研进度帧在这里被解析并转发。 */
+	onResponseChunk?: (chunk: Uint8Array) => void;
 }
 
 interface ActiveRelay {
@@ -104,6 +106,7 @@ export class SidecarModelRelayBridge {
 				{
 					onResponse: (value) => resolveMetadata(value),
 					onChunk: async (chunk) => {
+						this.options.onResponseChunk?.(chunk);
 						await responseWrittenTurn;
 						await this.send(relay, {
 							kind: "model/relay.chunk",

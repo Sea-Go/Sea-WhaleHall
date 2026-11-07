@@ -12,6 +12,7 @@ import {
 	createActivityReflectionProviderOutputSchema,
 	createActivityReflectionRuntimeOutputSchema,
 	MAX_ACTIVITY_REFLECTION_PROMPT_CHARACTERS,
+	normalizeActivityReflectionProviderOutput,
 } from "../activity-reflection-prompt";
 import {
 	assertPlanningModelOutputForRequest,
@@ -41,6 +42,10 @@ import {
 } from "./activity-support-team";
 import { createMastraAgentSet, type MastraAgentSet } from "./agents";
 import {
+	type CloudSearchProductPort,
+	CloudSearchToolSession,
+} from "./cloud-tools/cloud-search-tools";
+import {
 	type CalendarSnapshot,
 	HostStateAdapters,
 	type HostToolProposal,
@@ -61,6 +66,10 @@ import {
 	dynamicPlanningOutputSchema,
 	dynamicPlanningProviderOutputSchema,
 } from "./planning-analysis";
+import {
+	DEFAULT_PLANNING_ANALYSIS_POLICY,
+	type PlanningAnalysisAttemptPolicy,
+} from "./planning-analysis-policy";
 import {
 	type PlanningWorkflowClarification,
 	type PlanningWorkflowCompletion,
@@ -126,8 +135,11 @@ const maxRetainedRuns = 256;
 const maxClarificationRounds = 3;
 /** Must finish before the Bun-side 210-second reflection deadline. */
 export const DEFAULT_ACTIVITY_REFLECTION_WORKFLOW_TIMEOUT_MS = 195_000;
-/** Must finish before the Bun-side 130-second dynamic Planning deadline. */
-export const DEFAULT_DYNAMIC_PLANNING_ANALYSIS_TIMEOUT_MS = 120_000;
+/** Must stay under the Bun-side planning RPC deadline (620s) with headroom,
+ *  and under the DataCenter tool-loop 8-minute per-round budget. Healthy
+ *  analyses (research + thinking) measured 200-410s on 2026-11-03/04 after
+ *  the upstream slowdown; the previous 240s cap killed every analysis. */
+export const DEFAULT_DYNAMIC_PLANNING_ANALYSIS_TIMEOUT_MS = 450_000;
 interface ConversationRunContext {
 	conversationId: string;
 	resourceId: string;
@@ -381,7 +393,6 @@ export class AgentHostRuntime {
 			relay: this.relay,
 			planningRelay: this.planningRelay,
 			reflectionRelay: this.reflectionRelay,
-			executeTool: (input) => this.executeTool(input),
 			executePlanningWorkflow: (input) =>
 				this.executePlanningWorkflowCycle(input),
 			executeActivityReflectionWorkflow: (input) =>
@@ -510,7 +521,8 @@ export class AgentHostRuntime {
 				"Dynamic Planning analysis input failed its private protocol contract.",
 			);
 		}
-		const analysis = parsedInput.data as PlanningModelAnalysisRequest;
+		const analysis =
+			parsedInput.data as unknown as PlanningModelAnalysisRequest;
 		const agents = this.requireAgents();
 		const relay = this.requirePlanningRelay();
 		try {
@@ -521,24 +533,44 @@ export class AgentHostRuntime {
 					agentId: MODEL_AGENT_IDS.planningAnalysis,
 				},
 				async () => {
-					const result = await runDynamicPlanningAnalysisWithDeadline(
-						(abortSignal) =>
-							this.hostRunContext.run(invocationId, () =>
-								agents.planningAnalysis.generate(
+					// 降级梯：首轮带调研工具、输出硬上限 16k token；2026-11-03 起上游
+					// 降速（~140 字/秒）后，健康分析（调研+思考+JSON）实测需 200-410s
+					// （思考 49-67KB 文本），60-90s 是 11-01 上游尚快时的旧常态——
+					// 曾按"7 分钟 4.2MB 失控"误设 240s cap，把健康分析全数砍死。
+					// 首轮超时后去工具裸跑（没有调研素材可循环），再超时才落可重试
+					// 诊断。真失控思考不靠时限兜底，由网关 512KB 文本护栏（≈健康
+					// 思考 8 倍）在服务端截断。数值契约收敛在 planning-analysis-policy.ts
+					// （总占用 ≤10 分钟）。
+					const policy = DEFAULT_PLANNING_ANALYSIS_POLICY;
+					const attemptStream = (
+						abortSignal: AbortSignal,
+						attempt: PlanningAnalysisAttemptPolicy,
+					) =>
+						this.hostRunContext.run(invocationId, () =>
+							agents.planningAnalysis
+								// 流式调用让网关的思考增量与调研进度帧实时流过中继，
+								// Bun 侧从 chunk 里解析并推送给客户端（思考全程可见）。
+								.stream(
 									JSON.stringify(planningModelInputProjection(analysis)),
 									{
 										runId: invocationId,
 										abortSignal,
 										requestContext: new RequestContext(),
-										maxSteps: 1,
-										toolChoice: "none",
-										modelSettings: { temperature: 0 },
+										// 调研工具（zhipu.*）由网关在服务端执行并回填续生成，
+										// 这里看到的始终是最终回答；maxSteps 只为网关桥降级时
+										// 本地兜底 execute 之后的收敛留步数。
+										maxSteps: policy.maxSteps,
+										toolChoice: attempt.withTools ? "auto" : "none",
+										modelSettings: {
+											temperature: 0,
+											maxOutputTokens: attempt.maxOutputTokens,
+										},
 										structuredOutput: {
 											schema: dynamicPlanningProviderOutputSchema,
 											// App/domain validation below remains strict. `warn` prevents
 											// Mastra from hiding a parse failure behind a generic runtime
 											// error before WhaleHall can classify it as invalid output.
-											errorStrategy: "warn",
+											errorStrategy: policy.structuredErrorStrategy,
 											// The DataCenter-backed OpenAI-compatible provider rejects
 											// native response-format schemas while compiling its grammar.
 											// Inline injection keeps the provider call JSON-only while the
@@ -546,12 +578,41 @@ export class AgentHostRuntime {
 											jsonPromptInjection: "inline",
 										},
 									},
-								),
+								)
+								// 与 generate 等价：经 objectStream 收敛到最终结构化对象
+								// （与 executePlanningModel 同构）；reasoning 增量由 Bun 在
+								// 中继 chunk 层解析，无需在此消费。
+								.then(async (stream) => {
+									let last: unknown = null;
+									for await (const object of stream.objectStream) {
+										last = object;
+									}
+									return last;
+								}),
+						);
+					let result: unknown = null;
+					try {
+						result = await runDynamicPlanningAnalysisWithDeadline(
+							(signal) => attemptStream(signal, policy.primary),
+							Math.min(
+								this.dynamicPlanningAnalysisTimeoutMs,
+								policy.primary.timeoutCapMs,
 							),
-						this.dynamicPlanningAnalysisTimeoutMs,
-					);
+						);
+					} catch (firstError) {
+						if (!(firstError instanceof DynamicPlanningAnalysisDeadlineError)) {
+							throw firstError;
+						}
+						result = await runDynamicPlanningAnalysisWithDeadline(
+							(signal) => attemptStream(signal, policy.degraded),
+							Math.min(
+								policy.degraded.timeoutCapMs,
+								this.dynamicPlanningAnalysisTimeoutMs,
+							),
+						);
+					}
 					const parsedOutput = dynamicPlanningOutputSchema.safeParse(
-						decodeDynamicPlanningProviderOutput(result.object, analysis),
+						decodeDynamicPlanningProviderOutput(result, analysis),
 					);
 					if (!parsedOutput.success) throw new PlanningModelOutputError();
 					assertPlanningModelOutputForRequest(parsedOutput.data, analysis);
@@ -820,6 +881,9 @@ export class AgentHostRuntime {
 	): Promise<void> {
 		const context = record.conversation;
 		if (!context) throw new Error("Conversation run context is missing.");
+		let cloudSession: CloudSearchToolSession | null = null;
+		let conversationAgent: Agent<"whalehall-conversation"> | null = null;
+		let activeTools: readonly string[] = [];
 		try {
 			if (operation === "start")
 				await this.emit(record, {
@@ -830,6 +894,58 @@ export class AgentHostRuntime {
 				await this.emit(record, { kind: "run.resumed", decision: operation });
 			const agents = this.requireAgents();
 			const relay = this.requireRelay();
+			const runId = record.snapshot.runId;
+			conversationAgent = agents.conversation;
+			// 云检索工具：父操作由 Bun 经已认证 RTW 会话创建（cloud/parent.open）；
+			// 产品会话不可用时本运行保持纯文本——工具能力按可用性存在，不是错误。
+			try {
+				const parent = await this.adapters.openCloudParent(runId);
+				if (isCloudParentDescriptor(parent)) {
+					const port: CloudSearchProductPort = {
+						search: (input) =>
+							this.adapters.cloudSearch(runId, {
+								requestKey: input.requestKey,
+								depth: input.depth,
+								query: input.query,
+								intelligence: input.intelligence,
+								...(input.continueSearchId
+									? { continueSearchId: input.continueSearchId }
+									: {}),
+								limits: input.limits,
+							}),
+						readEvidence: (input) =>
+							this.adapters.cloudReadEvidence(runId, {
+								requestKey: input.requestKey,
+								searchId: input.searchId,
+								evidenceId: input.evidenceId,
+							}),
+					};
+					cloudSession = new CloudSearchToolSession(
+						{ ...parent, signal: record.controller.signal },
+						port,
+					);
+					conversationAgent = agents.buildConversationAgent(
+						cloudSession.tools() as unknown as Record<
+							string,
+							// 见 agents.ts 工厂注释：仅边界收窄。
+							// eslint-disable-next-line @typescript-eslint/no-explicit-any
+							any
+						>,
+					);
+					// updateWorkingMemory 是 Memory 注入的本地工具：与云检索
+					// 工具一起放开（无云会话时 toolChoice=none，不越 fail-closed）。
+					activeTools = [...CLOUD_SEARCH_TOOL_NAMES, "updateWorkingMemory"];
+				}
+			} catch (parentError) {
+				// 工具能力按可用性存在：失败不终止运行，但必须落诊断，纯文本降级
+				// 不能静默发生。
+				appendSidecarDiag(
+					`cloud-parent-error run=${runId} ${String(parentError)}`,
+				);
+				cloudSession = null;
+				conversationAgent = agents.conversation;
+				activeTools = [];
+			}
 			const memoryExecution: ConversationMemoryExecutionContext = {
 				runId: record.snapshot.runId,
 				requestId: record.snapshot.requestId,
@@ -847,15 +963,21 @@ export class AgentHostRuntime {
 					},
 					async () => {
 						const requestContext = this.createRequestContext(record);
+						if (!conversationAgent) {
+							throw runtimeError(
+								"INTERNAL_ERROR",
+								"Conversation agent is not initialized.",
+							);
+						}
 						const stream =
 							operation === "start"
-								? await agents.conversation.stream(context.message, {
+								? await conversationAgent.stream(context.message, {
 										runId: record.snapshot.runId,
 										abortSignal: record.controller.signal,
 										requestContext,
-										activeTools: [],
-										toolChoice: "none",
-										maxSteps: 1,
+										activeTools: [...activeTools],
+										toolChoice: cloudSession ? "auto" : "none",
+										maxSteps: cloudSession ? 6 : 1,
 										memory: {
 											thread: context.conversationId,
 											resource: context.resourceId,
@@ -889,12 +1011,24 @@ export class AgentHostRuntime {
 						};
 						for await (const chunk of stream.fullStream) {
 							if (this.isTerminal(record)) return;
+							if (chunk.type === "reasoning-delta") {
+								// 思考模型的推理流（ollama 的 delta.reasoning）：与正文
+								// 独立转发，端上在等待期实时显示，不落消息正文。
+								const reasoningDelta = chunk.payload.text;
+								if (reasoningDelta) {
+									await this.emit(record, {
+										kind: "conversation.reasoning.delta",
+										delta: reasoningDelta,
+									});
+								}
+								continue;
+							}
 							if (chunk.type === "text-delta") {
 								receivedTextDelta = true;
 								try {
 									await appendText(textGuard.push(chunk.payload.text));
 								} catch (error) {
-									agents.conversation.abortRunStream(record.snapshot.runId);
+									conversationAgent.abortRunStream(record.snapshot.runId);
 									throw error;
 								}
 								continue;
@@ -904,8 +1038,32 @@ export class AgentHostRuntime {
 								chunk.type === "tool-call-approval" ||
 								chunk.type === "tool-result"
 							) {
-								agents.conversation.abortRunStream(record.snapshot.runId);
-								throw conversationToolProtocolError();
+								if (!cloudSession || chunk.type === "tool-call-approval") {
+									// 云检索工具全部只读、无审批挂起；无工具会话时任何
+									// 工具块都视为协议违规（保持既有 fail-closed）。
+									conversationAgent.abortRunStream(record.snapshot.runId);
+									throw conversationToolProtocolError();
+								}
+								const payload = chunk.payload as {
+									toolCallId?: unknown;
+									toolName?: unknown;
+									isError?: unknown;
+								};
+								const toolCallId = String(payload.toolCallId ?? "");
+								const toolName = String(payload.toolName ?? "");
+								if (toolCallId && toolName) {
+									await this.emit(
+										record,
+										chunk.type === "tool-call"
+											? { kind: "agent.tool.call", toolCallId, toolName }
+											: {
+													kind: "agent.tool.result",
+													toolCallId,
+													toolName,
+													isError: payload.isError === true,
+												},
+									);
+								}
 							}
 						}
 						if (this.isTerminal(record)) return;
@@ -954,7 +1112,7 @@ export class AgentHostRuntime {
 					agentId: MODEL_AGENT_IDS.activitySupportSupervisor,
 				},
 				() =>
-					agents.activitySupportSupervisor.generate(
+					agents.activitySupportSupervisor.stream(
 						activitySupportAssessmentPrompt(activity.supportContext),
 						{
 							runId: activitySupportAgentRunId(record, "triage"),
@@ -972,7 +1130,7 @@ export class AgentHostRuntime {
 					),
 			);
 			const assessment = activitySupportAssessmentSchema.safeParse(
-				assessmentResult.object,
+				await assessmentResult.object,
 			);
 			if (!assessment.success) {
 				throw runtimeError(
@@ -993,7 +1151,7 @@ export class AgentHostRuntime {
 					agentId: ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS[specialistKey],
 				},
 				() =>
-					specialist.generate(
+					specialist.stream(
 						activitySupportSpecialistPrompt(
 							activity.supportContext,
 							guardedAssessment,
@@ -1008,13 +1166,14 @@ export class AgentHostRuntime {
 							modelSettings: { temperature: 0 },
 							structuredOutput: {
 								schema: activitySupportBriefSchema,
+								jsonPromptInjection: true,
 								errorStrategy: "strict",
 							},
 						},
 					),
 			);
 			const parsedBrief = activitySupportBriefSchema.safeParse(
-				briefResult.object,
+				await briefResult.object,
 			);
 			const brief =
 				parsedBrief.success && isSafeActivitySupportBrief(parsedBrief.data)
@@ -1104,6 +1263,9 @@ export class AgentHostRuntime {
 		}
 	}
 
+	// 休眠路径：当前没有任何挂载的审批工具（createWhaleHallAgentTools 已摘除，
+	// toolProposals 无写入点）。保留以服务对话 Agent 未来通过 provider
+	// conformance gate 后的本地审批工具；在此之前本方法不可达。
 	private async executeTool(input: AgentToolExecutionInput): Promise<unknown> {
 		const record = this.requireRun(input.runId);
 		if (record.snapshot.status !== "running" || this.isTerminal(record)) {
@@ -1360,7 +1522,7 @@ export class AgentHostRuntime {
 					await loadActivityReflectionNativeSkillContext(
 						agents.activityReflectionSkillCatalog,
 					);
-				const result = await agents.activityReflection.generate(userPrompt, {
+				const result = await agents.activityReflection.stream(userPrompt, {
 					runId: invocationId,
 					abortSignal,
 					requestContext: new RequestContext(),
@@ -1378,10 +1540,12 @@ export class AgentHostRuntime {
 						errorStrategy: "strict",
 						// This one-step call has no Tools, so native structured output
 						// can constrain the provider without a tool/schema conflict.
-						jsonPromptInjection: false,
+						jsonPromptInjection: true,
 					},
 				});
-				const runtimeOutput = runtimeOutputSchema.safeParse(result.object);
+				const runtimeOutput = runtimeOutputSchema.safeParse(
+					normalizeActivityReflectionProviderOutput(await result.object),
+				);
 				if (!runtimeOutput.success) {
 					return { kind: "invalid-output" as const };
 				}
@@ -2157,6 +2321,60 @@ class ToolMarkupGuard {
 	}
 }
 
+const CLOUD_SEARCH_TOOL_NAMES = [
+	"search_fast",
+	"search_detailed",
+	"read_evidence",
+] as const;
+
+/** Bun 返回的 cloud/parent.open 描述（无凭据字段）；字段不完整时按不可用处理。 */
+function isCloudParentDescriptor(value: unknown): value is {
+	runId: string;
+	accountId: string;
+	operationId: string;
+	scopeRef: string;
+	snapshotRef: string;
+	budgetRef: string;
+	allowLowerIntelligence: boolean;
+	deadlineAtMs: number;
+	budget: {
+		searchCalls: number;
+		readCalls: number;
+		quoteRunes: number;
+		maxReadsPerSearch: number;
+		maxQuoteRunesPerSearch: number;
+	};
+} {
+	if (typeof value !== "object" || value === null) return false;
+	const record = value as Record<string, unknown>;
+	const strings = [
+		record.runId,
+		record.accountId,
+		record.operationId,
+		record.scopeRef,
+		record.snapshotRef,
+		record.budgetRef,
+	];
+	if (strings.some((v) => typeof v !== "string" || v.length === 0))
+		return false;
+	if (typeof record.allowLowerIntelligence !== "boolean") return false;
+	if (
+		!Number.isSafeInteger(record.deadlineAtMs) ||
+		(record.deadlineAtMs as number) <= Date.now()
+	) {
+		return false;
+	}
+	const budget = record.budget as Record<string, unknown> | undefined;
+	if (!budget) return false;
+	return [
+		budget.searchCalls,
+		budget.readCalls,
+		budget.quoteRunes,
+		budget.maxReadsPerSearch,
+		budget.maxQuoteRunesPerSearch,
+	].every((v) => Number.isSafeInteger(v) && (v as number) >= 1);
+}
+
 function conversationToolProtocolError(): AgentHostRuntimeError {
 	return runtimeError(
 		"MODEL_RELAY_ERROR",
@@ -2279,10 +2497,73 @@ export function runActivityReflectionWithDeadline<TResult>(
 	});
 }
 
+function appendSidecarDiag(message: string): void {
+	try {
+		const nodeFs = process.getBuiltinModule?.("node:fs") as
+			| { appendFileSync: typeof import("node:fs").appendFileSync }
+			| undefined;
+		const nodePath = process.getBuiltinModule?.("node:path") as
+			| { join: typeof import("node:path").join }
+			| undefined;
+		const nodeOs = process.getBuiltinModule?.("node:os") as
+			| { homedir: typeof import("node:os").homedir }
+			| undefined;
+		if (!nodeFs || !nodePath) return;
+		const home = process.env.HOME || nodeOs?.homedir() || "";
+		nodeFs.appendFileSync(
+			nodePath.join(
+				home,
+				"Library/Application Support/com.seago.whalehall/dev/local/sidecar-diag.log",
+			),
+			`${new Date().toISOString()} ${message}\n`,
+		);
+	} catch {
+		// 诊断失败不干扰主流程
+	}
+}
+
 function asError(error: unknown): Error {
 	// Only locally constructed protocol errors can cross the private-stdio
 	// boundary verbatim. Model/provider objects can contain arbitrary prompts,
 	// outputs or huge serialized payloads, so they deliberately become generic.
+	try {
+		const nodeFs = process.getBuiltinModule?.("node:fs") as
+			| { appendFileSync: typeof import("node:fs").appendFileSync }
+			| undefined;
+		const nodePath = process.getBuiltinModule?.("node:path") as
+			| { join: typeof import("node:path").join }
+			| undefined;
+		const nodeOs = process.getBuiltinModule?.("node:os") as
+			| { homedir: typeof import("node:os").homedir }
+			| undefined;
+		if (nodeFs && nodePath) {
+			const home = process.env.HOME || nodeOs?.homedir() || "";
+			let detail: string;
+			if (error instanceof AgentHostRuntimeError) {
+				detail = `AgentHostRuntimeError code=${String((error as { code?: unknown }).code ?? "?")} msg=${error.message}`;
+			} else if (isRecord(error) && typeof error.diagnostic === "string") {
+				detail = `diagnostic ${error.diagnostic.slice(0, 300)}`;
+			} else if (error instanceof Error) {
+				detail = `${error.name}: ${error.message}`;
+			} else if (typeof error === "string") {
+				detail = error.slice(0, 300);
+			} else {
+				const rec = isRecord(error) ? error : undefined;
+				detail = `non-error ${rec ? JSON.stringify({ name: rec.name, message: rec.message, code: rec.code, status: rec.status, type: rec.type, data: typeof rec.data === "object" && rec.data !== null ? JSON.stringify(rec.data).slice(0, 200) : String(rec.data ?? "").slice(0, 100) }).slice(0, 600) : String(error).slice(0, 300)}`;
+			}
+			nodeFs.appendFileSync(
+				nodePath.join(
+					home,
+					"Library/Application Support/com.seago.whalehall/dev/local/sidecar-diag.log",
+				),
+				`${new Date().toISOString()} analyze-error ${detail}\n`,
+			);
+		} else {
+			process.stderr.write("[sidecar-diag] fs unavailable\n");
+		}
+	} catch {
+		// 诊断失败不干扰主流程
+	}
 	if (error instanceof AgentHostRuntimeError) return error;
 	if (isRecord(error) && typeof error.diagnostic === "string") {
 		return new Error(error.diagnostic.replace(/[\r\n]+/g, " ").slice(0, 1_000));

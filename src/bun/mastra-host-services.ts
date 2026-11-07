@@ -1,20 +1,39 @@
 import { randomUUID } from "node:crypto";
 import type {
+	TaskPlanningDraft,
+	TaskPlanningInput,
+} from "../shared/task-planning";
+import type { AgentToolPolicy } from "./agent-tool-policy";
+import type { CalendarRepository } from "./calendar-repository";
+import type {
 	AgentWorkflowRecord,
 	AgentWorkflowSnapshotListOptions,
 	AgentWorkflowSnapshotRecord,
 	EncryptedAgentRepository,
 } from "./encrypted-agent-repository";
-import type { CalendarRepository } from "./calendar-repository";
-import type { AgentToolPolicy } from "./agent-tool-policy";
 import { validatePlanningDraft } from "./planning-validator";
-import type { TaskPlanningDraft, TaskPlanningInput } from "../shared/task-planning";
 
 export interface ConversationMemoryService {
-	load(accountId: string, ownerRunId: string, conversationId: string): Promise<{
+	load(
+		accountId: string,
+		ownerRunId: string,
+		conversationId: string,
+	): Promise<{
 		messages: readonly { role: "user" | "assistant"; content: string }[];
 		version: number;
+		thread: {
+			title: string;
+			metadata: Record<string, unknown> | null;
+		};
 	}>;
+	/** Mastra 线程元数据（标题/working memory）持久化：Sidecar 只发起，不落盘。 */
+	saveThread(input: {
+		accountId: string;
+		ownerRunId: string;
+		conversationId: string;
+		title?: string;
+		metadata?: Record<string, unknown>;
+	}): Promise<{ title: string; metadata: Record<string, unknown> | null }>;
 	append(input: {
 		accountId: string;
 		ownerRunId: string;
@@ -72,12 +91,16 @@ export class LocalAgentHostServices {
 		this.now = options.now ?? Date.now;
 	}
 
-	async handle(method: string, params: Record<string, unknown>): Promise<unknown> {
+	async handle(
+		method: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
 		const ownerRunId = requiredId(params.ownerRunId, "ownerRunId");
 		const boundParams = { ...params };
 		delete boundParams.ownerRunId;
 		return this.options.runBound(ownerRunId, (accountId) =>
-			this.handleBound(method, accountId, ownerRunId, boundParams));
+			this.handleBound(method, accountId, ownerRunId, boundParams),
+		);
 	}
 
 	private async handleBound(
@@ -91,6 +114,8 @@ export class LocalAgentHostServices {
 				return this.loadMemory(accountId, ownerRunId, params);
 			case "memory/append":
 				return this.appendMemory(accountId, ownerRunId, params);
+			case "memory/thread.save":
+				return this.saveThread(accountId, ownerRunId, params);
 			case "workflow/start":
 				assertOwnerRun(ownerRunId, params);
 				return this.startWorkflow(accountId, params);
@@ -149,28 +174,69 @@ export class LocalAgentHostServices {
 		);
 	}
 
+	private async saveThread(
+		accountId: string,
+		ownerRunId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
+		assertResource(accountId, params);
+		const title =
+			typeof params.title === "string" && params.title.trim().length > 0
+				? params.title.trim().slice(0, 120)
+				: undefined;
+		const metadata =
+			params.metadata &&
+			typeof params.metadata === "object" &&
+			!Array.isArray(params.metadata)
+				? (params.metadata as Record<string, unknown>)
+				: undefined;
+		return this.options.memory.saveThread({
+			accountId,
+			ownerRunId,
+			conversationId: requiredId(params.threadId, "threadId"),
+			...(title !== undefined ? { title } : {}),
+			...(metadata !== undefined ? { metadata } : {}),
+		});
+	}
+
 	private async appendMemory(
 		accountId: string,
 		ownerRunId: string,
 		params: Record<string, unknown>,
 	): Promise<unknown> {
 		assertResource(accountId, params);
-		if (!Array.isArray(params.messages) || params.messages.length < 1 || params.messages.length > 8) {
-			throw new Error("memory/append messages must contain one to eight items.");
+		if (
+			!Array.isArray(params.messages) ||
+			params.messages.length < 1 ||
+			params.messages.length > 8
+		) {
+			throw new Error(
+				"memory/append messages must contain one to eight items.",
+			);
 		}
 		return this.options.memory.append({
 			accountId,
 			ownerRunId,
 			conversationId: requiredId(params.threadId, "threadId"),
-			expectedVersion: requiredVersion(params.expectedVersion, "expectedVersion"),
+			expectedVersion: requiredVersion(
+				params.expectedVersion,
+				"expectedVersion",
+			),
 			messages: params.messages.map(parseMemoryMessage),
 		});
 	}
 
-	private async startWorkflow(accountId: string, params: Record<string, unknown>): Promise<unknown> {
-		if (params.workflow !== "task-planning") throw new Error("Only task-planning workflow is available.");
+	private async startWorkflow(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
+		if (params.workflow !== "task-planning")
+			throw new Error("Only task-planning workflow is available.");
 		const sessionId = requiredId(params.sessionId, "sessionId");
-		const existing = await this.options.repository.getWorkflow(accountId, sessionId);
+		const existing = await this.options.repository.getWorkflow(
+			accountId,
+			sessionId,
+		);
 		if (existing) {
 			const state = parseWorkflow(existing);
 			return { workflowRunId: state.workflowRunId };
@@ -198,12 +264,18 @@ export class LocalAgentHostServices {
 		return { workflowRunId: state.workflowRunId };
 	}
 
-	private async resumeWorkflow(accountId: string, params: Record<string, unknown>): Promise<unknown> {
+	private async resumeWorkflow(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
 		const sessionId = requiredId(params.sessionId, "sessionId");
 		const record = await this.requireWorkflow(accountId, sessionId);
 		const state = parseWorkflow(record);
-		if (params.workflowRunId !== state.workflowRunId) throw new Error("Workflow run ID changed.");
-		const answers = Array.isArray(params.answers) ? params.answers.map(parsePlanningAnswer) : [];
+		if (params.workflowRunId !== state.workflowRunId)
+			throw new Error("Workflow run ID changed.");
+		const answers = Array.isArray(params.answers)
+			? params.answers.map(parsePlanningAnswer)
+			: [];
 		state.answers = [...state.answers, ...answers];
 		await this.saveWorkflowRecord(record, state);
 		return { resumed: true, version: state.version };
@@ -213,40 +285,53 @@ export class LocalAgentHostServices {
 		accountId: string,
 		params: Record<string, unknown>,
 	): Promise<unknown> {
-		assertExactKeys(params, [
-			"createdAtMs",
-			"resourceId",
-			"runId",
-			"snapshot",
-			"updatedAtMs",
-			"workflowName",
-		], ["resourceId", "createdAtMs", "updatedAtMs"]);
+		assertExactKeys(
+			params,
+			[
+				"createdAtMs",
+				"resourceId",
+				"runId",
+				"snapshot",
+				"updatedAtMs",
+				"workflowName",
+			],
+			["resourceId", "createdAtMs", "updatedAtMs"],
+		);
 		assertWorkflowResource(accountId, params.resourceId);
 		const workflowName = requiredId(params.workflowName, "workflowName");
 		const runId = requiredId(params.runId, "runId");
 		const snapshot = requiredRecord(params.snapshot, "snapshot");
-		return this.withWorkflowSnapshotLock(accountId, workflowName, runId, async () => {
-			const existing = await this.options.repository.getWorkflowSnapshot(
-				accountId,
-				runId,
-				workflowName,
-			);
-			const currentTime = this.now();
-			const createdAtMs = optionalTimestamp(params.createdAtMs, "createdAtMs") ??
-				existing?.createdAtMs ?? currentTime;
-			const updatedAtMs = optionalTimestamp(params.updatedAtMs, "updatedAtMs") ?? currentTime;
-			if (updatedAtMs < createdAtMs) throw new Error("Workflow snapshot timestamps are invalid.");
-			await this.options.repository.putWorkflowSnapshot({
-				accountId,
-				workflowName,
-				runId,
-				resourceId: accountId,
-				snapshot: structuredClone(snapshot),
-				createdAtMs,
-				updatedAtMs,
-			});
-			return { persisted: true };
-		});
+		return this.withWorkflowSnapshotLock(
+			accountId,
+			workflowName,
+			runId,
+			async () => {
+				const existing = await this.options.repository.getWorkflowSnapshot(
+					accountId,
+					runId,
+					workflowName,
+				);
+				const currentTime = this.now();
+				const createdAtMs =
+					optionalTimestamp(params.createdAtMs, "createdAtMs") ??
+					existing?.createdAtMs ??
+					currentTime;
+				const updatedAtMs =
+					optionalTimestamp(params.updatedAtMs, "updatedAtMs") ?? currentTime;
+				if (updatedAtMs < createdAtMs)
+					throw new Error("Workflow snapshot timestamps are invalid.");
+				await this.options.repository.putWorkflowSnapshot({
+					accountId,
+					workflowName,
+					runId,
+					resourceId: accountId,
+					snapshot: structuredClone(snapshot),
+					createdAtMs,
+					updatedAtMs,
+				});
+				return { persisted: true };
+			},
+		);
 	}
 
 	private async loadWorkflowSnapshot(
@@ -266,15 +351,27 @@ export class LocalAgentHostServices {
 		accountId: string,
 		params: Record<string, unknown>,
 	): Promise<unknown> {
-		assertExactKeys(params, [
-			"fromDateMs",
-			"page",
-			"perPage",
-			"resourceId",
-			"status",
-			"toDateMs",
-			"workflowName",
-		], ["workflowName", "fromDateMs", "toDateMs", "perPage", "page", "resourceId", "status"]);
+		assertExactKeys(
+			params,
+			[
+				"fromDateMs",
+				"page",
+				"perPage",
+				"resourceId",
+				"status",
+				"toDateMs",
+				"workflowName",
+			],
+			[
+				"workflowName",
+				"fromDateMs",
+				"toDateMs",
+				"perPage",
+				"page",
+				"resourceId",
+				"status",
+			],
+		);
 		assertWorkflowResource(accountId, params.resourceId);
 		const options: AgentWorkflowSnapshotListOptions = {
 			workflowName: optionalId(params.workflowName, "workflowName"),
@@ -285,7 +382,10 @@ export class LocalAgentHostServices {
 			resourceId: params.resourceId === undefined ? undefined : accountId,
 			status: optionalId(params.status, "status"),
 		};
-		const result = await this.options.repository.listWorkflowSnapshots(accountId, options);
+		const result = await this.options.repository.listWorkflowSnapshots(
+			accountId,
+			options,
+		);
 		return {
 			runs: result.runs.map(workflowSnapshotHostRecord),
 			total: result.total,
@@ -312,13 +412,18 @@ export class LocalAgentHostServices {
 		assertExactKeys(params, ["runId", "workflowName"]);
 		const workflowName = requiredId(params.workflowName, "workflowName");
 		const runId = requiredId(params.runId, "runId");
-		return this.withWorkflowSnapshotLock(accountId, workflowName, runId, async () => ({
-			deleted: await this.options.repository.deleteWorkflowSnapshot(
-				accountId,
-				runId,
-				workflowName,
-			),
-		}));
+		return this.withWorkflowSnapshotLock(
+			accountId,
+			workflowName,
+			runId,
+			async () => ({
+				deleted: await this.options.repository.deleteWorkflowSnapshot(
+					accountId,
+					runId,
+					workflowName,
+				),
+			}),
+		);
 	}
 
 	private async updateWorkflowResults(
@@ -336,19 +441,35 @@ export class LocalAgentHostServices {
 		const runId = requiredId(params.runId, "runId");
 		const stepId = requiredId(params.stepId, "stepId");
 		const result = requiredRecord(params.result, "result");
-		const requestContext = requiredRecord(params.requestContext, "requestContext");
-		return this.withWorkflowSnapshotLock(accountId, workflowName, runId, async () => {
-			const record = await this.options.repository.getWorkflowSnapshot(
-				accountId,
-				runId,
-				workflowName,
-			);
-			if (!record) return {};
-			const snapshot = requiredRecord(structuredClone(record.snapshot), "stored snapshot");
-			const context = mergeWorkflowStepResult(snapshot, stepId, result, requestContext);
-			await this.saveUpdatedWorkflowSnapshot(record, snapshot);
-			return context;
-		});
+		const requestContext = requiredRecord(
+			params.requestContext,
+			"requestContext",
+		);
+		return this.withWorkflowSnapshotLock(
+			accountId,
+			workflowName,
+			runId,
+			async () => {
+				const record = await this.options.repository.getWorkflowSnapshot(
+					accountId,
+					runId,
+					workflowName,
+				);
+				if (!record) return {};
+				const snapshot = requiredRecord(
+					structuredClone(record.snapshot),
+					"stored snapshot",
+				);
+				const context = mergeWorkflowStepResult(
+					snapshot,
+					stepId,
+					result,
+					requestContext,
+				);
+				await this.saveUpdatedWorkflowSnapshot(record, snapshot);
+				return context;
+			},
+		);
 	}
 
 	private async updateWorkflowState(
@@ -359,19 +480,28 @@ export class LocalAgentHostServices {
 		const workflowName = requiredId(params.workflowName, "workflowName");
 		const runId = requiredId(params.runId, "runId");
 		const opts = requiredRecord(params.opts, "opts");
-		return this.withWorkflowSnapshotLock(accountId, workflowName, runId, async () => {
-			const record = await this.options.repository.getWorkflowSnapshot(
-				accountId,
-				runId,
-				workflowName,
-			);
-			if (!record) return null;
-			const snapshot = requiredRecord(structuredClone(record.snapshot), "stored snapshot");
-			if (!isRecord(snapshot.context)) throw new Error("Stored workflow snapshot context is invalid.");
-			const next = { ...snapshot, ...structuredClone(opts) };
-			await this.saveUpdatedWorkflowSnapshot(record, next);
-			return next;
-		});
+		return this.withWorkflowSnapshotLock(
+			accountId,
+			workflowName,
+			runId,
+			async () => {
+				const record = await this.options.repository.getWorkflowSnapshot(
+					accountId,
+					runId,
+					workflowName,
+				);
+				if (!record) return null;
+				const snapshot = requiredRecord(
+					structuredClone(record.snapshot),
+					"stored snapshot",
+				);
+				if (!isRecord(snapshot.context))
+					throw new Error("Stored workflow snapshot context is invalid.");
+				const next = { ...snapshot, ...structuredClone(opts) };
+				await this.saveUpdatedWorkflowSnapshot(record, next);
+				return next;
+			},
+		);
 	}
 
 	private async saveUpdatedWorkflowSnapshot(
@@ -410,23 +540,44 @@ export class LocalAgentHostServices {
 		}
 	}
 
-	private async loadPlanning(accountId: string, params: Record<string, unknown>): Promise<unknown> {
-		await this.options.toolPolicy.assertReadAllowed(accountId, "planning.get_active_plan");
-		const record = await this.requireWorkflow(accountId, requiredId(params.sessionId, "sessionId"));
+	private async loadPlanning(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
+		await this.options.toolPolicy.assertReadAllowed(
+			accountId,
+			"planning.get_active_plan",
+		);
+		const record = await this.requireWorkflow(
+			accountId,
+			requiredId(params.sessionId, "sessionId"),
+		);
 		return parseWorkflow(record);
 	}
 
-	private async savePlanning(accountId: string, params: Record<string, unknown>): Promise<unknown> {
+	private async savePlanning(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
 		const sessionId = requiredId(params.sessionId, "sessionId");
 		const record = await this.requireWorkflow(accountId, sessionId);
 		const current = parseWorkflow(record);
-		const expectedVersion = requiredVersion(params.expectedVersion, "expectedVersion");
-		if (current.version !== expectedVersion) throw new Error("Planning workflow version conflict.");
+		const expectedVersion = requiredVersion(
+			params.expectedVersion,
+			"expectedVersion",
+		);
+		if (current.version !== expectedVersion)
+			throw new Error("Planning workflow version conflict.");
 		const next: StoredPlanningWorkflow = {
 			...current,
 			input: parsePlanningInput(params.input),
-			answers: Array.isArray(params.answers) ? params.answers.map(parsePlanningAnswer) : current.answers,
-			clarificationRounds: requiredVersion(params.clarificationRounds, "clarificationRounds"),
+			answers: Array.isArray(params.answers)
+				? params.answers.map(parsePlanningAnswer)
+				: current.answers,
+			clarificationRounds: requiredVersion(
+				params.clarificationRounds,
+				"clarificationRounds",
+			),
 			workflowRunId: requiredId(params.workflowRunId, "workflowRunId"),
 			version: current.version + 1,
 			result: structuredClone(params.result),
@@ -435,8 +586,14 @@ export class LocalAgentHostServices {
 		return { version: next.version };
 	}
 
-	private async validatePlanning(accountId: string, params: Record<string, unknown>): Promise<unknown> {
-		await this.options.toolPolicy.assertReadAllowed(accountId, "calendar.list_events");
+	private async validatePlanning(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
+		await this.options.toolPolicy.assertReadAllowed(
+			accountId,
+			"calendar.list_events",
+		);
 		const sessionId = requiredId(params.sessionId, "sessionId");
 		const record = await this.requireWorkflow(accountId, sessionId);
 		const state = parseWorkflow(record);
@@ -459,14 +616,29 @@ export class LocalAgentHostServices {
 		};
 	}
 
-	private async queryCalendar(accountId: string, params: Record<string, unknown>): Promise<unknown> {
-		await this.options.toolPolicy.assertReadAllowed(accountId, "calendar.list_events");
+	private async queryCalendar(
+		accountId: string,
+		params: Record<string, unknown>,
+	): Promise<unknown> {
+		await this.options.toolPolicy.assertReadAllowed(
+			accountId,
+			"calendar.list_events",
+		);
 		const fromDate = requiredDate(params.fromDate, "fromDate");
-		const toDateExclusive = requiredDate(params.toDateExclusive, "toDateExclusive");
+		const toDateExclusive = requiredDate(
+			params.toDateExclusive,
+			"toDateExclusive",
+		);
 		const requestedZone = requiredId(params.timeZone, "timeZone");
-		const snapshot = await this.options.calendar.snapshot(accountId, fromDate, toDateExclusive);
+		const snapshot = await this.options.calendar.snapshot(
+			accountId,
+			fromDate,
+			toDateExclusive,
+		);
 		if (snapshot.timeZone !== requestedZone) {
-			throw new Error("Calendar time zone does not match the authenticated account settings.");
+			throw new Error(
+				"Calendar time zone does not match the authenticated account settings.",
+			);
 		}
 		return {
 			fromDate,
@@ -477,8 +649,14 @@ export class LocalAgentHostServices {
 		};
 	}
 
-	private async requireWorkflow(accountId: string, sessionId: string): Promise<AgentWorkflowRecord> {
-		const record = await this.options.repository.getWorkflow(accountId, sessionId);
+	private async requireWorkflow(
+		accountId: string,
+		sessionId: string,
+	): Promise<AgentWorkflowRecord> {
+		const record = await this.options.repository.getWorkflow(
+			accountId,
+			sessionId,
+		);
 		if (!record) throw new Error("Planning workflow was not found.");
 		return record;
 	}
@@ -495,22 +673,33 @@ export class LocalAgentHostServices {
 	}
 }
 
-function assertResource(accountId: string, params: Record<string, unknown>): void {
+function assertResource(
+	accountId: string,
+	params: Record<string, unknown>,
+): void {
 	if (params.namespace !== "conversation" || params.resourceId !== accountId) {
-		throw new Error("Memory resource does not match the authenticated account.");
+		throw new Error(
+			"Memory resource does not match the authenticated account.",
+		);
 	}
 }
 
 function parseWorkflow(record: AgentWorkflowRecord): StoredPlanningWorkflow {
-	if (!isRecord(record.definition)) throw new Error("Stored planning workflow is invalid.");
+	if (!isRecord(record.definition))
+		throw new Error("Stored planning workflow is invalid.");
 	const value = record.definition;
 	return {
 		sessionId: requiredId(value.sessionId, "sessionId"),
 		runId: requiredId(value.runId, "runId"),
 		workflowRunId: requiredId(value.workflowRunId, "workflowRunId"),
 		input: parsePlanningInput(value.input),
-		answers: Array.isArray(value.answers) ? value.answers.map(parsePlanningAnswer) : [],
-		clarificationRounds: requiredVersion(value.clarificationRounds, "clarificationRounds"),
+		answers: Array.isArray(value.answers)
+			? value.answers.map(parsePlanningAnswer)
+			: [],
+		clarificationRounds: requiredVersion(
+			value.clarificationRounds,
+			"clarificationRounds",
+		),
 		version: requiredVersion(value.version, "version"),
 		result: structuredClone(value.result),
 	};
@@ -521,33 +710,53 @@ function parsePlanningInput(value: unknown): TaskPlanningInput {
 	return structuredClone(value) as unknown as TaskPlanningInput;
 }
 
-function parseMemoryMessage(value: unknown): { role: "user" | "assistant"; content: string } {
-	if (!isRecord(value) || (value.role !== "user" && value.role !== "assistant") || typeof value.content !== "string" || value.content.length > 64 * 1024) {
+function parseMemoryMessage(value: unknown): {
+	role: "user" | "assistant";
+	content: string;
+} {
+	if (
+		!isRecord(value) ||
+		(value.role !== "user" && value.role !== "assistant") ||
+		typeof value.content !== "string" ||
+		value.content.length > 64 * 1024
+	) {
 		throw new Error("Conversation memory message is invalid.");
 	}
 	return { role: value.role, content: value.content };
 }
 
-function parsePlanningAnswer(value: unknown): { questionKey: string; answerText: string } {
-	if (!isRecord(value) || typeof value.questionKey !== "string" || typeof value.answerText !== "string") {
+function parsePlanningAnswer(value: unknown): {
+	questionKey: string;
+	answerText: string;
+} {
+	if (
+		!isRecord(value) ||
+		typeof value.questionKey !== "string" ||
+		typeof value.answerText !== "string"
+	) {
 		throw new Error("Planning answer is invalid.");
 	}
 	return { questionKey: value.questionKey, answerText: value.answerText };
 }
 
 function requiredId(value: unknown, field: string): string {
-	if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new Error(`${field} is invalid.`);
+	if (typeof value !== "string" || value.length < 1 || value.length > 256)
+		throw new Error(`${field} is invalid.`);
 	return value;
 }
 
-function assertOwnerRun(ownerRunId: string, params: Record<string, unknown>): void {
+function assertOwnerRun(
+	ownerRunId: string,
+	params: Record<string, unknown>,
+): void {
 	if (requiredId(params.runId, "runId") !== ownerRunId) {
 		throw new Error("Sidecar host call does not match its owning Agent run.");
 	}
 }
 
 function requiredVersion(value: unknown, field: string): number {
-	if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${field} is invalid.`);
+	if (!Number.isSafeInteger(value) || (value as number) < 0)
+		throw new Error(`${field} is invalid.`);
 	return value as number;
 }
 
@@ -569,20 +778,29 @@ function optionalId(value: unknown, field: string): string | undefined {
 
 function optionalPerPage(value: unknown): number | false | undefined {
 	if (value === undefined || value === false) return value;
-	if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 1_000) {
+	if (
+		!Number.isSafeInteger(value) ||
+		(value as number) < 1 ||
+		(value as number) > 1_000
+	) {
 		throw new Error("perPage is invalid.");
 	}
 	return value as number;
 }
 
-function requiredRecord(value: unknown, field: string): Record<string, unknown> {
+function requiredRecord(
+	value: unknown,
+	field: string,
+): Record<string, unknown> {
 	if (!isRecord(value)) throw new Error(`${field} is invalid.`);
 	return value;
 }
 
 function assertWorkflowResource(accountId: string, value: unknown): void {
 	if (value !== undefined && value !== accountId) {
-		throw new Error("Workflow resource does not match the authenticated account.");
+		throw new Error(
+			"Workflow resource does not match the authenticated account.",
+		);
 	}
 }
 
@@ -597,13 +815,15 @@ function assertExactKeys(
 		if (!allowed.has(key)) throw new Error(`Unexpected field: ${key}.`);
 	}
 	for (const key of allowed) {
-		if (!optional.has(key) && !Object.prototype.hasOwnProperty.call(value, key)) {
+		if (!optional.has(key) && !Object.hasOwn(value, key)) {
 			throw new Error(`Missing field: ${key}.`);
 		}
 	}
 }
 
-function workflowSnapshotHostRecord(record: AgentWorkflowSnapshotRecord): Record<string, unknown> {
+function workflowSnapshotHostRecord(
+	record: AgentWorkflowSnapshotRecord,
+): Record<string, unknown> {
 	return {
 		workflowName: record.workflowName,
 		runId: record.runId,
@@ -667,26 +887,37 @@ function mergeWorkflowStepResult(
 }
 
 function isPendingWorkflowMarker(value: unknown): boolean {
-	return isRecord(value) &&
+	return (
+		isRecord(value) &&
 		value.__mastra_pending__ === true &&
-		Object.keys(value).length === 1;
+		Object.keys(value).length === 1
+	);
 }
 
 function canResetWorkflowOutput(value: unknown): boolean {
-	if (value === null || value === undefined || isPendingWorkflowMarker(value)) return true;
-	return isRecord(value) &&
+	if (value === null || value === undefined || isPendingWorkflowMarker(value))
+		return true;
+	return (
+		isRecord(value) &&
 		value.status === "suspended" &&
-		("suspendPayload" in value || "suspendedAt" in value);
+		("suspendPayload" in value || "suspendedAt" in value)
+	);
 }
 
 function requiredDate(value: unknown, field: string): string {
-	if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`${field} is invalid.`);
+	if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value))
+		throw new Error(`${field} is invalid.`);
 	return value;
 }
 
 function localDate(nowMs: number, timeZone: string): string {
 	const values = Object.fromEntries(
-		new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" })
+		new Intl.DateTimeFormat("en-CA", {
+			timeZone,
+			year: "numeric",
+			month: "2-digit",
+			day: "2-digit",
+		})
 			.formatToParts(nowMs)
 			.map((part) => [part.type, part.value]),
 	);

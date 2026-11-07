@@ -167,17 +167,6 @@ export function miniCalendarDays(anchorDate: string): MiniCalendarDay[] {
 	});
 }
 
-export function miniCalendarDayFlags(
-	date: string,
-	todayDate: string,
-	selectedDate: string,
-): { isToday: boolean; isSelected: boolean } {
-	return {
-		isToday: date === todayDate,
-		isSelected: date === selectedDate,
-	};
-}
-
 export function monthLabel(date: string): string {
 	const value = Temporal.PlainDate.from(date);
 	return `${value.year}年${value.month}月`;
@@ -212,10 +201,13 @@ export function calendarRangeLabel(
 }
 
 export function timeZoneOffsetLabel(timeZone: string, date: string): string {
-	const offset = Temporal.PlainDate.from(date)
-		.toZonedDateTime({ timeZone, plainTime: "12:00" })
-		.offset;
+	const offset = Temporal.PlainDate.from(date).toZonedDateTime({
+		timeZone,
+		plainTime: "12:00",
+	}).offset;
 	const [hours, minutes] = offset.split(":");
 	const hour = Number(hours);
-	return minutes === "00" ? `GMT${hour >= 0 ? "+" : ""}${hour}` : `GMT${offset}`;
+	return minutes === "00"
+		? `GMT${hour >= 0 ? "+" : ""}${hour}`
+		: `GMT${offset}`;
 }

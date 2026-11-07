@@ -60,6 +60,8 @@ export interface PlanTask {
 	status: PlanTaskStatus;
 	statusChangedAt: string | null;
 	statusChangedBy: "user" | null;
+	/** 用户对模型分级的改判；null/缺失表示沿用模型分级。 */
+	relevanceOverride?: "strong" | "weak" | null;
 }
 
 export interface RevisionTask {
@@ -70,6 +72,22 @@ export interface RevisionTask {
 	description: string;
 	estimatedMinutes: number;
 	dependencyTaskIds: readonly string[];
+	/** 旧版本修订可能缺失；缺失按 strong 对待（保守不改既有排程行为）。 */
+	relevance?: "strong" | "weak";
+	relevanceReason?: string;
+}
+
+/** 单角度计划评定，随修订持久化（模型提案内自评）。 */
+export interface PlanRevisionEvaluation {
+	angle:
+		| "goal-alignment"
+		| "time-feasibility"
+		| "dependency-risk"
+		| "load-recovery"
+		| "evidence-sufficiency";
+	verdict: "pass" | "adjust" | "block";
+	summary: string;
+	affectedTaskIds: readonly string[];
 }
 
 export interface SchedulingWindowPreference {
@@ -123,6 +141,8 @@ export interface PlanRevision {
 	schedule: readonly PlanScheduleItem[];
 	unscheduledTaskIds: readonly string[];
 	createdAt: string;
+	/** 旧版本修订可能缺失；缺失视为未评定。 */
+	evaluations?: readonly PlanRevisionEvaluation[];
 }
 
 export type PlanningCalendarEventKind =
@@ -290,12 +310,20 @@ export interface RetryPlanAnalysisRequest extends PlanningMutationContext {
 export interface ConfirmPlanRevisionRequest extends PlanningMutationContext {
 	planId: string;
 	revisionId: string;
+	/** 提案把既有强关联任务降级为弱关联时，必须显式确认为 true 才允许确认。 */
+	acknowledgeRelevanceDemotion?: boolean;
 }
 
 export interface SetTaskStatusRequest extends PlanningMutationContext {
 	planId: string;
 	taskId: string;
 	status: PlanTaskStatus;
+}
+
+export interface SetTaskRelevanceRequest extends PlanningMutationContext {
+	planId: string;
+	taskId: string;
+	relevance: "strong" | "weak";
 }
 
 export interface ConfirmObservationAttributionRequest

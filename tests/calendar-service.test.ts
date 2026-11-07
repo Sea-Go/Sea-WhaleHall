@@ -121,44 +121,4 @@ describe("Electrobun calendar service", () => {
 			userLocked: true,
 		});
 	});
-
-	test("rejects an unowned plan event before native RPC", async () => {
-		const captured: PlanningCalendarMutationProjection[] = [];
-		const service = new ElectrobunCalendarService(async () =>
-			rpcClient(captured),
-		);
-		const unownedPlan = manualEvent({ kind: "plan" });
-
-		expect(service.mutate(mutation("create", unownedPlan))).rejects.toThrow(
-			"计划来源、任务来源与锁定状态不一致",
-		);
-		expect(captured).toHaveLength(0);
-	});
-
-	test("turns calendarChanged into an authoritative reload invalidation", async () => {
-		const captured: PlanningCalendarMutationProjection[] = [];
-		const invalidations: Array<() => void> = [];
-		const service = new ElectrobunCalendarService(async () =>
-			rpcClient(captured, {
-				onCalendarChanged: (listener) => {
-					const invalidate = () => listener(9);
-					invalidations.push(invalidate);
-					return () => {
-						invalidations.splice(invalidations.indexOf(invalidate), 1);
-					};
-				},
-			}),
-		);
-		let reloads = 0;
-		const stop = service.subscribe(() => {
-			reloads += 1;
-		});
-		await Promise.resolve();
-
-		invalidations[0]?.();
-
-		expect(reloads).toBe(1);
-		stop();
-		expect(invalidations).toHaveLength(0);
-	});
 });

@@ -1,5 +1,50 @@
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+
+// GUI 进程 stdout 不可读；关键诊断落盘到 local 数据目录 diag.log。
+let diagPathResolved = "";
+function diag(message: string): void {
+	try {
+		if (!diagPathResolved) diagPathResolved = join(localDataPath, "diag.log");
+		appendFileSync(
+			diagPathResolved,
+			`${new Date().toISOString()} ${message}\n`,
+		);
+	} catch {
+		// 诊断失败不干扰主流程
+	}
+}
+
+// Sea 生产入口走 Cloudflare 直连；本机代理可能不可用，显式豁免（Bun fetch 遵循 NO_PROXY）。
+for (const key of ["NO_PROXY", "no_proxy"] as const) {
+	const extra = ".sea-ridethewindbreakthewaves.xyz";
+	const current = process.env[key] ?? "";
+	if (!current.includes(extra)) {
+		process.env[key] = current ? `${current},${extra}` : extra;
+	}
+}
+
+/**
+ * 每日结算钟点锚点（可选增强）：WHALEHALL_PLANNING_SETTLEMENT_LOCAL_TIME，
+ * HH:mm（按各计划本地时区解释）。未配置 = 现行"午夜后首 tick"行为；
+ * 坏值告警落 diag.log 后按未配置处理，不阻断启动。
+ */
+function readPlanningSettlementLocalTime(): string | null {
+	const raw =
+		process.env.WHALEHALL_PLANNING_SETTLEMENT_LOCAL_TIME?.trim() ?? "";
+	if (raw === "") return null;
+	try {
+		assertLocalMinute(raw, "WHALEHALL_PLANNING_SETTLEMENT_LOCAL_TIME");
+		return raw;
+	} catch {
+		diag(
+			`[planning] WHALEHALL_PLANNING_SETTLEMENT_LOCAL_TIME 无效，按未配置处理: ${raw}`,
+		);
+		return null;
+	}
+}
+
 import Electrobun, {
 	app,
 	BrowserView,
@@ -25,6 +70,7 @@ import {
 	MODEL_AGENT_IDS,
 } from "../agent/mastra-host/model-agent-catalog";
 import { AGENT_HOST_PROTOCOL_VERSION } from "../agent/mastra-host/protocol";
+import { assertLocalMinute } from "../agent/planning/time";
 import { loadOrCreateReflectionIdentity } from "../agent/reflection";
 import {
 	type RawFiveMinuteAuditSource,
@@ -50,6 +96,12 @@ import type {
 	PetActivityFeedbackRendererChallenge,
 	PetActivityFeedbackRPC,
 } from "../shared/pet-activity-feedback";
+import {
+	buildPetProactivePrompt,
+	PET_CHAT_REQUEST_ID_MAX_CHARACTERS,
+	PET_CHAT_TEXT_MAX_BYTES,
+	type PetChatRPC,
+} from "../shared/pet-chat";
 import type {
 	PlanningCalendarEventProjection,
 	PlanningCalendarMutationProjection,
@@ -59,6 +111,7 @@ import {
 	isSetProactiveFeedbackPolicyRequest,
 	type ProactiveFeedbackRpcResult,
 } from "../shared/proactive-feedback";
+import { PlanningProgressParser } from "../views/client/features/planning/progress-steps";
 import { AccountScopedActiveGoalStore } from "./account-scoped-active-goal";
 import { runAccountSessionCleanup } from "./account-session-cleanup";
 import { ActivityAnalysisDispatcher } from "./activity-analysis-dispatcher";
@@ -89,6 +142,12 @@ import {
 	planningModelConfigurationFromConfiguration,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 } from "./client-config";
+import { RTWCloudToolsClient } from "./clients/product/rtw-cloud-tools-client";
+import { RTWProductSearchError } from "./clients/product/rtw-product-search-client";
+import {
+	CloudSearchAgentToolsService,
+	cloudToolsLogicalSessionIdFor,
+} from "./cloud-search-agent-tools";
 import { CredentialHelperClient } from "./credential-helper-client";
 import { DataCenterContentCrypto } from "./data-center-crypto";
 import {
@@ -138,6 +197,7 @@ import { PlanningAuthorityService } from "./planning-authority-service";
 import { WhaleHallPlanningRuntime } from "./planning-runtime";
 import { PrivateTrainingWindowExportCoordinator } from "./private-training-window-export";
 import { ProactiveFeedbackRuntime } from "./proactive-feedback-runtime";
+import { ReasoningDeltaExtractor } from "./reasoning-delta-extractor";
 import {
 	createWhaleHallReflectionRuntime,
 	setRuntimeGoal,
@@ -148,6 +208,15 @@ import {
 	RemoteAuthError,
 	RemoteAuthSessionManager,
 } from "./remote-auth-session";
+import {
+	bindRtwCredentialStore,
+	RTW_WEB_BASE_URL,
+	restoreRtwSession,
+	rtwProductSessionProvider,
+	rtwSessionSignOut,
+	rtwSessionUsername,
+	subscribeRtwSession,
+} from "./rtw-session";
 import { SidecarModelRelayBridge } from "./sidecar-model-relay-bridge";
 import {
 	resumeTimelineRuntimeForAvailableVault,
@@ -209,6 +278,8 @@ const installationId = await loadOrCreateInstallationId(agentDataPath);
 const credentialStore = new CredentialHelperClient(credentialHelperPath, {
 	installationId,
 });
+// RTW 会话与 DC 登录共用同一 keychain 凭据库：登录一次，重启自动恢复。
+bindRtwCredentialStore(credentialStore);
 const agentRepository = new EncryptedAgentRepository({
 	databasePath: join(agentDataPath, "whalehall-agent.sqlite3"),
 	installationId,
@@ -316,10 +387,14 @@ async function publishReflectionRuntime(
 
 const authSession = new RemoteAuthSessionManager(credentialStore, {
 	baseUrl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
-	onBeforeSessionActivate: (identity) =>
-		proactiveFeedbackRuntime.prepareSessionActivationForAuth(identity),
-	onSessionActivated: (identity) =>
-		proactiveFeedbackRuntime.sessionReadyForAuth(identity),
+	onBeforeSessionActivate: (identity) => {
+		diag(`auth onBeforeSessionActivate account=${identity.accountId}`);
+		return proactiveFeedbackRuntime.prepareSessionActivationForAuth(identity);
+	},
+	onSessionActivated: (identity) => {
+		diag(`auth onSessionActivated account=${identity.accountId}`);
+		return proactiveFeedbackRuntime.sessionReadyForAuth(identity);
+	},
 	onSessionExpired: () => {
 		try {
 			relayBridge?.abortAll();
@@ -420,7 +495,16 @@ proactiveFeedbackRuntime = new ProactiveFeedbackRuntime({
 	cutoverCloudOwner: (accountId) => cutoverReflectionCloudOwner(accountId),
 	startDelivery: async () => {
 		const runtime = reflectionRuntime;
-		if (runtime) await startActivityWindowDelivery(runtime.repository);
+		diag(`startDelivery invoked runtime=${runtime === null ? "NULL" : "live"}`);
+		if (!runtime) return;
+		try {
+			await startActivityWindowDelivery(runtime.repository);
+			diag("startActivityWindowDelivery returned OK");
+		} catch (error) {
+			diag(
+				`startActivityWindowDelivery THREW: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+			);
+		}
 	},
 	stopDelivery: async ({ accountId, clearPending }) => {
 		await stopActivityWindowDelivery();
@@ -445,9 +529,8 @@ proactiveFeedbackRuntime = new ProactiveFeedbackRuntime({
 	protectedActivityRunIds: (accountId) =>
 		protectedActivityWindowDeliveryRunIds(accountId),
 	onError: (error) => {
-		console.warn(
-			"WhaleHall proactive feedback retention failed:",
-			error instanceof Error ? error.name : "UNKNOWN",
+		diag(
+			`proactive-feedback error: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)} | ${error instanceof Error && error.stack ? error.stack.split("\n").slice(1, 3).join(" ~ ") : ""}`,
 		);
 	},
 });
@@ -594,6 +677,52 @@ const sidecar = new MastraSidecarClient({
 				}
 			});
 		}
+		if (
+			call.method === "cloud/parent.open" ||
+			call.method === "cloud/search" ||
+			call.method === "cloud/read-evidence"
+		) {
+			const ownerRunId = call.params.runId;
+			if (typeof ownerRunId !== "string" || ownerRunId.length === 0) {
+				throw new Error("Cloud tool call is not bound to an Agent run.");
+			}
+			return coordinator.runBoundHostCall(ownerRunId, async (accountId) => {
+				try {
+					if (call.method === "cloud/parent.open") {
+						const parent = await cloudSearchAgentTools.openParent(
+							ownerRunId,
+							accountId,
+						);
+						diag(
+							`[cloud-tools] parent.open ok run=${ownerRunId} module-op=${parent.operationId}`,
+						);
+						return parent;
+					}
+					if (call.method === "cloud/search") {
+						const params = readCloudSearchParams(call.params);
+						diag(
+							`[cloud-tools] search run=${ownerRunId} depth=${params.depth} query=${params.query.slice(0, 40)}`,
+						);
+						return await cloudSearchAgentTools.search(ownerRunId, params);
+					}
+					const evidence = {
+						requestKey: requiredString(call.params.requestKey),
+						searchId: requiredString(call.params.searchId),
+						evidenceId: requiredString(call.params.evidenceId),
+					};
+					diag(
+						`[cloud-tools] read-evidence run=${ownerRunId} evidence=${evidence.evidenceId}`,
+					);
+					return await cloudSearchAgentTools.readEvidence(ownerRunId, evidence);
+				} catch (error) {
+					const payload = CloudSearchAgentToolsService.errorPayload(error);
+					diag(
+						`[cloud-tools] ${call.method} FAILED run=${ownerRunId} code=${payload.code} message=${payload.message}`,
+					);
+					throw new Error(`${payload.code}: ${payload.message}`);
+				}
+			});
+		}
 		return hostServices.handle(call.method, call.params);
 	},
 	onRunEvent: (event) => coordinator.acceptSidecarEvent(event),
@@ -615,10 +744,22 @@ activityAgentRelayBridge = new SidecarModelRelayBridge({
 	modelId: configuredModelId,
 	send: (event) => sidecar.sendRelayEvent(event),
 });
+const planningReasoningExtractor = new ReasoningDeltaExtractor();
+const planningProgressParser = new PlanningProgressParser();
 planningRelayBridge = new SidecarModelRelayBridge({
 	transport: planningModelRelay,
 	modelId: planningModelId,
 	send: (event) => sidecar.sendRelayEvent(event),
+	// 网关工具环的思考/调研进度帧：解析成 Claude Code 式步骤时间线
+	// （思考块折叠、工具 ⏺ 调用行 + ⎿ 结果行 + 状态点）实时推给客户端。
+	onResponseChunk: (chunk) => {
+		const delta = planningReasoningExtractor.feed(chunk);
+		if (delta === "") return;
+		const steps = planningProgressParser.feed(delta);
+		if (clientWindow !== null) {
+			clientRPC.send.planningProgress({ steps: [...steps] });
+		}
+	},
 });
 dynamicPlanningModel = new MastraPlanningModel({
 	sidecar,
@@ -653,7 +794,23 @@ coordinator = new AgentRunCoordinator({
 	onEvent: (event) => {
 		// Background activity analysis is an encrypted local-only workflow. Its
 		// lifecycle and model output must never be broadcast to the renderer.
-		if (isRendererAgentRunEvent(event)) clientRPC.send.agentRunEvent(event);
+		if (isRendererAgentRunEvent(event)) {
+			clientRPC.send.agentRunEvent(event);
+			forwardPetChatEvent(event);
+		}
+		// 云搜索 tool-runs 父操作随运行终态一并释放（中止其网络活动）。
+		const type = event.event.type;
+		const terminal =
+			type === "run.completed" ||
+			type === "run.cancelled" ||
+			type === "run.failed" ||
+			type === "run.interrupted";
+		if (terminal) {
+			cloudSearchAgentTools.cancelRun(event.runId);
+			if (petChatRun?.runId === event.runId) petChatRun.terminal = true;
+			if (petProactiveRun?.runId === event.runId)
+				petProactiveRun.terminal = true;
+		}
 	},
 	onActivityRunTerminal: (input) =>
 		(async () => {
@@ -674,15 +831,10 @@ coordinator = new AgentRunCoordinator({
 					// History is already durable; a renderer failure cannot roll back or
 					// repeat the expensive Agent operation.
 				}
-				try {
-					petActivityFeedbackDelivery?.present({
-						presentationId: input.feedback.id,
-						generatedAtMs: input.feedback.generatedAtMs,
-						text: input.feedback.message,
-					});
-				} catch {
-					// Pet delivery is online best-effort. The history remains authoritative.
-				}
+				// 桌宠侧：主动反馈不再走顶部"大肥鱼的观察"气泡——统一对话框是唯一
+				// 的桌宠对话 UI。以观察为上下文发起真实 conversation agent 轮次
+				//（带云检索工具），流式（SSE 事件）进同一面板。
+				startPetProactiveTurn(input.feedback);
 			}
 			await activityAnalysisDispatcher?.onActivityRunTerminal(input);
 		})(),
@@ -1185,6 +1337,11 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		await reconcileExecutingPlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
+	setPlanningTaskRelevance: async (command) => {
+		const runtime = await requirePlanningRuntime();
+		const plan = await runtime.setTaskRelevance(command);
+		return { plan: await runtime.getPlan(plan.id) };
+	},
 	confirmPlanningObservation: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.confirmObservationAttribution(command);
@@ -1242,9 +1399,15 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		};
 	},
 	mutatePlanningCalendar: async (mutation) => {
+		diag(
+			`[calendar] mutation kind=${mutation.kind} event=${mutation.eventId} expectedVersion=${mutation.expectedVersion ?? "none"}`,
+		);
 		const result = await mutateRendererCalendar(mutation.mutationId, [
 			mutation,
 		]);
+		diag(
+			`[calendar] mutation result kind=${mutation.kind} ok=${result.ok}${result.ok ? "" : ` conflicts=${JSON.stringify(result.conflicts).slice(0, 260)}`}`,
+		);
 		if (!result.ok) {
 			const conflict = result.conflicts[0] ?? {
 				reason: "service-unavailable" as const,
@@ -1330,7 +1493,8 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		}),
 	// No RTW product-session provider or logical-session mapping is approved yet.
 	// Keep the transport typed but explicitly disabled on the current DC-only login.
-	listCloudAcceptedAnswers: () => Promise.resolve({ kind: "disabled" as const }),
+	listCloudAcceptedAnswers: () =>
+		Promise.resolve({ kind: "disabled" as const }),
 	clearProactiveFeedbackData: (input) =>
 		proactiveFeedbackRpc(async () => {
 			if (!hasExactKeys(input, [])) {
@@ -1366,7 +1530,19 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		}),
 	restoreAuthSession: () =>
 		authRpc(async () => {
-			const session = await authSession.restoreSession();
+			diag("restoreAuthSession RPC invoked");
+			let session: Awaited<ReturnType<typeof authSession.restoreSession>>;
+			try {
+				session = await authSession.restoreSession();
+			} catch (error) {
+				diag(
+					`restoreSession THREW: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+				);
+				throw error;
+			}
+			diag(
+				`restoreSession result=${session ? `ok id=${session.id.slice(0, 8)}` : "null"}`,
+			);
 			if (!session) return null;
 			const identity = authSession.captureCurrentSession();
 			if (!identity || identity.sessionId !== session.id) {
@@ -1689,7 +1865,7 @@ const clientRPC = BrowserView.defineRPC<ClientRPC>({
 	},
 });
 
-const petRPC = BrowserView.defineRPC<PetActivityFeedbackRPC>({
+const petRPC = BrowserView.defineRPC<PetChatRPC>({
 	maxRequestTime: 1000,
 	handlers: {
 		requests: {},
@@ -1697,19 +1873,499 @@ const petRPC = BrowserView.defineRPC<PetActivityFeedbackRPC>({
 			ready: () => {
 				const challenge = petActivityFeedbackDelivery?.rendererChallenge();
 				if (challenge) schedulePetRendererProof(challenge);
+				pushPetChatAvailability(true);
 			},
 			interacted: (event) => {
 				if (event.kind === "dragStart") {
-					petWindowController.beginDrag(event.dragDelta);
+					petWindowController.beginDrag(event.dragDelta, event.grabPoint);
 				}
 				if (event.kind === "dragEnd") {
 					petWindowController.endDrag("webview");
 				}
 				petStateArbiter.showInteraction(event);
 			},
+			startPetChatTurn: (message) => {
+				startPetChatTurn(message.requestId, message.text);
+			},
+			cancelPetChat: (message) => {
+				cancelPetChat(
+					message.requestId,
+					message.runId,
+					message.expectedRevision,
+				);
+			},
+			petChatStateReport: (message) => {
+				diag(
+					`[pet-chat] state kind=${message.kind} request=${message.requestId ?? "-"} ${message.detail}`,
+				);
+			},
 		},
 	},
 });
+
+function requiredString(value: unknown, field = "value"): string {
+	if (typeof value !== "string" || value.length === 0) {
+		throw new Error(`Cloud tool parameter ${field} is invalid.`);
+	}
+	return value;
+}
+
+function readCloudSearchParams(params: Record<string, unknown>): {
+	requestKey: string;
+	depth: "fast" | "detailed";
+	query: string;
+	intelligence: "low" | "medium" | "high";
+	continueSearchId?: string;
+	limits: { readCalls: number; quoteRunes: number };
+} {
+	const depth = params.depth;
+	const intelligence = params.intelligence;
+	const limits = params.limits as
+		| { readCalls?: unknown; quoteRunes?: unknown }
+		| undefined;
+	if (depth !== "fast" && depth !== "detailed") {
+		throw new Error("Cloud tool parameter depth is invalid.");
+	}
+	if (
+		intelligence !== "low" &&
+		intelligence !== "medium" &&
+		intelligence !== "high"
+	) {
+		throw new Error("Cloud tool parameter intelligence is invalid.");
+	}
+	if (
+		!limits ||
+		!Number.isSafeInteger(limits.readCalls) ||
+		!Number.isSafeInteger(limits.quoteRunes) ||
+		(limits.readCalls as number) < 1 ||
+		(limits.quoteRunes as number) < 1
+	) {
+		throw new Error("Cloud tool parameter limits is invalid.");
+	}
+	const continueSearchId = params.continueSearchId;
+	return {
+		requestKey: requiredString(params.requestKey, "requestKey"),
+		depth,
+		query: requiredString(params.query, "query"),
+		intelligence,
+		...(typeof continueSearchId === "string" && continueSearchId
+			? { continueSearchId }
+			: {}),
+		limits: {
+			readCalls: limits.readCalls as number,
+			quoteRunes: limits.quoteRunes as number,
+		},
+	};
+}
+
+// 云搜索 Agent 工具宿主：Sidecar 的 CloudSearchToolSession 经协议反向调用到达
+// 这里；RTW 凭据与账号身份只存在于 Bun（见 docs/CONVERSATION_AGENT_INTEGRATION.md）。
+const cloudSearchAgentTools = new CloudSearchAgentToolsService({
+	baseUrl: RTW_WEB_BASE_URL,
+	sessions: rtwProductSessionProvider,
+	accountSessions: {
+		current: () => authSession.captureCurrentSession(),
+		isCurrent: (identity) => authSession.isCurrentSession(identity),
+	},
+	fetch: async (input, init) => {
+		try {
+			const response = await fetch(input, init);
+			diag(
+				`[cloud-tools] svc HTTP ${init?.method ?? "GET"} ${String(input).slice(0, 120)} → ${response.status}`,
+			);
+			return response;
+		} catch (error) {
+			diag(
+				`[cloud-tools] svc HTTP ${init?.method ?? "GET"} ${String(input).slice(0, 120)} THREW ${String(error).slice(0, 160)}`,
+			);
+			throw error;
+		}
+	},
+	logicalSessionId: () => {
+		const username = rtwSessionUsername();
+		return username === null ? null : cloudToolsLogicalSessionIdFor(username);
+	},
+	client: new RTWCloudToolsClient({
+		baseUrl: RTW_WEB_BASE_URL,
+		sessions: rtwProductSessionProvider,
+		accountSessions: {
+			current: () => authSession.captureCurrentSession(),
+			isCurrent: (identity) => authSession.isCurrentSession(identity),
+		},
+		// 云检索工具链路的 HTTP 层观测：openParent 失败必须能在 diag 里看到
+		// 真实状态码/异常，否则静默降级无法定位。
+		fetch: async (input, init) => {
+			try {
+				const response = await fetch(input, init);
+				diag(
+					`[cloud-tools] HTTP ${init?.method ?? "GET"} ${String(input).slice(0, 120)} → ${response.status} ct=${response.headers.get("content-type")?.slice(0, 40) ?? "-"}`,
+				);
+				return response;
+			} catch (error) {
+				diag(
+					`[cloud-tools] HTTP ${init?.method ?? "GET"} ${String(input).slice(0, 120)} THREW ${String(error).slice(0, 160)}`,
+				);
+				throw error;
+			}
+		},
+	}),
+});
+
+/** 桌宠对话：与客户端对话页共用 AgentRunCoordinator 的同一活跃会话。 */
+interface PetChatRun {
+	requestId: string;
+	runId: string | null;
+	terminal: boolean;
+}
+let petChatRun: PetChatRun | null = null;
+/** 大肥鱼主动搭话占用的轮次槽（与用户轮共用单活跃 turn 规则）。 */
+let petProactiveRun: PetChatRun | null = null;
+
+// RTW 会话仍是云检索工具（chat agent 的 knowledge_search）的凭据来源。
+void restoreRtwSession();
+
+let petChatAvailability: boolean | null = null;
+
+function pushPetChatAvailability(force = false): void {
+	const available = authSession.accountId !== null;
+	if (!force && petChatAvailability === available) return;
+	petChatAvailability = available;
+	diag(`[pet-chat] availability push available=${available}`);
+	petRPC.send.petChatAvailability({ available });
+}
+
+// 登录态恢复是异步的（ready 推送常早于 restoreSession 完成）：轻量轮询，
+// 变化才推；关闭时清理。
+const petChatAvailabilityTimer = setInterval(() => {
+	if (shutdownRequested) {
+		clearInterval(petChatAvailabilityTimer);
+		return;
+	}
+	pushPetChatAvailability();
+}, 2_500);
+
+// [DEV-ONLY E2E] 环境变量门控的确定性提交触发器：OS 合成点击不稳定，用它
+// 直接驱动真实 startPetChatTurn 链路（bun→coordinator→sidecar→服务器→事件流）。
+// 出现 ~/pet-e2e-submit.json（{"text":"..."}）即消费并提交一轮桌宠对话。
+if (process.env.WHALEHALL_PET_E2E_TRIGGER === "1") {
+	const petE2eTriggerPath = join(
+		process.env.HOME ?? "/tmp",
+		"pet-e2e-submit.json",
+	);
+	const petE2eTriggerTimer = setInterval(() => {
+		if (shutdownRequested) {
+			clearInterval(petE2eTriggerTimer);
+			return;
+		}
+		let raw: string;
+		try {
+			raw = readFileSync(petE2eTriggerPath, "utf8");
+		} catch {
+			return;
+		}
+		try {
+			unlinkSync(petE2eTriggerPath);
+		} catch {
+			// 消费失败不影响重试语义（下次读到再删）
+		}
+		try {
+			const parsed = JSON.parse(raw) as { text?: unknown; proactive?: unknown };
+			if (parsed.proactive === true) {
+				diag("[pet-chat][e2e] proactive trigger");
+				startPetProactiveTurn({
+					id: randomUUID(),
+					generatedAtMs: Date.now(),
+					message:
+						typeof parsed.text === "string" && parsed.text.trim().length > 0
+							? parsed.text
+							: "（E2E 触发的观察）最近在验证桌宠统一对话框。",
+				});
+				return;
+			}
+			if (typeof parsed.text === "string" && parsed.text.trim().length > 0) {
+				const requestId = randomUUID();
+				diag(`[pet-chat][e2e] trigger requestId=${requestId}`);
+				startPetChatTurn(requestId, parsed.text);
+			}
+		} catch {
+			// 触发文件格式错误：忽略
+		}
+	}, 400);
+}
+
+// 规划链路协议级 E2E 触发器：WHALEHALL_PLANNING_E2E_TRIGGER=1 时消费
+// ~/planning-e2e-submit.json。{"message":"…"} 对第一个未归档计划发真实
+// sendPlanMessage；{"confirm":true,"ack":true} 确认最新提案（ack 用于
+// 强弱降级门）。驱动真实 RPC 链路，绕过渲染器表单，不注入任何 UI。
+if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
+	const planningE2ePath = join(
+		process.env.HOME ?? "/tmp",
+		"planning-e2e-submit.json",
+	);
+	const planningE2eTimer = setInterval(() => {
+		if (shutdownRequested) {
+			clearInterval(planningE2eTimer);
+			return;
+		}
+		let raw: string;
+		try {
+			raw = readFileSync(planningE2ePath, "utf8");
+		} catch {
+			return;
+		}
+		try {
+			unlinkSync(planningE2ePath);
+		} catch {
+			// 消费失败不影响重试语义
+		}
+		void (async () => {
+			try {
+				const parsed = JSON.parse(raw) as {
+					message?: unknown;
+					confirm?: unknown;
+					ack?: unknown;
+					calendarDelete?: unknown;
+				};
+				const runtime = await requirePlanningRuntime();
+				const plans = await runtime.listPlans();
+				const plan = plans.find((item) => item.status !== "archived");
+				if (!plan) {
+					diag("[planning][e2e] no active plan");
+					return;
+				}
+				if (parsed.confirm === true) {
+					const detail = await runtime.getPlan(plan.id);
+					const revisionId = detail.proposedRevision?.revisionId ?? null;
+					if (!revisionId) {
+						diag("[planning][e2e] no proposed revision to confirm");
+						return;
+					}
+					diag(
+						`[planning][e2e] confirm plan=${plan.id} revision=${revisionId}`,
+					);
+					await runtime.confirmPlanRevision({
+						planId: plan.id,
+						revisionId,
+						operationId: `e2e-confirm-${randomUUID()}`,
+						expectedVersion: detail.version,
+						...(parsed.ack === true
+							? { acknowledgeRelevanceDemotion: true }
+							: {}),
+					});
+					const after = await runtime.getPlan(plan.id);
+					diag(
+						`[planning][e2e] confirm result status=${after.status} active=${after.proposedRevision ? "proposed" : "none"} notifications=${JSON.stringify(after.notifications).slice(0, 400)}`,
+					);
+					return;
+				}
+				if (parsed.calendarDelete === true) {
+					// 自驱动删除验证：与渲染器 UI 走完全相同的 RPC 处理器。
+					const calendar = await clientRequestHandlers.loadPlanningCalendar({});
+					const target = calendar.events.find((event) => event.kind === "plan");
+					if (!target) {
+						diag("[calendar][e2e] no plan event to delete");
+						return;
+					}
+					diag(
+						`[calendar][e2e] delete event=${target.id} version=${target.version}`,
+					);
+					const result = await clientRequestHandlers.mutatePlanningCalendar({
+						mutationId: `e2e-calendar-${randomUUID()}`,
+						kind: "delete",
+						eventId: target.id,
+						expectedVersion: target.version,
+						before: null,
+						after: null,
+						recurrenceScope: null,
+					});
+					diag(
+						`[calendar][e2e] delete result ok=${result.ok} detail=${JSON.stringify(result).slice(0, 300)}`,
+					);
+					return;
+				}
+				if (typeof parsed.message === "string" && parsed.message.trim()) {
+					diag(`[planning][e2e] message plan=${plan.id}`);
+					await runtime.sendPlanMessage({
+						planId: plan.id,
+						content: parsed.message,
+						operationId: `e2e-message-${randomUUID()}`,
+						expectedVersion: plan.version,
+					});
+				}
+			} catch (error) {
+				diag(
+					`[planning][e2e] failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		})();
+	}, 400);
+}
+
+function startPetChatTurn(requestId: string, text: string): void {
+	const queryBytes = new TextEncoder().encode(text).length;
+	if (
+		typeof requestId !== "string" ||
+		requestId.length === 0 ||
+		requestId.length > PET_CHAT_REQUEST_ID_MAX_CHARACTERS ||
+		typeof text !== "string" ||
+		text.trim().length === 0 ||
+		queryBytes === 0 ||
+		queryBytes > PET_CHAT_TEXT_MAX_BYTES
+	) {
+		petRPC.send.petChatTurnRejected({ requestId, message: "输入无效。" });
+		return;
+	}
+	if (petChatRun && !petChatRun.terminal) {
+		petRPC.send.petChatTurnRejected({
+			requestId,
+			message: "上一轮对话仍在进行，请先等待或取消。",
+		});
+		return;
+	}
+	if (petProactiveRun && !petProactiveRun.terminal) {
+		petRPC.send.petChatTurnRejected({
+			requestId,
+			message: "大肥鱼正在主动发起对话，请等待本轮结束。",
+		});
+		return;
+	}
+	diag(`[pet-chat] start request=${requestId} bytes=${queryBytes}`);
+	petChatRun = { requestId, runId: null, terminal: false };
+	void (async () => {
+		try {
+			const result = await coordinator.startConversationTurn({
+				requestId,
+				clientMessageId: `pet-chat-${requestId}`,
+				// 桌宠用户轮挂在统一持久线程上：客户端对话页可回看完整历史。
+				conversationId: await coordinator.petConversationId(),
+				text,
+			});
+			if (result.kind !== "success") {
+				petChatRun = null;
+				petRPC.send.petChatTurnRejected({
+					requestId,
+					message:
+						result.kind === "conflict"
+							? (result.message ?? "对话当前不可用。")
+							: "对话服务暂时不可用，请稍后再试。",
+				});
+				return;
+			}
+			if (petChatRun?.requestId === requestId)
+				petChatRun.runId = result.data.runId;
+		} catch (error) {
+			petChatRun = null;
+			diag(`[pet-chat] failed request=${requestId} error=${String(error)}`);
+			petRPC.send.petChatTurnRejected({
+				requestId,
+				message: "对话服务暂时不可用，请稍后再试。",
+			});
+		}
+	})();
+}
+
+function cancelPetChat(
+	requestId: string,
+	runId: string,
+	expectedRevision: number,
+): void {
+	// 用户轮与主动搭话轮都可被面板的"停止"取消。
+	const owned =
+		(petChatRun?.requestId === requestId && petChatRun.runId === runId) ||
+		(petProactiveRun?.requestId === requestId &&
+			petProactiveRun.runId === runId);
+	if (!owned) return;
+	void (async () => {
+		try {
+			await coordinator.cancelAgentRun({ requestId, runId, expectedRevision });
+		} catch {
+			// 取消失败不额外通知；运行事件会给出终态。
+		}
+	})();
+}
+
+function forwardPetChatEvent(envelope: unknown): void {
+	const event = envelope as { requestId?: unknown };
+	// 用户轮与主动搭话轮共用一个面板：任一活跃轮次的事件都转发（requestId
+	// 就是过滤键，控制器只应用自己记录的那一轮）。
+	const run =
+		event.requestId === petProactiveRun?.requestId
+			? petProactiveRun
+			: event.requestId === petChatRun?.requestId
+				? petChatRun
+				: null;
+	if (run === null || run.terminal || typeof event.requestId !== "string") {
+		return;
+	}
+	petRPC.send.petChatEvent({
+		requestId: event.requestId,
+		envelope: envelope as Parameters<
+			typeof petRPC.send.petChatEvent
+		>[0]["envelope"],
+	});
+}
+
+/** 心跳观察 → 以大肥鱼身份发起真实 conversation 轮次（流式进统一面板）。 */
+function startPetProactiveTurn(feedback: {
+	id: string;
+	generatedAtMs: number;
+	message: string;
+}): void {
+	if (shutdownRequested) return;
+	if (
+		(petChatRun && !petChatRun.terminal) ||
+		(petProactiveRun && !petProactiveRun.terminal)
+	) {
+		diag(`[pet-chat] proactive skipped (turn busy) feedback=${feedback.id}`);
+		return;
+	}
+	if (authSession.accountId === null) return;
+	const requestId = `pet-proactive-${randomUUID()}`;
+	diag(
+		`[pet-chat] proactive start request=${requestId} feedback=${feedback.id}`,
+	);
+	petProactiveRun = { requestId, runId: null, terminal: false };
+	petRPC.send.petChatProactiveTurn({
+		requestId,
+		generatedAtMs: feedback.generatedAtMs,
+	});
+	void (async () => {
+		try {
+			const result = await coordinator.startConversationTurn({
+				requestId,
+				// 以 feedback.id 做幂等键：同一条观察只开一轮主动对话。
+				clientMessageId: `pet-proactive-${feedback.id}`,
+				// 心跳轮同样落在统一持久线程：客户端对话页可回看全部历史。
+				conversationId: await coordinator.petConversationId(),
+				text: buildPetProactivePrompt(feedback.message),
+			});
+			if (result.kind !== "success") {
+				petProactiveRun = null;
+				diag(
+					`[pet-chat] proactive rejected request=${requestId} kind=${result.kind}${result.kind === "conflict" ? ` message=${result.message ?? ""}` : ""}`,
+				);
+				// 面板已进入主动搭话 running 态：用 rejected 消息带它退出。
+				petRPC.send.petChatTurnRejected({
+					requestId,
+					message: "本轮发起失败，稍后将自动重试。",
+				});
+				return;
+			}
+			if (petProactiveRun?.requestId === requestId) {
+				petProactiveRun.runId = result.data.runId;
+			}
+		} catch (error) {
+			petProactiveRun = null;
+			diag(
+				`[pet-chat] proactive failed request=${requestId} error=${String(error)}`,
+			);
+			petRPC.send.petChatTurnRejected({
+				requestId,
+				message: "本轮发起失败，稍后将自动重试。",
+			});
+		}
+	})();
+}
 
 function stopPetRendererProof(): void {
 	if (petRendererProofTimer !== null) clearTimeout(petRendererProofTimer);
@@ -1817,8 +2473,11 @@ async function viewUrl(view: "client" | "pet"): Promise<string> {
 	return bundled;
 }
 
-const petWidth = 360;
-const petHeight = 300;
+const petWidth = 320;
+// 窗口是透明但整框吃鼠标事件的：高度必须紧贴实际内容（鲸鱼 139 + 顶部
+// 气泡余量 + 底部聊天面板），多余的顶部空带会挡住用户对桌面/其他应用的
+// 点击。聊天面板 max-height 232（8 底边距）= 240 < 250，流式回答仍完整。
+const petHeight = 250;
 const display = Screen.getPrimaryDisplay();
 const clientWidth = Math.min(1280, Math.max(1000, display.workArea.width - 80));
 const clientHeight = Math.min(800, Math.max(720, display.workArea.height - 80));
@@ -2343,6 +3002,9 @@ startupPromise = (async () => {
 					proactiveFeedbackRuntime.cloudOwnerAccountId(),
 				onWindowSealed: (window) => {
 					const delivery = activityWindowDelivery;
+					diag(
+						`onWindowSealed id=${String(window.windowId).slice(0, 18)} delivery=${delivery === null ? "NULL" : "live"}`,
+					);
 					if (delivery === null || shutdownRequested) return;
 					return delivery.enqueueWindow(window);
 				},
@@ -2380,6 +3042,8 @@ startupPromise = (async () => {
 				},
 				() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
 				requireDynamicPlanningModel(),
+				// 结算钟点锚点：未配置=现行"午夜后首 tick"行为；坏值按未配置处理。
+				{ settlementLocalTime: readPlanningSettlementLocalTime() },
 			);
 			await reconcileExecutingPlanningGoal();
 			startPlanningMaintenance();
@@ -2486,6 +3150,9 @@ async function startActivityWindowDelivery(
 	const owner = authSession.captureCurrentSession();
 	const configuration = activityReflectionConfiguration;
 	const reflectionBridge = activityReflectionRelayBridge;
+	diag(
+		`startActivityWindowDelivery bridge=${reflectionBridge === null ? "NULL" : "live"} owner=${owner === null ? "NULL" : owner.accountId} shutdown=${shutdownRequested}`,
+	);
 	if (reflectionBridge === null || owner === null || shutdownRequested) {
 		return;
 	}
@@ -2553,9 +3220,16 @@ async function startActivityWindowDelivery(
 				identity.sessionId === owner.sessionId &&
 				identity.generation === owner.generation,
 			onError: (error) => {
+				// 完整 message 进日志：曾因只打 error.name（"Error"）导致毒任务
+				// 空转 23 小时无任何可诊断线索。
+				diag(
+					`[activity-dispatcher] job retry error name=${error instanceof Error ? error.name : "UNKNOWN"} message=${error instanceof Error ? error.message : String(error)}`,
+				);
 				console.warn(
 					"WhaleHall local activity Agent job retry:",
-					error instanceof Error ? error.name : "UNKNOWN",
+					error instanceof Error
+						? `${error.name}: ${error.message}`
+						: "UNKNOWN",
 				);
 			},
 		});
@@ -2706,6 +3380,27 @@ async function startActivityWindowDelivery(
 				proactiveFeedbackRuntime.cloudOwnerAccountId() === identity.accountId,
 			onError: (error) => {
 				const diagnostic = activityWindowWorkerDiagnostic(error);
+				let cause = "";
+				const inner =
+					error instanceof Error &&
+					"underlying" in error &&
+					(error as { underlying?: unknown }).underlying !== undefined
+						? (error as { underlying: unknown }).underlying
+						: error instanceof Error && "cause" in error
+							? (error as Error & { cause?: unknown }).cause
+							: undefined;
+				if (inner instanceof Error) {
+					cause = `${inner.name}: ${inner.message}`;
+				} else if (Array.isArray(inner)) {
+					cause = inner
+						.map((e) =>
+							e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+						)
+						.join(" ; ");
+				}
+				diag(
+					`delivery-retry code=${diagnostic.code} cause=${cause || "none"} raw=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)} | ${error instanceof Error && error.stack ? error.stack.split("\n")[1]?.trim() : ""}`,
+				);
 				console.warn(
 					"WhaleHall activity window delivery retry:",
 					diagnostic.code,
@@ -2730,10 +3425,13 @@ async function startActivityWindowDelivery(
 		});
 		bundle.delivery = delivery;
 		activityWindowDelivery = delivery;
+		diag("activityWindowDelivery assigned live");
 		assertAttemptCurrent();
 		await dispatcher.startAndRecover();
+		diag("dispatcher.startAndRecover OK");
 		assertAttemptCurrent();
 		await delivery.start();
+		diag("delivery.start OK");
 		assertAttemptCurrent();
 		// Claiming an Agent job is the first provider-capable transition. Keep it
 		// after delivery activation so shutdown can invalidate a blocked start
@@ -2834,8 +3532,13 @@ function requireDynamicPlanningModel(): MastraPlanningModel {
 function throwIfPlanningAnalysisUnavailable(plan: {
 	analysisDiagnostic: unknown;
 }): void {
-	if (plan.analysisDiagnostic !== null) {
-		throw new Error("MODEL_UNAVAILABLE");
+	const diagnostic = plan.analysisDiagnostic as { code?: unknown } | null;
+	if (diagnostic !== null) {
+		// 携带诊断码（invalid-output / request-timeout / model-unavailable），
+		// 客户端据此区分“结果没通过校验”与“模型服务不可用”的提示文案。
+		const code =
+			typeof diagnostic?.code === "string" ? diagnostic.code : "unknown";
+		throw new Error(`MODEL_UNAVAILABLE:${code}`);
 	}
 }
 
@@ -2968,6 +3671,7 @@ async function mutateRendererCalendar(
 						payload: {
 							batchId,
 							mutationCount: mutations.length,
+							mutationKinds: mutations.map((item) => item.kind),
 							planIds: affectedPlanIds,
 							requiresPlanningReestimate: true,
 						},
@@ -2996,6 +3700,9 @@ async function mutateRendererCalendar(
 	});
 	if (!mutation.committed) {
 		const error = mutation.error;
+		diag(
+			`[calendar] commit failed raw=${JSON.stringify(error instanceof Error ? { name: error.name, message: error.message, cause: String(error.cause ?? "") } : error).slice(0, 500)}`,
+		);
 		const stale =
 			error !== null &&
 			typeof error === "object" &&

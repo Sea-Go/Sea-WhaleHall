@@ -10,7 +10,6 @@ import {
 	Palette,
 	Settings,
 	ShieldCheck,
-	Target,
 	UserRound,
 	Waves,
 } from "lucide-react";
@@ -45,10 +44,7 @@ import {
 	MonitoringStatusControl,
 } from "../features/monitoring/public";
 import type { PetPresentationBridge } from "../features/pet-bridge/public";
-import {
-	type PlanningController,
-	PlanningPage,
-} from "../features/planning/public";
+import type { PlanningController } from "../features/planning/public";
 import {
 	type ProactiveFeedbackHistoryController,
 	ProactiveFeedbackHistoryPage,
@@ -66,7 +62,6 @@ import { ConfirmationDialog } from "../shared/ui/ConfirmationDialog";
 import { applyAppearancePreferences } from "./appearance";
 import { PAGE_LABELS, type PageId } from "./navigation";
 import { PlanningPetCoordinator } from "./PlanningPetCoordinator";
-import { PlanningSchedulePreview } from "./PlanningSchedulePreview";
 
 type MenuAction =
 	| "account"
@@ -81,12 +76,6 @@ const navigationItems = [
 		id: "conversation",
 		label: PAGE_LABELS.conversation,
 		icon: MessageCircle,
-		disabled: false,
-	},
-	{
-		id: "planning",
-		label: PAGE_LABELS.planning,
-		icon: Target,
 		disabled: false,
 	},
 	{
@@ -105,7 +94,7 @@ const navigationItems = [
 ] as const satisfies ReadonlyArray<{
 	id: PageId;
 	label: string;
-	icon: typeof Target;
+	icon: typeof CalendarDays;
 	disabled: boolean;
 }>;
 
@@ -326,7 +315,6 @@ export function AppShell({
 					</span>
 					<span className="brand__copy">
 						<strong>WhaleHall</strong>
-						<small>把时间留给重要的事</small>
 					</span>
 				</div>
 
@@ -454,16 +442,6 @@ export function AppShell({
 				{activePage === "conversation" ? (
 					<ConversationDestination controller={conversationController} />
 				) : null}
-				{activePage === "planning" ? (
-					<PlanningPage
-						controller={planningController}
-						onNotify={showNotice}
-						onOpenCalendar={() => setActivePage("calendar")}
-						renderSchedulePreview={(props) => (
-							<PlanningSchedulePreview {...props} />
-						)}
-					/>
-				) : null}
 				{activePage === "calendar" ? (
 					<CalendarPage
 						onNotify={showNotice}
@@ -471,6 +449,7 @@ export function AppShell({
 						controller={resolvedCalendarController}
 						initialScenario={null}
 						showScenarioControl={enableQaControls}
+						planningController={planningController}
 					/>
 				) : null}
 				{activePage === "history" ? (

@@ -1,13 +1,13 @@
 import {
-	isRecord,
-	type HostToolApprovalSummary,
 	type HostPlanningState,
+	type HostToolApprovalSummary,
+	isRecord,
 	type TaskPlanningAnswer,
 	type TaskPlanningInput,
 } from "./protocol";
 import {
-	taskPlanningQuestionKeySchema,
 	type TaskPlanningDraft,
+	taskPlanningQuestionKeySchema,
 } from "./schemas";
 import { AgentHostRuntimeError, type HostRequestPeer } from "./transport";
 
@@ -40,6 +40,32 @@ export interface HostToolProposal extends HostToolApprovalSummary {
 export class HostStateAdapters {
 	constructor(private readonly peer: HostRequestPeer) {}
 
+	/** 云搜索 Port 桥：会话父操作描述由 Bun 从已认证运行创建（无凭据字段）。 */
+	async openCloudParent(runId: string): Promise<unknown> {
+		return this.peer.requestHost("cloud/parent.open", { runId });
+	}
+
+	async cloudSearch(
+		runId: string,
+		input: {
+			requestKey: string;
+			depth: "fast" | "detailed";
+			query: string;
+			intelligence: "low" | "medium" | "high";
+			continueSearchId?: string;
+			limits: { readCalls: number; quoteRunes: number };
+		},
+	): Promise<unknown> {
+		return this.peer.requestHost("cloud/search", { runId, ...input });
+	}
+
+	async cloudReadEvidence(
+		runId: string,
+		input: { requestKey: string; searchId: string; evidenceId: string },
+	): Promise<unknown> {
+		return this.peer.requestHost("cloud/read-evidence", { runId, ...input });
+	}
+
 	async startPlanningWorkflow(input: {
 		sessionId: string;
 		runId: string;
@@ -51,8 +77,14 @@ export class HostStateAdapters {
 			runId: input.runId,
 			input: input.planningInput,
 		});
-		if (!isRecord(value) || typeof value.workflowRunId !== "string" || !value.workflowRunId) {
-			throw invalidHostState("workflow/start returned an invalid workflow run ID.");
+		if (
+			!isRecord(value) ||
+			typeof value.workflowRunId !== "string" ||
+			!value.workflowRunId
+		) {
+			throw invalidHostState(
+				"workflow/start returned an invalid workflow run ID.",
+			);
 		}
 		return value.workflowRunId;
 	}
@@ -79,7 +111,14 @@ export class HostStateAdapters {
 			fromDate,
 			toDateExclusive,
 			timeZone: input.timeZone,
-			include: ["timed", "all-day", "recurring", "exceptions", "proposed", "committed"],
+			include: [
+				"timed",
+				"all-day",
+				"recurring",
+				"exceptions",
+				"proposed",
+				"committed",
+			],
 		});
 		if (
 			!isRecord(value) ||
@@ -123,7 +162,10 @@ export class HostStateAdapters {
 		};
 	}
 
-	async savePlanning(state: HostPlanningState, result: unknown): Promise<number> {
+	async savePlanning(
+		state: HostPlanningState,
+		result: unknown,
+	): Promise<number> {
 		const value = await this.peer.requestHost("planning/save", {
 			...state,
 			expectedVersion: state.version,
@@ -139,8 +181,15 @@ export class HostStateAdapters {
 		sessionId: string,
 		draft: TaskPlanningDraft,
 	): Promise<PlanningValidationResult> {
-		const value = await this.peer.requestHost("planning/validate", { sessionId, draft });
-		if (!isRecord(value) || typeof value.ok !== "boolean" || !Array.isArray(value.issues)) {
+		const value = await this.peer.requestHost("planning/validate", {
+			sessionId,
+			draft,
+		});
+		if (
+			!isRecord(value) ||
+			typeof value.ok !== "boolean" ||
+			!Array.isArray(value.issues)
+		) {
 			throw invalidHostState("planning/validate returned an invalid result.");
 		}
 		return {
@@ -157,7 +206,9 @@ export class HostStateAdapters {
 	}): Promise<HostToolProposal> {
 		const value = await this.peer.requestHost("tool/propose", input);
 		if (!isRecord(value)) {
-			throw invalidHostState("tool/propose returned an invalid approval summary.");
+			throw invalidHostState(
+				"tool/propose returned an invalid approval summary.",
+			);
 		}
 		const summary = parseToolApprovalSummary(value, input.toolCallId);
 		return {
@@ -192,7 +243,9 @@ export class HostStateAdapters {
 				: {}),
 		};
 		try {
-			return await this.peer.requestHost("tool/call", params, { signal: input.signal });
+			return await this.peer.requestHost("tool/call", params, {
+				signal: input.signal,
+			});
 		} catch (error) {
 			if (input.signal?.aborted) {
 				void this.peer.requestHost("tool/cancel", {
@@ -206,26 +259,33 @@ export class HostStateAdapters {
 }
 
 function parsePlanningValidationIssue(value: unknown): PlanningValidationIssue {
-	if (!isRecord(value) || typeof value.code !== "string" || typeof value.message !== "string") {
+	if (
+		!isRecord(value) ||
+		typeof value.code !== "string" ||
+		typeof value.message !== "string"
+	) {
 		throw invalidHostState("planning/validate returned an invalid issue.");
 	}
-	if (
-		value.proposalId !== undefined &&
-		typeof value.proposalId !== "string"
-	) {
-		throw invalidHostState("planning/validate returned an invalid proposal ID.");
+	if (value.proposalId !== undefined && typeof value.proposalId !== "string") {
+		throw invalidHostState(
+			"planning/validate returned an invalid proposal ID.",
+		);
 	}
 	if (
 		value.busyEventIds !== undefined &&
 		(!Array.isArray(value.busyEventIds) ||
 			!value.busyEventIds.every((entry) => typeof entry === "string"))
 	) {
-		throw invalidHostState("planning/validate returned invalid busy event IDs.");
+		throw invalidHostState(
+			"planning/validate returned invalid busy event IDs.",
+		);
 	}
 	return {
 		code: value.code,
 		message: value.message,
-		...(typeof value.proposalId === "string" ? { proposalId: value.proposalId } : {}),
+		...(typeof value.proposalId === "string"
+			? { proposalId: value.proposalId }
+			: {}),
 		...(Array.isArray(value.busyEventIds)
 			? { busyEventIds: value.busyEventIds as string[] }
 			: {}),
@@ -247,7 +307,9 @@ function parseToolApprovalSummary(
 		typeof value.requestedAtMs !== "number" ||
 		typeof value.expiresAtMs !== "number"
 	) {
-		throw invalidHostState("tool/propose returned an invalid approval summary.");
+		throw invalidHostState(
+			"tool/propose returned an invalid approval summary.",
+		);
 	}
 	return value as unknown as HostToolApprovalSummary;
 }
@@ -270,7 +332,9 @@ function parsePlanningInput(value: Record<string, unknown>): TaskPlanningInput {
 		typeof value.goal !== "string" ||
 		(value.planType !== "short-term" && value.planType !== "long-term") ||
 		typeof value.deadline !== "string" ||
-		(value.priority !== "low" && value.priority !== "medium" && value.priority !== "high") ||
+		(value.priority !== "low" &&
+			value.priority !== "medium" &&
+			value.priority !== "high") ||
 		typeof value.weeklyCapacityHours !== "number" ||
 		!Array.isArray(value.unavailableDays) ||
 		!value.unavailableDays.every((day) => typeof day === "string") ||
@@ -288,14 +352,18 @@ function parsePlanningInput(value: Record<string, unknown>): TaskPlanningInput {
 
 function safeVersion(value: unknown): number {
 	if (!Number.isSafeInteger(value) || (value as number) < 0) {
-		throw invalidHostState("Host state version must be a non-negative safe integer.");
+		throw invalidHostState(
+			"Host state version must be a non-negative safe integer.",
+		);
 	}
 	return value as number;
 }
 
 function safeNonNegativeInteger(value: unknown): number {
 	if (!Number.isSafeInteger(value) || (value as number) < 0) {
-		throw invalidHostState("Host state counter must be a non-negative safe integer.");
+		throw invalidHostState(
+			"Host state counter must be a non-negative safe integer.",
+		);
 	}
 	return value as number;
 }
@@ -308,15 +376,20 @@ function localIsoDate(date: Date, timeZone: string): string {
 			month: "2-digit",
 			day: "2-digit",
 		}).formatToParts(date);
-		const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-		if (!values.year || !values.month || !values.day) throw new Error("missing date parts");
+		const values = Object.fromEntries(
+			parts.map((part) => [part.type, part.value]),
+		);
+		if (!values.year || !values.month || !values.day)
+			throw new Error("missing date parts");
 		return `${values.year}-${values.month}-${values.day}`;
 	} catch (error) {
 		throw new AgentHostRuntimeError({
 			code: "INVALID_REQUEST",
 			message: `Invalid IANA time zone: ${timeZone}`,
 			retryable: false,
-			details: { cause: error instanceof Error ? error.message : String(error) },
+			details: {
+				cause: error instanceof Error ? error.message : String(error),
+			},
 		});
 	}
 }
@@ -324,8 +397,13 @@ function localIsoDate(date: Date, timeZone: string): string {
 function nextIsoDate(value: string): string {
 	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
 	if (!match) throw invalidHostState("Planning deadline is not an ISO date.");
-	const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
-	if (Number.isNaN(date.valueOf()) || date.toISOString().slice(0, 10) !== value) {
+	const date = new Date(
+		Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])),
+	);
+	if (
+		Number.isNaN(date.valueOf()) ||
+		date.toISOString().slice(0, 10) !== value
+	) {
 		throw invalidHostState("Planning deadline is invalid.");
 	}
 	date.setUTCDate(date.getUTCDate() + 1);

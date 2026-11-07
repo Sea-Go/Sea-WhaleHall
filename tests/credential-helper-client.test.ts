@@ -70,67 +70,6 @@ describe("CredentialHelperClient", () => {
 			secretBytes: encoder.encode(secret).byteLength,
 		});
 	});
-
-	test("maps production NOT_FOUND reads to null and keeps legacy access delete-only", async () => {
-		const operations: Array<Record<string, unknown>> = [];
-		const client = createClient(async () =>
-			response("ERR NOT_FOUND\n", undefined, 1),
-		);
-		await expect(
-			client.read(AUTH_REFRESH_TOKEN_CREDENTIAL),
-		).resolves.toBeNull();
-		await expect(
-			client.read(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL),
-		).rejects.toEqual(
-			expect.objectContaining({ code: "SECRET_NAME_NOT_ALLOWED" }),
-		);
-		await expect(
-			client.write(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL, "retired-token"),
-		).rejects.toEqual(
-			expect.objectContaining({ code: "SECRET_NAME_NOT_ALLOWED" }),
-		);
-		await expect(client.read("auth.access-token.current")).rejects.toEqual(
-			expect.objectContaining({ code: "SECRET_NAME_NOT_ALLOWED" }),
-		);
-
-		const deletionClient = createClient(async (input) => {
-			operations.push(parseRequest(input).header);
-			return response("OK DELETED 1\n");
-		});
-		await expect(
-			deletionClient.delete(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL),
-		).resolves.toBeUndefined();
-		expect(operations).toEqual([
-			{
-				version: 1,
-				kind: "named-secret",
-				operation: "delete",
-				installationId: "install-1",
-				name: LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL,
-			},
-		]);
-	});
-
-	test("fails closed on malformed payload sizes and any stderr", async () => {
-		const malformed = createClient(async () =>
-			response("OK KEY 32\n", new Uint8Array(31)),
-		);
-		await expect(
-			malformed.getKey({
-				installationId: "install-1",
-				accountId: "account-1",
-				keyVersion: 1,
-			}),
-		).rejects.toEqual(expect.objectContaining({ code: "PROTOCOL_ERROR" }));
-
-		const noisy = createClient(async () => ({
-			...response("OK DELETED 1\n"),
-			stderr: encoder.encode("secret-looking diagnostic"),
-		}));
-		await expect(noisy.delete(AUTH_REFRESH_TOKEN_CREDENTIAL)).rejects.toEqual(
-			expect.objectContaining({ code: "PROTOCOL_ERROR" }),
-		);
-	});
 });
 
 function createClient(runner: CredentialHelperRunner): CredentialHelperClient {

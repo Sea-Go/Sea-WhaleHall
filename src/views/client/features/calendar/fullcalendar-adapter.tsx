@@ -1,28 +1,32 @@
 import FullCalendar, {
 	type CalendarRef,
+	type DateClickInfo,
 	type DateSelectInfo,
 	type DatesSetInfo,
+	type EventApi,
 	type EventClickInfo,
 	type EventDisplayInfo,
 	type EventDropInfo,
 	type EventInput,
 	type EventResizeDoneInfo,
+	type MountInfo,
 } from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/react/daygrid";
 import interactionPlugin from "@fullcalendar/react/interaction";
-import timeGridPlugin from "@fullcalendar/react/timegrid";
 import breezyThemePlugin from "@fullcalendar/react/themes/breezy";
+import timeGridPlugin from "@fullcalendar/react/timegrid";
 import rrulePlugin from "@fullcalendar/rrule";
 import {
 	forwardRef,
+	type ReactNode,
 	useEffect,
 	useImperativeHandle,
 	useMemo,
 	useRef,
-	type ReactNode,
 } from "react";
 import { RRule } from "rrule";
 import {
+	addDaysToDate,
 	dateDurationDays,
 	durationMinutes,
 	type LocalDateTimeParts,
@@ -76,7 +80,14 @@ export interface WhaleCalendarProps {
 	pendingEventIds: ReadonlySet<string>;
 	onRangeChange: (range: CalendarRange) => void;
 	onSelect: (draft: CalendarSelectionDraft) => void;
+	/** 单击空白日期格：与拖选同一预填语义（默认 60 分钟或全天单日）。 */
+	onDayClick?: (draft: CalendarSelectionDraft) => void;
 	onEventClick: (selection: CalendarOccurrenceSelection) => void;
+	/** 右键事件：弹出上下文菜单（含删除）。坐标为视口内像素。 */
+	onEventContextMenu?: (
+		selection: CalendarOccurrenceSelection,
+		position: { x: number; y: number },
+	) => void;
 	onMove: (
 		before: CalendarEvent,
 		after: CalendarEvent,
@@ -113,10 +124,7 @@ function recurrenceInput(event: CalendarEvent): Partial<EventInput> {
 		exdate: [...event.recurrence.exceptionDates],
 		duration: schedule.allDay
 			? {
-					days: dateDurationDays(
-						schedule.startDate,
-						schedule.endDateExclusive,
-					),
+					days: dateDurationDays(schedule.startDate, schedule.endDateExclusive),
 				}
 			: { minutes: durationMinutes(schedule.start, schedule.end) },
 	};
@@ -127,14 +135,15 @@ export function calendarEventToFullCalendarInput(
 	pending = false,
 	conflict: CalendarConflict | null = null,
 ): EventInput {
-	const scheduleInput: Partial<EventInput> = event.recurrence && !event.occurrenceId
-		? recurrenceInput(event)
-		: event.schedule.allDay
-			? {
-					start: event.schedule.startDate,
-					end: event.schedule.endDateExclusive,
-				}
-			: { start: event.schedule.start, end: event.schedule.end };
+	const scheduleInput: Partial<EventInput> =
+		event.recurrence && !event.occurrenceId
+			? recurrenceInput(event)
+			: event.schedule.allDay
+				? {
+						start: event.schedule.startDate,
+						end: event.schedule.endDateExclusive,
+					}
+				: { start: event.schedule.start, end: event.schedule.end };
 	const classes = [
 		"whale-event",
 		`whale-event--${event.kind}`,
@@ -234,10 +243,9 @@ function renderEventContent(info: EventDisplayInfo): ReactNode {
 	const kind = String(info.event.extendedProps.kind);
 	const pending = Boolean(info.event.extendedProps.pending);
 	const conflictReason = info.event.extendedProps.conflictReason;
-	const status =
-		conflictReason
-			? "冲突"
-			: state === "proposed"
+	const status = conflictReason
+		? "冲突"
+		: state === "proposed"
 			? "待确认"
 			: kind === "manual-block"
 				? "占用"
@@ -275,6 +283,31 @@ function selectionDraft(
 					end: info.endStr,
 					timeZone,
 				},
+	};
+}
+
+export function dayClickDraft(
+	info: DateClickInfo,
+	timeZone: string,
+): CalendarSelectionDraft {
+	if (info.allDay) {
+		const startDate = info.dateStr.slice(0, 10);
+		return {
+			schedule: {
+				allDay: true,
+				startDate,
+				endDateExclusive: addDaysToDate(startDate, 1),
+			},
+		};
+	}
+	const start = info.date.getTime();
+	return {
+		schedule: {
+			allDay: false,
+			start: new Date(start).toISOString(),
+			end: new Date(start + 60 * 60_000).toISOString(),
+			timeZone,
+		},
 	};
 }
 
@@ -327,7 +360,9 @@ export const WhaleCalendar = forwardRef<
 		pendingEventIds,
 		onRangeChange,
 		onSelect,
+		onDayClick,
 		onEventClick,
+		onEventContextMenu,
 		onMove,
 		onResize,
 	},
@@ -345,9 +380,7 @@ export const WhaleCalendar = forwardRef<
 				calendarEventToFullCalendarInput(
 					event,
 					pendingEventIds.has(event.id),
-					event.kind === "plan"
-						? detectCalendarConflict(event, events)
-						: null,
+					event.kind === "plan" ? detectCalendarConflict(event, events) : null,
 				),
 			),
 		[events, pendingEventIds],
@@ -420,8 +453,6 @@ export const WhaleCalendar = forwardRef<
 				expandRows
 				allDayText="全天"
 				allDaySlot
-				nowIndicator
-				nowIndicatorSnap="auto"
 				editable
 				selectable
 				selectMirror
@@ -468,12 +499,28 @@ export const WhaleCalendar = forwardRef<
 				events={inputs}
 				eventContent={renderEventContent}
 				select={(info) => onSelect(selectionDraft(info, timeZone))}
+				dateClick={(info: DateClickInfo) =>
+					onDayClick?.(dayClickDraft(info, timeZone))
+				}
 				eventClick={(info: EventClickInfo) =>
 					onEventClick({
 						eventId: info.event.id,
 						occurrenceStart: info.event.startStr || null,
 					})
 				}
+				eventDidMount={(info: MountInfo<EventDisplayInfo>) => {
+					info.el.addEventListener("contextmenu", (event: MouseEvent) => {
+						if (!onEventContextMenu) return;
+						event.preventDefault();
+						onEventContextMenu(
+							{
+								eventId: info.event.id,
+								occurrenceStart: info.event.startStr || null,
+							},
+							{ x: event.clientX, y: event.clientY },
+						);
+					});
+				}}
 				eventDrop={(info) => void handleChange(info, onMove)}
 				eventResize={(info) => void handleChange(info, onResize)}
 				datesSet={(info: DatesSetInfo) =>
@@ -481,8 +528,10 @@ export const WhaleCalendar = forwardRef<
 						title: info.view.title,
 						start: info.startStr,
 						end: info.endStr,
+						// 视图真实当前日期（getDate），不是区间中点——周视图的
+						// 中点永远是周三，会让迷你月历的选中高亮钉死在周三。
 						currentDate: info.view.calendar.formatIso(
-							new Date((info.start.getTime() + info.end.getTime()) / 2),
+							info.view.calendar.getDate(),
 							true,
 						),
 						view: toCalendarView(info.view.type),

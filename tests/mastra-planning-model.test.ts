@@ -38,6 +38,7 @@ function requestFixture(): PlanningModelAnalysisRequest {
 		currentSchedulingPreferences: null,
 		observationEvidence: [],
 		calendarEvents: [],
+		memoryHints: null,
 	};
 }
 
@@ -69,6 +70,8 @@ function proposalFixture(): PlanningModelProposal {
 				description: "完成一次小规模访谈。",
 				estimatedMinutes: 60,
 				dependencyKeys: [],
+				relevance: "strong",
+				relevanceReason: "关键路径任务",
 			},
 			{
 				taskKey: "review-market",
@@ -77,6 +80,40 @@ function proposalFixture(): PlanningModelProposal {
 				description: "决定是否继续当前方向。",
 				estimatedMinutes: 60,
 				dependencyKeys: ["validate-market"],
+				relevance: "strong",
+				relevanceReason: "关键路径任务",
+			},
+		],
+		evaluations: [
+			{
+				angle: "goal-alignment",
+				verdict: "pass",
+				summary: "任务与目标对齐。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "time-feasibility",
+				verdict: "pass",
+				summary: "容量足够。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "dependency-risk",
+				verdict: "pass",
+				summary: "依赖链清晰。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "load-recovery",
+				verdict: "pass",
+				summary: "负荷分布均衡。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "evidence-sufficiency",
+				verdict: "adjust",
+				summary: "访谈样本量未确认。",
+				affectedTaskKeys: ["validate-market"],
 			},
 		],
 	};
@@ -107,6 +144,7 @@ describe("MastraPlanningModel", () => {
 						schedulingPreferenceSource: proposal.schedulingPreferenceSource,
 						schedulingPreferences: proposal.schedulingPreferences,
 						tasks: proposal.tasks,
+						evaluations: proposal.evaluations,
 					},
 				},
 				requestFixture(),
@@ -130,6 +168,7 @@ describe("MastraPlanningModel", () => {
 				schedulingPreferenceSource: proposal.schedulingPreferenceSource,
 				schedulingPreferences: proposal.schedulingPreferences,
 				tasks: proposal.tasks,
+				evaluations: proposal.evaluations,
 			},
 		};
 		expect(
@@ -212,6 +251,7 @@ describe("MastraPlanningModel", () => {
 						schedulingPreferenceSource: proposal.schedulingPreferenceSource,
 						schedulingPreferences: proposal.schedulingPreferences,
 						tasks: proposal.tasks,
+						evaluations: proposal.evaluations,
 					},
 				},
 				requestFixture(),
@@ -241,6 +281,7 @@ describe("MastraPlanningModel", () => {
 						schedulingPreferenceSource: proposal.schedulingPreferenceSource,
 						schedulingPreferences: proposal.schedulingPreferences,
 						tasks: proposal.tasks,
+						evaluations: proposal.evaluations,
 					},
 				},
 				{ ...requestFixture(), analysisMode: "automatic-adjustment" },
@@ -266,6 +307,7 @@ describe("MastraPlanningModel", () => {
 					schedulingPreferenceSource: proposal.schedulingPreferenceSource,
 					schedulingPreferences: proposal.schedulingPreferences,
 					tasks: proposal.tasks,
+					evaluations: proposal.evaluations,
 				},
 			},
 			requestFixture(),
@@ -290,6 +332,7 @@ describe("MastraPlanningModel", () => {
 				schedulingPreferenceSource: "confirmed-reuse" as const,
 				schedulingPreferences: proposal.schedulingPreferences,
 				tasks: proposal.tasks,
+				evaluations: proposal.evaluations,
 			},
 		};
 		const decoded = decodeDynamicPlanningProviderOutput(

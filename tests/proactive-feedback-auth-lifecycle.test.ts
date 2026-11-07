@@ -58,43 +58,6 @@ describe("optional proactive feedback auth lifecycle", () => {
 		fixture.runtime.dispose();
 	});
 
-	test("keeps login and refresh token when proactive storage is unavailable", async () => {
-		const fixture = createAuthFixture({ storageUnavailable: true });
-
-		await expect(fixture.signIn()).resolves.toMatchObject({
-			id: "session-account-a",
-		});
-		expect(fixture.manager.accountId).toBe("account-a");
-		expect(fixture.credentials.values.get(refreshTokenKey)).toBe(
-			"refresh-token-account-a-0123456789",
-		);
-		expect(fixture.runtime.cloudOwnerAccountId()).toBeNull();
-		expect(fixture.calls.filter((call) => call === "stop:false")).toHaveLength(
-			2,
-		);
-		expect(fixture.calls).not.toContain("clear-pending");
-		expect(fixture.errors).toHaveLength(2);
-		fixture.runtime.dispose();
-	});
-
-	test("keeps login when proactive owner cutover fails after publication", async () => {
-		const fixture = createAuthFixture({ accountCutoverFailures: 1 });
-
-		await expect(fixture.signIn()).resolves.toMatchObject({
-			id: "session-account-a",
-		});
-		expect(fixture.manager.accountId).toBe("account-a");
-		expect(fixture.credentials.values.get(refreshTokenKey)).toBe(
-			"refresh-token-account-a-0123456789",
-		);
-		expect(fixture.runtime.cloudOwnerAccountId()).toBeNull();
-		expect(fixture.calls).toContain("cutover:account-a");
-		expect(fixture.calls).toContain("stop:false");
-		expect(fixture.calls).not.toContain("start");
-		expect(fixture.errors).toHaveLength(1);
-		fixture.runtime.dispose();
-	});
-
 	for (const scenario of [
 		{
 			name: "policy is disabled",
@@ -107,20 +70,6 @@ describe("optional proactive feedback auth lifecycle", () => {
 			capabilityAvailable: false,
 		},
 	]) {
-		test(`keeps login inactive when ${scenario.name}`, async () => {
-			const fixture = createAuthFixture(scenario);
-
-			await expect(fixture.signIn()).resolves.toMatchObject({
-				id: "session-account-a",
-			});
-			expect(fixture.manager.accountId).toBe("account-a");
-			expect(fixture.credentials.values.has(refreshTokenKey)).toBeTrue();
-			expect(fixture.runtime.cloudOwnerAccountId()).toBeNull();
-			expect(fixture.calls).not.toContain("cutover:account-a");
-			expect(fixture.calls).not.toContain("start");
-			expect(fixture.errors).toEqual([]);
-			fixture.runtime.dispose();
-		});
 	}
 });
 

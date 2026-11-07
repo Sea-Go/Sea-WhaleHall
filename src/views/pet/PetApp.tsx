@@ -1,12 +1,44 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PetBehaviorController } from "./behavior";
 import { CanvasPetRenderer } from "./CanvasPetRenderer";
+import { PetChatController } from "./chat";
 import { PetActivityFeedbackBubble } from "./PetActivityFeedbackBubble";
-import { PetCloudSearchPanel } from "./PetCloudSearchPanel";
-import { petApi } from "./rpc";
+import { PetChatPanel } from "./PetChatPanel";
+import { createPetChatPort, petApi } from "./rpc";
 
 export function PetApp() {
 	const canvasRef = useRef<HTMLCanvasElement>(null);
+	const [chatController, setChatController] =
+		useState<PetChatController | null>(null);
+
+	// 必须先于 petApi.ready() 注册，Bun 会在 ready 时推送当前可用性；事件流
+	// 终身订阅（控制器内部按 requestId 过滤本面板的 turn）。
+	useEffect(() => {
+		const controller = new PetChatController(createPetChatPort());
+		const unsubscribeAvailability = petApi.onPetChatAvailability(
+			(available) => {
+				controller.setAvailable(available);
+				setChatController(available ? controller : null);
+			},
+		);
+		const unsubscribeEvents = petApi.onPetChatEvent((requestId, envelope) => {
+			controller.applyEvent(requestId, envelope);
+		});
+		const unsubscribeRejected = petApi.onPetChatRejected(
+			(requestId, message) => {
+				controller.rejectTurn(requestId, message);
+			},
+		);
+		const unsubscribeProactive = petApi.onPetChatProactiveTurn((requestId) => {
+			controller.enterProactiveTurn(requestId);
+		});
+		return () => {
+			unsubscribeAvailability();
+			unsubscribeEvents();
+			unsubscribeRejected();
+			unsubscribeProactive();
+		};
+	}, []);
 
 	useEffect(() => {
 		const canvas = canvasRef.current;
@@ -68,7 +100,7 @@ export function PetApp() {
 		<div className="pet-stage">
 			<canvas ref={canvasRef} aria-label="WhaleHall 可交互桌面伙伴" />
 			<PetActivityFeedbackBubble />
-			<PetCloudSearchPanel port={null} />
+			<PetChatPanel controller={chatController} />
 		</div>
 	);
 }

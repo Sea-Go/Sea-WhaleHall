@@ -15,7 +15,7 @@ import type {
 export type ConversationTurnState =
 	| { status: "idle" }
 	| { status: "starting"; run: ConversationRun }
-	| { status: "running"; run: ConversationRun }
+	| { status: "running"; run: ConversationRun; reasoning?: string }
 	| { status: "suspended"; run: ConversationRun }
 	| { status: "cancelling"; run: ConversationRun }
 	| { status: "recovering"; run: ConversationRun; message: string }
@@ -665,6 +665,18 @@ export class ConversationController {
 					event.conversationId,
 				);
 				break;
+			case "reasoning.delta":
+				if (surface.turn.status === "running") {
+					this.setState({
+						status: "ready",
+						thread: surface.thread,
+						turn: {
+							...surface.turn,
+							reasoning: (surface.turn.reasoning ?? "") + event.delta,
+						},
+					});
+				}
+				return false;
 			default:
 				return false;
 		}
@@ -817,6 +829,17 @@ function applyEvent(
 					},
 				},
 			};
+		case "reasoning.delta": {
+			if (previousTurn.status !== "running") return null;
+			return {
+				thread,
+				turn: {
+					...previousTurn,
+					status: "running",
+					reasoning: (previousTurn.reasoning ?? "") + event.delta,
+				},
+			};
+		}
 		case "message.started": {
 			const nextThread = withConversationId(
 				ensureAssistantMessageStarted(thread, {

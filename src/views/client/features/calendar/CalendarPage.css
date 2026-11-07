@@ -386,7 +386,6 @@
 	--fc-breezy-event-contrast: var(--color-text-primary);
 	--fc-breezy-background-event: var(--color-calendar-plan-surface);
 	--fc-breezy-highlight: var(--color-selection);
-	--fc-breezy-now: var(--color-calendar-now);
 	--fc-breezy-selected: var(--color-surface-pressed);
 	--fc-breezy-popover: var(--color-surface-elevated);
 	--fc-breezy-popover-border: var(--color-border-strong);
@@ -847,4 +846,63 @@
 	.calendar-dialog form {
 		padding-block: var(--space-4);
 	}
+}
+
+/* 事件右键上下文菜单：视口定位的轻量浮层。 */
+.calendar-context-menu {
+	position: fixed;
+	z-index: 60;
+	min-width: 148px;
+	padding: 4px;
+	border-radius: 10px;
+	background: var(--color-surface, #ffffff);
+	box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+	border: 1px solid var(--color-border, rgba(15, 23, 42, 0.08));
+}
+
+.calendar-context-menu__title {
+	margin: 4px 8px 6px;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--color-text-secondary);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 220px;
+}
+
+.calendar-context-menu button {
+	display: block;
+	width: 100%;
+	padding: 7px 10px;
+	border: none;
+	border-radius: 7px;
+	background: transparent;
+	font-size: 13px;
+	text-align: left;
+	color: var(--color-text-primary);
+	cursor: pointer;
+}
+
+.calendar-context-menu button:hover:not(:disabled) {
+	background: var(--color-surface-muted, #eef2f6);
+}
+
+.calendar-context-menu__danger {
+	color: #d92d20;
+}
+
+.calendar-context-menu__danger:hover:not(:disabled) {
+	background: rgba(217, 45, 32, 0.08);
+}
+
+.calendar-context-menu__backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 59;
+	background: transparent;
+}
+
+.calendar-context-menu {
+	z-index: 60;
 }

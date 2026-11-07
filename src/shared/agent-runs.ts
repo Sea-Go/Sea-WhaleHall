@@ -102,6 +102,11 @@ export type AgentRunEvent =
 			delta: string;
 	  }
 	| {
+			type: "conversation.reasoning.delta";
+			conversationId: string;
+			delta: string;
+	  }
+	| {
 			type: "conversation.message.completed";
 			conversationId: string;
 			messageId: string;

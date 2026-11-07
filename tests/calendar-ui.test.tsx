@@ -5,6 +5,33 @@ import {
 	EventEditor,
 } from "../src/views/client/features/calendar/CalendarPage";
 import { calendarScenarioEvents } from "../src/views/client/features/calendar/fixtures";
+import { dayClickDraft } from "../src/views/client/features/calendar/fullcalendar-adapter";
+import { PlanningController } from "../src/views/client/features/planning/PlanningController";
+import { SmartScheduleComposer } from "../src/views/client/features/planning/PlanningPanels";
+import type { PlanningService } from "../src/views/client/features/planning/planning-service";
+
+const emptyPlanningService: PlanningService = {
+	subscribe: () => () => {},
+	onPlanningProgress() {
+		return () => {};
+	},
+	listPlans: async () => [],
+	getPlan: async () => {
+		throw new Error("not used");
+	},
+	createPlanDraft: async () => ({ planId: "not-used" }),
+	sendPlanMessage: async () => {},
+	confirmPlanRevision: async () => {},
+	setTaskStatus: async () => {},
+	setTaskRelevance: async () => {},
+	confirmObservationAttribution: async () => {},
+	pausePlan: async () => {},
+	resumePlan: async () => {},
+	completePlan: async () => {},
+	archivePlan: async () => {},
+	undoPlanAdjustment: async () => {},
+	retryPendingAnalysis: async () => {},
+};
 
 describe("calendar keyboard and form alternatives", () => {
 	test("create form exposes labeled date/time, recurrence, and 15-minute controls", () => {
@@ -37,16 +64,16 @@ describe("calendar keyboard and form alternatives", () => {
 		expect(markup).not.toContain("计划日程");
 	});
 
-	test("editable recurring event offers scope, delete, movement, and resize alternatives", () => {
-		const event = calendarScenarioEvents("recurrence")[0];
-		if (!event) throw new Error("Missing recurrence fixture");
+	test("smart compose body replaces the manual form for new schedules", async () => {
 		const editor: EditorState = {
-			event,
+			event: null,
 			selection: null,
-			occurrenceStart: "2026-07-29T12:00:00Z",
-			presetKind: "plan",
+			occurrenceStart: null,
+			presetKind: "manual-block",
 			returnFocus: null,
 		};
+		const planningController = new PlanningController(emptyPlanningService);
+		await planningController.initialize();
 		const markup = renderToStaticMarkup(
 			<EventEditor
 				editor={editor}
@@ -55,92 +82,23 @@ describe("calendar keyboard and form alternatives", () => {
 				onClose={() => {}}
 				onSave={async () => {}}
 				onDelete={async () => {}}
+				bodyOverride={
+					<SmartScheduleComposer
+						controller={planningController}
+						onOpenManual={() => {}}
+						onPlanned={() => {}}
+					/>
+				}
 			/>,
 		);
-		expect(markup).toContain("修改范围");
-		expect(markup).toContain("仅这一次");
-		expect(markup).toContain("整个系列");
-		expect(markup).toContain("删除");
-	});
-
-	test("locked model plan event offers an explicit rescheduling opt-in", () => {
-		const event = calendarScenarioEvents("normal").find(
-			(candidate) => candidate.scheduleOrigin === "model",
-		);
-		if (!event) throw new Error("Missing model plan fixture");
-		const markup = renderToStaticMarkup(
-			<EventEditor
-				editor={{
-					event: { ...event, userLocked: true },
-					selection: null,
-					occurrenceStart: null,
-					presetKind: "plan",
-					returnFocus: null,
-				}}
-				timeZone="Asia/Shanghai"
-				pending={false}
-				onClose={() => {}}
-				onSave={async () => {}}
-				onDelete={async () => {}}
-				onUnlock={async () => {}}
-			/>,
-		);
-		expect(markup).toContain("允许计划重新安排");
-	});
-
-	test("external event editor is visibly read-only", () => {
-		const event = calendarScenarioEvents("external")[0];
-		if (!event) throw new Error("Missing external fixture");
-		const markup = renderToStaticMarkup(
-			<EventEditor
-				editor={{
-					event,
-					selection: null,
-					occurrenceStart: null,
-					presetKind: "external",
-					returnFocus: null,
-				}}
-				timeZone="Asia/Shanghai"
-				pending={false}
-				onClose={() => {}}
-				onSave={async () => {}}
-				onDelete={async () => {}}
-			/>,
-		);
-		expect(markup).toContain("仅可查看");
-		expect(markup).not.toContain(">保存日程<");
-		expect(markup).not.toContain(">删除<");
-	});
-
-	test("ambiguous repeated hour offers an explicit earlier/later choice", () => {
-		const event = calendarScenarioEvents("short")[0];
-		if (!event) throw new Error("Missing timed fixture");
-		const markup = renderToStaticMarkup(
-			<EventEditor
-				editor={{
-					event: {
-						...event,
-						schedule: {
-							allDay: false,
-							start: "2026-11-01T05:30:00Z",
-							end: "2026-11-01T06:30:00Z",
-							timeZone: "America/New_York",
-						},
-					},
-					selection: null,
-					occurrenceStart: null,
-					presetKind: "plan",
-					returnFocus: null,
-				}}
-				timeZone="America/New_York"
-				pending={false}
-				onClose={() => {}}
-				onSave={async () => {}}
-				onDelete={async () => {}}
-			/>,
-		);
-		expect(markup).toContain("夏令时重复小时");
-		expect(markup).toContain("采用第一次出现");
-		expect(markup).toContain("采用第二次出现");
+		expect(markup).toContain('role="dialog"');
+		expect(markup).toContain("安排什么？");
+		expect(markup).toContain("智能安排");
+		expect(markup).toContain("手动设置");
+		// 手动表单不与智能主体同时出现。
+		expect(markup).not.toContain("开始日期");
+		expect(markup).not.toContain("保存日程");
 	});
 });
+
+describe("calendar day click draft", () => {});

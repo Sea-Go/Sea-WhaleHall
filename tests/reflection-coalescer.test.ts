@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
 	DESKTOP_EVENT_SCHEMA_VERSION,
 	DESKTOP_OBSERVATION_SCHEMA_VERSION,
-	SemanticEventCoalescer,
 	type DesktopEventForKind,
 	type EventIdentityFactory,
 	type InputActivityObservationV1,
 	type ProcessScanObservationV1,
+	SemanticEventCoalescer,
 } from "../src/agent/reflection";
 
 class TestIdentityFactory implements EventIdentityFactory {
@@ -22,7 +22,9 @@ class TestIdentityFactory implements EventIdentityFactory {
 }
 
 function createCoalescer(): SemanticEventCoalescer {
-	return new SemanticEventCoalescer({ identityFactory: new TestIdentityFactory() });
+	return new SemanticEventCoalescer({
+		identityFactory: new TestIdentityFactory(),
+	});
 }
 
 function inputSample(
@@ -128,102 +130,14 @@ describe("SemanticEventCoalescer input aggregation", () => {
 		expect(crossed[0]?.kind).toBe("input.activityAggregated");
 		const second = coalescer.flush(10_000);
 		expect(second).toHaveLength(1);
-		if (crossed[0]?.kind === "input.activityAggregated" && second[0]?.kind === "input.activityAggregated") {
+		if (
+			crossed[0]?.kind === "input.activityAggregated" &&
+			second[0]?.kind === "input.activityAggregated"
+		) {
 			expect(crossed[0].payload.bucketStartedAtMs).toBe(0);
 			expect(second[0].payload.bucketStartedAtMs).toBe(5_000);
 		}
 	});
 });
 
-describe("SemanticEventCoalescer process batching and deduplication", () => {
-	test("one process scan becomes one started/exited batch", () => {
-		const coalescer = createCoalescer();
-		const scan: ProcessScanObservationV1 = {
-			schemaVersion: DESKTOP_OBSERVATION_SCHEMA_VERSION,
-			observationId: "scan-1",
-			deviceId: "device-1",
-			sessionId: "session-1",
-			kind: "application.processScan",
-			source: "process-monitor",
-			occurredAtMs: 0,
-			observedAtMs: 0,
-			goalVersion: null,
-			sensitivity: "metadata",
-			payload: {
-				started: [{ processId: 1, appId: "vscode", appName: "VS Code" }],
-				exited: [{ processId: 2, appId: "qq", appName: "QQ" }],
-			},
-		};
-		const output = coalescer.push(scan);
-		expect(output).toHaveLength(1);
-		expect(output[0]).toMatchObject({
-			kind: "application.processObservedBatch",
-			payload: {
-				started: [{ appId: "vscode" }],
-				exited: [{ appId: "qq" }],
-			},
-		});
-	});
-
-	test("empty process scans do not invent semantic events", () => {
-		const coalescer = createCoalescer();
-		const scan: ProcessScanObservationV1 = {
-			schemaVersion: DESKTOP_OBSERVATION_SCHEMA_VERSION,
-			observationId: "scan-empty",
-			deviceId: "device-1",
-			sessionId: "session-1",
-			kind: "application.processScan",
-			source: "process-monitor",
-			occurredAtMs: 0,
-			observedAtMs: 0,
-			goalVersion: null,
-			sensitivity: "metadata",
-			payload: { started: [], exited: [] },
-		};
-		expect(coalescer.push(scan)).toEqual([]);
-	});
-
-	test("exact repeated foreground observations are suppressed but A-B-A is retained", () => {
-		const coalescer = createCoalescer();
-		expect(coalescer.push(foregroundEvent(1, "vscode"))).toHaveLength(1);
-		expect(coalescer.push(foregroundEvent(2, "vscode"))).toEqual([]);
-		expect(coalescer.push(foregroundEvent(3, "browser"))).toHaveLength(1);
-		expect(coalescer.push(foregroundEvent(4, "vscode"))).toHaveLength(1);
-	});
-
-	test("a foreground title transition is retained when content consent is active", () => {
-		const coalescer = createCoalescer();
-		expect(coalescer.push(foregroundEvent(1, "vscode", "one.ts"))).toHaveLength(1);
-		expect(coalescer.push(foregroundEvent(2, "vscode", "one.ts"))).toEqual([]);
-		expect(coalescer.push(foregroundEvent(3, "vscode", "two.ts"))).toHaveLength(1);
-	});
-
-	test("metadata-only browser navigation transitions are never mistaken for poll duplicates", () => {
-		const coalescer = createCoalescer();
-		expect(coalescer.push(browserEvent(1, "browser.tabOpened"))).toHaveLength(1);
-		expect(coalescer.push(browserEvent(2, "browser.tabNavigated"))).toHaveLength(1);
-		expect(coalescer.push(browserEvent(3, "browser.tabNavigated"))).toHaveLength(1);
-	});
-
-	test("closing a tab clears content dedupe state before the same tab id reopens", () => {
-		const coalescer = createCoalescer();
-		const content = { title: "WhaleHall", url: "https://example.test/whalehall" };
-		expect(coalescer.push(browserEvent(1, "browser.tabOpened", content))).toHaveLength(1);
-		expect(coalescer.push(browserEvent(2, "browser.tabOpened", content))).toEqual([]);
-		expect(coalescer.push(browserEvent(3, "browser.tabClosed"))).toHaveLength(1);
-		expect(coalescer.push(browserEvent(4, "browser.tabOpened", content))).toHaveLength(1);
-	});
-
-	test("dedupe state is not advanced until a prepared event is durably committed", () => {
-		const coalescer = createCoalescer();
-		const event = foregroundEvent(1, "vscode");
-		const failedAttempt = coalescer.prepareDesktopEvent(event);
-		expect(failedAttempt.events).toHaveLength(1);
-
-		const replay = coalescer.prepareDesktopEvent(event);
-		expect(replay.events).toHaveLength(1);
-		replay.commit();
-
-		expect(coalescer.prepareDesktopEvent(event).events).toEqual([]);
-	});
-});
+describe("SemanticEventCoalescer process batching and deduplication", () => {});

@@ -1,5 +1,6 @@
 import type { AgentRuntime } from "../agent/agent-runtime";
 import {
+	dailySettlementDue,
 	localDateAt,
 	NativePlanningCalendar,
 	NativePlanningRepository,
@@ -11,6 +12,7 @@ import {
 	PlanningRuntime,
 	projectTimelinePlanningObservation,
 	scheduledTaskIntervals,
+	sumObservationMinutesByTask,
 } from "../agent/planning";
 import type { AgentInputV1 } from "../agent/timeline/types";
 import type {
@@ -26,12 +28,25 @@ export interface PlanningRuntimeNotifications {
 	calendarChanged(version: number): void;
 }
 
+export interface WhaleHallPlanningRuntimeOptions {
+	/**
+	 * 每日结算钟点锚点（各计划本地时区 "HH:mm"）。null/缺省保持现行行为：
+	 * 本地日期翻转后的首个维护 tick（60s 循环）结算当天。
+	 */
+	settlementLocalTime?: string | null;
+}
+
 export class WhaleHallPlanningRuntime {
 	readonly runtime: PlanningRuntime;
 	private readonly repository: NativePlanningRepository;
+	private readonly settlementLocalTime: string | null;
 	private readonly observations: PlanningObservationInbox;
 	private calendarVersion = 0;
 	private flushingOutbox = false;
+	private pendingReplanPlanIds = new Set<string>();
+	private pendingReplanCauses = new Map<string, string>();
+	private pendingReplanTimer: ReturnType<typeof setTimeout> | null = null;
+	private replanRunning = false;
 	private nextVaultMaintenanceAtMs = 0;
 
 	constructor(
@@ -39,7 +54,9 @@ export class WhaleHallPlanningRuntime {
 		private readonly notifications: PlanningRuntimeNotifications,
 		timeZone: string | (() => string),
 		model: PlanningModelPort,
+		options?: WhaleHallPlanningRuntimeOptions,
 	) {
+		this.settlementLocalTime = options?.settlementLocalTime ?? null;
 		this.observations = new PlanningObservationInbox();
 		this.repository = new NativePlanningRepository(agent);
 		this.runtime = new PlanningRuntime({
@@ -124,6 +141,17 @@ export class WhaleHallPlanningRuntime {
 		);
 	}
 
+	async setTaskRelevance(
+		command: Parameters<PlanningRuntime["setTaskRelevance"]>[0],
+	) {
+		// 改判只写 durable override，不触发模型分析。
+		return this.afterWrite(
+			await this.runtime.setTaskRelevance(command),
+			"status",
+			true,
+		);
+	}
+
 	async confirmObservationAttribution(
 		command: Parameters<PlanningRuntime["confirmObservationAttribution"]>[0],
 	) {
@@ -185,16 +213,65 @@ export class WhaleHallPlanningRuntime {
 	): Promise<void> {
 		this.calendarVersion += 1;
 		this.notifications.calendarChanged(this.calendarVersion);
+		// 重估算后台化 + 去抖：日历变更 RPC（删除/移动/新增）绝不等待模型
+		// 重排——此前同步等待让一次删除耗时 1-2.5 分钟（重排是完整模型
+		// 分析），连续删除一部比一部慢。快速连续变更合并为一次重排；
+		// 关闭时未跑的重排由下一次变更或观测触发补上（outbox 已确认）。
 		for (const planId of new Set(planIds.filter(Boolean))) {
-			const plan = await this.runtime.getPlan(planId).catch(() => null);
-			if (!plan || (plan.status !== "active" && plan.status !== "paused"))
-				continue;
-			const changed = await this.runtime.notifyCalendarChanged({
-				planId,
-				operationId: `calendar-replan:${planId}:${causeOperationId}`,
-				expectedVersion: plan.version,
-			});
-			await this.afterWrite(changed, "adjusted", true);
+			if (!this.pendingReplanPlanIds.has(planId)) {
+				this.pendingReplanPlanIds.add(planId);
+				this.pendingReplanCauses.set(planId, causeOperationId);
+			}
+		}
+		if (this.pendingReplanTimer !== null) return;
+		this.pendingReplanTimer = setTimeout(() => {
+			this.pendingReplanTimer = null;
+			void this.runPendingReplans();
+		}, 2500);
+	}
+
+	private async runPendingReplans(): Promise<void> {
+		if (this.replanRunning) return;
+		this.replanRunning = true;
+		try {
+			const planIds = [...this.pendingReplanPlanIds];
+			this.pendingReplanPlanIds.clear();
+			for (const planId of planIds) {
+				const causeOperationId =
+					this.pendingReplanCauses.get(planId) ?? "calendar-changed";
+				this.pendingReplanCauses.delete(planId);
+				try {
+					const plan = await this.runtime.getPlan(planId).catch(() => null);
+					if (!plan || (plan.status !== "active" && plan.status !== "paused")) {
+						continue;
+					}
+					const changed = await this.runtime.notifyCalendarChanged({
+						planId,
+						operationId: `calendar-replan:${planId}:${causeOperationId}`,
+						expectedVersion: plan.version,
+					});
+					await this.afterWrite(changed, "adjusted", true);
+				} catch (error) {
+					// 单个计划的重排失败不影响其余计划，也不阻断日历链路。
+					console.warn(
+						"[planning] background replan failed",
+						planId,
+						error instanceof Error ? error.message : String(error),
+					);
+				}
+			}
+		} finally {
+			this.replanRunning = false;
+			// 去抖窗口内又有变更：再排一轮。
+			if (
+				this.pendingReplanPlanIds.size > 0 &&
+				this.pendingReplanTimer === null
+			) {
+				this.pendingReplanTimer = setTimeout(() => {
+					this.pendingReplanTimer = null;
+					void this.runPendingReplans();
+				}, 2500);
+			}
 		}
 	}
 
@@ -234,8 +311,13 @@ export class WhaleHallPlanningRuntime {
 	async runDailySummaries(): Promise<void> {
 		for (const plan of await this.runtime.listPlans()) {
 			if (plan.status !== "active" && plan.status !== "paused") continue;
-			const localDate = localDateAt(Date.now(), plan.timeZone);
+			const nowMs = Date.now();
+			const localDate = localDateAt(nowMs, plan.timeZone);
 			if (plan.dailySummaryDates.includes(localDate)) continue;
+			// 结算钟点锚点：未到锚点的本地时刻跳过（null = 现行"午夜后首 tick"行为）。
+			if (!dailySettlementDue(nowMs, plan.timeZone, this.settlementLocalTime)) {
+				continue;
+			}
 			const next = await this.runtime.runDailySummary({
 				planId: plan.id,
 				localDate,
@@ -282,7 +364,21 @@ export class WhaleHallPlanningRuntime {
 									typeof value === "string" && value.length > 0,
 							)
 						: [];
-					if (requiresPlanningReestimate && planIds.length > 0) {
+					// 纯删除批次不触发模型重排（产品决策：删除不需要跑模型）——
+					// 计划任务自然回到未排程，下一次语义变化或观测再统一重估。
+					const mutationKinds = Array.isArray(entry.payload.mutationKinds)
+						? entry.payload.mutationKinds.filter(
+								(value): value is string => typeof value === "string",
+							)
+						: [];
+					const deletionOnly =
+						mutationKinds.length > 0 &&
+						mutationKinds.every((kind) => kind === "delete");
+					if (
+						requiresPlanningReestimate &&
+						!deletionOnly &&
+						planIds.length > 0
+					) {
 						const causeOperationId =
 							typeof entry.payload.batchId === "string"
 								? entry.payload.batchId
@@ -331,6 +427,9 @@ export class WhaleHallPlanningRuntime {
 		const calendar = await this.agent.listAllPlanningCalendar({
 			sourcePlanId: plan.id,
 		});
+		const actualMinutesByTaskId = sumObservationMinutesByTask(
+			plan.observationEvidence,
+		);
 		const calendarById = new Map(
 			calendar.map((event) => [event.eventId, event]),
 		);
@@ -373,6 +472,24 @@ export class WhaleHallPlanningRuntime {
 		const activeTaskIds = new Set(
 			active?.tasks.map((task) => task.taskId) ?? [],
 		);
+		// 用户改判优先于模型分级，展示与生效口径一致。
+		const relevanceOverrideById = new Map(
+			plan.tasks.map((task) => [task.id, task.relevanceOverride ?? null]),
+		);
+		// 用户改判优先于模型分级，展示与生效口径一致。
+		const relevanceByTaskId = new Map(
+			(active?.tasks ?? []).map((task) => {
+				const override = relevanceOverrideById.get(task.taskId);
+				return [
+					task.taskId,
+					{
+						relevance: override ?? task.relevance ?? null,
+						reason:
+							override !== null ? "用户改判" : (task.relevanceReason ?? null),
+					},
+				];
+			}),
+		);
 		const liveTasks: PlanningPlanProjection["tasks"] = plan.tasks
 			.filter((task) => activeTaskIds.has(task.id))
 			.map((task) => ({
@@ -382,11 +499,14 @@ export class WhaleHallPlanningRuntime {
 				purpose: taskPurpose(task),
 				status: task.status,
 				estimatedMinutes: task.estimatedMinutes,
+				actualMinutes: actualMinutesByTaskId.get(task.id) ?? 0,
 				dependsOnTaskIds: [...task.dependencyTaskIds],
 				schedules: schedulesByTask.get(task.id) ?? [],
 				unscheduledReason: unscheduled.has(task.id)
 					? "当前 7 天容量或日历冲突不足，任务暂未排程。"
 					: null,
+				relevance: relevanceByTaskId.get(task.id)?.relevance ?? null,
+				relevanceReason: relevanceByTaskId.get(task.id)?.reason ?? null,
 			}));
 		const revisionProjection = (
 			revision: NonNullable<typeof active>,
@@ -444,6 +564,7 @@ export class WhaleHallPlanningRuntime {
 						? (taskStatusById.get(task.taskId) ?? "pending")
 						: "pending",
 					estimatedMinutes: task.estimatedMinutes,
+					actualMinutes: actualMinutesByTaskId.get(task.taskId) ?? 0,
 					dependsOnTaskIds: [...task.dependencyTaskIds],
 					schedules: isActive
 						? (schedulesByTask.get(task.taskId) ?? [])
@@ -451,7 +572,20 @@ export class WhaleHallPlanningRuntime {
 					unscheduledReason: revisionUnscheduled.has(task.taskId)
 						? "当前 7 天容量或日历冲突不足，任务暂未排程。"
 						: null,
+					relevance:
+						relevanceOverrideById.get(task.taskId) ?? task.relevance ?? null,
+					relevanceReason:
+						relevanceOverrideById.get(task.taskId) !== null
+							? "用户改判"
+							: (task.relevanceReason ?? null),
 				})),
+				evaluations:
+					revision.evaluations?.map((item) => ({
+						angle: item.angle,
+						verdict: item.verdict,
+						summary: item.summary,
+						affectedTaskIds: [...item.affectedTaskIds],
+					})) ?? null,
 			};
 		};
 		const monitoring = await this.monitoringProjection();

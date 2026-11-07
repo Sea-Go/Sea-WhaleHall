@@ -27,9 +27,8 @@ describe("local Agent production boundary", () => {
 		expect(clientConfiguration).toContain(
 			"WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL",
 		);
-		expect(clientConfiguration).toContain(
-			'"https://data.sea-ridethewindbreakthewaves.xyz"',
-		);
+		// 生产 DC origin 走本地 tlsfront+SSH 隧道（域名直连被 SNI 阻断）。
+		expect(clientConfiguration).toContain('"https://127.0.0.1:18443"');
 		expect(clientConfiguration).not.toContain("data-staging");
 		expect(bunComposition).toContain(
 			"baseUrl: WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL",
@@ -69,10 +68,12 @@ describe("local Agent production boundary", () => {
 		expect(activitySupport).toContain("不要复述桌面内容");
 		expect(activitySupport).toContain("不得输出分数");
 		expect(activityRuntime).toContain(
-			"agents.activitySupportSupervisor.generate(",
+			"agents.activitySupportSupervisor.stream(",
 		);
 		expect(activityRuntime).toContain("agents.activitySupportVoice.stream(");
-		expect(activityRuntime).toContain("agents.conversation.stream(");
+		// 会话流可能携带逐运行的云检索工具集（conversationAgent），仍经由
+		// 同一 Mastra Agent 边界，不引入直连模型路径。
+		expect(activityRuntime).toContain("conversationAgent.stream(");
 		expect(activityRuntime).not.toContain("activityConversationPrompt");
 		expect(activityRuntime).not.toContain("agents.activity.stream(");
 	});

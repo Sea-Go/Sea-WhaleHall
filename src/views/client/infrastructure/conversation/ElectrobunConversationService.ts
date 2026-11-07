@@ -12,16 +12,7 @@ import type {
 	ConversationRpcResult,
 	ConversationRpcThread,
 } from "../../../../shared/conversation";
-import type {
-	ConversationMessage,
-	ConversationRestorableRun,
-	ConversationRun,
-	ConversationThread,
-	ConversationToolApproval,
-	ConversationToolCall,
-} from "../../features/conversation/domain";
 import {
-	ConversationServiceError,
 	type CancelConversationRunInput,
 	type ConversationCommandAccepted,
 	type ConversationRunAccepted,
@@ -30,9 +21,18 @@ import {
 	type ConversationRunListener,
 	type ConversationRunSnapshot,
 	type ConversationService,
+	ConversationServiceError,
 	type ConversationStartInput,
 	type DecideConversationToolApprovalInput,
 } from "../../features/conversation/conversation-service";
+import type {
+	ConversationMessage,
+	ConversationRestorableRun,
+	ConversationRun,
+	ConversationThread,
+	ConversationToolApproval,
+	ConversationToolCall,
+} from "../../features/conversation/domain";
 
 export class ElectrobunConversationService implements ConversationService {
 	private readonly listeners = new Set<ConversationRunListener>();
@@ -47,7 +47,9 @@ export class ElectrobunConversationService implements ConversationService {
 		);
 	}
 
-	async startTurn(input: ConversationStartInput): Promise<ConversationRunAccepted> {
+	async startTurn(
+		input: ConversationStartInput,
+	): Promise<ConversationRunAccepted> {
 		await this.ensureEventSubscription();
 		const { clientApi } = await loadClientApi();
 		const result = await clientApi.startConversationTurn({
@@ -70,9 +72,14 @@ export class ElectrobunConversationService implements ConversationService {
 		});
 	}
 
-	async cancelRun(input: CancelConversationRunInput): Promise<ConversationCommandAccepted> {
+	async cancelRun(
+		input: CancelConversationRunInput,
+	): Promise<ConversationCommandAccepted> {
 		const { clientApi } = await loadClientApi();
-		return mapAgentResult(await clientApi.cancelAgentRun(input), mapCommandAccepted);
+		return mapAgentResult(
+			await clientApi.cancelAgentRun(input),
+			mapCommandAccepted,
+		);
 	}
 
 	async decideToolApproval(
@@ -198,7 +205,9 @@ function mapCommandAccepted(value: {
 	return { ...value };
 }
 
-function mapConversationSnapshot(snapshot: AgentRunSnapshot): ConversationRunSnapshot {
+function mapConversationSnapshot(
+	snapshot: AgentRunSnapshot,
+): ConversationRunSnapshot {
 	if (snapshot.kind !== "conversation-turn") {
 		throw invalidResponse("运行快照不是对话类型。");
 	}
@@ -208,7 +217,10 @@ function mapConversationSnapshot(snapshot: AgentRunSnapshot): ConversationRunSna
 		clientMessageId: snapshot.clientMessageId,
 		assistantMessageId: snapshot.assistantMessageId,
 		failure: snapshot.failure
-			? { message: snapshot.failure.message, retryable: snapshot.failure.retryable }
+			? {
+					message: snapshot.failure.message,
+					retryable: snapshot.failure.retryable,
+				}
 			: undefined,
 	};
 }
@@ -238,17 +250,19 @@ function mapConversationEvent(
 	const event = mapEvent(envelope.event);
 	return event
 		? {
-			runId: envelope.runId,
-			requestId: envelope.requestId,
-			sequence: envelope.sequence,
-			revision: envelope.revision,
-			emittedAtMs: envelope.emittedAtMs,
-			event,
-		}
+				runId: envelope.runId,
+				requestId: envelope.requestId,
+				sequence: envelope.sequence,
+				revision: envelope.revision,
+				emittedAtMs: envelope.emittedAtMs,
+				event,
+			}
 		: null;
 }
 
-function mapEvent(event: AgentRunEventEnvelope["event"]): ConversationRunEvent | null {
+function mapEvent(
+	event: AgentRunEventEnvelope["event"],
+): ConversationRunEvent | null {
 	switch (event.type) {
 		case "run.started":
 		case "run.progress":
@@ -260,6 +274,8 @@ function mapEvent(event: AgentRunEventEnvelope["event"]): ConversationRunEvent |
 			return { type: "message.started", ...withoutType(event) };
 		case "conversation.message.delta":
 			return { type: "message.delta", ...withoutType(event) };
+		case "conversation.reasoning.delta":
+			return { type: "reasoning.delta", delta: event.delta };
 		case "conversation.message.completed":
 			return { type: "message.completed", ...withoutType(event) };
 		case "tool.call.proposed":
@@ -279,7 +295,10 @@ function mapEvent(event: AgentRunEventEnvelope["event"]): ConversationRunEvent |
 				toolCall: mapToolCall({ ...event.toolCall, summary: event.message }),
 			};
 		case "tool.approval.requested":
-			return { type: "approval.requested", approval: mapApproval(event.approval) };
+			return {
+				type: "approval.requested",
+				approval: mapApproval(event.approval),
+			};
 		case "tool.approval.resolved":
 			return { type: "approval.resolved", ...withoutType(event) };
 		case "run.suspended":
@@ -322,7 +341,9 @@ function mapToolCall(toolCall: AgentToolCallSummary): ConversationToolCall {
 	return { ...toolCall };
 }
 
-function mapApproval(approval: AgentToolApprovalRequest): ConversationToolApproval {
+function mapApproval(
+	approval: AgentToolApprovalRequest,
+): ConversationToolApproval {
 	return {
 		id: approval.approvalId,
 		toolCallId: approval.toolCallId,
@@ -340,7 +361,9 @@ function isConversationRun(
 	return run.kind === "conversation-turn";
 }
 
-function mapRestorableRun(run: AgentRunRestorableSummary): ConversationRestorableRun {
+function mapRestorableRun(
+	run: AgentRunRestorableSummary,
+): ConversationRestorableRun {
 	return {
 		runId: run.runId,
 		requestId: run.requestId,

@@ -67,6 +67,9 @@ const DELTA_FLUSH_MS = 75;
 const PARTIAL_PERSIST_MS = 250;
 const PARTIAL_PERSIST_CHARACTERS = 512;
 const MAX_MESSAGE_CHARACTERS = 64 * 1024;
+// Sidecar 运行类请求覆盖完整 agent 轮次（多步模型调用 + 工具 + 思考），
+// 远端模型一次调用即可达分钟级；客户端默认 35s 会在流式输出中途杀死运行。
+const AGENT_RUN_REQUEST_TIMEOUT_MS = 10 * 60_000;
 
 class AgentSessionChangedError extends Error {
 	constructor(message = "登录会话已在本地 Agent 操作期间发生变化。") {
@@ -81,6 +84,22 @@ class ActivityAnalysisOutputError extends Error {
 	) {
 		super(message);
 		this.name = "ActivityAnalysisOutputError";
+	}
+}
+
+/**
+ * 载荷级永久拒绝：重试多少次结果都一样（载荷与持久存档不一致、载荷为空）。
+ * 调度器收到后应立即放弃并清理该任务（放弃路径会删除任务与凭证并物化
+ * 下一个任务），绝不能按瞬时故障退避重试——否则毒任务会占住唯一的
+ * 串行分析车道。
+ */
+export class ActivityAnalysisStartRejectedError extends Error {
+	constructor(
+		readonly code: "archive-identity-invalid" | "analysis-required",
+		message: string,
+	) {
+		super(message);
+		this.name = "ActivityAnalysisStartRejectedError";
 	}
 }
 
@@ -529,6 +548,12 @@ const toolLabels: Record<AgentToolName, string> = {
 	"calendar.commit_plan_schedule": "提交计划排程",
 };
 
+const cloudToolLabels: Record<string, string> = {
+	search_fast: "云检索·快搜",
+	search_detailed: "云检索·详搜",
+	read_evidence: "云检索·读证据",
+};
+
 function toolKey(runId: string, toolCallId: string): string {
 	return `${runId}:${toolCallId}`;
 }
@@ -592,6 +617,8 @@ interface ActiveRun {
 	snapshot: AgentRunSnapshot;
 	assistantContent: string;
 	pendingDelta: string;
+	/** 思考流缓冲：仅转发显示，不持久化到助手消息正文。 */
+	pendingReasoning: string;
 	deltaTimer: ReturnType<typeof setTimeout> | null;
 	lastPartialPersistAtMs: number;
 	lastPartialPersistLength: number;
@@ -689,6 +716,33 @@ export class AgentRunCoordinator
 		} catch (error) {
 			return conversationError(error);
 		}
+	}
+
+	/**
+	 * 桌宠统一对话的固定线程：心跳（主动搭话）与用户消息共用同一条
+	 * 持久会话，客户端对话页因此能看到完整历史，而不是每轮各开一条
+	 * 无人能回看的孤儿线程。
+	 */
+	async petConversationId(): Promise<string> {
+		const identity = this.requireSession();
+		const accountId = identity.accountId;
+		const id = "conversation-pet-main";
+		const existing = await this.inSession(identity, () =>
+			this.repository.getConversation(accountId, id),
+		);
+		if (existing) return existing.id;
+		const now = this.now();
+		await this.inSession(identity, () =>
+			this.repository.putConversation({
+				accountId,
+				id,
+				title: "大肥鱼对话",
+				metadata: null,
+				createdAtMs: now,
+				updatedAtMs: now,
+			}),
+		);
+		return id;
 	}
 
 	async startConversationTurn(
@@ -855,7 +909,10 @@ export class AgentRunCoordinator
 						message: input.text,
 						history: [],
 					},
-					{ requestId: input.requestId },
+					{
+						requestId: input.requestId,
+						timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
+					},
 				)
 				.catch((error) => this.failRun(runId, modelFailure(error)));
 			return { kind: "success", data: accepted(snapshot, now) };
@@ -920,7 +977,10 @@ export class AgentRunCoordinator
 						sessionId,
 						input: structuredClone(input.input),
 					},
-					{ requestId: input.requestId },
+					{
+						requestId: input.requestId,
+						timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
+					},
 				)
 				.catch((error) => this.failRun(runId, modelFailure(error)));
 			return { kind: "success", data: accepted(snapshot, now) };
@@ -962,7 +1022,10 @@ export class AgentRunCoordinator
 			}
 			const latestAnalysis = input.analyses.at(-1);
 			if (!latestAnalysis) {
-				throw new Error("Activity support analysis is required.");
+				throw new ActivityAnalysisStartRejectedError(
+					"analysis-required",
+					"Activity support analysis is required.",
+				);
 			}
 			const latestArchive = await this.inSession(identity, () =>
 				this.repository.getProactiveFeedbackEventStream(
@@ -975,7 +1038,10 @@ export class AgentRunCoordinator
 				JSON.stringify(latestArchive.analysis) !==
 					JSON.stringify(latestAnalysis)
 			) {
-				throw new Error(
+				// 载荷与持久存档不一致是永久性的（重试多少次都一样）：
+				// 调度器收到此类型后应放弃并清理任务，而不是无限退避占道。
+				throw new ActivityAnalysisStartRejectedError(
+					"archive-identity-invalid",
 					"Activity support context archive identity is invalid.",
 				);
 			}
@@ -1053,7 +1119,10 @@ export class AgentRunCoordinator
 						activityJobId: input.jobId,
 						supportContext: structuredClone(supportContext),
 					},
-					{ requestId: input.requestId },
+					{
+						requestId: input.requestId,
+						timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
+					},
 				)
 				.catch((error) => this.failRun(input.runId, modelFailure(error)));
 			this.trackRunOperation(run, dispatch);
@@ -1115,7 +1184,10 @@ export class AgentRunCoordinator
 						? { expectedVersion: run.sidecarPlanningVersion }
 						: {}),
 				},
-				{ requestId: input.requestId },
+				{
+					requestId: input.requestId,
+					timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
+				},
 			)
 			.catch((error) => this.failRun(input.runId, modelFailure(error)));
 		return {
@@ -1244,7 +1316,10 @@ export class AgentRunCoordinator
 								? { approvalId: input.approvalId }
 								: { denied: true },
 					},
-					{ requestId: input.requestId },
+					{
+						requestId: input.requestId,
+						timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
+					},
 				)
 				.catch((error) => this.failRun(input.runId, modelFailure(error)));
 			return {
@@ -1810,6 +1885,10 @@ export class AgentRunCoordinator
 	): Promise<{
 		messages: readonly { role: "user" | "assistant"; content: string }[];
 		version: number;
+		thread: {
+			title: string;
+			metadata: Record<string, unknown> | null;
+		};
 	}> {
 		this.assertCurrentAccount(accountId);
 		const owner = this.requireHostRun(ownerRunId);
@@ -1853,7 +1932,54 @@ export class AgentRunCoordinator
 			role: message.role as "user" | "assistant",
 			content: message.content,
 		}));
-		return { messages: recent, version: completed.length };
+		const conversation = await this.inRunSession(owner, () =>
+			this.repository.getConversation(accountId, conversationId),
+		);
+		return {
+			messages: recent,
+			version: completed.length,
+			thread: {
+				title: conversation?.title ?? "",
+				metadata: conversation?.metadata ?? null,
+			},
+		};
+	}
+
+	async saveThread(input: {
+		accountId: string;
+		ownerRunId: string;
+		conversationId: string;
+		title?: string;
+		metadata?: Record<string, unknown>;
+	}): Promise<{
+		title: string;
+		metadata: Record<string, unknown> | null;
+	}> {
+		this.assertCurrentAccount(input.accountId);
+		const run = this.requireHostRun(input.ownerRunId);
+		if (
+			run.accountId !== input.accountId ||
+			run.snapshot.kind !== "conversation-turn" ||
+			run.snapshot.conversationId !== input.conversationId
+		) {
+			throw new Error(
+				"Conversation memory does not belong to its owning Agent run.",
+			);
+		}
+		const existing = await this.inRunSession(run, () =>
+			this.repository.getConversation(input.accountId, input.conversationId),
+		);
+		if (!existing) {
+			throw new Error("找不到当前账号的本地对话。");
+		}
+		const next: AgentConversationRecord = {
+			...existing,
+			...(input.title !== undefined ? { title: input.title } : {}),
+			...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+			updatedAtMs: this.now(),
+		};
+		await this.inRunSession(run, () => this.repository.putConversation(next));
+		return { title: next.title, metadata: next.metadata };
 	}
 
 	async append(input: {
@@ -2092,6 +2218,15 @@ export class AgentRunCoordinator
 				this.scheduleDeltaFlush(run);
 				await this.persistPartialIfDue(run);
 				return;
+			case "conversation.reasoning.delta":
+				if (
+					run.snapshot.kind !== "conversation-turn" ||
+					run.snapshot.status === "cancelling"
+				)
+					return;
+				run.pendingReasoning += event.delta;
+				this.scheduleDeltaFlush(run);
+				return;
 			case "planning.object.delta":
 				if (run.snapshot.kind === "task-planning") {
 					run.snapshot.session = parsePlanningSession(
@@ -2100,6 +2235,47 @@ export class AgentRunCoordinator
 					);
 				}
 				return;
+			case "agent.tool.call":
+			case "agent.tool.result": {
+				// 云检索等 Sidecar 本地执行的工具：无 tool/call 桥，由 Sidecar
+				// 直接上报调用/结果，投影为渲染端工具时间线事件。
+				if (run.snapshot.kind !== "conversation-turn") return;
+				const label = cloudToolLabels[event.toolName] ?? event.toolName;
+				if (event.kind === "agent.tool.call") {
+					await this.emit(run, {
+						type: "tool.call.started",
+						toolCall: {
+							id: event.toolCallId,
+							name: event.toolName,
+							label,
+							risk: "read",
+							status: "running",
+							startedAtMs: Date.now(),
+						},
+					});
+					return;
+				}
+				const isError = event.isError;
+				const summary: AgentToolCallSummary = {
+					id: event.toolCallId,
+					name: event.toolName,
+					label,
+					risk: "read",
+					status: isError ? "failed" : "succeeded",
+					completedAtMs: Date.now(),
+				};
+				await this.emit(
+					run,
+					isError
+						? {
+								type: "tool.call.failed",
+								toolCall: summary,
+								message: "云检索工具执行失败。",
+							}
+						: { type: "tool.call.completed", toolCall: summary },
+				);
+				return;
+			}
 			case "run.suspended":
 				await this.handleSuspended(run, event.suspendPayload);
 				return;
@@ -2261,12 +2437,21 @@ export class AgentRunCoordinator
 	}
 
 	private async flushDelta(run: ActiveRun): Promise<void> {
-		if (
-			!run.pendingDelta ||
-			run.snapshot.kind !== "conversation-turn" ||
-			!run.snapshot.assistantMessageId
-		)
-			return;
+		if (run.snapshot.kind !== "conversation-turn") return;
+		if (run.pendingReasoning) {
+			const reasoning = run.pendingReasoning;
+			run.pendingReasoning = "";
+			await this.emit(
+				run,
+				{
+					type: "conversation.reasoning.delta",
+					conversationId: run.snapshot.conversationId,
+					delta: reasoning,
+				},
+				false,
+			);
+		}
+		if (!run.pendingDelta || !run.snapshot.assistantMessageId) return;
 		const delta = run.pendingDelta;
 		run.pendingDelta = "";
 		const startOffset = run.assistantContent.length - delta.length;
@@ -2625,6 +2810,7 @@ export class AgentRunCoordinator
 			snapshot,
 			assistantContent: "",
 			pendingDelta: "",
+			pendingReasoning: "",
 			deltaTimer: null,
 			lastPartialPersistAtMs: this.now(),
 			lastPartialPersistLength: 0,
@@ -2811,6 +2997,7 @@ export class AgentRunCoordinator
 			accountId,
 			id: `conversation-${randomUUID()}`,
 			title: input.text.trim().slice(0, 36) || "新对话",
+			metadata: null,
 			createdAtMs: now,
 			updatedAtMs: now,
 		};

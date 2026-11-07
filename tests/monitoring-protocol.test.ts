@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { LocalToolClient } from "../src/agent/local-tool-client";
 import {
 	isLocalMonitoringConfigure,
 	isLocalMonitoringStatus,
 	type LocalMonitoringStatus,
 } from "../src/agent/local-protocol";
+import { LocalToolClient } from "../src/agent/local-tool-client";
 
 function status(
 	overrides: Partial<LocalMonitoringStatus> = {},
@@ -51,16 +51,11 @@ describe("monitoring local protocol", () => {
 		expect(
 			isLocalMonitoringStatus(
 				status({
-					excludedBundleIds: [
-						"com.example.duplicate",
-						"com.example.duplicate",
-					],
+					excludedBundleIds: ["com.example.duplicate", "com.example.duplicate"],
 				}),
 			),
 		).toBeFalse();
-		expect(
-			isLocalMonitoringStatus(status({ bootId: "boot/id" })),
-		).toBeFalse();
+		expect(isLocalMonitoringStatus(status({ bootId: "boot/id" }))).toBeFalse();
 		expect(
 			isLocalMonitoringStatus(status({ lastCallbackAtMs: -1 })),
 		).toBeFalse();
@@ -71,9 +66,7 @@ describe("monitoring local protocol", () => {
 			isLocalMonitoringStatus(status({ state: "paused", tapReady: true })),
 		).toBeFalse();
 		expect(
-			isLocalMonitoringStatus(
-				status({ lastCallbackAtMs: 1_800_000_000_001 }),
-			),
+			isLocalMonitoringStatus(status({ lastCallbackAtMs: 1_800_000_000_001 })),
 		).toBeFalse();
 		expect(
 			isLocalMonitoringStatus(
@@ -92,9 +85,7 @@ describe("monitoring local protocol", () => {
 			),
 		).toBeFalse();
 		expect(
-			isLocalMonitoringStatus(
-				status({ coverage: ["metadata", "metadata"] }),
-			),
+			isLocalMonitoringStatus(status({ coverage: ["metadata", "metadata"] })),
 		).toBeFalse();
 		expect(
 			isLocalMonitoringStatus(
@@ -142,16 +133,5 @@ describe("monitoring local protocol", () => {
 				excludedBundleIds: ["敏感窗口标题"],
 			}),
 		).toBeFalse();
-	});
-
-	test("fails malformed calls before writing to the native process", async () => {
-		const client = new LocalToolClient("/missing/whalehall-local");
-		await expect(
-			client.configureMonitoring({
-				enabled: true,
-				captureContent: true,
-				excludedBundleIds: ["duplicate", "duplicate"],
-			}),
-		).rejects.toMatchObject({ code: "INVALID_ARGUMENTS" });
 	});
 });

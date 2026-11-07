@@ -13,15 +13,19 @@ import {
 	Wrench,
 } from "lucide-react";
 import {
-	useEffect,
-	useRef,
-	useState,
 	type FormEvent,
 	type ReactNode,
 	type Ref,
+	useEffect,
+	useRef,
+	useState,
 } from "react";
 import { Button } from "../../shared/ui/Button";
 import { PageHeader } from "../../shared/ui/PageHeader";
+import type {
+	ConversationPageState,
+	ConversationTurnState,
+} from "./ConversationController";
 import type {
 	ConversationDraft,
 	ConversationMessage,
@@ -29,10 +33,6 @@ import type {
 	ConversationThread,
 	ConversationToolCall,
 } from "./domain";
-import type {
-	ConversationPageState,
-	ConversationTurnState,
-} from "./ConversationController";
 
 export interface ConversationPageActions {
 	onCreateConversation?: () => void;
@@ -49,7 +49,10 @@ export interface ConversationPageProps {
 	actions?: ConversationPageActions;
 }
 
-export function ConversationPage({ state, actions = {} }: ConversationPageProps) {
+export function ConversationPage({
+	state,
+	actions = {},
+}: ConversationPageProps) {
 	const [draft, setDraft] = useState("");
 	const visibleThread = threadFor(state);
 	const turn = turnFor(state);
@@ -79,7 +82,6 @@ export function ConversationPage({ state, actions = {} }: ConversationPageProps)
 			<PageHeader
 				eyebrow="陪伴与协作"
 				title="对话"
-				description="在这里和 WhaleHall 沟通想法、计划与下一步。"
 				action={
 					<Button
 						variant="secondary"
@@ -103,7 +105,10 @@ export function ConversationPage({ state, actions = {} }: ConversationPageProps)
 						description={state.message}
 						action={
 							actions.onCreateConversation ? (
-								<Button icon={<Plus size={15} />} onClick={actions.onCreateConversation}>
+								<Button
+									icon={<Plus size={15} />}
+									onClick={actions.onCreateConversation}
+								>
 									新建对话
 								</Button>
 							) : undefined
@@ -191,13 +196,16 @@ function ConversationWorkspace({
 	const approvalCardRef = useRef<HTMLElement>(null);
 	const approvalFocusReturnArmedRef = useRef(false);
 	const showTyping =
-		Boolean(turn && (turn.status === "starting" || turn.status === "running")) &&
+		Boolean(
+			turn && (turn.status === "starting" || turn.status === "running"),
+		) &&
 		!thread.messages.some(
-			(message) => message.role === "assistant" && message.state === "streaming",
+			(message) =>
+				message.role === "assistant" && message.state === "streaming",
 		);
 	const run = turn && turn.status !== "idle" ? turn.run : null;
 	const pendingApprovalId =
-		turn?.status === "suspended" ? run?.pendingApproval?.id ?? null : null;
+		turn?.status === "suspended" ? (run?.pendingApproval?.id ?? null) : null;
 	const previousApprovalIdRef = useRef<string | null>(pendingApprovalId);
 
 	useEffect(() => {
@@ -213,9 +221,11 @@ function ConversationWorkspace({
 			}
 		};
 		document.addEventListener("pointerdown", handlePointerDown, true);
-		return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+		return () =>
+			document.removeEventListener("pointerdown", handlePointerDown, true);
 	}, [pendingApprovalId]);
 
+	// biome-ignore lint/correctness/useExhaustiveDependencies: disabled 变化需重试焦点归还（body 只读 composer.disabled 的 DOM 态）
 	useEffect(() => {
 		const previousApprovalId = previousApprovalIdRef.current;
 		previousApprovalIdRef.current = pendingApprovalId;
@@ -246,7 +256,7 @@ function ConversationWorkspace({
 		const focusTarget =
 			composer && !composer.disabled
 				? composer
-				: runStatusRef.current ?? workspaceRef.current;
+				: (runStatusRef.current ?? workspaceRef.current);
 		focusTarget?.focus({ preventScroll: true });
 	}, [pendingApprovalId, disabled]);
 
@@ -328,7 +338,11 @@ function ConversationWorkspace({
 					rows={3}
 				/>
 				<div className="conversation-composer__footer">
-					<span>{disabled ? "等待当前操作结束后可继续发送" : "Enter 发送，Shift + Enter 换行"}</span>
+					<span>
+						{disabled
+							? "等待当前操作结束后可继续发送"
+							: "Enter 发送，Shift + Enter 换行"}
+					</span>
 					<Button
 						type="submit"
 						icon={<Send size={15} />}
@@ -363,6 +377,12 @@ function ConversationRunBanner({
 			<div>
 				<strong>{runStatusTitle(turn)}</strong>
 				<span>{runStatusDescription(turn)}</span>
+				{turn.status === "running" && turn.reasoning ? (
+					<details className="conversation-run-banner__reasoning" open>
+						<summary>思考过程（实时）</summary>
+						<p>{turn.reasoning.slice(-4000)}</p>
+					</details>
+				) : null}
 			</div>
 			<div className="conversation-run-banner__actions">
 				{turn.status === "failed" && turn.retryable && actions.onRetry ? (
@@ -391,7 +411,11 @@ function ConversationRunBanner({
 						variant="danger"
 						size="small"
 						icon={<Square size={13} />}
-						disabled={!actions.onStopRun || turn.status === "cancelling" || turn.status === "recovering"}
+						disabled={
+							!actions.onStopRun ||
+							turn.status === "cancelling" ||
+							turn.status === "recovering"
+						}
 						onClick={actions.onStopRun}
 					>
 						{turn.status === "cancelling" ? "正在停止" : "停止"}
@@ -419,7 +443,9 @@ function ToolTimeline({ run }: { run: ConversationRun }) {
 
 function ToolCallCard({ toolCall }: { toolCall: ConversationToolCall }) {
 	return (
-		<article className={`conversation-tool-card conversation-tool-card--${toolCall.status}`}>
+		<article
+			className={`conversation-tool-card conversation-tool-card--${toolCall.status}`}
+		>
 			<div>
 				<strong>{toolCall.label}</strong>
 				<span>{toolStatusLabel(toolCall.status)}</span>
@@ -486,10 +512,16 @@ function ToolApprovalCard({
 	);
 }
 
-function ConversationMessageBubble({ message }: { message: ConversationMessage }) {
+function ConversationMessageBubble({
+	message,
+}: {
+	message: ConversationMessage;
+}) {
 	const assistant = message.role === "assistant";
 	return (
-		<article className={`conversation-message conversation-message--${message.role}`}>
+		<article
+			className={`conversation-message conversation-message--${message.role}`}
+		>
 			<div className="conversation-message__avatar" aria-hidden="true">
 				{assistant ? <Bot size={16} /> : <UserRound size={16} />}
 			</div>
@@ -548,12 +580,17 @@ function ConversationFeedback({
 	tone?: "neutral" | "error";
 }) {
 	return (
-		<section className={`conversation-feedback conversation-feedback--${tone}`} aria-live="polite">
+		<section
+			className={`conversation-feedback conversation-feedback--${tone}`}
+			aria-live="polite"
+		>
 			<div>{icon}</div>
 			<p>{eyebrow}</p>
 			<h2>{title}</h2>
 			<span>{description}</span>
-			{action ? <div className="conversation-feedback__action">{action}</div> : null}
+			{action ? (
+				<div className="conversation-feedback__action">{action}</div>
+			) : null}
 		</section>
 	);
 }
@@ -575,14 +612,20 @@ function threadFor(state: ConversationPageState): ConversationThread | null {
 
 function turnFor(state: ConversationPageState): ConversationTurnState | null {
 	if (state.status === "ready") return state.turn;
-	if (state.status === "error" || state.status === "offline" || state.status === "unavailable") {
+	if (
+		state.status === "error" ||
+		state.status === "offline" ||
+		state.status === "unavailable"
+	) {
 		return state.turn ?? null;
 	}
 	return null;
 }
 
 function noticeFor(state: ConversationPageState): string | null {
-	return state.status === "error" || state.status === "offline" || state.status === "unavailable"
+	return state.status === "error" ||
+		state.status === "offline" ||
+		state.status === "unavailable"
 		? state.message
 		: null;
 }
@@ -596,35 +639,63 @@ function canRetrySurface(state: ConversationPageState): boolean {
 }
 
 function turnAllowsNewMessage(turn: ConversationTurnState | null): boolean {
-	return !turn || turn.status === "idle" || turn.status === "cancelled" || turn.status === "failed";
+	return (
+		!turn ||
+		turn.status === "idle" ||
+		turn.status === "cancelled" ||
+		turn.status === "failed"
+	);
 }
 
 function isActiveTurn(turn: ConversationTurnState): boolean {
-	return ["starting", "running", "suspended", "cancelling", "recovering"].includes(turn.status);
+	return [
+		"starting",
+		"running",
+		"suspended",
+		"cancelling",
+		"recovering",
+	].includes(turn.status);
 }
 
-function runStatusTitle(turn: Exclude<ConversationTurnState, { status: "idle" }>): string {
+function runStatusTitle(
+	turn: Exclude<ConversationTurnState, { status: "idle" }>,
+): string {
 	switch (turn.status) {
-		case "starting": return "正在开始";
-		case "running": return "WhaleHall 正在处理";
-		case "suspended": return "等待你的确认";
-		case "cancelling": return "正在停止";
-		case "recovering": return "正在恢复运行";
-		case "interrupted": return "运行已中断";
-		case "cancelled": return "已停止生成";
-		case "failed": return "本次回复未完成";
+		case "starting":
+			return "正在开始";
+		case "running":
+			return "WhaleHall 正在处理";
+		case "suspended":
+			return "等待你的确认";
+		case "cancelling":
+			return "正在停止";
+		case "recovering":
+			return "正在恢复运行";
+		case "interrupted":
+			return "运行已中断";
+		case "cancelled":
+			return "已停止生成";
+		case "failed":
+			return "本次回复未完成";
 	}
 }
 
-function runStatusDescription(turn: Exclude<ConversationTurnState, { status: "idle" }>): string {
+function runStatusDescription(
+	turn: Exclude<ConversationTurnState, { status: "idle" }>,
+): string {
 	if ("message" in turn) return turn.message;
 	if (turn.run.statusMessage) return turn.run.statusMessage;
-	if (turn.status === "suspended") return "请审阅下面的工具操作，再决定是否继续。";
-	if (turn.status === "cancelling") return "正在安全结束当前运行，已有内容会保留。";
+	if (turn.status === "suspended")
+		return "请审阅下面的工具操作，再决定是否继续。";
+	if (turn.status === "cancelling")
+		return "正在安全结束当前运行，已有内容会保留。";
 	return "你可以随时停止；当前已生成的内容会保留。";
 }
 
-function composerPlaceholder(turn: ConversationTurnState | null, disabled: boolean): string {
+function composerPlaceholder(
+	turn: ConversationTurnState | null,
+	disabled: boolean,
+): string {
 	if (!disabled) return "输入你想讨论的内容…";
 	if (turn && isActiveTurn(turn)) return "当前回复完成或停止后可继续发送";
 	return "对话服务恢复后即可发送消息";
@@ -632,30 +703,44 @@ function composerPlaceholder(turn: ConversationTurnState | null, disabled: boole
 
 function messageStateLabel(state: ConversationMessage["state"]): string {
 	switch (state) {
-		case "queued": return "等待 Agent 接收…";
-		case "streaming": return "正在生成回复…";
-		case "failed": return "这条消息未完成，已保留部分内容";
-		case "cancelled": return "生成已停止，已保留部分内容";
-		case "complete": return "";
+		case "queued":
+			return "等待 Agent 接收…";
+		case "streaming":
+			return "正在生成回复…";
+		case "failed":
+			return "这条消息未完成，已保留部分内容";
+		case "cancelled":
+			return "生成已停止，已保留部分内容";
+		case "complete":
+			return "";
 	}
 }
 
 function toolStatusLabel(status: ConversationToolCall["status"]): string {
 	switch (status) {
-		case "queued": return "等待执行";
-		case "awaiting-approval": return "等待确认";
-		case "running": return "执行中";
-		case "succeeded": return "已完成";
-		case "failed": return "执行失败";
-		case "cancelled": return "已取消";
+		case "queued":
+			return "等待执行";
+		case "awaiting-approval":
+			return "等待确认";
+		case "running":
+			return "执行中";
+		case "succeeded":
+			return "已完成";
+		case "failed":
+			return "执行失败";
+		case "cancelled":
+			return "已取消";
 	}
 }
 
 function toolRiskLabel(risk: ConversationToolCall["risk"]): string {
 	switch (risk) {
-		case "read": return "只读操作";
-		case "write": return "会修改数据";
-		case "control": return "会控制本机功能";
+		case "read":
+			return "只读操作";
+		case "write":
+			return "会修改数据";
+		case "control":
+			return "会控制本机功能";
 	}
 }
 

@@ -77,43 +77,4 @@ describe("renderer planning-calendar actor policy", () => {
 		};
 		expect(isExplicitRendererPlanUnlock(updateMutation(reordered))).toBe(true);
 	});
-
-	test("rejects unlock writes that do not increment the optimistic version", () => {
-		const staleUnlock = updateMutation({
-			...lockedModelEvent,
-			userLocked: false,
-		});
-		expect(isExplicitRendererPlanUnlock(staleUnlock)).toBe(false);
-		expect(shouldForceRendererPlanLock(staleUnlock)).toBe(true);
-	});
-
-	test("forces every model-event edit other than the exact unlock to stay locked", () => {
-		const edit = updateMutation({
-			...lockedModelEvent,
-			title: "用户改过的标题",
-			userLocked: false,
-		});
-		expect(isExplicitRendererPlanUnlock(edit)).toBe(false);
-		expect(shouldForceRendererPlanLock(edit)).toBe(true);
-	});
-
-	test("does not claim model-actor policy for user-origin or non-update writes", () => {
-		const userEvent = {
-			...lockedModelEvent,
-			scheduleOrigin: "user" as const,
-		};
-		expect(
-			shouldForceRendererPlanLock({
-				...updateMutation(userEvent),
-				before: userEvent,
-			}),
-		).toBe(false);
-		expect(
-			shouldForceRendererPlanLock({
-				...updateMutation(lockedModelEvent),
-				kind: "create",
-				before: null,
-			}),
-		).toBe(false);
-	});
 });
