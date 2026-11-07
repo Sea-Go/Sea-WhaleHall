@@ -1457,8 +1457,7 @@ fn validate_planning_runtime_calendar_upsert(
         PlanStatus::Active | PlanStatus::Paused | PlanStatus::AwaitingConfirmation
     ) {
         return Err(PlanningStoreError::Configuration(
-            "PlanningRuntime may only schedule active, paused, or confirming plans"
-                .to_owned(),
+            "PlanningRuntime may only schedule active, paused, or confirming plans".to_owned(),
         ));
     }
     let task_id = event
@@ -1833,15 +1832,14 @@ fn validate_outbox_payload(
                         "calendar user-batch requiresPlanningReestimate must be boolean".to_owned(),
                     ));
                 }
-                let mutation_kinds =
-                    object
-                        .get("mutationKinds")
-                        .and_then(Value::as_array)
-                        .ok_or_else(|| {
-                            PlanningStoreError::Configuration(
-                                "calendar user-batch mutationKinds must be an array".to_owned(),
-                            )
-                        })?;
+                let mutation_kinds = object
+                    .get("mutationKinds")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        PlanningStoreError::Configuration(
+                            "calendar user-batch mutationKinds must be an array".to_owned(),
+                        )
+                    })?;
                 validate_collection_bound("calendar outbox mutationKinds", mutation_kinds.len())?;
                 for kind in mutation_kinds {
                     let kind = kind.as_str().ok_or_else(|| {
@@ -1849,10 +1847,7 @@ fn validate_outbox_payload(
                             "calendar user-batch mutationKinds must contain strings".to_owned(),
                         )
                     })?;
-                    if !matches!(
-                        kind,
-                        "create" | "update" | "delete" | "restore"
-                    ) {
+                    if !matches!(kind, "create" | "update" | "delete" | "restore") {
                         return Err(PlanningStoreError::Configuration(
                             "calendar user-batch mutationKinds contains an unknown kind".to_owned(),
                         ));

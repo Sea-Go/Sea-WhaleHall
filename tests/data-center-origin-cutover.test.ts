@@ -101,9 +101,6 @@ describe("DataCenter production-origin cutover", () => {
 			credentials.values.has(LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL),
 		).toBeFalse();
 	});
-
-
-
 });
 
 class MemoryCutoverRepository

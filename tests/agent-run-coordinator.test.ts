@@ -405,36 +405,6 @@ describe("AgentRunCoordinator", () => {
 			harness.repository.getRun("account-a", runId),
 		).resolves.toBeNull();
 	});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 });
 
 class RecordingSidecar implements AgentSidecar {

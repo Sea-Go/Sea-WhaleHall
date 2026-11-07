@@ -65,7 +65,4 @@ describe("LocalTestAuthSessionManager", () => {
 		cleanup.resolve();
 		await signOut;
 	});
-
-
-
 });

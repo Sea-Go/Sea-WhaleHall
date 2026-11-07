@@ -15,10 +15,7 @@ export const GATEWAY_RESEARCH_TOOL_NAMES = ["zhipu.web_search_prime"] as const;
  * 名；工具环在网关服务端闭环，回程不含这些名字，无需反向映射。
  */
 export const GATEWAY_TOOL_NAME_RESTORE: ReadonlyMap<string, string> = new Map(
-	GATEWAY_RESEARCH_TOOL_NAMES.map((name) => [
-		name.replace(/\./gu, "_"),
-		name,
-	]),
+	GATEWAY_RESEARCH_TOOL_NAMES.map((name) => [name.replace(/\./gu, "_"), name]),
 );
 
 /** 就地还原请求体 tools 数组里的桥接工具名；非 JSON 或无匹配时原样返回。 */

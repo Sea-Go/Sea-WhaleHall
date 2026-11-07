@@ -77,6 +77,3 @@ test("后续分页按接纳序号递增，撤回引用只展示状态", async ()
 	expect(html).not.toContain("仅在冻结包中的旧摘录");
 	expect(html).not.toContain("更早记录");
 });
-
-
-

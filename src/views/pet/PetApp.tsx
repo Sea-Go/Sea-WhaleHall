@@ -8,18 +8,19 @@ import { createPetChatPort, petApi } from "./rpc";
 
 export function PetApp() {
 	const canvasRef = useRef<HTMLCanvasElement>(null);
-	const [chatController, setChatController] = useState<PetChatController | null>(
-		null,
-	);
+	const [chatController, setChatController] =
+		useState<PetChatController | null>(null);
 
 	// 必须先于 petApi.ready() 注册，Bun 会在 ready 时推送当前可用性；事件流
 	// 终身订阅（控制器内部按 requestId 过滤本面板的 turn）。
 	useEffect(() => {
 		const controller = new PetChatController(createPetChatPort());
-		const unsubscribeAvailability = petApi.onPetChatAvailability((available) => {
-			controller.setAvailable(available);
-			setChatController(available ? controller : null);
-		});
+		const unsubscribeAvailability = petApi.onPetChatAvailability(
+			(available) => {
+				controller.setAvailable(available);
+				setChatController(available ? controller : null);
+			},
+		);
 		const unsubscribeEvents = petApi.onPetChatEvent((requestId, envelope) => {
 			controller.applyEvent(requestId, envelope);
 		});

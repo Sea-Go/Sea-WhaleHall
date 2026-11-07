@@ -36,7 +36,9 @@ export type PlanningOperation =
 	| "retry-analysis";
 
 /** 挂起分析的无人值守重试退避（次数即会话内预算；每次启动重置）。 */
-const AUTO_RETRY_ANALYSIS_DELAYS_MS = [4_000, 30_000, 120_000, 600_000] as const;
+const AUTO_RETRY_ANALYSIS_DELAYS_MS = [
+	4_000, 30_000, 120_000, 600_000,
+] as const;
 
 export type PlanningState =
 	| { status: "idle" }
@@ -92,7 +94,8 @@ export type PlanningState =
 			retryable: boolean;
 	  };
 
-function productErrorMessage(code: PlanningServiceErrorCode): string {	switch (code) {
+function productErrorMessage(code: PlanningServiceErrorCode): string {
+	switch (code) {
 		case "model-unavailable":
 			return "计划分析服务暂时不可用。你的消息已保留，可在服务恢复后继续分析。";
 		case "stale-version":
@@ -568,9 +571,10 @@ export class PlanningController {
 		}
 		if (this.autoRetryTimer !== null) return;
 		if (this.autoRetryAttempts >= this.autoRetryDelaysMs.length) return;
-		const delayMs = this.autoRetryDelaysMs[
-			Math.min(this.autoRetryAttempts, this.autoRetryDelaysMs.length - 1)
-		];
+		const delayMs =
+			this.autoRetryDelaysMs[
+				Math.min(this.autoRetryAttempts, this.autoRetryDelaysMs.length - 1)
+			];
 		this.autoRetryTimer = setTimeout(() => {
 			this.autoRetryTimer = null;
 			void this.runScheduledAnalysisRetry(plan.id);

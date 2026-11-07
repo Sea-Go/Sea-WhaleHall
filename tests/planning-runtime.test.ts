@@ -106,8 +106,7 @@ function proposal(
 			dependencyKeys: index === 0 ? [] : [`task-${index}`],
 			// 按稳定 taskKey 标记（task-2 为弱），避免位置变化造成跨修订的假性降级。
 			relevance: index === 1 ? ("weak" as const) : ("strong" as const),
-			relevanceReason:
-				index === 1 ? "支撑性任务，可让" : "关键路径任务",
+			relevanceReason: index === 1 ? "支撑性任务，可让" : "关键路径任务",
 		})),
 		evaluations: [
 			{

@@ -1960,14 +1960,10 @@ describe("ActivityWindowDeliveryService", () => {
 			expect(providerStarts).toBe(1);
 			const inspector = new Database(databasePath, { strict: true });
 			const rows = inspector
-				.query(
-					`SELECT job_id FROM activity_window_worker_agent_jobs`,
-				)
+				.query(`SELECT job_id FROM activity_window_worker_agent_jobs`)
 				.all();
 			const receipts = inspector
-				.query(
-					`SELECT count(*) AS n FROM activity_window_worker_receipts`,
-				)
+				.query(`SELECT count(*) AS n FROM activity_window_worker_receipts`)
 				.get() as { n: number };
 			inspector.close();
 			// 任务行与毒载荷凭证都被清理，且没有终态行残留（终态会永久拒绝新物化）。

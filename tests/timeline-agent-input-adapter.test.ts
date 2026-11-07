@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
 	AGENT_INPUT_COMMIT_REQUEST_VERSION,
 	AGENT_INPUT_COMMIT_RESPONSE_VERSION,
-	AGENT_INPUT_QUERY_METHOD,
 	AGENT_INPUT_MAX_LEASE_MS,
+	AGENT_INPUT_QUERY_METHOD,
 	AGENT_INPUT_QUERY_REQUEST_VERSION,
 	AGENT_INPUT_QUERY_RESPONSE_VERSION,
 	AGENT_INPUT_REPLAY_REQUEST_VERSION,
@@ -56,8 +56,7 @@ class FakeAgentInputService {
 					(envelope.state === "LEASED" &&
 						(envelope.leaseExpiresAtMs ?? Number.POSITIVE_INFINITY) <=
 							this.nowMs) ||
-					(query.includeHeldLocal === true &&
-						envelope.state === "HELD_LOCAL"),
+					(query.includeHeldLocal === true && envelope.state === "HELD_LOCAL"),
 			)
 			.slice(0, limit);
 		const inputs = candidates.map((candidate) => {
@@ -175,9 +174,7 @@ describe("TimelineAgentInputAdapterV1", () => {
 		const response = await adapter.handle(AGENT_INPUT_QUERY_METHOD, {
 			schemaVersion: AGENT_INPUT_QUERY_REQUEST_VERSION,
 		});
-		expect(response.schemaVersion).toBe(
-			AGENT_INPUT_QUERY_RESPONSE_VERSION,
-		);
+		expect(response.schemaVersion).toBe(AGENT_INPUT_QUERY_RESPONSE_VERSION);
 		const error = await captureError(() =>
 			adapter.handle("agent.input.releaseAll", {
 				schemaVersion: AGENT_INPUT_REPLAY_REQUEST_VERSION,
@@ -185,12 +182,6 @@ describe("TimelineAgentInputAdapterV1", () => {
 		);
 		expect(error.code).toBe("INVALID_REQUEST");
 	});
-
-
-
-
-
-
 });
 
 function inputFixture(

@@ -73,8 +73,6 @@ describe("audit export UI", () => {
 		expect(message).not.toContain("training_export_internal");
 		expect(message).not.toContain("/Users/");
 	});
-
-
 });
 
 function idlePrivateTrainingStatus() {

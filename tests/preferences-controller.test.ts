@@ -64,12 +64,4 @@ describe("PreferencesController", () => {
 		});
 		expect(state.dirty).toBe(false);
 	});
-
-
-
-
-
-
-
-
 });

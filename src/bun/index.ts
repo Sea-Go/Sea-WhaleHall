@@ -1,6 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 
 // GUI 进程 stdout 不可读；关键诊断落盘到 local 数据目录 diag.log。
 let diagPathResolved = "";
@@ -59,7 +59,6 @@ import {
 	ActivityWindowDeliveryStore,
 	activityWindowWorkerDiagnostic,
 } from "../agent/activity-window-worker";
-import { assertLocalMinute } from "../agent/planning/time";
 import { AgentRuntime } from "../agent/agent-runtime";
 import type {
 	LocalToolEvent,
@@ -71,6 +70,7 @@ import {
 	MODEL_AGENT_IDS,
 } from "../agent/mastra-host/model-agent-catalog";
 import { AGENT_HOST_PROTOCOL_VERSION } from "../agent/mastra-host/protocol";
+import { assertLocalMinute } from "../agent/planning/time";
 import { loadOrCreateReflectionIdentity } from "../agent/reflection";
 import {
 	type RawFiveMinuteAuditSource,
@@ -96,6 +96,12 @@ import type {
 	PetActivityFeedbackRendererChallenge,
 	PetActivityFeedbackRPC,
 } from "../shared/pet-activity-feedback";
+import {
+	buildPetProactivePrompt,
+	PET_CHAT_REQUEST_ID_MAX_CHARACTERS,
+	PET_CHAT_TEXT_MAX_BYTES,
+	type PetChatRPC,
+} from "../shared/pet-chat";
 import type {
 	PlanningCalendarEventProjection,
 	PlanningCalendarMutationProjection,
@@ -105,6 +111,7 @@ import {
 	isSetProactiveFeedbackPolicyRequest,
 	type ProactiveFeedbackRpcResult,
 } from "../shared/proactive-feedback";
+import { PlanningProgressParser } from "../views/client/features/planning/progress-steps";
 import { AccountScopedActiveGoalStore } from "./account-scoped-active-goal";
 import { runAccountSessionCleanup } from "./account-session-cleanup";
 import { ActivityAnalysisDispatcher } from "./activity-analysis-dispatcher";
@@ -135,7 +142,12 @@ import {
 	planningModelConfigurationFromConfiguration,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 } from "./client-config";
+import { RTWCloudToolsClient } from "./clients/product/rtw-cloud-tools-client";
 import { RTWProductSearchError } from "./clients/product/rtw-product-search-client";
+import {
+	CloudSearchAgentToolsService,
+	cloudToolsLogicalSessionIdFor,
+} from "./cloud-search-agent-tools";
 import { CredentialHelperClient } from "./credential-helper-client";
 import { DataCenterContentCrypto } from "./data-center-crypto";
 import {
@@ -179,23 +191,13 @@ import {
 	parseNativeRuntimeChannel,
 } from "./native-runtime-security";
 import { PetActivityFeedbackDelivery } from "./pet-activity-feedback-delivery";
-import {
-	CloudSearchAgentToolsService,
-	cloudToolsLogicalSessionIdFor,
-} from "./cloud-search-agent-tools";
-import { RTWCloudToolsClient } from "./clients/product/rtw-cloud-tools-client";
-import {
-	PET_CHAT_REQUEST_ID_MAX_CHARACTERS,
-	PET_CHAT_TEXT_MAX_BYTES,
-	buildPetProactivePrompt,
-	type PetChatRPC,
-} from "../shared/pet-chat";
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { PlanningAuthorityService } from "./planning-authority-service";
 import { WhaleHallPlanningRuntime } from "./planning-runtime";
 import { PrivateTrainingWindowExportCoordinator } from "./private-training-window-export";
 import { ProactiveFeedbackRuntime } from "./proactive-feedback-runtime";
+import { ReasoningDeltaExtractor } from "./reasoning-delta-extractor";
 import {
 	createWhaleHallReflectionRuntime,
 	setRuntimeGoal,
@@ -208,15 +210,13 @@ import {
 } from "./remote-auth-session";
 import {
 	bindRtwCredentialStore,
-	restoreRtwSession,
 	RTW_WEB_BASE_URL,
+	restoreRtwSession,
 	rtwProductSessionProvider,
 	rtwSessionSignOut,
 	rtwSessionUsername,
 	subscribeRtwSession,
 } from "./rtw-session";
-import { ReasoningDeltaExtractor } from "./reasoning-delta-extractor";
-import { PlanningProgressParser } from "../views/client/features/planning/progress-steps";
 import { SidecarModelRelayBridge } from "./sidecar-model-relay-bridge";
 import {
 	resumeTimelineRuntimeForAvailableVault,
@@ -686,44 +686,42 @@ const sidecar = new MastraSidecarClient({
 			if (typeof ownerRunId !== "string" || ownerRunId.length === 0) {
 				throw new Error("Cloud tool call is not bound to an Agent run.");
 			}
-		return coordinator.runBoundHostCall(ownerRunId, async (accountId) => {
-			try {
-				if (call.method === "cloud/parent.open") {
-					const parent = await cloudSearchAgentTools.openParent(
-						ownerRunId,
-						accountId,
-					);
+			return coordinator.runBoundHostCall(ownerRunId, async (accountId) => {
+				try {
+					if (call.method === "cloud/parent.open") {
+						const parent = await cloudSearchAgentTools.openParent(
+							ownerRunId,
+							accountId,
+						);
+						diag(
+							`[cloud-tools] parent.open ok run=${ownerRunId} module-op=${parent.operationId}`,
+						);
+						return parent;
+					}
+					if (call.method === "cloud/search") {
+						const params = readCloudSearchParams(call.params);
+						diag(
+							`[cloud-tools] search run=${ownerRunId} depth=${params.depth} query=${params.query.slice(0, 40)}`,
+						);
+						return await cloudSearchAgentTools.search(ownerRunId, params);
+					}
+					const evidence = {
+						requestKey: requiredString(call.params.requestKey),
+						searchId: requiredString(call.params.searchId),
+						evidenceId: requiredString(call.params.evidenceId),
+					};
 					diag(
-						`[cloud-tools] parent.open ok run=${ownerRunId} module-op=${parent.operationId}`,
+						`[cloud-tools] read-evidence run=${ownerRunId} evidence=${evidence.evidenceId}`,
 					);
-					return parent;
-				}
-				if (call.method === "cloud/search") {
-					const params = readCloudSearchParams(call.params);
+					return await cloudSearchAgentTools.readEvidence(ownerRunId, evidence);
+				} catch (error) {
+					const payload = CloudSearchAgentToolsService.errorPayload(error);
 					diag(
-						`[cloud-tools] search run=${ownerRunId} depth=${params.depth} query=${params.query.slice(0, 40)}`,
+						`[cloud-tools] ${call.method} FAILED run=${ownerRunId} code=${payload.code} message=${payload.message}`,
 					);
-					return await cloudSearchAgentTools.search(ownerRunId, params);
+					throw new Error(`${payload.code}: ${payload.message}`);
 				}
-				const evidence = {
-					requestKey: requiredString(call.params.requestKey),
-					searchId: requiredString(call.params.searchId),
-					evidenceId: requiredString(call.params.evidenceId),
-				};
-				diag(
-					`[cloud-tools] read-evidence run=${ownerRunId} evidence=${evidence.evidenceId}`,
-				);
-				return await cloudSearchAgentTools.readEvidence(ownerRunId, evidence);
-			} catch (error) {
-				const payload = CloudSearchAgentToolsService.errorPayload(error);
-				diag(
-					`[cloud-tools] ${call.method} FAILED run=${ownerRunId} code=${payload.code} message=${payload.message}`,
-				);
-				throw new Error(
-					`${payload.code}: ${payload.message}`,
-				);
-			}
-		});
+			});
 		}
 		return hostServices.handle(call.method, call.params);
 	},
@@ -810,7 +808,8 @@ coordinator = new AgentRunCoordinator({
 		if (terminal) {
 			cloudSearchAgentTools.cancelRun(event.runId);
 			if (petChatRun?.runId === event.runId) petChatRun.terminal = true;
-			if (petProactiveRun?.runId === event.runId) petProactiveRun.terminal = true;
+			if (petProactiveRun?.runId === event.runId)
+				petProactiveRun.terminal = true;
 		}
 	},
 	onActivityRunTerminal: (input) =>
@@ -1889,7 +1888,11 @@ const petRPC = BrowserView.defineRPC<PetChatRPC>({
 				startPetChatTurn(message.requestId, message.text);
 			},
 			cancelPetChat: (message) => {
-				cancelPetChat(message.requestId, message.runId, message.expectedRevision);
+				cancelPetChat(
+					message.requestId,
+					message.runId,
+					message.expectedRevision,
+				);
 			},
 			petChatStateReport: (message) => {
 				diag(
@@ -1980,9 +1983,7 @@ const cloudSearchAgentTools = new CloudSearchAgentToolsService({
 	},
 	logicalSessionId: () => {
 		const username = rtwSessionUsername();
-		return username === null
-			? null
-			: cloudToolsLogicalSessionIdFor(username);
+		return username === null ? null : cloudToolsLogicalSessionIdFor(username);
 	},
 	client: new RTWCloudToolsClient({
 		baseUrl: RTW_WEB_BASE_URL,
@@ -2047,7 +2048,10 @@ const petChatAvailabilityTimer = setInterval(() => {
 // 直接驱动真实 startPetChatTurn 链路（bun→coordinator→sidecar→服务器→事件流）。
 // 出现 ~/pet-e2e-submit.json（{"text":"..."}）即消费并提交一轮桌宠对话。
 if (process.env.WHALEHALL_PET_E2E_TRIGGER === "1") {
-	const petE2eTriggerPath = join(process.env.HOME ?? "/tmp", "pet-e2e-submit.json");
+	const petE2eTriggerPath = join(
+		process.env.HOME ?? "/tmp",
+		"pet-e2e-submit.json",
+	);
 	const petE2eTriggerTimer = setInterval(() => {
 		if (shutdownRequested) {
 			clearInterval(petE2eTriggerTimer);
@@ -2157,9 +2161,7 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 				if (parsed.calendarDelete === true) {
 					// 自驱动删除验证：与渲染器 UI 走完全相同的 RPC 处理器。
 					const calendar = await clientRequestHandlers.loadPlanningCalendar({});
-					const target = calendar.events.find(
-						(event) => event.kind === "plan",
-					);
+					const target = calendar.events.find((event) => event.kind === "plan");
 					if (!target) {
 						diag("[calendar][e2e] no plan event to delete");
 						return;
@@ -2249,7 +2251,8 @@ function startPetChatTurn(requestId: string, text: string): void {
 				});
 				return;
 			}
-			if (petChatRun?.requestId === requestId) petChatRun.runId = result.data.runId;
+			if (petChatRun?.requestId === requestId)
+				petChatRun.runId = result.data.runId;
 		} catch (error) {
 			petChatRun = null;
 			diag(`[pet-chat] failed request=${requestId} error=${String(error)}`);
@@ -2296,7 +2299,9 @@ function forwardPetChatEvent(envelope: unknown): void {
 	}
 	petRPC.send.petChatEvent({
 		requestId: event.requestId,
-		envelope: envelope as Parameters<typeof petRPC.send.petChatEvent>[0]["envelope"],
+		envelope: envelope as Parameters<
+			typeof petRPC.send.petChatEvent
+		>[0]["envelope"],
 	});
 }
 
@@ -2307,7 +2312,10 @@ function startPetProactiveTurn(feedback: {
 	message: string;
 }): void {
 	if (shutdownRequested) return;
-	if ((petChatRun && !petChatRun.terminal) || (petProactiveRun && !petProactiveRun.terminal)) {
+	if (
+		(petChatRun && !petChatRun.terminal) ||
+		(petProactiveRun && !petProactiveRun.terminal)
+	) {
 		diag(`[pet-chat] proactive skipped (turn busy) feedback=${feedback.id}`);
 		return;
 	}
@@ -2348,7 +2356,9 @@ function startPetProactiveTurn(feedback: {
 			}
 		} catch (error) {
 			petProactiveRun = null;
-			diag(`[pet-chat] proactive failed request=${requestId} error=${String(error)}`);
+			diag(
+				`[pet-chat] proactive failed request=${requestId} error=${String(error)}`,
+			);
 			petRPC.send.petChatTurnRejected({
 				requestId,
 				message: "本轮发起失败，稍后将自动重试。",
@@ -3217,7 +3227,9 @@ async function startActivityWindowDelivery(
 				);
 				console.warn(
 					"WhaleHall local activity Agent job retry:",
-					error instanceof Error ? `${error.name}: ${error.message}` : "UNKNOWN",
+					error instanceof Error
+						? `${error.name}: ${error.message}`
+						: "UNKNOWN",
 				);
 			},
 		});

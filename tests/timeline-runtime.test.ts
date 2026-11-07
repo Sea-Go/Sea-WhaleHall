@@ -78,6 +78,4 @@ describe("Timeline v2 deterministic production runtime", () => {
 		await closing;
 		expect(repositoryCloseCount).toBe(1);
 	});
-
-
 });

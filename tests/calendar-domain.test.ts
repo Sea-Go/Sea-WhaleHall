@@ -112,19 +112,8 @@ describe("calendar domain invariants", () => {
 			}),
 		).not.toThrow();
 	});
-
-
-
-
-
 });
 
-describe("calendar time abstraction", () => {
+describe("calendar time abstraction", () => {});
 
-});
-
-describe("FullCalendar adapter boundary", () => {
-
-
-
-});
+describe("FullCalendar adapter boundary", () => {});

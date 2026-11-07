@@ -38,9 +38,4 @@ describe("DeferredReflectionOperations", () => {
 		]);
 		expect(operations.pendingCount()).toBe(0);
 	});
-
-
-
-
-
 });

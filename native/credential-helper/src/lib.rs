@@ -271,7 +271,8 @@ fn validate_request(parsed: &ParsedRequest) -> Result<CredentialTarget, &'static
                 return Err("INVALID_REQUEST");
             }
             let name = request.name.as_deref().ok_or("INVALID_REQUEST")?;
-            if name != AUTH_REFRESH_TOKEN_NAME && name != RTW_SESSION_NAME
+            if name != AUTH_REFRESH_TOKEN_NAME
+                && name != RTW_SESSION_NAME
                 && !(name == LEGACY_AUTH_REFRESH_TOKEN_NAME
                     && request.operation == CredentialOperation::Delete)
             {

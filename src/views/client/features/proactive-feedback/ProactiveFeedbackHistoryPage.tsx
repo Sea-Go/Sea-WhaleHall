@@ -44,10 +44,7 @@ export function ProactiveFeedbackHistoryPage({
 
 	return (
 		<div className="proactive-history-page">
-			<PageHeader
-				eyebrow="主动反馈"
-				title="历史记录"
-			/>
+			<PageHeader eyebrow="主动反馈" title="历史记录" />
 
 			{state.status === "idle" || state.status === "loading" ? (
 				<HistoryLoading />

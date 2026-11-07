@@ -1,4 +1,3 @@
-import type { PlanningProgressStep } from "../../../../shared/planning";
 import {
 	AlertTriangle,
 	Bot,
@@ -20,13 +19,14 @@ import {
 	useSyncExternalStore,
 } from "react";
 import { Temporal } from "temporal-polyfill";
+import type { PlanningProgressStep } from "../../../../shared/planning";
 import { Button } from "../../shared/ui/Button";
 import {
 	isPlanRevisionConfirmable,
-	type PlanStatus,
-	type PlanView,
 	type PlanningTaskSchedule,
 	type PlanningTaskView,
+	type PlanStatus,
+	type PlanView,
 } from "./domain";
 import type {
 	PlanningContent,
@@ -91,9 +91,7 @@ function contentFromState(state: PlanningState): PlanningContent | null {
 }
 
 /** 计划控制器随登录会话长存，这里只订阅并在挂载时拉一次最新状态。 */
-function usePlanningSnapshot(
-	controller: PlanningController,
-): PlanningState {
+function usePlanningSnapshot(controller: PlanningController): PlanningState {
 	const state = useSyncExternalStore(
 		controller.subscribe,
 		controller.getSnapshot,
@@ -191,6 +189,8 @@ export function SmartScheduleComposer({
 }: SmartScheduleComposerProps) {
 	const state = usePlanningSnapshot(controller);
 	const [adjustment, setAdjustment] = useState("");
+	// 降级确认门的显式 ack 状态：Hook 必须在条件返回之前声明。
+	const [acknowledgedDemotion, setAcknowledgedDemotion] = useState(false);
 	const content = contentFromState(state);
 	const busy =
 		state.status === "updating" ||
@@ -254,9 +254,7 @@ export function SmartScheduleComposer({
 	// 降级确认门：提案存在弱关联任务即提示；运行时对"强→弱降级"要求显式 ack。
 	const demotedTaskCount =
 		revision?.tasks.filter((task) => task.relevance === "weak").length ?? 0;
-	const [acknowledgedDemotion, setAcknowledgedDemotion] = useState(false);
 	// 已确认任务清单分组：进行中按最近排期升序；已完成/已跳过单独分组。
-	// 实际投入进度（observationEvidence 聚合）接入后，进行中改为按进度降序。
 	const settledTasks = proposing ? [] : (revision?.tasks ?? []);
 	const {
 		active: activeTasks,
@@ -322,7 +320,11 @@ export function SmartScheduleComposer({
 			{state.status === "updating" ? (
 				<div>
 					<p className="smart-composer__notice" role="status">
-						<LoaderCircle className="planning-spin" size={15} aria-hidden="true" />
+						<LoaderCircle
+							className="planning-spin"
+							size={15}
+							aria-hidden="true"
+						/>
 						正在处理上一步操作…
 					</p>
 					{state.thinking.length > 0 ? (
@@ -333,7 +335,10 @@ export function SmartScheduleComposer({
 			{state.status === "model-unavailable" ||
 			state.status === "offline" ||
 			state.status === "error" ? (
-				<p className="smart-composer__notice smart-composer__notice--warning" role="alert">
+				<p
+					className="smart-composer__notice smart-composer__notice--warning"
+					role="alert"
+				>
 					<AlertTriangle size={15} aria-hidden="true" />
 					{state.message}
 					{state.retryable ? (
@@ -384,7 +389,12 @@ export function SmartScheduleComposer({
 									</button>
 									{task.title}
 								</strong>
-								<span>{taskTimeLabel(task.schedules, task.unplanned?.message ?? null)}</span>
+								<span>
+									{taskTimeLabel(
+										task.schedules,
+										task.unplanned?.message ?? null,
+									)}
+								</span>
 							</li>
 						))}
 					</ul>
@@ -395,7 +405,11 @@ export function SmartScheduleComposer({
 								{revision.evaluations.map((item) => (
 									<li key={item.angle}>
 										{angleLabels[item.angle] ?? item.angle}
-										{item.verdict === "pass" ? "✓" : item.verdict === "adjust" ? "△" : "✕"}
+										{item.verdict === "pass"
+											? "✓"
+											: item.verdict === "adjust"
+												? "△"
+												: "✕"}
 										　{item.summary}
 									</li>
 								))}
@@ -418,7 +432,8 @@ export function SmartScheduleComposer({
 								className="smart-composer__notice smart-composer__notice--warning"
 								role="alert"
 							>
-								本版提案把 {demotedTaskCount} 个原强关联任务降为弱关联（可被压缩/舍弃）。确认降级请再点一次。
+								本版提案把 {demotedTaskCount}{" "}
+								个原强关联任务降为弱关联（可被压缩/舍弃）。确认降级请再点一次。
 							</p>
 						) : null}
 						<Button
@@ -547,7 +562,9 @@ export function SmartScheduleComposer({
 													</span>
 													{task.title}
 												</strong>
-												<span className="smart-composer__task-state">已跳过</span>
+												<span className="smart-composer__task-state">
+													已跳过
+												</span>
 											</li>
 										))}
 									</ul>
@@ -567,7 +584,7 @@ export function SmartScheduleComposer({
 
 			{lastAssistantMessage ? (
 				awaitingUserAnswers ? (
-					<div
+					<section
 						className="smart-composer__questions"
 						aria-label="待回答的澄清问题"
 					>
@@ -578,7 +595,7 @@ export function SmartScheduleComposer({
 						<div className="smart-composer__questions-body">
 							{lastAssistantMessage.content}
 						</div>
-					</div>
+					</section>
 				) : (
 					<p className="smart-composer__reply">
 						<Bot size={15} aria-hidden="true" />
@@ -588,7 +605,11 @@ export function SmartScheduleComposer({
 			) : null}
 			{hasPendingAnalysis ? (
 				<p className="smart-composer__notice" role="status">
-					<LoaderCircle className="planning-spin" size={15} aria-hidden="true" />
+					<LoaderCircle
+						className="planning-spin"
+						size={15}
+						aria-hidden="true"
+					/>
 					消息已保存，正在等待计划分析。
 					<button
 						type="button"
@@ -641,7 +662,10 @@ function CreateGoalForm({
 				void controller.createPlanDraft();
 			}}
 		>
-			<label className="calendar-field calendar-field--wide" htmlFor="smart-goal">
+			<label
+				className="calendar-field calendar-field--wide"
+				htmlFor="smart-goal"
+			>
 				<span>安排什么？</span>
 				<textarea
 					id="smart-goal"
@@ -707,12 +731,15 @@ export function PlanStatusCard({ controller }: PlanStatusCardProps) {
 	const canConfirm = isPlanRevisionConfirmable(plan);
 	// 活跃计划的任务清单：进行中按最近排期升序；已完成/已跳过单独分组，
 	// 让已确认的计划随时有地方查看任务与完成状态。
-	const { active: activeTasks, completed: completedTasks, skipped: skippedTasks } =
-		groupPlanTasks(proposing ? [] : (revision?.tasks ?? []));
+	const {
+		active: activeTasks,
+		completed: completedTasks,
+		skipped: skippedTasks,
+	} = groupPlanTasks(proposing ? [] : (revision?.tasks ?? []));
 	const settledTotal = proposing ? 0 : (revision?.tasks.length ?? 0);
 
 	return (
-		<div className="plan-status-card" aria-label="进行中的计划">
+		<section className="plan-status-card" aria-label="进行中的计划">
 			<div className="plan-status-card__head">
 				<Target size={14} aria-hidden="true" />
 				<strong>{truncate(plan.goal, 16)}</strong>
@@ -736,10 +763,7 @@ export function PlanStatusCard({ controller }: PlanStatusCardProps) {
 				</div>
 			) : null}
 			{!proposing && revision ? (
-				<section
-					className="plan-status-card__tasks"
-					aria-label="计划任务清单"
-				>
+				<section className="plan-status-card__tasks" aria-label="计划任务清单">
 					<div className="plan-status-card__tasks-head">
 						<span>任务清单</span>
 						<span aria-live="polite">
@@ -820,7 +844,11 @@ export function PlanStatusCard({ controller }: PlanStatusCardProps) {
 			) : null}
 			{state.status === "updating" ? (
 				<p className="plan-status-card__notice" role="status">
-					<LoaderCircle className="planning-spin" size={13} aria-hidden="true" />
+					<LoaderCircle
+						className="planning-spin"
+						size={13}
+						aria-hidden="true"
+					/>
 					正在处理…
 				</p>
 			) : null}
@@ -881,7 +909,7 @@ export function PlanStatusCard({ controller }: PlanStatusCardProps) {
 					</button>
 				) : null}
 			</div>
-		</div>
+		</section>
 	);
 }
 
@@ -915,6 +943,7 @@ function ProgressSteps({
 	live?: boolean;
 }) {
 	const ref = useRef<HTMLDivElement>(null);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: steps 增长即触发贴底滚动，语义依赖其变化而非引用其值
 	useEffect(() => {
 		if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
 	}, [steps]);
@@ -924,13 +953,16 @@ function ProgressSteps({
 			{steps.map((step, index) => {
 				if (step.kind === "tool") {
 					return (
+						// biome-ignore lint/suspicious/noArrayIndexKey: 进度帧为只追加序列，不重排不删除，索引即稳定身份
 						<div className="progress-step progress-step--tool" key={index}>
 							<div className="progress-step__head">
 								<span
 									className={`progress-step__dot progress-step__dot--${step.status}`}
 									aria-hidden="true"
 								/>
-								<span className="progress-step__glyph" aria-hidden="true">⏺</span>
+								<span className="progress-step__glyph" aria-hidden="true">
+									⏺
+								</span>
 								<strong className="progress-step__tool">{step.tool}</strong>
 								{step.args !== "" ? (
 									<code className="progress-step__args">{step.args}</code>
@@ -949,7 +981,9 @@ function ProgressSteps({
 								</div>
 							) : (
 								<div className="progress-step__result">
-									<span className="progress-step__branch" aria-hidden="true">⎿</span>
+									<span className="progress-step__branch" aria-hidden="true">
+										⎿
+									</span>
 									<span className="progress-step__running">执行中…</span>
 								</div>
 							)}
@@ -960,6 +994,7 @@ function ProgressSteps({
 				const open = live && isLast ? true : (expanded[index] ?? false);
 				const chars = Array.from(step.text).length;
 				return (
+					// biome-ignore lint/suspicious/noArrayIndexKey: 进度帧为只追加序列，不重排不删除，索引即稳定身份
 					<div className="progress-step progress-step--thinking" key={index}>
 						<button
 							type="button"
@@ -970,9 +1005,9 @@ function ProgressSteps({
 						>
 							<span aria-hidden="true">{open ? "▾" : "▸"}</span> 思考 {chars} 字
 						</button>
-						{open ? (
-							<pre className="progress-step__thinking-text">{step.text}</pre>
-						) : null}
+						open ? (
+						<pre className="progress-step__thinking-text">{step.text}</pre>) :
+						null
 					</div>
 				);
 			})}
@@ -1013,11 +1048,7 @@ function ComposerFailure({
 			<p>{message}</p>
 			<div>
 				{retryable ? (
-					<Button
-						size="small"
-						icon={<RefreshCw size={14} />}
-						onClick={onRetry}
-					>
+					<Button size="small" icon={<RefreshCw size={14} />} onClick={onRetry}>
 						重试
 					</Button>
 				) : null}

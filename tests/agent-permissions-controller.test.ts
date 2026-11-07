@@ -55,10 +55,6 @@ describe("AgentPermissionsController", () => {
 		expect(state.snapshot.grants).toEqual([]);
 		expect(state.snapshot.revision).toBe(2);
 	});
-
-
 });
 
-describe("ElectrobunAgentPermissionsService", () => {
-
-});
+describe("ElectrobunAgentPermissionsService", () => {});

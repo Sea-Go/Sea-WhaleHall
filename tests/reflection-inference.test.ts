@@ -94,10 +94,6 @@ describe("DeterministicReflectionInference", () => {
 		expect(result.goalRelevance).toBeNull();
 		expect(result.feedbackCode).toBe("silent");
 	});
-
-
 });
 
-describe("fixed feedback and reminder suppression", () => {
-
-});
+describe("fixed feedback and reminder suppression", () => {});

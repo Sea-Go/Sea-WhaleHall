@@ -266,7 +266,7 @@ describe("client app shell", () => {
 				conversationController={conversationController}
 				planningController={planningController}
 				reportController={reportController}
-					preferencesController={preferencesController}
+				preferencesController={preferencesController}
 				petBridge={petBridge}
 				monitoringController={monitoringController}
 				auditExportService={auditExportService}
@@ -290,12 +290,6 @@ describe("client app shell", () => {
 		expect(markup).toContain("有客户端更新");
 		expect(markup).not.toContain("Local tool control room");
 	});
-
-
-
 });
 
-describe("client page shells", () => {
-
-
-});
+describe("client page shells", () => {});

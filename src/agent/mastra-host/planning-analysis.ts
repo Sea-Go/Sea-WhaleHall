@@ -377,8 +377,7 @@ export function decodeDynamicPlanningProviderOutput(
 		tasks: proposal.data.tasks.map((task) => ({
 			...task,
 			relevance: task.relevance ?? "strong",
-			relevanceReason:
-				task.relevanceReason ?? "模型未标注，按强关联对待。",
+			relevanceReason: task.relevanceReason ?? "模型未标注，按强关联对待。",
 		})),
 		evaluations: proposal.data.evaluations ?? null,
 		// With no confirmed revision, a manual draft can only be user-provided.

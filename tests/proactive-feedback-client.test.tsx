@@ -165,18 +165,9 @@ describe("proactive feedback history", () => {
 		expect(controller.getSnapshot().status).toBe("ready");
 		controller.dispose();
 	});
-
-
-
-
 });
 
-describe("proactive feedback policy", () => {
-
-
-
-
-});
+describe("proactive feedback policy", () => {});
 
 function clonePolicy(
 	snapshot: ProactiveFeedbackPolicySnapshot,

@@ -11,10 +11,10 @@ import type {
 import {
 	DeterministicTimelineHypothesisGenerator,
 	InMemoryTimelineV2Repository,
-	TimelineV2JobRunner,
-	TimelineV2Service,
 	type SemanticEventV2,
+	TimelineV2JobRunner,
 	type TimelineV2Processor,
+	TimelineV2Service,
 } from "../src/agent/timeline";
 
 class FakeClock implements ReflectionClock {
@@ -90,16 +90,12 @@ class FakeSemanticTransport {
 			throw new Error("injected semantic commit failure");
 		}
 		this.commits.push(cursor);
-		const index = this.durable.findIndex(
-			(event) => event.cursor === cursor,
-		);
+		const index = this.durable.findIndex((event) => event.cursor === cursor);
 		this.committedIndex = Math.max(this.committedIndex, index + 1);
 		return { consumerId, cursor, advanced: true };
 	}
 
-	onSemanticEvent(
-		listener: (event: SemanticEventV2) => void,
-	): () => void {
+	onSemanticEvent(listener: (event: SemanticEventV2) => void): () => void {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
 	}
@@ -211,10 +207,7 @@ function authorization(
 						]
 					: ["automation"],
 			transition,
-			reason:
-				transition === "baseline"
-					? "startup_snapshot"
-					: "runtime_change",
+			reason: transition === "baseline" ? "startup_snapshot" : "runtime_change",
 		},
 	};
 }
@@ -234,8 +227,7 @@ describe("TimelineV2Service", () => {
 				deviceId: "device-1",
 				sessionId: "session-1",
 			},
-			hypotheses:
-				new DeterministicTimelineHypothesisGenerator(),
+			hypotheses: new DeterministicTimelineHypothesisGenerator(),
 			clock: new FakeClock(),
 			eventPollMs: 60_000,
 			jobPollMs: 60_000,
@@ -252,7 +244,8 @@ describe("TimelineV2Service", () => {
 		let startCalls = 0;
 		transport.start = async () => {
 			startCalls += 1;
-			if (startCalls === 1) throw new Error("transient transport startup failure");
+			if (startCalls === 1)
+				throw new Error("transient transport startup failure");
 		};
 		const service = new TimelineV2Service({
 			transport,
@@ -275,16 +268,4 @@ describe("TimelineV2Service", () => {
 		expect(startCalls).toBe(2);
 		await service.stop();
 	});
-
-
-
-
-
-
-
-
-
-
-
-
 });

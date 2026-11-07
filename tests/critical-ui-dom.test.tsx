@@ -191,11 +191,9 @@ describe("critical ConversationPage DOM behavior", () => {
 		await user.click(view.getByRole("button", { name: "停止" }));
 		expect(stopCalls).toBe(1);
 	});
-
 });
 
-describe("critical AuthPage DOM behavior", () => {
-});
+describe("critical AuthPage DOM behavior", () => {});
 
 function liveRegionText(container: HTMLElement): string[] {
 	return [...container.querySelectorAll<HTMLElement>("[aria-live]")].map(

@@ -142,6 +142,4 @@ describe("ElectrobunMonitoringService", () => {
 			"accessibility_permission_revoked",
 		);
 	});
-
-
 });

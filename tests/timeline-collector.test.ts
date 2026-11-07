@@ -6,8 +6,8 @@ import type {
 import { WebCryptoReflectionHasher } from "../src/agent/reflection/hash";
 import {
 	InMemoryTimelineV2Repository,
-	TimelineV2Collector,
 	type SemanticEventV2,
+	TimelineV2Collector,
 } from "../src/agent/timeline";
 
 // 慢速集成层：默认 dev 套件不执行这些用例；WHALEHALL_FULL_TESTS=1
@@ -119,10 +119,7 @@ function authorization(
 			},
 			changedPermissions: ["automation"],
 			transition,
-			reason:
-				transition === "baseline"
-					? "startup_snapshot"
-					: "runtime_change",
+			reason: transition === "baseline" ? "startup_snapshot" : "runtime_change",
 		},
 	};
 }
@@ -144,66 +141,61 @@ function collector(clock = new FakeClock()) {
 }
 
 describe("TimelineV2Collector dual trigger", () => {
-	fullTest("the 63rd effective event does not seal and the 64th seals exactly once", async () => {
-		const runtime = collector();
-		await runtime.collector.recover();
-		for (let index = 1; index <= 63; index += 1) {
+	fullTest(
+		"the 63rd effective event does not seal and the 64th seals exactly once",
+		async () => {
+			const runtime = collector();
+			await runtime.collector.recover();
+			for (let index = 1; index <= 63; index += 1) {
+				expect(await runtime.collector.ingest(event(index, index))).toBeNull();
+			}
+			expect(runtime.collector.getSnapshot().openWindow).toMatchObject({
+				effectiveEventCount: 63,
+			});
+			expect(runtime.clock.timerCount).toBe(1);
+
+			const sealed = await runtime.collector.ingest(event(64, 64, 5_064));
+			expect(sealed).toMatchObject({
+				triggerReason: "event_count",
+				eventCount: 64,
+				endedAtMs: 5_064,
+				firstCursor: "sec2_0000000000000001",
+				lastCursor: "sec2_0000000000000040",
+			});
 			expect(
-				await runtime.collector.ingest(event(index, index)),
-			).toBeNull();
-		}
-		expect(runtime.collector.getSnapshot().openWindow).toMatchObject({
-			effectiveEventCount: 63,
-		});
-		expect(runtime.clock.timerCount).toBe(1);
+				sealed!.events.every((item) => item.observedAtMs <= sealed!.endedAtMs),
+			).toBe(true);
+			expect(runtime.collector.getState()).toBe("ACTIVE_EMPTY");
+			expect((await runtime.repository.getJob(sealed!.windowId))?.state).toBe(
+				"READY",
+			);
+		},
+	);
 
-		const sealed = await runtime.collector.ingest(event(64, 64, 5_064));
-		expect(sealed).toMatchObject({
-			triggerReason: "event_count",
-			eventCount: 64,
-			endedAtMs: 5_064,
-			firstCursor: "sec2_0000000000000001",
-			lastCursor: "sec2_0000000000000040",
-		});
-		expect(
-			sealed!.events.every(
-				(item) => item.observedAtMs <= sealed!.endedAtMs,
-			),
-		).toBe(true);
-		expect(runtime.collector.getState()).toBe("ACTIVE_EMPTY");
-		expect((await runtime.repository.getJob(sealed!.windowId))?.state).toBe(
-			"READY",
-		);
-	});
+	fullTest(
+		"sealed interval contains delayed event and observation timestamps",
+		async () => {
+			const runtime = collector();
+			await runtime.collector.recover();
+			await runtime.collector.ingest(event(1, 1_000));
+			for (let index = 2; index <= 63; index += 1) {
+				await runtime.collector.ingest(event(index, 1_000 + index));
+			}
 
-	fullTest("sealed interval contains delayed event and observation timestamps", async () => {
-		const runtime = collector();
-		await runtime.collector.recover();
-		await runtime.collector.ingest(event(1, 1_000));
-		for (let index = 2; index <= 63; index += 1) {
-			await runtime.collector.ingest(event(index, 1_000 + index));
-		}
-
-		const sealed = await runtime.collector.ingest(
-			event(64, 900, 5_064),
-		);
-		expect(sealed).toMatchObject({
-			triggerReason: "event_count",
-			startedAtMs: 900,
-			endedAtMs: 5_064,
-			deadlineAtMs: 301_000,
-		});
-		expect(
-			sealed!.events.every(
-				(item) =>
-					item.occurredAtMs >= sealed!.startedAtMs &&
-					item.observedAtMs <= sealed!.endedAtMs,
-			),
-		).toBe(true);
-	});
-
-
-
-
-
+			const sealed = await runtime.collector.ingest(event(64, 900, 5_064));
+			expect(sealed).toMatchObject({
+				triggerReason: "event_count",
+				startedAtMs: 900,
+				endedAtMs: 5_064,
+				deadlineAtMs: 301_000,
+			});
+			expect(
+				sealed!.events.every(
+					(item) =>
+						item.occurredAtMs >= sealed!.startedAtMs &&
+						item.observedAtMs <= sealed!.endedAtMs,
+				),
+			).toBe(true);
+		},
+	);
 });

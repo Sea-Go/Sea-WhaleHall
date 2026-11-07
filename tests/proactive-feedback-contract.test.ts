@@ -50,6 +50,4 @@ describe("proactive feedback shared contract", () => {
 			}),
 		).toBe(false);
 	});
-
-
 });

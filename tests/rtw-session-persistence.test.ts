@@ -42,11 +42,12 @@ describe("rtw session persistence", () => {
 		expect(rtwSessionUsername()).toBe("tester");
 		const session = await rtwProductSessionProvider.current();
 		expect(session?.accessToken).toBe("t".repeat(32));
-		expect(session !== null && rtwProductSessionProvider.isCurrent(session)).toBeTrue();
+		expect(
+			session !== null && rtwProductSessionProvider.isCurrent(session),
+		).toBeTrue();
 		// 二次恢复幂等：已有会话时不再变更。
 		expect(await restoreRtwSession()).toBeTrue();
 		rtwSessionSignOut();
 		expect(await store.read(RTW_SESSION_CREDENTIAL)).toBeNull();
 	});
-
 });

@@ -222,23 +222,6 @@ describe("ConversationController", () => {
 		]);
 		controller.dispose();
 	});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 });
 
 function readyState(

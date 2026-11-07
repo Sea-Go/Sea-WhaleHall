@@ -617,7 +617,7 @@ export class CloudSearchToolSession {
 			search_fast: createTool({
 				id: "search_fast",
 				description:
-					"一次有界快搜，返回同版证据和引用收据，不生成最终回答。生产当前仅支持 intelligence=low，调用时传 \"low\"。",
+					'一次有界快搜，返回同版证据和引用收据，不生成最终回答。生产当前仅支持 intelligence=low，调用时传 "low"。',
 				inputSchema: searchInput,
 				strict: true,
 				execute: (input, context) =>

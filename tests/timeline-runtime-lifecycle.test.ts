@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-	TimelineRuntimeLifecycle,
 	resumeTimelineRuntimeForAvailableVault,
+	TimelineRuntimeLifecycle,
 } from "../src/bun/timeline-runtime-lifecycle";
 
 class TestRuntime {
@@ -141,7 +141,4 @@ describe("Timeline runtime lifecycle", () => {
 		expect(lifecycle.recoveryPending).toBeFalse();
 		await lifecycle.close();
 	});
-
-
-
 });

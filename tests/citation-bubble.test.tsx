@@ -42,7 +42,4 @@ describe("citation breadcrumb", () => {
 	});
 });
 
-describe("CitationBubble", () => {
-
-
-});
+describe("CitationBubble", () => {});

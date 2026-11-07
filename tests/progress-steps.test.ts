@@ -5,7 +5,9 @@ describe("planning progress parser", () => {
 	test("parses thinking text and tool call/result blocks into a DAG timeline", () => {
 		const parser = new PlanningProgressParser();
 		parser.feed("需要先查开放时间，\n再排动线。");
-		parser.feed("[调研] zhipu.web_search_prime search_query=Fushimi Inari hours");
+		parser.feed(
+			"[调研] zhipu.web_search_prime search_query=Fushimi Inari hours",
+		);
 		parser.feed("[调研] zhipu.web_search_prime 完成（4183 字结果）");
 		parser.feed("查到了，开始排三天行程。");
 

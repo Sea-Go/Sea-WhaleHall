@@ -2,11 +2,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import type { MastraDBMessage } from "@mastra/core/agent";
 import type { StorageThreadType } from "@mastra/core/memory";
-import {
-	MastraCompositeStore,
-	MemoryStorage,
-	WorkflowsStorage,
-} from "@mastra/core/storage";
 import type {
 	StorageListMessagesInput,
 	StorageListMessagesOutput,
@@ -15,15 +10,14 @@ import type {
 	WorkflowRun,
 	WorkflowRuns,
 } from "@mastra/core/storage";
+import {
+	MastraCompositeStore,
+	MemoryStorage,
+	WorkflowsStorage,
+} from "@mastra/core/storage";
 import type { WorkflowRunState } from "@mastra/core/workflows";
-import {
-	isRecord,
-	type ConversationInputMessage,
-} from "./protocol";
-import {
-	AgentHostRuntimeError,
-	type HostRequestPeer,
-} from "./transport";
+import { type ConversationInputMessage, isRecord } from "./protocol";
+import { AgentHostRuntimeError, type HostRequestPeer } from "./transport";
 
 export interface ConversationMemoryExecutionContext {
 	runId: string;
@@ -84,7 +78,9 @@ class RemoteMemoryStorage extends MemoryStorage {
 	}
 
 	async dangerouslyClearAll(): Promise<void> {
-		throw storageError("Mastra Memory clearing is not available in the Sidecar.");
+		throw storageError(
+			"Mastra Memory clearing is not available in the Sidecar.",
+		);
 	}
 
 	async getThreadById({
@@ -156,7 +152,8 @@ class RemoteMemoryStorage extends MemoryStorage {
 			total: messages.length,
 			page,
 			perPage,
-			hasMore: perPage === false ? false : start + selected.length < messages.length,
+			hasMore:
+				perPage === false ? false : start + selected.length < messages.length,
 		};
 	}
 
@@ -183,10 +180,14 @@ class RemoteMemoryStorage extends MemoryStorage {
 		const context = this.requireContext();
 		for (const message of messages) {
 			if (message.threadId && message.threadId !== context.threadId) {
-				throw storageError("Mastra Memory attempted to cross conversation boundaries.");
+				throw storageError(
+					"Mastra Memory attempted to cross conversation boundaries.",
+				);
 			}
 			if (message.resourceId && message.resourceId !== context.resourceId) {
-				throw storageError("Mastra Memory attempted to cross resource boundaries.");
+				throw storageError(
+					"Mastra Memory attempted to cross resource boundaries.",
+				);
 			}
 		}
 
@@ -221,16 +222,22 @@ class RemoteMemoryStorage extends MemoryStorage {
 
 	async updateMessages({
 		messages,
-	}: Parameters<MemoryStorage["updateMessages"]>[0]): Promise<MastraDBMessage[]> {
+	}: Parameters<MemoryStorage["updateMessages"]>[0]): Promise<
+		MastraDBMessage[]
+	> {
 		this.requireContext();
 		if (messages.length === 0) return [];
-		throw storageError("Mastra Memory message mutation is not available in the Sidecar.");
+		throw storageError(
+			"Mastra Memory message mutation is not available in the Sidecar.",
+		);
 	}
 
 	async deleteMessages(messageIds: string[]): Promise<void> {
 		this.requireContext();
 		if (messageIds.length === 0) return;
-		throw storageError("Mastra Memory message deletion must be initiated by Bun.");
+		throw storageError(
+			"Mastra Memory message deletion must be initiated by Bun.",
+		);
 	}
 
 	async listThreads(
@@ -265,10 +272,14 @@ class RemoteMemoryStorage extends MemoryStorage {
 			throw storageError("Mastra Memory was called outside an Agent turn.");
 		}
 		if (threadId && threadId !== context.threadId) {
-			throw storageError("Mastra Memory thread does not match the active turn.");
+			throw storageError(
+				"Mastra Memory thread does not match the active turn.",
+			);
 		}
 		if (resourceId && resourceId !== context.resourceId) {
-			throw storageError("Mastra Memory resource does not match the active turn.");
+			throw storageError(
+				"Mastra Memory resource does not match the active turn.",
+			);
 		}
 		return context;
 	}
@@ -286,8 +297,14 @@ class RemoteMemoryStorage extends MemoryStorage {
 			threadId: context.threadId,
 			resourceId: context.resourceId,
 		});
-		if (!isRecord(value) || !Array.isArray(value.messages) || !isVersion(value.version)) {
-			throw storageError("memory/load returned an invalid conversation record.");
+		if (
+			!isRecord(value) ||
+			!Array.isArray(value.messages) ||
+			!isVersion(value.version)
+		) {
+			throw storageError(
+				"memory/load returned an invalid conversation record.",
+			);
 		}
 		const threadValue = value.thread;
 		const thread =
@@ -338,10 +355,7 @@ class RemoteMemoryStorage extends MemoryStorage {
 			...(update.title !== undefined ? { title: update.title } : {}),
 			...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
 		});
-		if (
-			!isRecord(result) ||
-			typeof result.title !== "string"
-		) {
+		if (!isRecord(result) || typeof result.title !== "string") {
 			throw storageError("memory/thread.save returned an invalid thread.");
 		}
 		return {
@@ -366,7 +380,9 @@ class RemoteWorkflowsStorage extends WorkflowsStorage {
 	}
 
 	async dangerouslyClearAll(): Promise<void> {
-		throw storageError("Mastra Workflow clearing is not available in the Sidecar.");
+		throw storageError(
+			"Mastra Workflow clearing is not available in the Sidecar.",
+		);
 	}
 
 	async updateWorkflowResults(
@@ -379,7 +395,9 @@ class RemoteWorkflowsStorage extends WorkflowsStorage {
 		if (!isRecord(value)) {
 			throw storageError("Workflow result update returned invalid context.");
 		}
-		return value as Awaited<ReturnType<WorkflowsStorage["updateWorkflowResults"]>>;
+		return value as Awaited<
+			ReturnType<WorkflowsStorage["updateWorkflowResults"]>
+		>;
 	}
 
 	async updateWorkflowState(
@@ -402,7 +420,9 @@ class RemoteWorkflowsStorage extends WorkflowsStorage {
 		createdAt,
 		updatedAt,
 		...args
-	}: Parameters<WorkflowsStorage["persistWorkflowSnapshot"]>[0]): Promise<void> {
+	}: Parameters<
+		WorkflowsStorage["persistWorkflowSnapshot"]
+	>[0]): Promise<void> {
 		await this.peer.requestHost("workflow/snapshot.persist", {
 			...args,
 			...(createdAt ? { createdAtMs: createdAt.getTime() } : {}),
@@ -413,13 +433,16 @@ class RemoteWorkflowsStorage extends WorkflowsStorage {
 	async loadWorkflowSnapshot({
 		workflowName,
 		runId,
-	}: Parameters<WorkflowsStorage["loadWorkflowSnapshot"]>[0]): Promise<WorkflowRunState | null> {
+	}: Parameters<
+		WorkflowsStorage["loadWorkflowSnapshot"]
+	>[0]): Promise<WorkflowRunState | null> {
 		const value = await this.peer.requestHost("workflow/snapshot.load", {
 			workflowName,
 			runId,
 		});
 		if (value === null) return null;
-		const snapshot = isRecord(value) && "snapshot" in value ? value.snapshot : value;
+		const snapshot =
+			isRecord(value) && "snapshot" in value ? value.snapshot : value;
 		if (!isRecord(snapshot)) {
 			throw storageError("Workflow snapshot load returned invalid state.");
 		}
@@ -436,7 +459,11 @@ class RemoteWorkflowsStorage extends WorkflowsStorage {
 			fromDate: undefined,
 			toDate: undefined,
 		});
-		if (!isRecord(value) || !Array.isArray(value.runs) || !isVersion(value.total)) {
+		if (
+			!isRecord(value) ||
+			!Array.isArray(value.runs) ||
+			!isVersion(value.total)
+		) {
 			throw storageError("Workflow snapshot list returned invalid records.");
 		}
 		return {
@@ -550,7 +577,9 @@ function emptyThreadPage(
 function singleThreadId(value: string | string[]): string {
 	if (typeof value === "string") return value;
 	if (value.length === 1 && value[0]) return value[0];
-	throw storageError("WhaleHall Memory supports exactly one conversation per query.");
+	throw storageError(
+		"WhaleHall Memory supports exactly one conversation per query.",
+	);
 }
 
 function parseWorkflowRun(value: unknown): WorkflowRun {

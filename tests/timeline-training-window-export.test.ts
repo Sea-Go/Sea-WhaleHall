@@ -1,12 +1,13 @@
-import { createHash } from "node:crypto";
+import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
-	mkdtempSync,
 	mkdirSync,
-	readFileSync,
+	mkdtempSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -15,7 +16,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
 import type {
 	ReflectionClock,
 	ReflectionTimerHandle,
@@ -25,22 +25,22 @@ import {
 	WebCryptoReflectionHasher,
 } from "../src/agent/reflection/hash";
 import {
+	type ActivityEpisodeV2,
 	DeterministicEpisodeAssembler,
 	DeterministicEvidenceRenderer,
 	DeterministicTimelineHypothesisGenerator,
-	InMemoryTimelineV2Repository,
-	PrivateTrainingWindowExporter,
-	TimelineV2Collector,
-	TimelineV2JobRunner,
-	TimelineV2Processor,
-	type ActivityEpisodeV2,
 	type EvidenceFactV2,
+	InMemoryTimelineV2Repository,
 	type JsonValue,
 	type PersistTimelineResult,
+	PrivateTrainingWindowExporter,
 	type RawFiveMinuteAuditSource,
 	type SemanticEventV2,
 	type TimelineJobV2,
 	type TimelineSummaryV2,
+	TimelineV2Collector,
+	TimelineV2JobRunner,
+	TimelineV2Processor,
 	type TimelineWindowV2,
 } from "../src/agent/timeline";
 
@@ -59,10 +59,7 @@ class ExportReplayClock implements ReflectionClock {
 		this.currentMs = value;
 	}
 
-	setTimer(
-		_callback: () => void,
-		_delayMs: number,
-	): ReflectionTimerHandle {
+	setTimer(_callback: () => void, _delayMs: number): ReflectionTimerHandle {
 		this.timerId += 1;
 		return this.timerId as unknown as ReflectionTimerHandle;
 	}
@@ -228,8 +225,7 @@ function fixture() {
 			appName: "Visual Studio Code",
 			text: "PRIVATE EDITOR TEXT",
 		},
-		renderedText:
-			"焦点控件最终增加了文本 PRIVATE EDITOR TEXT，输入方式未知",
+		renderedText: "焦点控件最终增加了文本 PRIVATE EDITOR TEXT，输入方式未知",
 		anchor: {
 			appId: "com.microsoft.VSCode",
 			windowId: "window-1",
@@ -436,7 +432,8 @@ describe("private COMMITTED Timeline training export", () => {
 			() => value.window.endedAtMs + 1_000,
 			() => "export-1",
 		);
-		const progress: Array<{ completedWindows: number; totalWindows: number }> = [];
+		const progress: Array<{ completedWindows: number; totalWindows: number }> =
+			[];
 		const exported = await exporter.exportToNewDirectory({
 			directory: target,
 			windowIds: [value.window.windowId],
@@ -457,9 +454,7 @@ describe("private COMMITTED Timeline training export", () => {
 		);
 		expect(exported.manifest.overlapGroups).toEqual([
 			{
-				groupId: `overlap_${sha256(
-					canonicalJson([value.window.windowId]),
-				)}`,
+				groupId: `overlap_${sha256(canonicalJson([value.window.windowId]))}`,
 				windowIds: [value.window.windowId],
 				sharedIdentityHash: sha256(
 					canonicalJson([
@@ -523,11 +518,6 @@ describe("private COMMITTED Timeline training export", () => {
 		expect(readFileSync(sentinel, "utf8")).toBe("keep");
 		expect(readdirSync(root)).toEqual(["package"]);
 	});
-
-
-
-
-
 
 	const trainingRepository = resolve(
 		import.meta.dir,

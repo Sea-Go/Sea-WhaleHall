@@ -193,7 +193,6 @@ describe("activity support context privacy boundary", () => {
 		expect(JSON.stringify(context)).not.toMatch(/(?:张三|ABC123|联系|报错)/u);
 	});
 
-
 	for (const message of [
 		"包含分数的历史消息",
 		"包含评分的历史消息",
@@ -210,13 +209,9 @@ describe("activity support context privacy boundary", () => {
 	}
 });
 
-describe("activity support context exact validation", () => {
-
-
-});
+describe("activity support context exact validation", () => {});
 
 describe("activity support output firewall", () => {
-
 	for (const [label, message] of [
 		["scoring terminology", "这次得分很好，继续加油。"],
 		["internal Agent label", "Agent 建议你继续。"],
@@ -253,14 +248,6 @@ describe("activity support output firewall", () => {
 		["emoji", "继续加油🙂"],
 	] as const) {
 	}
-
 });
 
-describe("activity support deterministic routing", () => {
-
-
-
-
-
-
-});
+describe("activity support deterministic routing", () => {});

@@ -255,9 +255,4 @@ describe("settings UI", () => {
 			for (const fragment of fragments) expect(markup).toContain(fragment);
 		}
 	});
-
-
-
-
-
 });

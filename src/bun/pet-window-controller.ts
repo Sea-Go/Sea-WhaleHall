@@ -29,7 +29,11 @@ export interface PetScreenHandle {
 	getPrimaryDisplay(): PetDisplay;
 }
 
-export type NativeDragEndReason = "pointerup" | "webview" | "hidden" | "disposed";
+export type NativeDragEndReason =
+	| "pointerup"
+	| "webview"
+	| "hidden"
+	| "disposed";
 
 export interface NativeDragEvent {
 	dragging: boolean;
@@ -55,7 +59,10 @@ type DragSession = {
 
 const LEFT_MOUSE_BUTTON = 1n;
 
-function containsPoint(rectangle: ScreenRectangle, point: ScreenPoint): boolean {
+function containsPoint(
+	rectangle: ScreenRectangle,
+	point: ScreenPoint,
+): boolean {
 	return (
 		point.x >= rectangle.x &&
 		point.y >= rectangle.y &&
@@ -64,9 +71,18 @@ function containsPoint(rectangle: ScreenRectangle, point: ScreenPoint): boolean 
 	);
 }
 
-function pointDistanceSquared(rectangle: ScreenRectangle, point: ScreenPoint): number {
-	const nearestX = Math.max(rectangle.x, Math.min(point.x, rectangle.x + rectangle.width));
-	const nearestY = Math.max(rectangle.y, Math.min(point.y, rectangle.y + rectangle.height));
+function pointDistanceSquared(
+	rectangle: ScreenRectangle,
+	point: ScreenPoint,
+): number {
+	const nearestX = Math.max(
+		rectangle.x,
+		Math.min(point.x, rectangle.x + rectangle.width),
+	);
+	const nearestY = Math.max(
+		rectangle.y,
+		Math.min(point.y, rectangle.y + rectangle.height),
+	);
 	const deltaX = point.x - nearestX;
 	const deltaY = point.y - nearestY;
 	return deltaX * deltaX + deltaY * deltaY;
@@ -77,7 +93,9 @@ export function displayForPoint(
 	point: ScreenPoint,
 	fallback: PetDisplay,
 ): PetDisplay {
-	const containing = displays.find((display) => containsPoint(display.workArea, point));
+	const containing = displays.find((display) =>
+		containsPoint(display.workArea, point),
+	);
 	if (containing) return containing;
 	if (displays.length === 0) return fallback;
 	return displays.reduce((nearest, display) =>
@@ -220,7 +238,11 @@ export class PetWindowController {
 		const cursor = this.screen.getCursorScreenPoint();
 		const frame = this.window.getFrame();
 		const displays = this.screen.getAllDisplays();
-		const display = displayForPoint(displays, cursor, this.screen.getPrimaryDisplay());
+		const display = displayForPoint(
+			displays,
+			cursor,
+			this.screen.getPrimaryDisplay(),
+		);
 		if (session.grabOffset && session.offsetEst) {
 			const lastCommand = session.lastCommand;
 			if (lastCommand) {

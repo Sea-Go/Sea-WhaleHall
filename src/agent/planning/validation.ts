@@ -272,26 +272,26 @@ function isPlanRevision(
 		!isRecordWithKeys(
 			record,
 			[
-			"id",
-			"planId",
-			"number",
-			"parentRevisionId",
-			"trigger",
-			"goal",
-			"type",
-			"rationaleSummary",
-			"assumptions",
-			"estimateId",
-			"schedulingPreferences",
-			"tasks",
-			"scheduleWindow",
-			"schedule",
-			"unscheduledTaskIds",
-			"createdAt",
-			// 新版修订带 evaluations；旧数据没有该键也算合法。
-		],
-		["evaluations"],
-	)
+				"id",
+				"planId",
+				"number",
+				"parentRevisionId",
+				"trigger",
+				"goal",
+				"type",
+				"rationaleSummary",
+				"assumptions",
+				"estimateId",
+				"schedulingPreferences",
+				"tasks",
+				"scheduleWindow",
+				"schedule",
+				"unscheduledTaskIds",
+				"createdAt",
+				// 新版修订带 evaluations；旧数据没有该键也算合法。
+			],
+			["evaluations"],
+		)
 	) {
 		return false;
 	}
@@ -328,8 +328,10 @@ function isPlanRevision(
 					].includes(item.angle as never) &&
 					["pass", "adjust", "block"].includes(item.verdict as never) &&
 					boundedText(item.summary, 1, 300) &&
-					stringArray(item.affectedTaskIds, (id) =>
-						typeof id === "string" && revisionTaskIdsForEvaluations.has(id),
+					stringArray(
+						item.affectedTaskIds,
+						(id) =>
+							typeof id === "string" && revisionTaskIdsForEvaluations.has(id),
 					)
 				);
 			})

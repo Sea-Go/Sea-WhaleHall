@@ -1,6 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import type { PetChatState } from "./chat";
-import { PetChatController } from "./chat";
+import type { PetChatController, PetChatState } from "./chat";
 import { SafePetMarkdown } from "./SafePetMarkdown";
 
 export interface PetChatPanelProps {
@@ -18,6 +17,7 @@ export function PetChatPanel({ controller }: PetChatPanelProps) {
 	);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	// 流式期间滚动区贴底跟随（终端式），面板本身不越限长高。
+	// biome-ignore lint/correctness/useExhaustiveDependencies: state 流式更新即触发贴底滚动，语义依赖其变化而非引用其值
 	useEffect(() => {
 		const node = scrollRef.current;
 		if (node) node.scrollTop = node.scrollHeight;
@@ -37,36 +37,37 @@ export function PetChatPanel({ controller }: PetChatPanelProps) {
 			onKeyUp={stopPropagation}
 		>
 			<div className="pet-chat__scroll" ref={scrollRef}>
-			<div className="pet-chat__status" role="status">
-				{renderStatus(state)}
-			</div>
-			{state &&
-			((state.kind === "running" && state.reasoning) ||
-				(state.kind === "done" && state.reasoning)) ? (
-				<div className="pet-chat__reasoning" aria-live="polite">
-					{state.reasoning.slice(-600)}
+				<div className="pet-chat__status" role="status">
+					{renderStatus(state)}
 				</div>
-			) : null}
-			{state?.kind === "running" || state?.kind === "done" ? (
-				<div className="pet-chat__answer" aria-live="polite">
-					{state.kind === "done" && state.answer === "" ? (
-						<p className="pet-chat__muted">（这轮没有生成回答。）</p>
-					) : (
-						<SafePetMarkdown
-							fallbackText={
-								state.kind === "done" ? state.answer : state.streaming
-							}
-						/>
-					)}
-				</div>
-			) : null}
+				{state &&
+				((state.kind === "running" && state.reasoning) ||
+					(state.kind === "done" && state.reasoning)) ? (
+					<div className="pet-chat__reasoning" aria-live="polite">
+						{state.reasoning.slice(-600)}
+					</div>
+				) : null}
+				{state?.kind === "running" || state?.kind === "done" ? (
+					<div className="pet-chat__answer" aria-live="polite">
+						{state.kind === "done" && state.answer === "" ? (
+							<p className="pet-chat__muted">（这轮没有生成回答。）</p>
+						) : (
+							<SafePetMarkdown
+								fallbackText={
+									state.kind === "done" ? state.answer : state.streaming
+								}
+							/>
+						)}
+					</div>
+				) : null}
 			</div>
 			<form
 				className="pet-chat__form"
 				onSubmit={(event) => {
 					event.preventDefault();
 					event.stopPropagation();
-					const input = event.currentTarget.elements.namedItem("pet-chat-input");
+					const input =
+						event.currentTarget.elements.namedItem("pet-chat-input");
 					if (input instanceof HTMLInputElement) submitInput(input);
 				}}
 			>
@@ -74,7 +75,9 @@ export function PetChatPanel({ controller }: PetChatPanelProps) {
 					name="pet-chat-input"
 					aria-label="问点什么，回车发送"
 					placeholder={
-						state?.kind === "unavailable" ? "登录后可与大肥鱼对话" : "问点什么，回车发送"
+						state?.kind === "unavailable"
+							? "登录后可与大肥鱼对话"
+							: "问点什么，回车发送"
 					}
 					disabled={controller === null || state?.kind === "unavailable"}
 					maxLength={2048}
@@ -124,7 +127,8 @@ function renderStatus(state: PetChatState | null): React.ReactNode {
 	}
 	const active = state.tools.filter((tool) => tool.status === "running");
 	const latestActive = active[active.length - 1];
-	if (state.origin === "proactive" && !latestActive) return "大肥鱼正在主动发起对话…";
+	if (state.origin === "proactive" && !latestActive)
+		return "大肥鱼正在主动发起对话…";
 	if (latestActive) {
 		return `${latestActive.label}中…`;
 	}

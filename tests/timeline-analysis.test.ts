@@ -224,11 +224,4 @@ describe("Timeline v2 real-capture regressions", () => {
 		expect(visibleA?.anchor.documentId).toBe("editor-window");
 		expect(visibleB?.anchor.documentId).toBe("editor-window");
 	});
-
-
-
-
-
-
-
 });

@@ -79,5 +79,4 @@ describe("AccountScopedActiveGoalStore", () => {
 		expect(writes[1]).toBeNull();
 		expect(store.getForAccount("account-a")).toBeNull();
 	});
-
 });

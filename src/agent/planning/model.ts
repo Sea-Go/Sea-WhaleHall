@@ -270,7 +270,11 @@ export function isPlanningModelOutput(
 	}
 	const tasks = value.tasks;
 	if (!tasks.every(isPlanningModelTask)) return false;
-	if (value.evaluations !== null && !isPlanningModelEvaluations(value.evaluations, tasks)) return false;
+	if (
+		value.evaluations !== null &&
+		!isPlanningModelEvaluations(value.evaluations, tasks)
+	)
+		return false;
 	if (
 		value.recommendedType === "fuzzy" &&
 		(!tasks.some((task) => task.purpose === "validation") ||
@@ -371,16 +375,15 @@ function isPlanningModelEvaluations(
 	for (const item of value) {
 		if (!isRecord(item)) return false;
 		if (
-			!hasExactKeys(item, [
-				"angle",
-				"verdict",
-				"summary",
-				"affectedTaskKeys",
-			])
+			!hasExactKeys(item, ["angle", "verdict", "summary", "affectedTaskKeys"])
 		) {
 			return false;
 		}
-		if (!EVALUATION_ANGLES.includes(item.angle as (typeof EVALUATION_ANGLES)[number]))
+		if (
+			!EVALUATION_ANGLES.includes(
+				item.angle as (typeof EVALUATION_ANGLES)[number],
+			)
+		)
 			return false;
 		const angle = item.angle as (typeof EVALUATION_ANGLES)[number];
 		if (angles.has(angle)) return false;

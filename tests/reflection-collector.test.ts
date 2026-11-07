@@ -302,29 +302,10 @@ describe("ReflectionCollector count and deadline triggers", () => {
 		});
 		expect((await repository.getQueueStats()).pendingJobs).toBe(1);
 	});
-
-
 });
 
-describe("ReflectionCollector boundaries and goal isolation", () => {
+describe("ReflectionCollector boundaries and goal isolation", () => {});
 
+describe("ReflectionCollector recovery, context, and idempotency", () => {});
 
-
-
-
-
-
-});
-
-describe("ReflectionCollector recovery, context, and idempotency", () => {
-
-
-
-
-
-
-});
-
-describe("ReflectionCollector authorization gates", () => {
-
-});
+describe("ReflectionCollector authorization gates", () => {});

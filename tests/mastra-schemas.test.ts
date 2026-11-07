@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-	planningWorkflowResumeSchema,
-} from "../src/agent/mastra-host/planning-workflow";
+import { planningWorkflowResumeSchema } from "../src/agent/mastra-host/planning-workflow";
 import {
 	taskPlanningInputSchema,
 	taskPlanningResultSchema,
@@ -25,22 +23,29 @@ describe("Mastra planning schemas", () => {
 	});
 
 	test("rejects unknown fields and out-of-bounds input", () => {
-		expect(taskPlanningInputSchema.safeParse({
-			...validInput,
-			providerKey: "must-not-cross-boundary",
-		}).success).toBe(false);
-		expect(taskPlanningInputSchema.safeParse({
-			...validInput,
-			goal: "x".repeat(1_001),
-		}).success).toBe(false);
-		expect(taskPlanningInputSchema.safeParse({
-			...validInput,
-			weeklyCapacityHours: 41,
-		}).success).toBe(false);
-		expect(taskPlanningInputSchema.safeParse({
-			...validInput,
-			unavailableDays: ["holiday"],
-		}).success).toBe(false);
+		expect(
+			taskPlanningInputSchema.safeParse({
+				...validInput,
+				providerKey: "must-not-cross-boundary",
+			}).success,
+		).toBe(false);
+		expect(
+			taskPlanningInputSchema.safeParse({
+				...validInput,
+				goal: "x".repeat(1_001),
+			}).success,
+		).toBe(false);
+		expect(
+			taskPlanningInputSchema.safeParse({
+				...validInput,
+				weeklyCapacityHours: 41,
+			}).success,
+		).toBe(false);
+		expect(
+			taskPlanningInputSchema.safeParse({
+				...validInput,
+				unavailableDays: ["holiday"],
+			}).success,
+		).toBe(false);
 	});
-
 });

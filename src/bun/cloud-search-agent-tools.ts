@@ -1,11 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { RTWProductSessionProvider } from "./clients/product/rtw-product-search-client";
+import type { AuthSessionIdentity } from "../shared/session-identity";
+import type { RTWCloudToolsRun } from "./clients/product/rtw-cloud-tools-client";
 import {
-	RTWCloudToolsClient,
+	type RTWCloudToolsClient,
 	RTWCloudToolsError,
 } from "./clients/product/rtw-cloud-tools-client";
-import type { RTWCloudToolsRun } from "./clients/product/rtw-cloud-tools-client";
-import type { AuthSessionIdentity } from "../shared/session-identity";
+import type { RTWProductSessionProvider } from "./clients/product/rtw-product-search-client";
 
 /**
  * 云搜索 Agent 工具的 Bun 宿主：Sidecar 的 CloudSearchToolSession 通过协议
@@ -64,7 +64,9 @@ export class CloudSearchAgentToolsError extends Error {
 
 export class CloudSearchAgentToolsService {
 	private readonly runs = new Map<string, RTWCloudToolsRun>();
-	private readonly fetchImpl: NonNullable<CloudSearchAgentToolsOptions["fetch"]>;
+	private readonly fetchImpl: NonNullable<
+		CloudSearchAgentToolsOptions["fetch"]
+	>;
 	private moduleCache: { key: string; moduleId: string; at: number } | null =
 		null;
 
@@ -73,7 +75,10 @@ export class CloudSearchAgentToolsService {
 	}
 
 	/** Sidecar conversation 运行开始时调用：创建 RTW tool-runs 父操作。 */
-	async openParent(runId: string, accountId: string): Promise<CloudParentDescriptor> {
+	async openParent(
+		runId: string,
+		accountId: string,
+	): Promise<CloudParentDescriptor> {
 		if (typeof runId !== "string" || runId.length === 0) {
 			throw new CloudSearchAgentToolsError("INVALID_INPUT", true);
 		}
@@ -179,7 +184,8 @@ export class CloudSearchAgentToolsService {
 			return cached.moduleId;
 		}
 		const session = await this.options.sessions.current();
-		if (!session) throw new CloudSearchAgentToolsError("NOT_AUTHENTICATED", true);
+		if (!session)
+			throw new CloudSearchAgentToolsError("NOT_AUTHENTICATED", true);
 		let response: Response;
 		try {
 			response = await this.fetchImpl(

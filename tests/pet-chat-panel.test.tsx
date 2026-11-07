@@ -11,10 +11,11 @@ const reactActEnvironment = globalThis as typeof globalThis & {
 };
 reactActEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
 
-const [{ act, cleanup, fireEvent, render }, { PetChatPanel }] = await Promise.all([
-	import("@testing-library/react"),
-	import("../src/views/pet/PetChatPanel"),
-]);
+const [{ act, cleanup, fireEvent, render }, { PetChatPanel }] =
+	await Promise.all([
+		import("@testing-library/react"),
+		import("../src/views/pet/PetChatPanel"),
+	]);
 const { PetChatController } = await import("../src/views/pet/chat");
 
 afterEach(() => cleanup());
@@ -57,7 +58,4 @@ describe("PetChatPanel", () => {
 		fireEvent.keyDown(input, { key: "Enter" });
 		expect(started).toHaveLength(0);
 	});
-
-
-
 });

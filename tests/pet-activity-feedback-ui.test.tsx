@@ -79,6 +79,4 @@ describe("pet activity feedback bubble", () => {
 		expect(view.getByRole("button", { name: "下一段" })).toBeTruthy();
 		expect(view.getByRole("button", { name: "收起剩余" })).toBeTruthy();
 	});
-
-
 });

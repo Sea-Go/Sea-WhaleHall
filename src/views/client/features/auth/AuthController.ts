@@ -1,10 +1,6 @@
 import type { AuthService } from "./auth-service";
 import { authFailureFromUnknown } from "./auth-service";
-import type {
-	AuthBootOperation,
-	AuthCredentials,
-	AuthState,
-} from "./domain";
+import type { AuthBootOperation, AuthCredentials, AuthState } from "./domain";
 
 type AuthStateListener = () => void;
 
@@ -110,10 +106,7 @@ export class AuthController {
 		const lifecycleVersion = this.lifecycleVersion;
 		this.setState({ status: "booting", operation });
 
-		const request = this.performRestore(
-			lifecycleVersion,
-			operationVersion,
-		);
+		const request = this.performRestore(lifecycleVersion, operationVersion);
 		this.restorePromise = request;
 		void request.finally(() => {
 			if (this.restorePromise === request) {

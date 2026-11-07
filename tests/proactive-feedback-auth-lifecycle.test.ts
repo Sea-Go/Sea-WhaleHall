@@ -58,8 +58,6 @@ describe("optional proactive feedback auth lifecycle", () => {
 		fixture.runtime.dispose();
 	});
 
-
-
 	for (const scenario of [
 		{
 			name: "policy is disabled",

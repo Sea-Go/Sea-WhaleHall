@@ -156,15 +156,4 @@ describe("AppUpdateController", () => {
 		if (snapshot.state !== "failed") throw new Error("expected failure");
 		expect(snapshot.failure.code).toBe("signature_invalid");
 	});
-
-
-
-
-
-
-
-
-
-
-
 });

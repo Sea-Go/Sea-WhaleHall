@@ -146,30 +146,6 @@ describe("DesktopReflectionService", () => {
 		expect((await service.getStatus()).pendingJobs).toBe(0);
 		await service.stop();
 	});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 });
 
 class FakeTransport implements DesktopEventTransport {

@@ -47,10 +47,6 @@ describe("ReportController periods and states", () => {
 		await controller.next();
 		expect(controller.getSnapshot().status).toBe("populated");
 	});
-
-
-
-
 });
 
 class CountingService implements ReportService {

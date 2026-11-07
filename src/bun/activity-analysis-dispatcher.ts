@@ -406,7 +406,10 @@ export class ActivityAnalysisDispatcher {
 				// （防"未知但实际永久"的毒任务占道）。放弃=删任务+凭证+扣分
 				// 并物化下一个，绝不落终态——终态行会永久拒绝新物化。
 				const permanent = error instanceof ActivityAnalysisStartRejectedError;
-				if (permanent || claimed.transportAttempt + 1 >= this.startRetryAttemptLimit) {
+				if (
+					permanent ||
+					claimed.transportAttempt + 1 >= this.startRetryAttemptLimit
+				) {
 					const materialized = this.store.abandonActivityAnalysisJob(
 						claimed.jobId,
 						accountId,

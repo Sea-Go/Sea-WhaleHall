@@ -45,7 +45,19 @@ async function roundtrip(
 	messages: unknown[],
 	tools: unknown[],
 ): Promise<ToolCallRound> {
-	const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+	// 显式解析并校验网关地址：仅允许 https 或本机回环，阻断参数拼接出的任意外部地址。
+	const endpoint = new URL(`${baseUrl.replace(/\/$/, "")}/chat/completions`);
+	if (
+		endpoint.protocol !== "https:" &&
+		endpoint.hostname !== "localhost" &&
+		endpoint.hostname !== "127.0.0.1" &&
+		endpoint.hostname !== "::1"
+	) {
+		fail(
+			`不允许的网关地址 ${endpoint.protocol}//${endpoint.hostname}（仅允许 https 或本机回环）`,
+		);
+	}
+	const response = await fetch(endpoint, {
 		method: "POST",
 		headers: { "content-type": "application/json", ...headers },
 		body: JSON.stringify({ model, messages, tools, max_tokens: 512 }),
@@ -77,7 +89,11 @@ async function roundtrip(
 		} catch {
 			fail(`工具参数不是合法 JSON：${call.function?.arguments}`);
 		}
-		return { id: call.id as string, name: call.function!.name!, arguments: args };
+		return {
+			id: call.id as string,
+			name: call.function!.name!,
+			arguments: args,
+		};
 	});
 	return {
 		finishReason: choice.finish_reason ?? null,
@@ -126,7 +142,9 @@ async function main(): Promise<void> {
 	if (typeof args.city !== "string" || args.city.length === 0) {
 		fail(`工具参数不符合 schema：${JSON.stringify(call.arguments)}`);
 	}
-	console.log(`[conformance] round1 ok: ${call.name}(${JSON.stringify(call.arguments)})`);
+	console.log(
+		`[conformance] round1 ok: ${call.name}(${JSON.stringify(call.arguments)})`,
+	);
 
 	// 第二轮：注入工具结果后必须收敛为文本答案。
 	const second = await roundtrip(
@@ -142,7 +160,10 @@ async function main(): Promise<void> {
 					{
 						id: call.id,
 						type: "function",
-						function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+						function: {
+							name: call.name,
+							arguments: JSON.stringify(call.arguments),
+						},
 					},
 				],
 			},
@@ -160,7 +181,9 @@ async function main(): Promise<void> {
 		);
 	}
 	if (second.content.trim().length === 0) fail("第二轮收敛但答案为空");
-	console.log(`[conformance] round2 ok: ${second.content.trim().slice(0, 120)}`);
+	console.log(
+		`[conformance] round2 ok: ${second.content.trim().slice(0, 120)}`,
+	);
 	console.log("[conformance] PASS：生产模型通过工具调用一致性门禁");
 }
 

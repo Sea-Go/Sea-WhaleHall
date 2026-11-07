@@ -121,6 +121,4 @@ describe("Electrobun calendar service", () => {
 			userLocked: true,
 		});
 	});
-
-
 });

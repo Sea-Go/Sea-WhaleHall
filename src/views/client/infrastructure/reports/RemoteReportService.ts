@@ -1,15 +1,15 @@
 import { Temporal } from "temporal-polyfill";
 import {
 	assertValidGrowthReport,
-	reportRangeFor,
 	type GrowthReport,
 	type ReportPeriod,
+	reportRangeFor,
 	type TrendPoint,
 } from "../../features/reports/domain";
 import {
-	ReportServiceError,
 	type ReportLoadResult,
 	type ReportService,
+	ReportServiceError,
 } from "../../features/reports/report-service";
 
 const REPORTS_BASE_URL =
@@ -33,9 +33,11 @@ type TelemetryResponse = {
 
 function daysBetween(start: string, endExclusive: string): number {
 	return Number(
-		Temporal.PlainDate.from(start).until(Temporal.PlainDate.from(endExclusive), {
-			largestUnit: "day",
-		}).total({ unit: "day" }),
+		Temporal.PlainDate.from(start)
+			.until(Temporal.PlainDate.from(endExclusive), {
+				largestUnit: "day",
+			})
+			.total({ unit: "day" }),
 	);
 }
 
@@ -66,13 +68,13 @@ export class RemoteReportService implements ReportService {
 				{ signal: AbortSignal.timeout(20_000) },
 			);
 			if (response.status === 503 || response.status === 502) {
-				throw new ReportServiceError(
-					"unavailable",
-					"报告数据源暂时不可用",
-				);
+				throw new ReportServiceError("unavailable", "报告数据源暂时不可用");
 			}
 			if (!response.ok) {
-				throw new ReportServiceError("unavailable", `报告服务异常 ${response.status}`);
+				throw new ReportServiceError(
+					"unavailable",
+					`报告服务异常 ${response.status}`,
+				);
 			}
 			payload = (await response.json()) as TelemetryResponse;
 		} catch (error) {
@@ -121,7 +123,12 @@ export class RemoteReportService implements ReportService {
 		const totalBatches = inRange.reduce((sum, day) => sum + day.batches, 0);
 		const peak = inRange.reduce(
 			(best, day) => (day.accepted > best.accepted ? day : best),
-			inRange[0] ?? { day: range.startDate, batches: 0, accepted: 0, duplicates: 0 },
+			inRange[0] ?? {
+				day: range.startDate,
+				batches: 0,
+				accepted: 0,
+				duplicates: 0,
+			},
 		);
 		const trend: TrendPoint[] = payload.days.map((day) => ({
 			key: `${period}-${day.day}`,

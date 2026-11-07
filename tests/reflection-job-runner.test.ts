@@ -1,17 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
 	DESKTOP_EVENT_SCHEMA_VERSION,
+	type DesktopEventForKind,
 	DeterministicWindowBuilder,
+	type EventWindowV1,
 	InMemoryReflectionRepository,
 	InvalidReflectionJobTransitionError,
 	REFLECTION_SCHEMA_VERSION,
-	ReflectionCollector,
-	ReflectionJobRunner,
-	type DesktopEventForKind,
-	type EventWindowV1,
 	type ReflectionClock,
+	ReflectionCollector,
 	type ReflectionInferenceProvider,
 	type ReflectionJobClock,
+	ReflectionJobRunner,
 	type ReflectionTimerHandle,
 	type ReflectionV1,
 	WebCryptoReflectionHasher,
@@ -67,14 +67,18 @@ async function enqueueWindow(
 		deviceId: "device-1",
 		sessionId: `session-${collectorIndex}`,
 		repository,
-		windowBuilder: new DeterministicWindowBuilder(new WebCryptoReflectionHasher()),
+		windowBuilder: new DeterministicWindowBuilder(
+			new WebCryptoReflectionHasher(),
+		),
 		clock,
 		semanticEventThreshold: eventCount,
 	});
 	await collector.recover();
 	let window: EventWindowV1 | null = null;
 	for (let index = 1; index <= eventCount; index += 1) {
-		window = await collector.ingest(event(collectorIndex, index, clock.nowMs()));
+		window = await collector.ingest(
+			event(collectorIndex, index, clock.nowMs()),
+		);
 	}
 	collector.dispose();
 	if (!window) throw new Error("Test failed to seal its reflection window.");
@@ -214,17 +218,8 @@ describe("ReflectionJobRunner durable state flow", () => {
 			attempt: 2,
 		});
 	});
-
 });
 
-describe("ReflectionJobRunner retries and terminal failure", () => {
+describe("ReflectionJobRunner retries and terminal failure", () => {});
 
-
-
-
-
-});
-
-describe("ReflectionJobRunner backpressure", () => {
-
-});
+describe("ReflectionJobRunner backpressure", () => {});

@@ -7,16 +7,16 @@ import {
 	TriangleAlert,
 } from "lucide-react";
 import {
+	type KeyboardEvent,
 	useEffect,
 	useRef,
 	useSyncExternalStore,
-	type KeyboardEvent,
 } from "react";
 import { Button } from "../../shared/ui/Button";
 import { IconButton } from "../../shared/ui/IconButton";
 import { PageHeader } from "../../shared/ui/PageHeader";
-import type { ReportController, ReportState } from "./ReportController";
 import type { ReportPeriod } from "./domain";
+import type { ReportController, ReportState } from "./ReportController";
 import { ReportLayout } from "./ReportLayout";
 
 const periodOptions: ReadonlyArray<{
@@ -66,8 +66,7 @@ export function ReportsPage({ controller }: ReportsPageProps) {
 					? periodOptions.length - 1
 					: event.key === "ArrowRight"
 						? (currentIndex + 1) % periodOptions.length
-						: (currentIndex - 1 + periodOptions.length) %
-							periodOptions.length;
+						: (currentIndex - 1 + periodOptions.length) % periodOptions.length;
 		activatePeriod(nextIndex);
 	}
 
@@ -80,14 +79,15 @@ export function ReportsPage({ controller }: ReportsPageProps) {
 
 	return (
 		<div className="reports-page">
-			<PageHeader
-				eyebrow="成长回顾"
-				title="成长报告"
-			/>
+			<PageHeader eyebrow="成长回顾" title="成长报告" />
 
 			<div className="reports-page__content">
 				<section className="report-toolbar" aria-label="报告筛选">
-					<div className="report-period-tabs" role="tablist" aria-label="报告类型">
+					<div
+						className="report-period-tabs"
+						role="tablist"
+						aria-label="报告类型"
+					>
 						{periodOptions.map((item, index) => (
 							<button
 								ref={(element) => {
@@ -243,7 +243,10 @@ function ReportFeedback({
 	tone?: "neutral" | "error";
 }) {
 	return (
-		<section className={`report-feedback report-feedback--${tone}`} aria-live="polite">
+		<section
+			className={`report-feedback report-feedback--${tone}`}
+			aria-live="polite"
+		>
 			<div>{icon}</div>
 			<p>{eyebrow}</p>
 			<h2>{title}</h2>

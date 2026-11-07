@@ -127,24 +127,10 @@ describe("AuthController", () => {
 			session: demoSession,
 		});
 	});
-
-
-
-
-
-
-
-
 });
 
-describe("MockAuthService", () => {
-
-});
+describe("MockAuthService", () => {});
 
 describe("authentication UI", () => {
 	const noSubmit = async (_credentials?: AuthCredentials) => {};
-
-
-
-
 });

@@ -287,9 +287,6 @@ describe("Planning Vault fail-closed garbage collection", () => {
 		expect(port.records.size).toBe(2);
 	});
 
-
 	for (const failure of ["inventory", "references"] as const) {
 	}
-
-
 });

@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { expect, test } from "bun:test";
 import {
 	existsSync,
 	mkdirSync,
@@ -41,8 +41,16 @@ type SensorCiContext = {
 
 const sensorCiContext: SensorCiContext = {
 	dataDirectory: "",
-	displayMode: expectation("WHALEHALL_CI_DISPLAY_MODE", ["auto", "degraded", "required"]),
-	foregroundMode: expectation("WHALEHALL_CI_FOREGROUND_MODE", ["auto", "degraded", "required"]),
+	displayMode: expectation("WHALEHALL_CI_DISPLAY_MODE", [
+		"auto",
+		"degraded",
+		"required",
+	]),
+	foregroundMode: expectation("WHALEHALL_CI_FOREGROUND_MODE", [
+		"auto",
+		"degraded",
+		"required",
+	]),
 	presenceMode: expectation("WHALEHALL_CI_PRESENCE_MODE", [
 		"auto",
 		"complete",
@@ -110,7 +118,10 @@ const sensorCiProbes: SensorCiProbe[] = [
 			expect(status.lastError).toBeNull();
 			expect(output).toMatchObject({
 				databasePath: join(context.dataDirectory, "accessibility.sqlite3"),
-				bridgePath: join(context.dataDirectory, "accessibility-current-tree.json"),
+				bridgePath: join(
+					context.dataDirectory,
+					"accessibility-current-tree.json",
+				),
 				pollIntervalMs: 50,
 				bridgeMaxAgeMs: 60000,
 				maxNodes: 300,
@@ -268,7 +279,9 @@ const sensorCiProbes: SensorCiProbe[] = [
 				warnings: Array<{ component: string; message: string }>;
 			};
 			const resolutions =
-				snapshot.screens.map((screen) => `${screen.widthPx}x${screen.heightPx}`).join(",") || "none";
+				snapshot.screens
+					.map((screen) => `${screen.widthPx}x${screen.heightPx}`)
+					.join(",") || "none";
 			console.info(
 				[
 					`[sensor-ci] device os=${snapshot.operatingSystem.name} ${snapshot.operatingSystem.version}`,
@@ -293,7 +306,9 @@ const sensorCiProbes: SensorCiProbe[] = [
 				expect(snapshot.screenCount > 0).toBe(true);
 			}
 			if (snapshot.screenCount === 0) {
-				expect(snapshot.warnings.some((warning) => warning.component === "screens")).toBe(true);
+				expect(
+					snapshot.warnings.some((warning) => warning.component === "screens"),
+				).toBe(true);
 			}
 			if (context.displayMode === "degraded") {
 				expect(snapshot.screenCount).toBe(0);
@@ -430,616 +445,700 @@ const sensorCiProbes: SensorCiProbe[] = [
 
 fullTest("every public Rust sensor has exactly one native CI probe", () => {
 	const sensorFiles = readdirSync(sensorDirectory, { withFileTypes: true })
-		.filter((entry) => entry.isFile() && entry.name.endsWith(".rs") && entry.name !== "mod.rs")
+		.filter(
+			(entry) =>
+				entry.isFile() && entry.name.endsWith(".rs") && entry.name !== "mod.rs",
+		)
 		.map((entry) => entry.name)
 		.sort();
 	const coveredFiles = sensorCiProbes.map((probe) => probe.sourceFile).sort();
 
 	expect(coveredFiles).toEqual(sensorFiles);
-	expect(new Set(sensorCiProbes.map((probe) => probe.callId)).size).toBe(sensorCiProbes.length);
-	expect(new Set(sensorCiProbes.map((probe) => probe.toolName)).size).toBe(sensorCiProbes.length);
+	expect(new Set(sensorCiProbes.map((probe) => probe.callId)).size).toBe(
+		sensorCiProbes.length,
+	);
+	expect(new Set(sensorCiProbes.map((probe) => probe.toolName)).size).toBe(
+		sensorCiProbes.length,
+	);
 });
 
-fullTest("whalehall-local lists, calls, streams, and cancels tools over JSONL", async () => {
-	const manifest = resolve(projectRoot, "native/local-host/Cargo.toml");
-	const build = Bun.spawnSync(
-		[
-			"cargo",
-			"build",
-			"--locked",
-			"--manifest-path",
-			manifest,
-			"--package",
-			"whalehall-local-server",
-		],
-		{ cwd: projectRoot, stdout: "pipe", stderr: "pipe" },
-	);
-	if (build.exitCode !== 0) throw new Error(new TextDecoder().decode(build.stderr));
+fullTest(
+	"whalehall-local lists, calls, streams, and cancels tools over JSONL",
+	async () => {
+		const manifest = resolve(projectRoot, "native/local-host/Cargo.toml");
+		const build = Bun.spawnSync(
+			[
+				"cargo",
+				"build",
+				"--locked",
+				"--manifest-path",
+				manifest,
+				"--package",
+				"whalehall-local-server",
+			],
+			{ cwd: projectRoot, stdout: "pipe", stderr: "pipe" },
+		);
+		if (build.exitCode !== 0)
+			throw new Error(new TextDecoder().decode(build.stderr));
 
-	const binary = resolve(
-		projectRoot,
-		"native/local-host/target/debug",
-		process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local",
-	);
-	const dataDirectory = mkdtempSync(join(tmpdir(), "whalehall-activity-integration-"));
-	const browserProfileRoot = createBrowserFixture(dataDirectory);
-	createAccessibilityFixture(dataDirectory);
-	const context = { ...sensorCiContext, dataDirectory };
-	const nativeEnvironment = { ...process.env };
-	const child = Bun.spawn({
-		cmd: [binary],
-		env: {
-			...nativeEnvironment,
-			WHALEHALL_DATA_DIR: dataDirectory,
-			WHALEHALL_RUNTIME_CHANNEL: "dev",
-			WHALEHALL_ACTIVITY_POLL_MS: "50",
-			// One immediate scan is enough for this protocol probe. A 50ms
-			// process scan creates a feedback loop with short-lived macOS
-			// helper processes and can starve control responses behind
-			// processObservedBatch frames on busy developer machines.
-			WHALEHALL_APPLICATION_POLL_MS: "5000",
-			WHALEHALL_PRESENCE_POLL_MS: "50",
-			WHALEHALL_AFK_THRESHOLD_MS: "1000",
-			WHALEHALL_SUSPEND_GAP_THRESHOLD_MS: "1000",
-			WHALEHALL_BROWSER_PROFILE_ROOT: browserProfileRoot,
-			WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED: "true",
-			WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED: "true",
-			WHALEHALL_BROWSER_TAB_POLL_MS: "50",
-			WHALEHALL_BROWSER_HISTORY_REFRESH_MS: "1000",
-			WHALEHALL_BROWSER_BRIDGE_MAX_AGE_MS: "60000",
-			WHALEHALL_ACCESSIBILITY_POLL_MS: "50",
-			WHALEHALL_ACCESSIBILITY_BRIDGE_MAX_AGE_MS: "60000",
-			WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED: "true",
-			WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED: "true",
-			// Native CI must never inherit a developer shell opt-in and start a
-			// global event tap while exercising the protocol.
-			WHALEHALL_INPUT_MONITORING_ENABLED: "false",
-		},
-		stdin: "pipe",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const serverDatabasesInitialized = deferred();
-	const runtimeReady = deferred();
-	const stderrComplete = collectServerStderr(child.stderr, (line) => {
-		if (line.startsWith("observation journal database:")) {
-			serverDatabasesInitialized.resolve();
-		}
-	});
-	const messages: LocalMessage[] = [];
-	const queryCallIds = [
-		"activity-sessions",
-		"activity-cleanup",
-		"installed-applications",
-		"application-processes",
-		"presence-events",
-		"browser-tabs",
-		"browser-history",
-		"browser-searches",
-		"browser-downloads",
-		"accessibility-tree",
-	];
-	const queryCompleted = new Map(queryCallIds.map((callId) => [callId, deferred()] as const));
-	const progressObserved = deferred();
-	const progressCompleted = deferred();
-	const waitStarted = deferred();
-	const waitCancelled = deferred();
-	const waitCompleted = deferred();
-	const cancelCompleted = deferred();
-	const sensorCompleted = new Map(
-		sensorCiProbes.map((probe) => [probe.callId, deferred()] as const),
-	);
-	const outputComplete = collectMessages(child.stdout, messages, (message) => {
-		if ("id" in message && typeof message.id === "string") {
-			sensorCompleted.get(message.id)?.resolve();
-			if (message.id === "health") runtimeReady.resolve();
-		}
-		if (
-			"event" in message &&
-			message.event !== "desktop.event" &&
-			message.event !== "semantic.event" &&
-			message.callId === "wait" &&
-			message.event === "tool.started"
-		) {
-			waitStarted.resolve();
-		}
-		if (
-			"event" in message &&
-			message.event !== "desktop.event" &&
-			message.event !== "semantic.event" &&
-			message.callId === "progress" &&
-			message.event === "tool.progress"
-		) {
-			progressObserved.resolve();
-		}
-		if (
-			"event" in message &&
-			message.event !== "desktop.event" &&
-			message.event !== "semantic.event" &&
-			message.callId === "wait" &&
-			message.event === "tool.cancelled"
-		) {
-			waitCancelled.resolve();
-		}
-		if ("id" in message && message.id === "progress") progressCompleted.resolve();
-		if ("id" in message && message.id === "wait") waitCompleted.resolve();
-		if ("id" in message && message.id === "cancel") cancelCompleted.resolve();
-		if ("id" in message && typeof message.id === "string") {
-			queryCompleted.get(message.id)?.resolve();
-		}
-	});
-	await withNativeRuntimeStartup(
-		serverDatabasesInitialized.promise,
-		"native database initialization",
-		child.exited,
-		outputComplete,
-		nativeStartupTimeoutMs,
-	);
-	// Database-path diagnostics are emitted before serve_session initializes the
-	// retention tasks, Observer supervisor, stdout writer, and stdin request
-	// loop. Use the protocol itself as the authoritative readiness boundary so
-	// a slow Windows image cannot turn startup work into a sensor response
-	// timeout.
-	child.stdin.write('{"id":"health","method":"runtime.health","params":{}}\n');
-	await child.stdin.flush();
-	await withNativeRuntimeStartup(
-		runtimeReady.promise,
-		"native runtime health response",
-		child.exited,
-		outputComplete,
-		nativeStartupTimeoutMs,
-	);
-	expect(messages.find((message) => "id" in message && message.id === "health")).toMatchObject({
-		ok: true,
-		result: {
-			service: "whalehall-local",
-			status: "ok",
-		},
-	});
-	child.stdin.write('{"id":"list","method":"tool.list","params":{}}\n');
-	child.stdin.write(
-		'{"id":"system","method":"tool.call","params":{"name":"system.info","arguments":{}}}\n',
-	);
-	for (const probe of sensorCiProbes) {
-		if (probe.sourceFile === "accessibility_tree.rs") {
-			let readinessOutput: unknown;
-			let readinessReached = false;
-			for (let attempt = 0; attempt < 120; attempt += 1) {
-				const readinessCallId = `sensor-accessibility-readiness-${attempt}`;
-				const readinessCompleted = deferred();
-				sensorCompleted.set(readinessCallId, readinessCompleted);
-				child.stdin.write(
-					`${JSON.stringify({
-						id: readinessCallId,
-						method: "tool.call",
-						params: { name: probe.toolName, arguments: probe.arguments },
-					})}\n`,
-				);
-				await child.stdin.flush();
-				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
-				readinessOutput = successfulToolOutput(messages, readinessCallId);
-				if (accessibilitySensorReady(readinessOutput)) {
-					readinessReached = true;
-					break;
+		const binary = resolve(
+			projectRoot,
+			"native/local-host/target/debug",
+			process.platform === "win32" ? "whalehall-local.exe" : "whalehall-local",
+		);
+		const dataDirectory = mkdtempSync(
+			join(tmpdir(), "whalehall-activity-integration-"),
+		);
+		const browserProfileRoot = createBrowserFixture(dataDirectory);
+		createAccessibilityFixture(dataDirectory);
+		const context = { ...sensorCiContext, dataDirectory };
+		const nativeEnvironment = { ...process.env };
+		const child = Bun.spawn({
+			cmd: [binary],
+			env: {
+				...nativeEnvironment,
+				WHALEHALL_DATA_DIR: dataDirectory,
+				WHALEHALL_RUNTIME_CHANNEL: "dev",
+				WHALEHALL_ACTIVITY_POLL_MS: "50",
+				// One immediate scan is enough for this protocol probe. A 50ms
+				// process scan creates a feedback loop with short-lived macOS
+				// helper processes and can starve control responses behind
+				// processObservedBatch frames on busy developer machines.
+				WHALEHALL_APPLICATION_POLL_MS: "5000",
+				WHALEHALL_PRESENCE_POLL_MS: "50",
+				WHALEHALL_AFK_THRESHOLD_MS: "1000",
+				WHALEHALL_SUSPEND_GAP_THRESHOLD_MS: "1000",
+				WHALEHALL_BROWSER_PROFILE_ROOT: browserProfileRoot,
+				WHALEHALL_BROWSER_EVENT_MONITORING_ENABLED: "true",
+				WHALEHALL_BROWSER_CONTENT_MONITORING_ENABLED: "true",
+				WHALEHALL_BROWSER_TAB_POLL_MS: "50",
+				WHALEHALL_BROWSER_HISTORY_REFRESH_MS: "1000",
+				WHALEHALL_BROWSER_BRIDGE_MAX_AGE_MS: "60000",
+				WHALEHALL_ACCESSIBILITY_POLL_MS: "50",
+				WHALEHALL_ACCESSIBILITY_BRIDGE_MAX_AGE_MS: "60000",
+				WHALEHALL_ACCESSIBILITY_MONITORING_ENABLED: "true",
+				WHALEHALL_ACCESSIBILITY_CONTENT_MONITORING_ENABLED: "true",
+				// Native CI must never inherit a developer shell opt-in and start a
+				// global event tap while exercising the protocol.
+				WHALEHALL_INPUT_MONITORING_ENABLED: "false",
+			},
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const serverDatabasesInitialized = deferred();
+		const runtimeReady = deferred();
+		const stderrComplete = collectServerStderr(child.stderr, (line) => {
+			if (line.startsWith("observation journal database:")) {
+				serverDatabasesInitialized.resolve();
+			}
+		});
+		const messages: LocalMessage[] = [];
+		const queryCallIds = [
+			"activity-sessions",
+			"activity-cleanup",
+			"installed-applications",
+			"application-processes",
+			"presence-events",
+			"browser-tabs",
+			"browser-history",
+			"browser-searches",
+			"browser-downloads",
+			"accessibility-tree",
+		];
+		const queryCompleted = new Map(
+			queryCallIds.map((callId) => [callId, deferred()] as const),
+		);
+		const progressObserved = deferred();
+		const progressCompleted = deferred();
+		const waitStarted = deferred();
+		const waitCancelled = deferred();
+		const waitCompleted = deferred();
+		const cancelCompleted = deferred();
+		const sensorCompleted = new Map(
+			sensorCiProbes.map((probe) => [probe.callId, deferred()] as const),
+		);
+		const outputComplete = collectMessages(
+			child.stdout,
+			messages,
+			(message) => {
+				if ("id" in message && typeof message.id === "string") {
+					sensorCompleted.get(message.id)?.resolve();
+					if (message.id === "health") runtimeReady.resolve();
 				}
-				await Bun.sleep(250);
-			}
-			if (!readinessReached) {
-				throw new Error(
-					`Accessibility sensor did not import its native fixture: ${JSON.stringify(readinessOutput)}`,
-				);
-			}
-		}
-		if (probe.sourceFile === "activity.rs" && context.foregroundMode !== "auto") {
-			let readinessOutput: unknown;
-			let readinessReached = false;
-			for (let attempt = 0; attempt < 60; attempt += 1) {
-				const readinessCallId = `sensor-activity-readiness-${attempt}`;
-				const readinessCompleted = deferred();
-				sensorCompleted.set(readinessCallId, readinessCompleted);
-				child.stdin.write(
-					`${JSON.stringify({
-						id: readinessCallId,
-						method: "tool.call",
-						params: { name: probe.toolName, arguments: probe.arguments },
-					})}\n`,
-				);
-				await child.stdin.flush();
-				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
-				readinessOutput = successfulToolOutput(messages, readinessCallId);
-				if (activityCapabilityReady(readinessOutput, context.foregroundMode)) {
-					readinessReached = true;
-					break;
+				if (
+					"event" in message &&
+					message.event !== "desktop.event" &&
+					message.event !== "semantic.event" &&
+					message.callId === "wait" &&
+					message.event === "tool.started"
+				) {
+					waitStarted.resolve();
 				}
-				await Bun.sleep(250);
-			}
-			if (!readinessReached) {
-				throw new Error(
-					`Activity sensor did not reach ${context.foregroundMode} capability: ${JSON.stringify(readinessOutput)}`,
-				);
-			}
-		}
-		if (probe.sourceFile === "application_inventory.rs") {
-			let readinessOutput: unknown;
-			let readinessReached = false;
-			for (let attempt = 0; attempt < 120; attempt += 1) {
-				const readinessCallId = `sensor-applications-readiness-${attempt}`;
-				const readinessCompleted = deferred();
-				sensorCompleted.set(readinessCallId, readinessCompleted);
-				child.stdin.write(
-					`${JSON.stringify({
-						id: readinessCallId,
-						method: "tool.call",
-						params: { name: probe.toolName, arguments: probe.arguments },
-					})}\n`,
-				);
-				await child.stdin.flush();
-				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
-				readinessOutput = successfulToolOutput(messages, readinessCallId);
-				if (applicationInventoryReady(readinessOutput)) {
-					readinessReached = true;
-					break;
+				if (
+					"event" in message &&
+					message.event !== "desktop.event" &&
+					message.event !== "semantic.event" &&
+					message.callId === "progress" &&
+					message.event === "tool.progress"
+				) {
+					progressObserved.resolve();
 				}
-				await Bun.sleep(250);
-			}
-			if (!readinessReached) {
-				throw new Error(
-					`Application inventory did not become ready: ${JSON.stringify(readinessOutput)}`,
-				);
-			}
-		}
-		if (probe.sourceFile === "browser_activity.rs") {
-			let readinessOutput: unknown;
-			let readinessReached = false;
-			for (let attempt = 0; attempt < 120; attempt += 1) {
-				const readinessCallId = `sensor-browser-readiness-${attempt}`;
-				const readinessCompleted = deferred();
-				sensorCompleted.set(readinessCallId, readinessCompleted);
-				child.stdin.write(
-					`${JSON.stringify({
-						id: readinessCallId,
-						method: "tool.call",
-						params: { name: probe.toolName, arguments: probe.arguments },
-					})}\n`,
-				);
-				await child.stdin.flush();
-				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
-				readinessOutput = successfulToolOutput(messages, readinessCallId);
-				if (browserSensorReady(readinessOutput)) {
-					readinessReached = true;
-					break;
+				if (
+					"event" in message &&
+					message.event !== "desktop.event" &&
+					message.event !== "semantic.event" &&
+					message.callId === "wait" &&
+					message.event === "tool.cancelled"
+				) {
+					waitCancelled.resolve();
 				}
-				await Bun.sleep(250);
-			}
-			if (!readinessReached) {
-				throw new Error(
-					`Browser sensor did not import its native fixture: ${JSON.stringify(readinessOutput)}`,
-				);
-			}
-		}
-		if (probe.sourceFile === "presence.rs") {
-			let readinessOutput: unknown;
-			let readinessReached = false;
-			for (let attempt = 0; attempt < 60; attempt += 1) {
-				const readinessCallId = `sensor-presence-readiness-${attempt}`;
-				const readinessCompleted = deferred();
-				sensorCompleted.set(readinessCallId, readinessCompleted);
-				child.stdin.write(
-					`${JSON.stringify({
-						id: readinessCallId,
-						method: "tool.call",
-						params: { name: probe.toolName, arguments: probe.arguments },
-					})}\n`,
-				);
-				await child.stdin.flush();
-				await withTimeout(readinessCompleted.promise, `${probe.toolName} readiness response`);
-				readinessOutput = successfulToolOutput(messages, readinessCallId);
-				if (presenceCapabilityReady(readinessOutput, context.presenceMode)) {
-					readinessReached = true;
-					break;
+				if ("id" in message && message.id === "progress")
+					progressCompleted.resolve();
+				if ("id" in message && message.id === "wait") waitCompleted.resolve();
+				if ("id" in message && message.id === "cancel")
+					cancelCompleted.resolve();
+				if ("id" in message && typeof message.id === "string") {
+					queryCompleted.get(message.id)?.resolve();
 				}
-				await Bun.sleep(250);
-			}
-			if (!readinessReached) {
-				throw new Error(
-					`Presence sensor did not reach ${context.presenceMode} capability: ${JSON.stringify(readinessOutput)}`,
-				);
-			}
-		}
+			},
+		);
+		await withNativeRuntimeStartup(
+			serverDatabasesInitialized.promise,
+			"native database initialization",
+			child.exited,
+			outputComplete,
+			nativeStartupTimeoutMs,
+		);
+		// Database-path diagnostics are emitted before serve_session initializes the
+		// retention tasks, Observer supervisor, stdout writer, and stdin request
+		// loop. Use the protocol itself as the authoritative readiness boundary so
+		// a slow Windows image cannot turn startup work into a sensor response
+		// timeout.
 		child.stdin.write(
-			`${JSON.stringify({
-				id: probe.callId,
-				method: "tool.call",
-				params: { name: probe.toolName, arguments: probe.arguments },
-			})}\n`,
+			'{"id":"health","method":"runtime.health","params":{}}\n',
 		);
 		await child.stdin.flush();
-		await withTimeout(sensorCompleted.get(probe.callId)!.promise, `${probe.toolName} response`, 15_000);
-	}
-	child.stdin.write(
-		'{"id":"activity-sessions","method":"tool.call","params":{"name":"activity.sessions","arguments":{"limit":10}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"activity-cleanup","method":"tool.call","params":{"name":"activity.cleanup","arguments":{"scope":"shortTerm"}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"installed-applications","method":"tool.call","params":{"name":"applications.installed","arguments":{"limit":20}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"application-processes","method":"tool.call","params":{"name":"applications.processes","arguments":{"limit":1000,"runningOnly":true}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"presence-events","method":"tool.call","params":{"name":"presence.events","arguments":{"limit":100,"eventTypes":["afkStarted","afkEnded","screenLocked","screenUnlocked","sleepStarted","wokeUp"]}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"browser-tabs","method":"tool.call","params":{"name":"browser.tabs","arguments":{"limit":10,"currentOnly":true}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"browser-history","method":"tool.call","params":{"name":"browser.history","arguments":{"limit":10,"domainContains":"search.example"}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"browser-searches","method":"tool.call","params":{"name":"browser.searches","arguments":{"limit":10,"termContains":"whalehall"}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"browser-downloads","method":"tool.call","params":{"name":"browser.downloads","arguments":{"limit":10,"state":"complete"}}}\n',
-	);
-	child.stdin.write(
-		'{"id":"accessibility-tree","method":"tool.call","params":{"name":"accessibility.tree","arguments":{"limit":20,"includeValues":true,"includeDocumentText":true}}}\n',
-	);
-	await child.stdin.flush();
-	await withTimeout(
-		Promise.all(Array.from(queryCompleted.values(), (completed) => completed.promise)).then(
-			() => undefined,
-		),
-		"sensor query responses",
-	);
-	child.stdin.write(
-		'{"id":"progress","method":"tool.call","params":{"name":"demo.wait","arguments":{"durationMs":500}}}\n',
-	);
-	await child.stdin.flush();
-	await withTimeout(progressObserved.promise, "tool.progress");
-	await withTimeout(progressCompleted.promise, "progress call response");
-	child.stdin.write(
-		'{"id":"wait","method":"tool.call","params":{"name":"demo.wait","arguments":{"durationMs":5000}}}\n',
-	);
-	await child.stdin.flush();
-	await withTimeout(waitStarted.promise, "tool.started");
-	child.stdin.write(
-		'{"id":"cancel","method":"tool.cancel","params":{"callId":"wait"}}\n',
-	);
-	await child.stdin.flush();
-	await withTimeout(cancelCompleted.promise, "tool.cancel response");
-	await withTimeout(waitCancelled.promise, "tool.cancelled event");
-	await withTimeout(waitCompleted.promise, "cancelled tool response");
-	child.stdin.end();
-
-	await outputComplete;
-	await stderrComplete;
-	const exitCode = await child.exited;
-	expect(exitCode).toBe(0);
-
-	const listResponse = messages.find(
-		(message) => "id" in message && message.id === "list" && message.ok,
-	) as { result: { tools: Array<{ name: string }> } } | undefined;
-	expect(listResponse?.result.tools.map((tool) => tool.name)).toEqual([
-		"accessibility.status",
-		"accessibility.tree",
-		"activity.cleanup",
-		"activity.sessions",
-		"activity.status",
-		"applications.installed",
-		"applications.processes",
-		"applications.status",
-		"browser.downloads",
-		"browser.history",
-		"browser.searches",
-		"browser.status",
-		"browser.tabs",
-		"demo.wait",
-		"device.environment",
-		"input.status",
-		"presence.events",
-		"presence.status",
-		"system.info",
-	]);
-	const systemOutput = toolOutput(messages, "system") as { pid: number };
-	expect(typeof systemOutput.pid).toBe("number");
-	for (const probe of sensorCiProbes) {
-		probe.verify(toolOutput(messages, probe.callId), context);
-	}
-	expect(
-		messages.find((message) => "id" in message && message.id === "activity-sessions"),
-	).toMatchObject({
-		ok: true,
-		result: {
-			callId: "activity-sessions",
-			output: { count: expect.any(Number), sessions: expect.any(Array) },
-		},
-	});
-	expect(
-		messages.find((message) => "id" in message && message.id === "activity-cleanup"),
-	).toMatchObject({
-		ok: true,
-		result: {
-			callId: "activity-cleanup",
-			output: {
-				scope: "shortTerm",
-				deletedSessions: expect.any(Number),
-				retentionDays: 7,
-				cutoffAtMs: expect.any(Number),
-			},
-		},
-	});
-	const installedOutput = toolOutput(messages, "installed-applications") as {
-		count: number;
-		applications: Array<{ name: string; executablePath: string; source: string }>;
-	};
-	expect(installedOutput.count).toBe(installedOutput.applications.length);
-	for (const application of installedOutput.applications) {
-		expect(application.name.length > 0).toBe(true);
-		expect(application.executablePath.length > 0).toBe(true);
-		expect(application.source.length > 0).toBe(true);
-	}
-	const processOutput = toolOutput(messages, "application-processes") as {
-		count: number;
-		processes: Array<{
-			processId: number;
-			name: string;
-			executablePath: string;
-			startedAtMs: number;
-			exitedAt: string | null;
-			cpuUsagePercent: number;
-			memoryBytes: number;
-			isRunning: boolean;
-		}>;
-	};
-	expect(processOutput.count).toBe(processOutput.processes.length);
-	expect(processOutput.processes.length > 0).toBe(true);
-	const localServerProcess = processOutput.processes.find(
-		(process) => process.processId === systemOutput.pid,
-	);
-	console.info(
-		`[sensor-ci] process query count=${processOutput.count} serverPid=${systemOutput.pid} serverFound=${localServerProcess !== undefined}`,
-	);
-	expect(localServerProcess).toBeDefined();
-	expect(localServerProcess!.name.length > 0).toBe(true);
-	expect(localServerProcess!.executablePath.length > 0).toBe(true);
-	expect(typeof localServerProcess!.startedAtMs).toBe("number");
-	expect(localServerProcess!.exitedAt).toBeNull();
-	expect(typeof localServerProcess!.cpuUsagePercent).toBe("number");
-	expect(typeof localServerProcess!.memoryBytes).toBe("number");
-	expect(localServerProcess!.isRunning).toBe(true);
-	const presenceEventsOutput = toolOutput(messages, "presence-events") as {
-		count: number;
-		events: Array<{
-			eventType: string;
-			occurredAtMs: number;
-			observedAtMs: number;
-		}>;
-	};
-	expect(presenceEventsOutput.count).toBe(presenceEventsOutput.events.length);
-	for (const event of presenceEventsOutput.events) {
-		expect(event.eventType).toMatch(
-			/^(afkStarted|afkEnded|screenLocked|screenUnlocked|sleepStarted|wokeUp)$/,
+		await withNativeRuntimeStartup(
+			runtimeReady.promise,
+			"native runtime health response",
+			child.exited,
+			outputComplete,
+			nativeStartupTimeoutMs,
 		);
-		expect(typeof event.occurredAtMs).toBe("number");
-		expect(typeof event.observedAtMs).toBe("number");
-	}
-	expect(toolOutput(messages, "browser-tabs")).toMatchObject({
-		count: 1,
-		tabs: [
-			{
-				title: "WhaleHall Browser Probe",
-				url: "https://search.example/?q=whalehall+sensor",
-				domain: "search.example",
-				audible: true,
-				endedAtMs: null,
-				isCurrent: true,
+		expect(
+			messages.find((message) => "id" in message && message.id === "health"),
+		).toMatchObject({
+			ok: true,
+			result: {
+				service: "whalehall-local",
+				status: "ok",
 			},
-		],
-	});
-	expect(toolOutput(messages, "browser-history")).toMatchObject({
-		count: 1,
-		history: [
-			{
-				title: "WhaleHall Search",
-				url: "https://search.example/?q=whalehall+sensor",
-				domain: "search.example",
-				visitCount: 3,
+		});
+		child.stdin.write('{"id":"list","method":"tool.list","params":{}}\n');
+		child.stdin.write(
+			'{"id":"system","method":"tool.call","params":{"name":"system.info","arguments":{}}}\n',
+		);
+		for (const probe of sensorCiProbes) {
+			if (probe.sourceFile === "accessibility_tree.rs") {
+				let readinessOutput: unknown;
+				let readinessReached = false;
+				for (let attempt = 0; attempt < 120; attempt += 1) {
+					const readinessCallId = `sensor-accessibility-readiness-${attempt}`;
+					const readinessCompleted = deferred();
+					sensorCompleted.set(readinessCallId, readinessCompleted);
+					child.stdin.write(
+						`${JSON.stringify({
+							id: readinessCallId,
+							method: "tool.call",
+							params: { name: probe.toolName, arguments: probe.arguments },
+						})}\n`,
+					);
+					await child.stdin.flush();
+					await withTimeout(
+						readinessCompleted.promise,
+						`${probe.toolName} readiness response`,
+					);
+					readinessOutput = successfulToolOutput(messages, readinessCallId);
+					if (accessibilitySensorReady(readinessOutput)) {
+						readinessReached = true;
+						break;
+					}
+					await Bun.sleep(250);
+				}
+				if (!readinessReached) {
+					throw new Error(
+						`Accessibility sensor did not import its native fixture: ${JSON.stringify(readinessOutput)}`,
+					);
+				}
+			}
+			if (
+				probe.sourceFile === "activity.rs" &&
+				context.foregroundMode !== "auto"
+			) {
+				let readinessOutput: unknown;
+				let readinessReached = false;
+				for (let attempt = 0; attempt < 60; attempt += 1) {
+					const readinessCallId = `sensor-activity-readiness-${attempt}`;
+					const readinessCompleted = deferred();
+					sensorCompleted.set(readinessCallId, readinessCompleted);
+					child.stdin.write(
+						`${JSON.stringify({
+							id: readinessCallId,
+							method: "tool.call",
+							params: { name: probe.toolName, arguments: probe.arguments },
+						})}\n`,
+					);
+					await child.stdin.flush();
+					await withTimeout(
+						readinessCompleted.promise,
+						`${probe.toolName} readiness response`,
+					);
+					readinessOutput = successfulToolOutput(messages, readinessCallId);
+					if (
+						activityCapabilityReady(readinessOutput, context.foregroundMode)
+					) {
+						readinessReached = true;
+						break;
+					}
+					await Bun.sleep(250);
+				}
+				if (!readinessReached) {
+					throw new Error(
+						`Activity sensor did not reach ${context.foregroundMode} capability: ${JSON.stringify(readinessOutput)}`,
+					);
+				}
+			}
+			if (probe.sourceFile === "application_inventory.rs") {
+				let readinessOutput: unknown;
+				let readinessReached = false;
+				for (let attempt = 0; attempt < 120; attempt += 1) {
+					const readinessCallId = `sensor-applications-readiness-${attempt}`;
+					const readinessCompleted = deferred();
+					sensorCompleted.set(readinessCallId, readinessCompleted);
+					child.stdin.write(
+						`${JSON.stringify({
+							id: readinessCallId,
+							method: "tool.call",
+							params: { name: probe.toolName, arguments: probe.arguments },
+						})}\n`,
+					);
+					await child.stdin.flush();
+					await withTimeout(
+						readinessCompleted.promise,
+						`${probe.toolName} readiness response`,
+					);
+					readinessOutput = successfulToolOutput(messages, readinessCallId);
+					if (applicationInventoryReady(readinessOutput)) {
+						readinessReached = true;
+						break;
+					}
+					await Bun.sleep(250);
+				}
+				if (!readinessReached) {
+					throw new Error(
+						`Application inventory did not become ready: ${JSON.stringify(readinessOutput)}`,
+					);
+				}
+			}
+			if (probe.sourceFile === "browser_activity.rs") {
+				let readinessOutput: unknown;
+				let readinessReached = false;
+				for (let attempt = 0; attempt < 120; attempt += 1) {
+					const readinessCallId = `sensor-browser-readiness-${attempt}`;
+					const readinessCompleted = deferred();
+					sensorCompleted.set(readinessCallId, readinessCompleted);
+					child.stdin.write(
+						`${JSON.stringify({
+							id: readinessCallId,
+							method: "tool.call",
+							params: { name: probe.toolName, arguments: probe.arguments },
+						})}\n`,
+					);
+					await child.stdin.flush();
+					await withTimeout(
+						readinessCompleted.promise,
+						`${probe.toolName} readiness response`,
+					);
+					readinessOutput = successfulToolOutput(messages, readinessCallId);
+					if (browserSensorReady(readinessOutput)) {
+						readinessReached = true;
+						break;
+					}
+					await Bun.sleep(250);
+				}
+				if (!readinessReached) {
+					throw new Error(
+						`Browser sensor did not import its native fixture: ${JSON.stringify(readinessOutput)}`,
+					);
+				}
+			}
+			if (probe.sourceFile === "presence.rs") {
+				let readinessOutput: unknown;
+				let readinessReached = false;
+				for (let attempt = 0; attempt < 60; attempt += 1) {
+					const readinessCallId = `sensor-presence-readiness-${attempt}`;
+					const readinessCompleted = deferred();
+					sensorCompleted.set(readinessCallId, readinessCompleted);
+					child.stdin.write(
+						`${JSON.stringify({
+							id: readinessCallId,
+							method: "tool.call",
+							params: { name: probe.toolName, arguments: probe.arguments },
+						})}\n`,
+					);
+					await child.stdin.flush();
+					await withTimeout(
+						readinessCompleted.promise,
+						`${probe.toolName} readiness response`,
+					);
+					readinessOutput = successfulToolOutput(messages, readinessCallId);
+					if (presenceCapabilityReady(readinessOutput, context.presenceMode)) {
+						readinessReached = true;
+						break;
+					}
+					await Bun.sleep(250);
+				}
+				if (!readinessReached) {
+					throw new Error(
+						`Presence sensor did not reach ${context.presenceMode} capability: ${JSON.stringify(readinessOutput)}`,
+					);
+				}
+			}
+			child.stdin.write(
+				`${JSON.stringify({
+					id: probe.callId,
+					method: "tool.call",
+					params: { name: probe.toolName, arguments: probe.arguments },
+				})}\n`,
+			);
+			await child.stdin.flush();
+			await withTimeout(
+				sensorCompleted.get(probe.callId)!.promise,
+				`${probe.toolName} response`,
+				15_000,
+			);
+		}
+		child.stdin.write(
+			'{"id":"activity-sessions","method":"tool.call","params":{"name":"activity.sessions","arguments":{"limit":10}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"activity-cleanup","method":"tool.call","params":{"name":"activity.cleanup","arguments":{"scope":"shortTerm"}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"installed-applications","method":"tool.call","params":{"name":"applications.installed","arguments":{"limit":20}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"application-processes","method":"tool.call","params":{"name":"applications.processes","arguments":{"limit":1000,"runningOnly":true}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"presence-events","method":"tool.call","params":{"name":"presence.events","arguments":{"limit":100,"eventTypes":["afkStarted","afkEnded","screenLocked","screenUnlocked","sleepStarted","wokeUp"]}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"browser-tabs","method":"tool.call","params":{"name":"browser.tabs","arguments":{"limit":10,"currentOnly":true}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"browser-history","method":"tool.call","params":{"name":"browser.history","arguments":{"limit":10,"domainContains":"search.example"}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"browser-searches","method":"tool.call","params":{"name":"browser.searches","arguments":{"limit":10,"termContains":"whalehall"}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"browser-downloads","method":"tool.call","params":{"name":"browser.downloads","arguments":{"limit":10,"state":"complete"}}}\n',
+		);
+		child.stdin.write(
+			'{"id":"accessibility-tree","method":"tool.call","params":{"name":"accessibility.tree","arguments":{"limit":20,"includeValues":true,"includeDocumentText":true}}}\n',
+		);
+		await child.stdin.flush();
+		await withTimeout(
+			Promise.all(
+				Array.from(queryCompleted.values(), (completed) => completed.promise),
+			).then(() => undefined),
+			"sensor query responses",
+		);
+		child.stdin.write(
+			'{"id":"progress","method":"tool.call","params":{"name":"demo.wait","arguments":{"durationMs":500}}}\n',
+		);
+		await child.stdin.flush();
+		await withTimeout(progressObserved.promise, "tool.progress");
+		await withTimeout(progressCompleted.promise, "progress call response");
+		child.stdin.write(
+			'{"id":"wait","method":"tool.call","params":{"name":"demo.wait","arguments":{"durationMs":5000}}}\n',
+		);
+		await child.stdin.flush();
+		await withTimeout(waitStarted.promise, "tool.started");
+		child.stdin.write(
+			'{"id":"cancel","method":"tool.cancel","params":{"callId":"wait"}}\n',
+		);
+		await child.stdin.flush();
+		await withTimeout(cancelCompleted.promise, "tool.cancel response");
+		await withTimeout(waitCancelled.promise, "tool.cancelled event");
+		await withTimeout(waitCompleted.promise, "cancelled tool response");
+		child.stdin.end();
+
+		await outputComplete;
+		await stderrComplete;
+		const exitCode = await child.exited;
+		expect(exitCode).toBe(0);
+
+		const listResponse = messages.find(
+			(message) => "id" in message && message.id === "list" && message.ok,
+		) as { result: { tools: Array<{ name: string }> } } | undefined;
+		expect(listResponse?.result.tools.map((tool) => tool.name)).toEqual([
+			"accessibility.status",
+			"accessibility.tree",
+			"activity.cleanup",
+			"activity.sessions",
+			"activity.status",
+			"applications.installed",
+			"applications.processes",
+			"applications.status",
+			"browser.downloads",
+			"browser.history",
+			"browser.searches",
+			"browser.status",
+			"browser.tabs",
+			"demo.wait",
+			"device.environment",
+			"input.status",
+			"presence.events",
+			"presence.status",
+			"system.info",
+		]);
+		const systemOutput = toolOutput(messages, "system") as { pid: number };
+		expect(typeof systemOutput.pid).toBe("number");
+		for (const probe of sensorCiProbes) {
+			probe.verify(toolOutput(messages, probe.callId), context);
+		}
+		expect(
+			messages.find(
+				(message) => "id" in message && message.id === "activity-sessions",
+			),
+		).toMatchObject({
+			ok: true,
+			result: {
+				callId: "activity-sessions",
+				output: { count: expect.any(Number), sessions: expect.any(Array) },
 			},
-		],
-	});
-	expect(toolOutput(messages, "browser-searches")).toMatchObject({
-		count: 1,
-		searches: [
-			{
-				searchTerm: "whalehall sensor",
-				url: "https://search.example/?q=whalehall+sensor",
+		});
+		expect(
+			messages.find(
+				(message) => "id" in message && message.id === "activity-cleanup",
+			),
+		).toMatchObject({
+			ok: true,
+			result: {
+				callId: "activity-cleanup",
+				output: {
+					scope: "shortTerm",
+					deletedSessions: expect.any(Number),
+					retentionDays: 7,
+					cutoffAtMs: expect.any(Number),
+				},
 			},
-		],
-	});
-	expect(toolOutput(messages, "browser-downloads")).toMatchObject({
-		count: 1,
-		downloads: [
-			{
-				url: "https://downloads.example/whalehall.zip",
-				domain: "downloads.example",
-				targetPath: expect.stringContaining("whalehall.zip"),
-				receivedBytes: 1024,
-				totalBytes: 1024,
-				state: "complete",
-			},
-		],
-	});
-	const accessibilityOutput = toolOutput(messages, "accessibility-tree") as {
-		count: number;
-		snapshot: { applicationName: string; windowTitle: string; nodeCount: number };
-		nodes: Array<{
-			nodeId: string;
-			role: string;
-			name: string;
-			value: string | null;
-			selected: boolean | null;
-			focused: boolean;
-			documentText: string | null;
-			protected: boolean;
-		}>;
-	};
-	expect(accessibilityOutput.count).toBe(7);
-	expect(accessibilityOutput.snapshot).toMatchObject({
-		applicationName: "WhaleHall Accessibility Probe",
-		windowTitle: "Accessibility Fixture",
-		nodeCount: 7,
-	});
-	expect(accessibilityOutput.nodes.find((node) => node.role === "button")).toMatchObject({
-		name: "Save",
-	});
-	expect(accessibilityOutput.nodes.find((node) => node.role === "menu")).toMatchObject({
-		name: "File",
-	});
-	expect(accessibilityOutput.nodes.find((node) => node.nodeId === "title-input")).toMatchObject({
-		role: "textBox",
-		name: "Title",
-		value: "WhaleHall sensor draft",
-		focused: true,
-	});
-	expect(accessibilityOutput.nodes.find((node) => node.nodeId === "selected-item")).toMatchObject({
-		name: "Second item",
-		selected: true,
-	});
-	expect(accessibilityOutput.nodes.find((node) => node.role === "document")).toMatchObject({
-		documentText: "A bounded excerpt from the current document.",
-	});
-	expect(accessibilityOutput.nodes.find((node) => node.protected)).toMatchObject({
-		role: "passwordText",
-		value: null,
-		documentText: null,
-	});
-	expect(messages.some((message) => "event" in message && message.event === "tool.started")).toBe(
-		true,
-	);
-	expect(messages.some((message) => "event" in message && message.event === "tool.progress")).toBe(
-		true,
-	);
-	expect(toolOutput(messages, "progress")).toMatchObject({ waitedMs: 500 });
-	expect(
-		messages.some((message) => "event" in message && message.event === "tool.cancelled"),
-	).toBe(true);
-	expect(messages.find((message) => "id" in message && message.id === "cancel")).toMatchObject({
-		ok: true,
-		result: { callId: "wait", cancelled: true },
-	});
-	expect(messages.find((message) => "id" in message && message.id === "wait")).toMatchObject({
-		ok: false,
-		error: { code: "CANCELLED" },
-	});
-	expect(existsSync(join(dataDirectory, "usage.sqlite3"))).toBe(true);
-	expect(existsSync(join(dataDirectory, "applications.sqlite3"))).toBe(true);
-	expect(existsSync(join(dataDirectory, "presence.sqlite3"))).toBe(true);
-	expect(existsSync(join(dataDirectory, "browser.sqlite3"))).toBe(true);
-	expect(existsSync(join(dataDirectory, "accessibility.sqlite3"))).toBe(true);
-	rmSync(dataDirectory, { recursive: true, force: true });
-}, 120_000);
+		});
+		const installedOutput = toolOutput(messages, "installed-applications") as {
+			count: number;
+			applications: Array<{
+				name: string;
+				executablePath: string;
+				source: string;
+			}>;
+		};
+		expect(installedOutput.count).toBe(installedOutput.applications.length);
+		for (const application of installedOutput.applications) {
+			expect(application.name.length > 0).toBe(true);
+			expect(application.executablePath.length > 0).toBe(true);
+			expect(application.source.length > 0).toBe(true);
+		}
+		const processOutput = toolOutput(messages, "application-processes") as {
+			count: number;
+			processes: Array<{
+				processId: number;
+				name: string;
+				executablePath: string;
+				startedAtMs: number;
+				exitedAt: string | null;
+				cpuUsagePercent: number;
+				memoryBytes: number;
+				isRunning: boolean;
+			}>;
+		};
+		expect(processOutput.count).toBe(processOutput.processes.length);
+		expect(processOutput.processes.length > 0).toBe(true);
+		const localServerProcess = processOutput.processes.find(
+			(process) => process.processId === systemOutput.pid,
+		);
+		console.info(
+			`[sensor-ci] process query count=${processOutput.count} serverPid=${systemOutput.pid} serverFound=${localServerProcess !== undefined}`,
+		);
+		expect(localServerProcess).toBeDefined();
+		expect(localServerProcess!.name.length > 0).toBe(true);
+		expect(localServerProcess!.executablePath.length > 0).toBe(true);
+		expect(typeof localServerProcess!.startedAtMs).toBe("number");
+		expect(localServerProcess!.exitedAt).toBeNull();
+		expect(typeof localServerProcess!.cpuUsagePercent).toBe("number");
+		expect(typeof localServerProcess!.memoryBytes).toBe("number");
+		expect(localServerProcess!.isRunning).toBe(true);
+		const presenceEventsOutput = toolOutput(messages, "presence-events") as {
+			count: number;
+			events: Array<{
+				eventType: string;
+				occurredAtMs: number;
+				observedAtMs: number;
+			}>;
+		};
+		expect(presenceEventsOutput.count).toBe(presenceEventsOutput.events.length);
+		for (const event of presenceEventsOutput.events) {
+			expect(event.eventType).toMatch(
+				/^(afkStarted|afkEnded|screenLocked|screenUnlocked|sleepStarted|wokeUp)$/,
+			);
+			expect(typeof event.occurredAtMs).toBe("number");
+			expect(typeof event.observedAtMs).toBe("number");
+		}
+		expect(toolOutput(messages, "browser-tabs")).toMatchObject({
+			count: 1,
+			tabs: [
+				{
+					title: "WhaleHall Browser Probe",
+					url: "https://search.example/?q=whalehall+sensor",
+					domain: "search.example",
+					audible: true,
+					endedAtMs: null,
+					isCurrent: true,
+				},
+			],
+		});
+		expect(toolOutput(messages, "browser-history")).toMatchObject({
+			count: 1,
+			history: [
+				{
+					title: "WhaleHall Search",
+					url: "https://search.example/?q=whalehall+sensor",
+					domain: "search.example",
+					visitCount: 3,
+				},
+			],
+		});
+		expect(toolOutput(messages, "browser-searches")).toMatchObject({
+			count: 1,
+			searches: [
+				{
+					searchTerm: "whalehall sensor",
+					url: "https://search.example/?q=whalehall+sensor",
+				},
+			],
+		});
+		expect(toolOutput(messages, "browser-downloads")).toMatchObject({
+			count: 1,
+			downloads: [
+				{
+					url: "https://downloads.example/whalehall.zip",
+					domain: "downloads.example",
+					targetPath: expect.stringContaining("whalehall.zip"),
+					receivedBytes: 1024,
+					totalBytes: 1024,
+					state: "complete",
+				},
+			],
+		});
+		const accessibilityOutput = toolOutput(messages, "accessibility-tree") as {
+			count: number;
+			snapshot: {
+				applicationName: string;
+				windowTitle: string;
+				nodeCount: number;
+			};
+			nodes: Array<{
+				nodeId: string;
+				role: string;
+				name: string;
+				value: string | null;
+				selected: boolean | null;
+				focused: boolean;
+				documentText: string | null;
+				protected: boolean;
+			}>;
+		};
+		expect(accessibilityOutput.count).toBe(7);
+		expect(accessibilityOutput.snapshot).toMatchObject({
+			applicationName: "WhaleHall Accessibility Probe",
+			windowTitle: "Accessibility Fixture",
+			nodeCount: 7,
+		});
+		expect(
+			accessibilityOutput.nodes.find((node) => node.role === "button"),
+		).toMatchObject({
+			name: "Save",
+		});
+		expect(
+			accessibilityOutput.nodes.find((node) => node.role === "menu"),
+		).toMatchObject({
+			name: "File",
+		});
+		expect(
+			accessibilityOutput.nodes.find((node) => node.nodeId === "title-input"),
+		).toMatchObject({
+			role: "textBox",
+			name: "Title",
+			value: "WhaleHall sensor draft",
+			focused: true,
+		});
+		expect(
+			accessibilityOutput.nodes.find((node) => node.nodeId === "selected-item"),
+		).toMatchObject({
+			name: "Second item",
+			selected: true,
+		});
+		expect(
+			accessibilityOutput.nodes.find((node) => node.role === "document"),
+		).toMatchObject({
+			documentText: "A bounded excerpt from the current document.",
+		});
+		expect(
+			accessibilityOutput.nodes.find((node) => node.protected),
+		).toMatchObject({
+			role: "passwordText",
+			value: null,
+			documentText: null,
+		});
+		expect(
+			messages.some(
+				(message) => "event" in message && message.event === "tool.started",
+			),
+		).toBe(true);
+		expect(
+			messages.some(
+				(message) => "event" in message && message.event === "tool.progress",
+			),
+		).toBe(true);
+		expect(toolOutput(messages, "progress")).toMatchObject({ waitedMs: 500 });
+		expect(
+			messages.some(
+				(message) => "event" in message && message.event === "tool.cancelled",
+			),
+		).toBe(true);
+		expect(
+			messages.find((message) => "id" in message && message.id === "cancel"),
+		).toMatchObject({
+			ok: true,
+			result: { callId: "wait", cancelled: true },
+		});
+		expect(
+			messages.find((message) => "id" in message && message.id === "wait"),
+		).toMatchObject({
+			ok: false,
+			error: { code: "CANCELLED" },
+		});
+		expect(existsSync(join(dataDirectory, "usage.sqlite3"))).toBe(true);
+		expect(existsSync(join(dataDirectory, "applications.sqlite3"))).toBe(true);
+		expect(existsSync(join(dataDirectory, "presence.sqlite3"))).toBe(true);
+		expect(existsSync(join(dataDirectory, "browser.sqlite3"))).toBe(true);
+		expect(existsSync(join(dataDirectory, "accessibility.sqlite3"))).toBe(true);
+		rmSync(dataDirectory, { recursive: true, force: true });
+	},
+	120_000,
+);
 
 function deferred() {
 	let resolve!: () => void;
@@ -1049,7 +1148,10 @@ function deferred() {
 	return { promise, resolve };
 }
 
-function expectation<const T extends string>(name: string, allowed: readonly T[]): T {
+function expectation<const T extends string>(
+	name: string,
+	allowed: readonly T[],
+): T {
 	const value = process.env[name] ?? allowed[0];
 	if (!allowed.includes(value as T)) {
 		throw new Error(`${name} must be one of: ${allowed.join(", ")}`);
@@ -1058,13 +1160,20 @@ function expectation<const T extends string>(name: string, allowed: readonly T[]
 }
 
 function toolOutput(messages: LocalMessage[], callId: string): unknown {
-	const response = messages.find((message) => "id" in message && message.id === callId);
+	const response = messages.find(
+		(message) => "id" in message && message.id === callId,
+	);
 	expect(response).toMatchObject({ ok: true, result: { callId } });
 	return successfulToolOutput(messages, callId);
 }
 
-function successfulToolOutput(messages: LocalMessage[], callId: string): unknown {
-	const response = messages.find((message) => "id" in message && message.id === callId);
+function successfulToolOutput(
+	messages: LocalMessage[],
+	callId: string,
+): unknown {
+	const response = messages.find(
+		(message) => "id" in message && message.id === callId,
+	);
 	if (!response || !("ok" in response) || !response.ok) {
 		throw new Error(`Missing successful sensor response for ${callId}`);
 	}
@@ -1115,7 +1224,11 @@ function browserSensorReady(output: unknown): boolean {
 		downloadCount: number;
 		lastTabScanAtMs: number | null;
 		lastHistoryScanAtMs: number | null;
-		capabilities: { currentTabs: boolean; history: boolean; downloads: boolean };
+		capabilities: {
+			currentTabs: boolean;
+			history: boolean;
+			downloads: boolean;
+		};
 	};
 	return (
 		status.state === "running" &&
@@ -1192,10 +1305,12 @@ function createBrowserFixture(dataDirectory: string): string {
 	const chromiumEpochOffsetMicroseconds = 11_644_473_600_000_000;
 	const visitTime = chromiumEpochOffsetMicroseconds + Date.now() * 1000;
 	database
-		.query(
-			"INSERT INTO urls VALUES (1, ?, ?, 3, ?)",
-		)
-		.run("https://search.example/?q=whalehall+sensor", "WhaleHall Search", visitTime);
+		.query("INSERT INTO urls VALUES (1, ?, ?, 3, ?)")
+		.run(
+			"https://search.example/?q=whalehall+sensor",
+			"WhaleHall Search",
+			visitTime,
+		);
 	database
 		.query("INSERT INTO downloads VALUES (7, '', '', ?, ?, ?, 1024, 1024, 1)")
 		.run(
@@ -1372,14 +1487,20 @@ async function withNativeRuntimeStartup(
 	await Promise.race([
 		ready,
 		exited.then((exitCode) => {
-			throw new Error(`Native runtime exited with code ${exitCode} while waiting for ${label}`);
+			throw new Error(
+				`Native runtime exited with code ${exitCode} while waiting for ${label}`,
+			);
 		}),
 		outputComplete.then(
 			() => {
-				throw new Error(`Native runtime closed stdout while waiting for ${label}`);
+				throw new Error(
+					`Native runtime closed stdout while waiting for ${label}`,
+				);
 			},
 			(error) => {
-				throw new Error(`Native runtime stdout failed while waiting for ${label}: ${String(error)}`);
+				throw new Error(
+					`Native runtime stdout failed while waiting for ${label}: ${String(error)}`,
+				);
 			},
 		),
 		Bun.sleep(timeoutMs).then(() => {

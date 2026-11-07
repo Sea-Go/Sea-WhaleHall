@@ -62,17 +62,4 @@ describe("pet activity feedback delivery gate", () => {
 		expect(clears).toBe(3);
 		expect(delivery.present(feedback)).toBe(false);
 	});
-
-
-
-
-
-
-
-
-
-
-
-
-
 });

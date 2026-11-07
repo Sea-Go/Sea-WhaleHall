@@ -20,15 +20,9 @@ type ActivityFeedbackClearListener = () => void;
 const activityFeedbackClearListeners = new Set<ActivityFeedbackClearListener>();
 type PetChatAvailabilityListener = (available: boolean) => void;
 const petChatAvailabilityListeners = new Set<PetChatAvailabilityListener>();
-type PetChatEventListener = (
-	requestId: string,
-	envelope: unknown,
-) => void;
+type PetChatEventListener = (requestId: string, envelope: unknown) => void;
 const petChatEventListeners = new Set<PetChatEventListener>();
-type PetChatRejectedListener = (
-	requestId: string,
-	message: string,
-) => void;
+type PetChatRejectedListener = (requestId: string, message: string) => void;
 const petChatRejectedListeners = new Set<PetChatRejectedListener>();
 type PetChatProactiveListener = (requestId: string) => void;
 const petChatProactiveListeners = new Set<PetChatProactiveListener>();
@@ -75,7 +69,8 @@ const rpc = Electroview.defineRPC<PetChatRPC>({
 				}
 			},
 			petChatAvailability: ({ available }) => {
-				for (const listener of petChatAvailabilityListeners) listener(available);
+				for (const listener of petChatAvailabilityListeners)
+					listener(available);
 			},
 			petChatEvent: ({ requestId, envelope }) => {
 				for (const listener of petChatEventListeners)

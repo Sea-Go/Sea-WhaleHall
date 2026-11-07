@@ -137,40 +137,6 @@ describe("ProactiveFeedbackRuntime", () => {
 		expect(fixture.calls.some((call) => call.startsWith("save:"))).toBeFalse();
 		fixture.runtime.dispose();
 	});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 });
 
 function createFixture(initial?: {

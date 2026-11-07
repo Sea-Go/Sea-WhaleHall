@@ -67,9 +67,4 @@ describe("activity reflection provider wire shape", () => {
 			"array",
 		);
 	});
-
-
-
-
-
 });

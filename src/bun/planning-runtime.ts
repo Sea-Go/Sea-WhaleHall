@@ -4,7 +4,6 @@ import {
 	localDateAt,
 	NativePlanningCalendar,
 	NativePlanningRepository,
-	sumObservationMinutesByTask,
 	type PlanningModelPort,
 	type PlanningObservationPort,
 	type PlanningObservationQuery,
@@ -13,6 +12,7 @@ import {
 	PlanningRuntime,
 	projectTimelinePlanningObservation,
 	scheduledTaskIntervals,
+	sumObservationMinutesByTask,
 } from "../agent/planning";
 import type { AgentInputV1 } from "../agent/timeline/types";
 import type {
@@ -242,10 +242,7 @@ export class WhaleHallPlanningRuntime {
 				this.pendingReplanCauses.delete(planId);
 				try {
 					const plan = await this.runtime.getPlan(planId).catch(() => null);
-					if (
-						!plan ||
-						(plan.status !== "active" && plan.status !== "paused")
-					) {
+					if (!plan || (plan.status !== "active" && plan.status !== "paused")) {
 						continue;
 					}
 					const changed = await this.runtime.notifyCalendarChanged({
@@ -266,7 +263,10 @@ export class WhaleHallPlanningRuntime {
 		} finally {
 			this.replanRunning = false;
 			// 去抖窗口内又有变更：再排一轮。
-			if (this.pendingReplanPlanIds.size > 0 && this.pendingReplanTimer === null) {
+			if (
+				this.pendingReplanPlanIds.size > 0 &&
+				this.pendingReplanTimer === null
+			) {
 				this.pendingReplanTimer = setTimeout(() => {
 					this.pendingReplanTimer = null;
 					void this.runPendingReplans();
@@ -485,9 +485,7 @@ export class WhaleHallPlanningRuntime {
 					{
 						relevance: override ?? task.relevance ?? null,
 						reason:
-							override !== null
-								? "用户改判"
-								: (task.relevanceReason ?? null),
+							override !== null ? "用户改判" : (task.relevanceReason ?? null),
 					},
 				];
 			}),
@@ -575,9 +573,7 @@ export class WhaleHallPlanningRuntime {
 						? "当前 7 天容量或日历冲突不足，任务暂未排程。"
 						: null,
 					relevance:
-						relevanceOverrideById.get(task.taskId) ??
-						task.relevance ??
-						null,
+						relevanceOverrideById.get(task.taskId) ?? task.relevance ?? null,
 					relevanceReason:
 						relevanceOverrideById.get(task.taskId) !== null
 							? "用户改判"

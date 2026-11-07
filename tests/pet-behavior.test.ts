@@ -40,9 +40,3 @@ test("prioritizes birthday, holiday, weather, and temperature signals", () => {
 	expect(environmentActionFor({ temperatureC: 2 }, now)).toBe("winterShiver");
 	expect(environmentActionFor({ temperatureC: 35 }, now)).toBe("summerFan");
 });
-
-
-
-
-
-

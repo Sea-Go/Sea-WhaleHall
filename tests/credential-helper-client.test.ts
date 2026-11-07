@@ -70,8 +70,6 @@ describe("CredentialHelperClient", () => {
 			secretBytes: encoder.encode(secret).byteLength,
 		});
 	});
-
-
 });
 
 function createClient(runner: CredentialHelperRunner): CredentialHelperClient {

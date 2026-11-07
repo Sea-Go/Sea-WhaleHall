@@ -973,11 +973,12 @@ function isLocalPlanningOutboxPayload(
 			isPositiveSafeInteger(payload.mutationCount) &&
 			Array.isArray(payload.mutationKinds) &&
 			payload.mutationKinds.length <= 10_000 &&
-			payload.mutationKinds.every((kind) =>
-				kind === "create" ||
-				kind === "update" ||
-				kind === "delete" ||
-				kind === "restore",
+			payload.mutationKinds.every(
+				(kind) =>
+					kind === "create" ||
+					kind === "update" ||
+					kind === "delete" ||
+					kind === "restore",
 			) &&
 			Array.isArray(payload.planIds) &&
 			payload.planIds.length <= 10_000 &&

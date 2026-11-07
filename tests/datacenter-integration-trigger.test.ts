@@ -23,8 +23,7 @@ const scriptPath = join(
 );
 const temporaryDirectories: string[] = [];
 const shellTestTimeoutMs = 15_000;
-const canonicalRepositoryUrl =
-	"https://github.com/Sea-Go/Sea-WhaleHall.git";
+const canonicalRepositoryUrl = "https://github.com/Sea-Go/Sea-WhaleHall.git";
 const dataCenterCiRepositoryUrl =
 	"file:///srv/datacenter-ci-sources/Sea-WhaleHall.git";
 
@@ -47,9 +46,7 @@ describe("DataCenter integration trigger", () => {
 			"utf8",
 		);
 
-		expect(workflow).not.toContain(
-			"DATACENTER_WHALEHALL_REPOSITORY_URL",
-		);
+		expect(workflow).not.toContain("DATACENTER_WHALEHALL_REPOSITORY_URL");
 	});
 
 	fullTest(
@@ -62,15 +59,6 @@ describe("DataCenter integration trigger", () => {
 		},
 		shellTestTimeoutMs,
 	);
-
-
-
-
-
-
-
-
-
 });
 
 async function runTrigger(

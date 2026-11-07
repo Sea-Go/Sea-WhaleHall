@@ -210,13 +210,6 @@ test("显式 v2 的 list、detail、citations 同路由，旧 turn 仅交付安�
 	expect("quote" in (detail.citations[0] ?? {})).toBe(false);
 });
 
-
-
-
-
-
-
-
 function turnWithSubject(owner: object): string {
 	const original = JSON.parse(turn);
 	original.Request.Subject = owner;
@@ -236,11 +229,3 @@ function historyClientFor(record: object) {
 			: json({ items: [record], next_ordinal: 0 }),
 	).client;
 }
-
-
-
-
-
-
-
-

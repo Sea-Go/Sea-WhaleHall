@@ -32,9 +32,9 @@ import type {
 	LocalVaultSealBatch,
 	LocalVaultSealBatchResult,
 } from "../src/agent/local-protocol";
-import {
+import type {
 	LocalClientError,
-	type LocalToolProcess,
+	LocalToolProcess,
 } from "../src/agent/local-tool-client";
 import type { DesktopEventV1 } from "../src/agent/reflection/types";
 import type { SemanticEventV2 } from "../src/agent/timeline/types";
@@ -419,21 +419,6 @@ describe("AgentRuntime", () => {
 		expect(local.isRunning).toBe(false);
 		expect(runtime.getLocalStatus().state).toBe("stopped");
 	});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 });
 
 function desktopEvent(): DesktopEventV1 {

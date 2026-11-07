@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseLocalMessage } from "../src/agent/local-protocol";
-import {
-	isSemanticEventV2,
-	type SemanticEventV2,
-} from "../src/agent/timeline";
+import { isSemanticEventV2, type SemanticEventV2 } from "../src/agent/timeline";
 
 function semanticEvent(): SemanticEventV2 {
 	return {
@@ -131,9 +128,4 @@ describe("semantic-event.v2 protocol mirror", () => {
 			}),
 		).toBeFalse();
 	});
-
-
-
-
-
 });

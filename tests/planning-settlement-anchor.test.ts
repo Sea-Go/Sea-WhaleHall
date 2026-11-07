@@ -54,12 +54,12 @@ describe("dailySettlementDue", () => {
 	});
 
 	test("at or after the anchor the settlement is due", () => {
-		expect(dailySettlementDue(Date.UTC(2026, 5, 1, 21, 30), "UTC", "21:30")).toBe(
-			true,
-		);
-		expect(dailySettlementDue(Date.UTC(2026, 5, 1, 23, 45), "UTC", "21:30")).toBe(
-			true,
-		);
+		expect(
+			dailySettlementDue(Date.UTC(2026, 5, 1, 21, 30), "UTC", "21:30"),
+		).toBe(true);
+		expect(
+			dailySettlementDue(Date.UTC(2026, 5, 1, 23, 45), "UTC", "21:30"),
+		).toBe(true);
 	});
 
 	test("anchor is interpreted in the plan's own time zone", () => {

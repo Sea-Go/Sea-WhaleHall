@@ -169,9 +169,4 @@ describe("Mastra cloud search tools", () => {
 		).rejects.toMatchObject({ code: "BAD_EVIDENCE" });
 		expect(session.remainingBudget().searchCalls).toBe(0);
 	});
-
-
-
-
-
 });

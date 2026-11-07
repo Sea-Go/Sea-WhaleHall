@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import type { PlanMemoryHints } from "../src/agent/planning/plan-memory";
 import {
 	deriveRelevanceHints,
 	type RelevanceSignalTaskInput,
 } from "../src/agent/planning/relevance-signal";
-import type { PlanMemoryHints } from "../src/agent/planning/plan-memory";
 
 function taskInput(
 	overrides: Partial<RelevanceSignalTaskInput> & { taskId: string },
@@ -52,25 +52,19 @@ describe("deriveRelevanceHints", () => {
 	});
 
 	test("high weak-skip rate with enough calibration samples demotes to weak", () => {
-		const result = deriveRelevanceHints(
-			[taskInput({ taskId: "a" })],
-			{
-				memoryHints: { ...hints, weakSkipRate: 0.6, calibrationSamples: 10 },
-				sessionMinutes: null,
-			},
-		);
+		const result = deriveRelevanceHints([taskInput({ taskId: "a" })], {
+			memoryHints: { ...hints, weakSkipRate: 0.6, calibrationSamples: 10 },
+			sessionMinutes: null,
+		});
 		expect(result[0]!.suggested).toBe("weak");
 		expect(result[0]!.reason).toContain("舍弃率 60%");
 	});
 
 	test("weak-skip demotion requires a minimum calibration sample size", () => {
-		const result = deriveRelevanceHints(
-			[taskInput({ taskId: "a" })],
-			{
-				memoryHints: { ...hints, weakSkipRate: 0.9, calibrationSamples: 3 },
-				sessionMinutes: null,
-			},
-		);
+		const result = deriveRelevanceHints([taskInput({ taskId: "a" })], {
+			memoryHints: { ...hints, weakSkipRate: 0.9, calibrationSamples: 3 },
+			sessionMinutes: null,
+		});
 		expect(result[0]!.suggested).toBe("strong");
 		expect(result[0]!.reason).toBe("无确定性信号，沿用基线分级");
 	});
@@ -96,7 +90,11 @@ describe("deriveRelevanceHints", () => {
 		const result = deriveRelevanceHints(
 			[
 				taskInput({ taskId: "a", baseRelevance: "weak" }),
-				taskInput({ taskId: "b", dependencyTaskIds: ["a"], status: "completed" }),
+				taskInput({
+					taskId: "b",
+					dependencyTaskIds: ["a"],
+					status: "completed",
+				}),
 			],
 			{ memoryHints: null, sessionMinutes: null },
 		);

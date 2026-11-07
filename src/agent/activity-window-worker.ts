@@ -1285,10 +1285,7 @@ export class ActivityWindowDeliveryStore {
 		const run = boundedString(runId, "runId", MAXIMUM_RUN_ID_LENGTH);
 		const error = boundedString(errorCode, "errorCode", 80);
 		const threshold = validScoreThreshold(scoreThreshold);
-		const abandonedAt = nonNegativeSafeInteger(
-			abandonedAtMs,
-			"abandonedAtMs",
-		);
+		const abandonedAt = nonNegativeSafeInteger(abandonedAtMs, "abandonedAtMs");
 		if (this.stateRow().owner_account_id !== account) {
 			throw new Error("Activity analysis job belongs to another account.");
 		}

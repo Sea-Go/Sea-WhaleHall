@@ -105,7 +105,4 @@ describe("desktop pet pointer state machine", () => {
 		expect(pressing.events.map(({ kind }) => kind)).toEqual(["hoverEnd"]);
 		expect(pressing.internals.activePointerId).toBeNull();
 	});
-
-
-
 });

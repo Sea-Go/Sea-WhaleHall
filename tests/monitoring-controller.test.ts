@@ -150,9 +150,4 @@ describe("MonitoringController", () => {
 			snapshot: { state: "running" },
 		});
 	});
-
-
-
-
-
 });

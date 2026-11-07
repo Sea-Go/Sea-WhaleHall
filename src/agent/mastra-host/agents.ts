@@ -1,14 +1,11 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { Agent } from "@mastra/core/agent";
-import type { Tool } from "@mastra/core/tools";
 import { Mastra } from "@mastra/core/mastra";
+import type { Tool } from "@mastra/core/tools";
 import { Memory } from "@mastra/memory";
-import {
-	ACTIVITY_REFLECTION_SYSTEM_PROMPT,
-} from "../activity-reflection-prompt";
+import { ACTIVITY_REFLECTION_SYSTEM_PROMPT } from "../activity-reflection-prompt";
 import { PLANNING_MODEL_SYSTEM_PROMPT } from "../planning/model";
 import { activityReflectionNativeSkillPaths } from "./activity-reflection-skills";
-import { gatewayResearchTools } from "./cloud-tools/gateway-research-tools";
 import {
 	type ActivityReflectionWorkflow,
 	type ActivityReflectionWorkflowDriver,
@@ -19,6 +16,7 @@ import {
 	ACTIVITY_SUPPORT_SUPERVISOR_INSTRUCTIONS,
 	ACTIVITY_SUPPORT_VOICE_INSTRUCTIONS,
 } from "./activity-support-team";
+import { gatewayResearchTools } from "./cloud-tools/gateway-research-tools";
 import type { HostMastraStorage } from "./mastra-storage";
 import {
 	ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS,

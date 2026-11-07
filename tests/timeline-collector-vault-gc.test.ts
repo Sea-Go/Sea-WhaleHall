@@ -1,8 +1,8 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database } from "bun:sqlite";
 import {
 	SqliteTimelineV2Repository,
 	TimelineCollectorRevisionConflictError,
@@ -135,9 +135,8 @@ class FailFirstConcurrentCandidateVault extends ExactMemoryVault {
 		if (
 			!this.failed &&
 			request.purpose === "timeline.collector.v2" &&
-			(
-				JSON.parse(request.plaintext) as TimelineCollectorSnapshotV2
-			).materializedCursor === "same-concurrent-candidate"
+			(JSON.parse(request.plaintext) as TimelineCollectorSnapshotV2)
+				.materializedCursor === "same-concurrent-candidate"
 		) {
 			this.failed = true;
 			// Keep the first preparation live long enough for the identical caller to
@@ -216,7 +215,9 @@ describe("Timeline v2 collector vault garbage collection", () => {
 					0,
 				),
 		).toBeGreaterThan(1024 * 1024);
-		expect(await repository.loadCollector(current.collectorId)).toEqual(current);
+		expect(await repository.loadCollector(current.collectorId)).toEqual(
+			current,
+		);
 
 		const database = new Database(path, { readonly: true });
 		expect(
@@ -278,9 +279,4 @@ describe("Timeline v2 collector vault garbage collection", () => {
 		]);
 		repository.close();
 	});
-
-
-
-
-
 });

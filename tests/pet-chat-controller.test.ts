@@ -16,7 +16,9 @@ function harness() {
 			sent.cancel.push(input);
 		},
 		reportState: (state) => {
-			sent.states.push(`${state.kind}${state.detail ? `:${state.detail}` : ""}`);
+			sent.states.push(
+				`${state.kind}${state.detail ? `:${state.detail}` : ""}`,
+			);
 		},
 	};
 	const controller = new PetChatController(port);
@@ -90,8 +92,4 @@ describe("PetChatController", () => {
 			origin: "proactive",
 		});
 	});
-
-
-
-
 });

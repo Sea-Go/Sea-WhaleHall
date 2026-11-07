@@ -21,6 +21,4 @@ describe("native runtime security channel", () => {
 			);
 		},
 	);
-
-
 });

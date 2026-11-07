@@ -395,378 +395,413 @@ function plaintext(snapshot: LocalPlanningPlanSnapshot): string {
 }
 
 describe("NativePlanningRepository encrypted persistence", () => {
-	fullTest("writes only safe indexes and restores the full plan through the vault", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const repository = new NativePlanningRepository(agent);
-		const plan = activePlan();
-
-		const written = await repository.createPlan(plan, "native-create-secure");
-		expect(written.plan).toEqual(plan);
-		const snapshot = agent.storedPlan(plan.id);
-		const raw = plaintext(snapshot);
-		expect(snapshot.goal).toBeNull();
-		expect(snapshot.sealedContentRef).toBeString();
-		expect(snapshot.runtimePayload).toMatchObject({
-			schemaVersion: "planning.runtime.reference.v1",
-			namespace: "planning.runtime.v1",
-			manifestSchemaVersion: "planning.runtime.manifest.v1",
-			manifestRecordId: expect.stringMatching(/^planning-manifest-/),
-		});
-		for (const secret of [
-			plan.goal,
-			plan.messages[0]?.content,
-			plan.tasks[0]?.title,
-			plan.tasks[0]?.description,
-			plan.estimates[0]?.basis,
-			plan.revisions[0]?.rationaleSummary,
-		]) {
-			expect(raw).not.toContain(secret ?? "missing-secret");
-		}
-		expect(snapshot.conversation).toEqual([]);
-		expect(snapshot.estimateSnapshots).toEqual([]);
-		expect(snapshot.tasks).toEqual([
-			expect.objectContaining({ title: "sealed", description: "" }),
-		]);
-		expect(snapshot.currentEstimate).toMatchObject({
-			basis: "sealed",
-			modelVersion: "sealed",
-		});
-		expect(
-			agent.sealBatches.every(
-				(batch) => batch.namespace === "planning.runtime.v1",
-			),
-		).toBeTrue();
-		expect(
-			agent.openBatches.every(
-				(batch) => batch.namespace === "planning.runtime.v1",
-			),
-		).toBeTrue();
-		expect(await repository.getPlan(plan.id)).toEqual(plan);
-	});
-
-	fullTest("supports a near-8 MiB plan with encrypted manifest and bounded chunks", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const repository = new NativePlanningRepository(agent);
-		const plan = largePlan(8 * 1024 * 1024 - 16 * 1024);
-		const bytes = Buffer.byteLength(JSON.stringify(plan), "utf8");
-		expect(bytes).toBeGreaterThan(7.9 * 1024 * 1024);
-		expect(bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
-
-		await expect(
-			repository.createPlan(plan, "native-create-large"),
-		).resolves.toMatchObject({
-			plan,
-		});
-		const chunkBatches = agent.sealBatches.filter(
-			(batch) =>
-				batch.records[0]?.schemaVersion === "planning.runtime.chunk.v1",
-		);
-		expect(chunkBatches).toHaveLength(Math.ceil(bytes / (360 * 1024)));
-		expect(
-			agent.sealBatches.every((batch) => batch.records.length === 1),
-		).toBeTrue();
-		for (const batch of agent.sealBatches) {
-			const size = Buffer.byteLength(
-				JSON.stringify(batch.records[0]?.content),
-				"utf8",
-			);
-			expect(size).toBeLessThanOrEqual(512 * 1024);
-			expect(size).toBeLessThanOrEqual(768 * 1024);
-		}
-		expect(await repository.getPlan(plan.id)).toEqual(plan);
-	}, 60_000);
-
-	fullTest("rejects payloads above 8 MiB before writing SQLite", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const repository = new NativePlanningRepository(agent);
-		const plan = largePlan(8 * 1024 * 1024 + 128 * 1024);
-		expect(Buffer.byteLength(JSON.stringify(plan), "utf8")).toBeGreaterThan(
-			8 * 1024 * 1024,
-		);
-		await expect(
-			repository.createPlan(plan, "native-create-oversize"),
-		).rejects.toMatchObject({
-			name: "PlanningVaultPersistenceError",
-			code: "payload-too-large",
-		});
-		expect(agent.sealBatches).toEqual([]);
-	}, 60_000);
-
-	fullTest("rejects identifiers that native SQLite cannot index before sealing", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const repository = new NativePlanningRepository(agent);
-		await expect(
-			repository.createPlan(activePlan(), "operation with spaces"),
-		).rejects.toMatchObject({
-			name: "PlanningVaultPersistenceError",
-			code: "invalid-reference",
-		});
-		expect(agent.sealBatches).toEqual([]);
-	});
-
-	fullTest("strictly rejects reference, schema, identity, manifest, and ref mismatches", async () => {
-		const cases: Array<{
-			name: string;
-			mutate(
-				agent: FakeNativePlanningAgent,
-				snapshot: LocalPlanningPlanSnapshot,
-			): void;
-		}> = [
-			{
-				name: "namespace",
-				mutate(agent, snapshot) {
-					agent.replaceStoredPlan({
-						...snapshot,
-						runtimePayload: {
-							...(snapshot.runtimePayload as Record<string, unknown>),
-							namespace: "planning.runtime.other",
-						},
-					});
-				},
-			},
-			{
-				name: "schema",
-				mutate(agent, snapshot) {
-					agent.replaceStoredPlan({
-						...snapshot,
-						runtimePayload: {
-							...(snapshot.runtimePayload as Record<string, unknown>),
-							schemaVersion: "planning.runtime.reference.v0",
-						},
-					});
-				},
-			},
-			{
-				name: "plan identity",
-				mutate(agent, snapshot) {
-					agent.mutateVaultContent(
-						String(snapshot.sealedContentRef),
-						(content) => ({
-							...(content as Record<string, unknown>),
-							planId: "plan-wrong",
-						}),
-					);
-				},
-			},
-			{
-				name: "version identity",
-				mutate(agent, snapshot) {
-					agent.mutateVaultContent(
-						String(snapshot.sealedContentRef),
-						(content) => ({
-							...(content as Record<string, unknown>),
-							planVersion: 999,
-						}),
-					);
-				},
-			},
-			{
-				name: "manifest shape",
-				mutate(agent, snapshot) {
-					agent.mutateVaultContent(
-						String(snapshot.sealedContentRef),
-						(content) => ({
-							...(content as Record<string, unknown>),
-							chunks: [],
-						}),
-					);
-				},
-			},
-			{
-				name: "content reference",
-				mutate(agent) {
-					agent.mutateNextOpen((record) => ({
-						...record,
-						contentRef: `wrong.${record.contentRef}`,
-					}));
-				},
-			},
-		];
-
-		for (const testCase of cases) {
+	fullTest(
+		"writes only safe indexes and restores the full plan through the vault",
+		async () => {
 			const agent = new FakeNativePlanningAgent();
 			const repository = new NativePlanningRepository(agent);
 			const plan = activePlan();
-			await repository.createPlan(
-				plan,
-				`strict-${testCase.name.replaceAll(" ", "-")}`,
-			);
+
+			const written = await repository.createPlan(plan, "native-create-secure");
+			expect(written.plan).toEqual(plan);
 			const snapshot = agent.storedPlan(plan.id);
-			testCase.mutate(agent, snapshot);
+			const raw = plaintext(snapshot);
+			expect(snapshot.goal).toBeNull();
+			expect(snapshot.sealedContentRef).toBeString();
+			expect(snapshot.runtimePayload).toMatchObject({
+				schemaVersion: "planning.runtime.reference.v1",
+				namespace: "planning.runtime.v1",
+				manifestSchemaVersion: "planning.runtime.manifest.v1",
+				manifestRecordId: expect.stringMatching(/^planning-manifest-/),
+			});
+			for (const secret of [
+				plan.goal,
+				plan.messages[0]?.content,
+				plan.tasks[0]?.title,
+				plan.tasks[0]?.description,
+				plan.estimates[0]?.basis,
+				plan.revisions[0]?.rationaleSummary,
+			]) {
+				expect(raw).not.toContain(secret ?? "missing-secret");
+			}
+			expect(snapshot.conversation).toEqual([]);
+			expect(snapshot.estimateSnapshots).toEqual([]);
+			expect(snapshot.tasks).toEqual([
+				expect.objectContaining({ title: "sealed", description: "" }),
+			]);
+			expect(snapshot.currentEstimate).toMatchObject({
+				basis: "sealed",
+				modelVersion: "sealed",
+			});
+			expect(
+				agent.sealBatches.every(
+					(batch) => batch.namespace === "planning.runtime.v1",
+				),
+			).toBeTrue();
+			expect(
+				agent.openBatches.every(
+					(batch) => batch.namespace === "planning.runtime.v1",
+				),
+			).toBeTrue();
+			expect(await repository.getPlan(plan.id)).toEqual(plan);
+		},
+	);
+
+	fullTest(
+		"supports a near-8 MiB plan with encrypted manifest and bounded chunks",
+		async () => {
+			const agent = new FakeNativePlanningAgent();
+			const repository = new NativePlanningRepository(agent);
+			const plan = largePlan(8 * 1024 * 1024 - 16 * 1024);
+			const bytes = Buffer.byteLength(JSON.stringify(plan), "utf8");
+			expect(bytes).toBeGreaterThan(7.9 * 1024 * 1024);
+			expect(bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+
+			await expect(
+				repository.createPlan(plan, "native-create-large"),
+			).resolves.toMatchObject({
+				plan,
+			});
+			const chunkBatches = agent.sealBatches.filter(
+				(batch) =>
+					batch.records[0]?.schemaVersion === "planning.runtime.chunk.v1",
+			);
+			expect(chunkBatches).toHaveLength(Math.ceil(bytes / (360 * 1024)));
+			expect(
+				agent.sealBatches.every((batch) => batch.records.length === 1),
+			).toBeTrue();
+			for (const batch of agent.sealBatches) {
+				const size = Buffer.byteLength(
+					JSON.stringify(batch.records[0]?.content),
+					"utf8",
+				);
+				expect(size).toBeLessThanOrEqual(512 * 1024);
+				expect(size).toBeLessThanOrEqual(768 * 1024);
+			}
+			expect(await repository.getPlan(plan.id)).toEqual(plan);
+		},
+		60_000,
+	);
+
+	fullTest(
+		"rejects payloads above 8 MiB before writing SQLite",
+		async () => {
+			const agent = new FakeNativePlanningAgent();
+			const repository = new NativePlanningRepository(agent);
+			const plan = largePlan(8 * 1024 * 1024 + 128 * 1024);
+			expect(Buffer.byteLength(JSON.stringify(plan), "utf8")).toBeGreaterThan(
+				8 * 1024 * 1024,
+			);
+			await expect(
+				repository.createPlan(plan, "native-create-oversize"),
+			).rejects.toMatchObject({
+				name: "PlanningVaultPersistenceError",
+				code: "payload-too-large",
+			});
+			expect(agent.sealBatches).toEqual([]);
+		},
+		60_000,
+	);
+
+	fullTest(
+		"rejects identifiers that native SQLite cannot index before sealing",
+		async () => {
+			const agent = new FakeNativePlanningAgent();
+			const repository = new NativePlanningRepository(agent);
+			await expect(
+				repository.createPlan(activePlan(), "operation with spaces"),
+			).rejects.toMatchObject({
+				name: "PlanningVaultPersistenceError",
+				code: "invalid-reference",
+			});
+			expect(agent.sealBatches).toEqual([]);
+		},
+	);
+
+	fullTest(
+		"strictly rejects reference, schema, identity, manifest, and ref mismatches",
+		async () => {
+			const cases: Array<{
+				name: string;
+				mutate(
+					agent: FakeNativePlanningAgent,
+					snapshot: LocalPlanningPlanSnapshot,
+				): void;
+			}> = [
+				{
+					name: "namespace",
+					mutate(agent, snapshot) {
+						agent.replaceStoredPlan({
+							...snapshot,
+							runtimePayload: {
+								...(snapshot.runtimePayload as Record<string, unknown>),
+								namespace: "planning.runtime.other",
+							},
+						});
+					},
+				},
+				{
+					name: "schema",
+					mutate(agent, snapshot) {
+						agent.replaceStoredPlan({
+							...snapshot,
+							runtimePayload: {
+								...(snapshot.runtimePayload as Record<string, unknown>),
+								schemaVersion: "planning.runtime.reference.v0",
+							},
+						});
+					},
+				},
+				{
+					name: "plan identity",
+					mutate(agent, snapshot) {
+						agent.mutateVaultContent(
+							String(snapshot.sealedContentRef),
+							(content) => ({
+								...(content as Record<string, unknown>),
+								planId: "plan-wrong",
+							}),
+						);
+					},
+				},
+				{
+					name: "version identity",
+					mutate(agent, snapshot) {
+						agent.mutateVaultContent(
+							String(snapshot.sealedContentRef),
+							(content) => ({
+								...(content as Record<string, unknown>),
+								planVersion: 999,
+							}),
+						);
+					},
+				},
+				{
+					name: "manifest shape",
+					mutate(agent, snapshot) {
+						agent.mutateVaultContent(
+							String(snapshot.sealedContentRef),
+							(content) => ({
+								...(content as Record<string, unknown>),
+								chunks: [],
+							}),
+						);
+					},
+				},
+				{
+					name: "content reference",
+					mutate(agent) {
+						agent.mutateNextOpen((record) => ({
+							...record,
+							contentRef: `wrong.${record.contentRef}`,
+						}));
+					},
+				},
+			];
+
+			for (const testCase of cases) {
+				const agent = new FakeNativePlanningAgent();
+				const repository = new NativePlanningRepository(agent);
+				const plan = activePlan();
+				await repository.createPlan(
+					plan,
+					`strict-${testCase.name.replaceAll(" ", "-")}`,
+				);
+				const snapshot = agent.storedPlan(plan.id);
+				testCase.mutate(agent, snapshot);
+				await expect(repository.getPlan(plan.id)).rejects.toBeInstanceOf(
+					PlanningVaultPersistenceError,
+				);
+			}
+		},
+	);
+
+	fullTest(
+		"reads a legacy plaintext payload only for migration and seals the next write",
+		async () => {
+			const agent = new FakeNativePlanningAgent();
+			const repository = new NativePlanningRepository(agent);
+			const legacy = activePlan();
+			agent.seedPlan({
+				schemaVersion: "planning.v1",
+				planId: legacy.id,
+				version: legacy.version,
+				goal: legacy.goal,
+				runtimePayload: structuredClone(legacy),
+			});
+			expect(await repository.getPlan(legacy.id)).toEqual(legacy);
+			expect(agent.openBatches).toEqual([]);
+
+			const migrated = {
+				...legacy,
+				version: legacy.version + 1,
+				updatedAt: "2026-08-13T02:06:00Z",
+			};
+			await repository.savePlan(migrated, {
+				operationId: "migrate-legacy-plan",
+				expectedVersion: legacy.version,
+			});
+			const snapshot = agent.storedPlan(legacy.id);
+			expect(snapshot.sealedContentRef).toBeString();
+			expect(plaintext(snapshot)).not.toContain(legacy.goal);
+			expect(await repository.getPlan(legacy.id)).toEqual(migrated);
+		},
+	);
+
+	fullTest(
+		"preserves the native actual version in optimistic conflicts",
+		async () => {
+			const agent = new FakeNativePlanningAgent();
+			const repository = new NativePlanningRepository(agent);
+			const plan = activePlan();
+			await repository.createPlan(plan, "native-create-before-stale");
+			const changed = {
+				...plan,
+				version: plan.version + 1,
+				updatedAt: "2026-08-13T02:06:00Z",
+			};
+			try {
+				await repository.savePlan(changed, {
+					operationId: "native-stale-save",
+					expectedVersion: plan.version - 1,
+				});
+				throw new Error("Expected a native planning version conflict.");
+			} catch (error) {
+				expect(error).toBeInstanceOf(PlanVersionConflictError);
+				expect(error).toMatchObject({
+					expectedVersion: plan.version - 1,
+					actualVersion: plan.version,
+				});
+			}
+		},
+	);
+
+	fullTest(
+		"never downgrades a broken sealed snapshot to its plaintext runtime payload",
+		async () => {
+			const agent = new FakeNativePlanningAgent();
+			const repository = new NativePlanningRepository(agent);
+			const plan = activePlan();
+			agent.seedPlan({
+				schemaVersion: "planning.v1",
+				planId: plan.id,
+				version: plan.version,
+				sealedContentRef: "missing.sealed.reference",
+				runtimePayload: structuredClone(plan),
+			});
 			await expect(repository.getPlan(plan.id)).rejects.toBeInstanceOf(
 				PlanningVaultPersistenceError,
 			);
-		}
-	});
+		},
+	);
 
-	fullTest("reads a legacy plaintext payload only for migration and seals the next write", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const repository = new NativePlanningRepository(agent);
-		const legacy = activePlan();
-		agent.seedPlan({
-			schemaVersion: "planning.v1",
-			planId: legacy.id,
-			version: legacy.version,
-			goal: legacy.goal,
-			runtimePayload: structuredClone(legacy),
-		});
-		expect(await repository.getPlan(legacy.id)).toEqual(legacy);
-		expect(agent.openBatches).toEqual([]);
-
-		const migrated = {
-			...legacy,
-			version: legacy.version + 1,
-			updatedAt: "2026-08-13T02:06:00Z",
-		};
-		await repository.savePlan(migrated, {
-			operationId: "migrate-legacy-plan",
-			expectedVersion: legacy.version,
-		});
-		const snapshot = agent.storedPlan(legacy.id);
-		expect(snapshot.sealedContentRef).toBeString();
-		expect(plaintext(snapshot)).not.toContain(legacy.goal);
-		expect(await repository.getPlan(legacy.id)).toEqual(migrated);
-	});
-
-	fullTest("preserves the native actual version in optimistic conflicts", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const repository = new NativePlanningRepository(agent);
-		const plan = activePlan();
-		await repository.createPlan(plan, "native-create-before-stale");
-		const changed = {
-			...plan,
-			version: plan.version + 1,
-			updatedAt: "2026-08-13T02:06:00Z",
-		};
-		try {
-			await repository.savePlan(changed, {
-				operationId: "native-stale-save",
-				expectedVersion: plan.version - 1,
-			});
-			throw new Error("Expected a native planning version conflict.");
-		} catch (error) {
-			expect(error).toBeInstanceOf(PlanVersionConflictError);
-			expect(error).toMatchObject({
-				expectedVersion: plan.version - 1,
-				actualVersion: plan.version,
-			});
-		}
-	});
-
-	fullTest("never downgrades a broken sealed snapshot to its plaintext runtime payload", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const repository = new NativePlanningRepository(agent);
-		const plan = activePlan();
-		agent.seedPlan({
-			schemaVersion: "planning.v1",
-			planId: plan.id,
-			version: plan.version,
-			sealedContentRef: "missing.sealed.reference",
-			runtimePayload: structuredClone(plan),
-		});
-		await expect(repository.getPlan(plan.id)).rejects.toBeInstanceOf(
-			PlanningVaultPersistenceError,
-		);
-	});
-
-	fullTest("binds vault record IDs to operation and rejects same-operation content reuse", async () => {
-		const firstAgent = new FakeNativePlanningAgent();
-		const secondAgent = new FakeNativePlanningAgent();
-		const plan = activePlan();
-		await new NativePlanningRepository(firstAgent).createPlan(
-			plan,
-			"operation-a",
-		);
-		await new NativePlanningRepository(secondAgent).createPlan(
-			plan,
-			"operation-b",
-		);
-		const firstReference = firstAgent.storedPlan(plan.id)
-			.runtimePayload as Record<string, unknown>;
-		const secondReference = secondAgent.storedPlan(plan.id)
-			.runtimePayload as Record<string, unknown>;
-		expect(firstReference.manifestRecordId).not.toBe(
-			secondReference.manifestRecordId,
-		);
-
-		const changed = { ...plan, goal: "同版本但不同的机密目标" };
-		await expect(
-			new NativePlanningRepository(firstAgent).createPlan(
-				changed,
+	fullTest(
+		"binds vault record IDs to operation and rejects same-operation content reuse",
+		async () => {
+			const firstAgent = new FakeNativePlanningAgent();
+			const secondAgent = new FakeNativePlanningAgent();
+			const plan = activePlan();
+			await new NativePlanningRepository(firstAgent).createPlan(
+				plan,
 				"operation-a",
-			),
-		).rejects.toThrow("fake vault record conflict");
-	});
+			);
+			await new NativePlanningRepository(secondAgent).createPlan(
+				plan,
+				"operation-b",
+			);
+			const firstReference = firstAgent.storedPlan(plan.id)
+				.runtimePayload as Record<string, unknown>;
+			const secondReference = secondAgent.storedPlan(plan.id)
+				.runtimePayload as Record<string, unknown>;
+			expect(firstReference.manifestRecordId).not.toBe(
+				secondReference.manifestRecordId,
+			);
 
-	fullTest("redacts model calendar titles before native persistence", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const calendar = new NativePlanningCalendar(agent);
-		const changeSet: CalendarChangeSet = {
-			id: "calendar-change-secure",
-			planId: "plan-secure-1",
-			operationId: "calendar-operation-secure",
-			createdAt: "2026-08-13T02:05:00Z",
-			changes: [
-				{
-					kind: "create",
-					eventId: "calendar-event-secure",
-					expectedVersion: null,
-					before: null,
-					after: {
-						id: "calendar-event-secure",
-						title: "机密任务标题绝不能进入 calendar_events",
-						kind: "plan",
-						state: "committed",
-						start: "2026-08-14T01:00:00Z",
-						end: "2026-08-14T02:00:00Z",
-						timeZone: "Asia/Shanghai",
-						planId: "plan-secure-1",
-						sourceTaskId: "task-secure-1",
-						scheduleOrigin: "model",
-						userLocked: false,
-						version: 1,
+			const changed = { ...plan, goal: "同版本但不同的机密目标" };
+			await expect(
+				new NativePlanningRepository(firstAgent).createPlan(
+					changed,
+					"operation-a",
+				),
+			).rejects.toThrow("fake vault record conflict");
+		},
+	);
+
+	fullTest(
+		"redacts model calendar titles before native persistence",
+		async () => {
+			const agent = new FakeNativePlanningAgent();
+			const calendar = new NativePlanningCalendar(agent);
+			const changeSet: CalendarChangeSet = {
+				id: "calendar-change-secure",
+				planId: "plan-secure-1",
+				operationId: "calendar-operation-secure",
+				createdAt: "2026-08-13T02:05:00Z",
+				changes: [
+					{
+						kind: "create",
+						eventId: "calendar-event-secure",
+						expectedVersion: null,
+						before: null,
+						after: {
+							id: "calendar-event-secure",
+							title: "机密任务标题绝不能进入 calendar_events",
+							kind: "plan",
+							state: "committed",
+							start: "2026-08-14T01:00:00Z",
+							end: "2026-08-14T02:00:00Z",
+							timeZone: "Asia/Shanghai",
+							planId: "plan-secure-1",
+							sourceTaskId: "task-secure-1",
+							scheduleOrigin: "model",
+							userLocked: false,
+							version: 1,
+						},
 					},
-				},
-			],
-		};
+				],
+			};
 
-		const result = await calendar.applyChangeSet(changeSet);
-		expect(result.ok).toBeTrue();
-		expect(agent.calendarMutations[0]?.actor).toBe("planning-runtime");
-		const mutation = agent.calendarMutations[0]?.mutations[0];
-		expect(mutation?.action).toBe("upsert");
-		if (mutation?.action !== "upsert") {
-			throw new Error("Expected an upsert calendar mutation.");
-		}
-		expect(mutation.event).toMatchObject({
-			title: "计划任务",
-			sealedContentRef: null,
-			redactedContent: true,
-		});
-		expect(JSON.stringify(mutation)).not.toContain(
-			"机密任务标题绝不能进入 calendar_events",
-		);
-		if (!result.ok) throw new Error("Calendar mutation unexpectedly failed.");
-		expect(result.events[0]?.title).toBe("计划任务");
-	});
+			const result = await calendar.applyChangeSet(changeSet);
+			expect(result.ok).toBeTrue();
+			expect(agent.calendarMutations[0]?.actor).toBe("planning-runtime");
+			const mutation = agent.calendarMutations[0]?.mutations[0];
+			expect(mutation?.action).toBe("upsert");
+			if (mutation?.action !== "upsert") {
+				throw new Error("Expected an upsert calendar mutation.");
+			}
+			expect(mutation.event).toMatchObject({
+				title: "计划任务",
+				sealedContentRef: null,
+				redactedContent: true,
+			});
+			expect(JSON.stringify(mutation)).not.toContain(
+				"机密任务标题绝不能进入 calendar_events",
+			);
+			if (!result.ok) throw new Error("Calendar mutation unexpectedly failed.");
+			expect(result.events[0]?.title).toBe("计划任务");
+		},
+	);
 
-	fullTest("does not call native calendar.mutate for an empty change set", async () => {
-		const agent = new FakeNativePlanningAgent();
-		const calendar = new NativePlanningCalendar(agent);
-		const result = await calendar.applyChangeSet({
-			id: "calendar-change-noop",
-			planId: "plan-secure-1",
-			operationId: "calendar-operation-noop",
-			createdAt: "2026-08-13T02:05:00Z",
-			changes: [],
-		});
+	fullTest(
+		"does not call native calendar.mutate for an empty change set",
+		async () => {
+			const agent = new FakeNativePlanningAgent();
+			const calendar = new NativePlanningCalendar(agent);
+			const result = await calendar.applyChangeSet({
+				id: "calendar-change-noop",
+				planId: "plan-secure-1",
+				operationId: "calendar-operation-noop",
+				createdAt: "2026-08-13T02:05:00Z",
+				changes: [],
+			});
 
-		expect(result).toEqual({
-			ok: true,
-			changeSetId: "calendar-change-noop",
-			events: [],
-			replayed: false,
-		});
-		expect(agent.calendarMutations).toEqual([]);
-	});
+			expect(result).toEqual({
+				ok: true,
+				changeSetId: "calendar-change-noop",
+				events: [],
+				replayed: false,
+			});
+			expect(agent.calendarMutations).toEqual([]);
+		},
+	);
 });

@@ -102,7 +102,4 @@ describe("durable calendar mutation boundary", () => {
 		expect(calls).toEqual(["commit", "project", "flush", "reconcile"]);
 		expect(failures).toEqual(["projection", "outbox-flush"]);
 	});
-
-
-
 });

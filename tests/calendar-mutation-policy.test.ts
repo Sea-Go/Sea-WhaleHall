@@ -77,7 +77,4 @@ describe("renderer planning-calendar actor policy", () => {
 		};
 		expect(isExplicitRendererPlanUnlock(updateMutation(reordered))).toBe(true);
 	});
-
-
-
 });

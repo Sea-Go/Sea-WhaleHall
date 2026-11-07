@@ -28,108 +28,110 @@ type FakeBehavior =
 	| "succeed";
 
 describe("MastraSidecarClient initialization recovery", () => {
-	fullTest("kills a timed-out initializer and permits a clean immediate restart", async () => {
-		const harness = createHarness(["hang-initialize", "succeed"]);
-		harness.client.trackRun("run-before-initialize");
-		const starting = harness.client.start();
-		const pendingDuringInitialize = harness.client.request(
-			"run.resume",
-			{ runId: "pending-run" },
-			{ requestId: "pending-during-initialize", timeoutMs: 5_000 },
-		);
-
-		const outcomes = await Promise.allSettled([
-			starting,
-			pendingDuringInitialize,
-		]);
-		expect(outcomes[0]).toEqual(
-			expect.objectContaining({
-				status: "rejected",
-				reason: expect.objectContaining({ code: "TIMEOUT" }),
-			}),
-		);
-		expect(outcomes[1]).toEqual(
-			expect.objectContaining({
-				status: "rejected",
-				reason: expect.objectContaining({ code: "INTERRUPTED" }),
-			}),
-		);
-		expect(harness.children[0]?.killed).toBe(true);
-		expect(harness.interruptions).toEqual([["run-before-initialize"]]);
-
-		await expect(harness.client.start()).resolves.toEqual(
-			expect.objectContaining({ protocolVersion: AGENT_HOST_PROTOCOL_VERSION }),
-		);
-		expect(harness.children).toHaveLength(2);
-
-		// A close/error from the terminated child must not tear down its successor.
-		harness.children[0]?.emitClose(1, null);
-		harness.children[0]?.emitError(new Error("late stale child error"));
-		await expect(
-			harness.client.request(
+	fullTest(
+		"kills a timed-out initializer and permits a clean immediate restart",
+		async () => {
+			const harness = createHarness(["hang-initialize", "succeed"]);
+			harness.client.trackRun("run-before-initialize");
+			const starting = harness.client.start();
+			const pendingDuringInitialize = harness.client.request(
 				"run.resume",
-				{ runId: "new-run" },
-				{ requestId: "pending-during-initialize" },
-			),
-		).resolves.toEqual({ accepted: true });
-		await Bun.sleep(1_050);
-		expect(harness.children).toHaveLength(2);
-		expect(harness.interruptions).toHaveLength(1);
-		await harness.client.stop();
-	});
+				{ runId: "pending-run" },
+				{ requestId: "pending-during-initialize", timeoutMs: 5_000 },
+			);
 
-	fullTest("tears down a child that rejects initialize instead of leaving ALREADY_RUNNING", async () => {
-		const harness = createHarness(["reject-initialize", "succeed"]);
+			const outcomes = await Promise.allSettled([
+				starting,
+				pendingDuringInitialize,
+			]);
+			expect(outcomes[0]).toEqual(
+				expect.objectContaining({
+					status: "rejected",
+					reason: expect.objectContaining({ code: "TIMEOUT" }),
+				}),
+			);
+			expect(outcomes[1]).toEqual(
+				expect.objectContaining({
+					status: "rejected",
+					reason: expect.objectContaining({ code: "INTERRUPTED" }),
+				}),
+			);
+			expect(harness.children[0]?.killed).toBe(true);
+			expect(harness.interruptions).toEqual([["run-before-initialize"]]);
 
-		await expect(harness.client.start()).rejects.toEqual(
-			expect.objectContaining({ code: "INTERNAL_ERROR" }),
-		);
-		expect(harness.children[0]?.killed).toBe(true);
-		await expect(harness.client.start()).resolves.toEqual(
-			expect.objectContaining({ protocolVersion: AGENT_HOST_PROTOCOL_VERSION }),
-		);
-		expect(harness.children).toHaveLength(2);
-		harness.children[0]?.emitClose(1, null);
-		await expect(
-			harness.client.request("run.resume", { runId: "after-error" }),
-		).resolves.toEqual({ accepted: true });
-		await harness.client.stop();
-	});
+			await expect(harness.client.start()).resolves.toEqual(
+				expect.objectContaining({
+					protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				}),
+			);
+			expect(harness.children).toHaveLength(2);
 
-	fullTest("schedules exactly one automatic restart after initialize failure", async () => {
-		const harness = createHarness(["reject-initialize", "succeed"]);
-		await expect(harness.client.start()).rejects.toEqual(
-			expect.objectContaining({ code: "INTERNAL_ERROR" }),
-		);
+			// A close/error from the terminated child must not tear down its successor.
+			harness.children[0]?.emitClose(1, null);
+			harness.children[0]?.emitError(new Error("late stale child error"));
+			await expect(
+				harness.client.request(
+					"run.resume",
+					{ runId: "new-run" },
+					{ requestId: "pending-during-initialize" },
+				),
+			).resolves.toEqual({ accepted: true });
+			await Bun.sleep(1_050);
+			expect(harness.children).toHaveLength(2);
+			expect(harness.interruptions).toHaveLength(1);
+			await harness.client.stop();
+		},
+	);
 
-		await waitFor(() => harness.restarts.count === 1);
-		expect(harness.children).toHaveLength(2);
-		expect(harness.interruptions).toHaveLength(1);
-		await Bun.sleep(50);
-		expect(harness.restarts.count).toBe(1);
-		expect(harness.children).toHaveLength(2);
-		// The terminated initializer remains process-owned until Node confirms
-		// close, even though its successor is already the active transport.
-		harness.children[0]?.emitClose(1, null);
-		await expect(
-			harness.client.request("run.resume", { runId: "automatic-restart" }),
-		).resolves.toEqual({ accepted: true });
-		await harness.client.stop();
-	});
+	fullTest(
+		"tears down a child that rejects initialize instead of leaving ALREADY_RUNNING",
+		async () => {
+			const harness = createHarness(["reject-initialize", "succeed"]);
 
+			await expect(harness.client.start()).rejects.toEqual(
+				expect.objectContaining({ code: "INTERNAL_ERROR" }),
+			);
+			expect(harness.children[0]?.killed).toBe(true);
+			await expect(harness.client.start()).resolves.toEqual(
+				expect.objectContaining({
+					protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+				}),
+			);
+			expect(harness.children).toHaveLength(2);
+			harness.children[0]?.emitClose(1, null);
+			await expect(
+				harness.client.request("run.resume", { runId: "after-error" }),
+			).resolves.toEqual({ accepted: true });
+			await harness.client.stop();
+		},
+	);
+
+	fullTest(
+		"schedules exactly one automatic restart after initialize failure",
+		async () => {
+			const harness = createHarness(["reject-initialize", "succeed"]);
+			await expect(harness.client.start()).rejects.toEqual(
+				expect.objectContaining({ code: "INTERNAL_ERROR" }),
+			);
+
+			await waitFor(() => harness.restarts.count === 1);
+			expect(harness.children).toHaveLength(2);
+			expect(harness.interruptions).toHaveLength(1);
+			await Bun.sleep(50);
+			expect(harness.restarts.count).toBe(1);
+			expect(harness.children).toHaveLength(2);
+			// The terminated initializer remains process-owned until Node confirms
+			// close, even though its successor is already the active transport.
+			harness.children[0]?.emitClose(1, null);
+			await expect(
+				harness.client.request("run.resume", { runId: "automatic-restart" }),
+			).resolves.toEqual({ accepted: true });
+			await harness.client.stop();
+		},
+	);
 });
 
-describe("MastraSidecarClient shutdown", () => {
-
-
-
-
-
-
-
-
-
-});
+describe("MastraSidecarClient shutdown", () => {});
 
 function createHarness(
 	behaviors: readonly FakeBehavior[],

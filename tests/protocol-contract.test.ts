@@ -32,7 +32,6 @@ describe("shared local protocol fixtures", () => {
 			error: { code: "TOOL_NOT_FOUND" },
 		});
 	});
-
 });
 
 describe("planning local protocol validation", () => {
@@ -59,6 +58,4 @@ describe("planning local protocol validation", () => {
 		editable: true,
 		version: 1,
 	};
-
-
 });

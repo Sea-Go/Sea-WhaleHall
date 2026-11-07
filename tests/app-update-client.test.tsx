@@ -152,15 +152,6 @@ describe("app update client controller", () => {
 	});
 });
 
-describe("app update client UI", () => {
+describe("app update client UI", () => {});
 
-
-
-});
-
-describe("Electrobun app update adapter", () => {
-
-
-
-
-});
+describe("Electrobun app update adapter", () => {});

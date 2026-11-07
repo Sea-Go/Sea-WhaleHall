@@ -164,13 +164,6 @@ describe("CalendarController CRUD and rollback", () => {
 				?.userLocked,
 		).toBe(true);
 	});
-
-
-
-
-
-
-
 });
 
 describe("CalendarController recurrence, batch, and load states", () => {
@@ -192,9 +185,7 @@ describe("CalendarController recurrence, batch, and load states", () => {
 		const background = controller.load(undefined, { background: true });
 		expect(controller.getSnapshot().loadState).toBe("ready");
 		expect(controller.getSnapshot().events).toHaveLength(beforeCount);
-		service.pendingLoads[
-			service.pendingLoads.length - 1
-		]?.deferred.resolve({
+		service.pendingLoads[service.pendingLoads.length - 1]?.deferred.resolve({
 			events: calendarScenarioEvents("empty"),
 			timeZone: "Asia/Shanghai",
 			scenario: "normal",
@@ -217,9 +208,9 @@ describe("CalendarController recurrence, batch, and load states", () => {
 		const eventsBefore = controller.getSnapshot().events;
 
 		const background = controller.load(undefined, { background: true });
-		service.pendingLoads[
-			service.pendingLoads.length - 1
-		]?.deferred.reject(new Error("offline"));
+		service.pendingLoads[service.pendingLoads.length - 1]?.deferred.reject(
+			new Error("offline"),
+		);
 		await background;
 		expect(controller.getSnapshot().loadState).toBe("ready");
 		expect(controller.getSnapshot().events).toEqual(eventsBefore);

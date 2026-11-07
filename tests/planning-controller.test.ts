@@ -14,7 +14,8 @@ import {
 	PlanningServiceError,
 	type PlanningServiceEvent,
 	type SendPlanMessageRequest,
-	type SetPlanTaskRelevanceRequest, SetPlanTaskStatusRequest,
+	type SetPlanTaskRelevanceRequest,
+	type SetPlanTaskStatusRequest,
 	type UndoPlanAdjustmentRequest,
 } from "../src/views/client/features/planning/planning-service";
 
@@ -111,7 +112,7 @@ function basePlan(
 			assumptions: ["每周至少投入 3 小时"],
 			questions: [],
 			tasks,
-		evaluations: null,
+			evaluations: null,
 		},
 		messages: [
 			{

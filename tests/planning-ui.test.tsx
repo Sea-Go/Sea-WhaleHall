@@ -199,7 +199,9 @@ class StaticPlanningService implements PlanningService {
 	async resumePlan(_request: ChangePlanStatusRequest): Promise<void> {}
 	async completePlan(_request: ChangePlanStatusRequest): Promise<void> {}
 	async archivePlan(_request: ChangePlanStatusRequest): Promise<void> {}
-	async undoPlanAdjustment(_request: UndoPlanAdjustmentRequest): Promise<void> {}
+	async undoPlanAdjustment(
+		_request: UndoPlanAdjustmentRequest,
+	): Promise<void> {}
 	async retryPendingAnalysis(
 		_request: ChangePlanStatusRequest,
 	): Promise<void> {}
@@ -262,7 +264,7 @@ describe("smart schedule composer", () => {
 		expect(markup).toContain("当前版本已确认，调整会生成新的提案");
 		expect(markup).toContain("现在更适合作为模糊计划");
 		expect(markup).toContain("输入调整意见");
-		expect(markup).not.toContain('<span>确认安排</span>');
+		expect(markup).not.toContain("<span>确认安排</span>");
 	});
 
 	test("plan without any revision yet prompts to keep talking", async () => {
@@ -272,7 +274,6 @@ describe("smart schedule composer", () => {
 		expect(markup).toContain("需要你补充以下信息");
 		expect(markup).toContain("可一次性回答");
 	});
-
 });
 
 describe("smart composer confirmed task list", () => {
@@ -425,12 +426,11 @@ describe("plan status card task list", () => {
 		expect(markup).toContain("已投入 30m（50%）");
 		// 已完成单独分组，排在活跃任务之后；完成态有删除线样式与文字标注。
 		expect(markup.indexOf("smart-composer__item--completed")).toBe(-1);
-		expect(
-			markup.indexOf("plan-status-card__task--completed"),
-		).toBeGreaterThan(markup.indexOf("较晚的排程任务"));
+		expect(markup.indexOf("plan-status-card__task--completed")).toBeGreaterThan(
+			markup.indexOf("较晚的排程任务"),
+		);
 		expect(markup).toContain("已跳过");
 		// 活跃计划不显示提案确认按钮。
 		expect(markup).not.toContain("确认安排");
 	});
 });
-

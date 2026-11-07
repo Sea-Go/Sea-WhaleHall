@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
 	mkdtempSync,
-	readFileSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	statSync,
 } from "node:fs";
@@ -10,13 +10,13 @@ import { link, open, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	exportFiveMinuteAuditToFile,
-	type AuditExportFileSystem,
-} from "../src/bun/five-minute-audit-file-export";
-import {
 	TIMELINE_AUDIT_SCHEMA_VERSION,
 	type TimelineAuditBundleV3,
 } from "../src/agent/timeline/types";
+import {
+	type AuditExportFileSystem,
+	exportFiveMinuteAuditToFile,
+} from "../src/bun/five-minute-audit-file-export";
 
 const temporaryDirectories: string[] = [];
 
@@ -256,9 +256,4 @@ describe("secure five-minute audit file export", () => {
 			),
 		).not.toThrow();
 	});
-
-
-
-
-
 });

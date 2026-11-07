@@ -33,13 +33,15 @@ describe("WhaleHallAgentToolExecutor", () => {
 			},
 		});
 
-		await expect(executor.execute({
-			accountId: "account-b",
-			runId: "run-goal-1",
-			toolCallId: "tool-goal-1",
-			name: "planning.get_active_goal",
-			arguments: {},
-		})).resolves.toEqual({ goal: null });
+		await expect(
+			executor.execute({
+				accountId: "account-b",
+				runId: "run-goal-1",
+				toolCallId: "tool-goal-1",
+				name: "planning.get_active_goal",
+				arguments: {},
+			}),
+		).resolves.toEqual({ goal: null });
 		expect(requestedAccounts).toEqual(["account-b"]);
 	});
 
@@ -50,7 +52,9 @@ describe("WhaleHallAgentToolExecutor", () => {
 		}> = [];
 		const repository = {
 			async compareAndSetWorkflow(
-				record: Parameters<EncryptedAgentRepository["compareAndSetWorkflow"]>[0],
+				record: Parameters<
+					EncryptedAgentRepository["compareAndSetWorkflow"]
+				>[0],
 				expectedVersion: number | null,
 			): Promise<boolean> {
 				writes.push({ record: structuredClone(record), expectedVersion });
@@ -86,10 +90,4 @@ describe("WhaleHallAgentToolExecutor", () => {
 			version: 1_000,
 		});
 	});
-
-
-
-
-
-
 });

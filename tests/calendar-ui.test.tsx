@@ -99,12 +99,6 @@ describe("calendar keyboard and form alternatives", () => {
 		expect(markup).not.toContain("开始日期");
 		expect(markup).not.toContain("保存日程");
 	});
-
-
-
-
 });
 
-describe("calendar day click draft", () => {
-
-});
+describe("calendar day click draft", () => {});

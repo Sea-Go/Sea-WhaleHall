@@ -69,7 +69,8 @@ export class PlanningProgressParser {
 	}
 
 	private appendThinking(line: string): void {
-		if (this.thinkingStartedAtMs === null) this.thinkingStartedAtMs = this.nowOffsetMs();
+		if (this.thinkingStartedAtMs === null)
+			this.thinkingStartedAtMs = this.nowOffsetMs();
 		this.thinkingText += (this.thinkingText === "" ? "" : "\n") + line;
 	}
 

@@ -140,9 +140,6 @@ describe("private training window local RPC boundary", () => {
 		expect(choseDirectory).toBeFalse();
 		expect(exported).toBeFalse();
 	});
-
-
-
 });
 
 async function waitForTerminal(

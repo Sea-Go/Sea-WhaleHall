@@ -289,16 +289,3 @@ test("RTW durable citation ref accepts only its fixed path and search-ID digest"
 		).rejects.toMatchObject({ code: "BAD_RESPONSE" });
 	}
 });
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -42,8 +42,8 @@ import {
 } from "./activity-support-team";
 import { createMastraAgentSet, type MastraAgentSet } from "./agents";
 import {
-	CloudSearchToolSession,
 	type CloudSearchProductPort,
+	CloudSearchToolSession,
 } from "./cloud-tools/cloud-search-tools";
 import {
 	type CalendarSnapshot,
@@ -66,6 +66,10 @@ import {
 	dynamicPlanningOutputSchema,
 	dynamicPlanningProviderOutputSchema,
 } from "./planning-analysis";
+import {
+	DEFAULT_PLANNING_ANALYSIS_POLICY,
+	type PlanningAnalysisAttemptPolicy,
+} from "./planning-analysis-policy";
 import {
 	type PlanningWorkflowClarification,
 	type PlanningWorkflowCompletion,
@@ -113,10 +117,6 @@ import {
 	type AgentToolExecutionInput,
 	isApprovalRequiredToolName,
 } from "./tools";
-import {
-	DEFAULT_PLANNING_ANALYSIS_POLICY,
-	type PlanningAnalysisAttemptPolicy,
-} from "./planning-analysis-policy";
 import {
 	AgentHostRuntimeError,
 	type HostRequestOptions,
@@ -521,7 +521,8 @@ export class AgentHostRuntime {
 				"Dynamic Planning analysis input failed its private protocol contract.",
 			);
 		}
-		const analysis = parsedInput.data as unknown as PlanningModelAnalysisRequest;
+		const analysis =
+			parsedInput.data as unknown as PlanningModelAnalysisRequest;
 		const agents = this.requireAgents();
 		const relay = this.requirePlanningRelay();
 		try {
@@ -593,17 +594,21 @@ export class AgentHostRuntime {
 					try {
 						result = await runDynamicPlanningAnalysisWithDeadline(
 							(signal) => attemptStream(signal, policy.primary),
-							Math.min(this.dynamicPlanningAnalysisTimeoutMs, policy.primary.timeoutCapMs),
+							Math.min(
+								this.dynamicPlanningAnalysisTimeoutMs,
+								policy.primary.timeoutCapMs,
+							),
 						);
 					} catch (firstError) {
-						if (
-							!(firstError instanceof DynamicPlanningAnalysisDeadlineError)
-						) {
+						if (!(firstError instanceof DynamicPlanningAnalysisDeadlineError)) {
 							throw firstError;
 						}
 						result = await runDynamicPlanningAnalysisWithDeadline(
 							(signal) => attemptStream(signal, policy.degraded),
-							Math.min(policy.degraded.timeoutCapMs, this.dynamicPlanningAnalysisTimeoutMs),
+							Math.min(
+								policy.degraded.timeoutCapMs,
+								this.dynamicPlanningAnalysisTimeoutMs,
+							),
 						);
 					}
 					const parsedOutput = dynamicPlanningOutputSchema.safeParse(
@@ -1059,7 +1064,6 @@ export class AgentHostRuntime {
 												},
 									);
 								}
-								continue;
 							}
 						}
 						if (this.isTerminal(record)) return;
@@ -2351,7 +2355,8 @@ function isCloudParentDescriptor(value: unknown): value is {
 		record.snapshotRef,
 		record.budgetRef,
 	];
-	if (strings.some((v) => typeof v !== "string" || v.length === 0)) return false;
+	if (strings.some((v) => typeof v !== "string" || v.length === 0))
+		return false;
 	if (typeof record.allowLowerIntelligence !== "boolean") return false;
 	if (
 		!Number.isSafeInteger(record.deadlineAtMs) ||
@@ -2367,9 +2372,7 @@ function isCloudParentDescriptor(value: unknown): value is {
 		budget.quoteRunes,
 		budget.maxReadsPerSearch,
 		budget.maxQuoteRunesPerSearch,
-	].every(
-		(v) => Number.isSafeInteger(v) && (v as number) >= 1,
-	);
+	].every((v) => Number.isSafeInteger(v) && (v as number) >= 1);
 }
 
 function conversationToolProtocolError(): AgentHostRuntimeError {

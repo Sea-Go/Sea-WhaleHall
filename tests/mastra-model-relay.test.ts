@@ -52,7 +52,6 @@ describe("Mastra ModelRelay event sequencing", () => {
 		expect(peer.openRelayId).toBeNull();
 	});
 
-
 	for (const scenario of [
 		{ name: "duplicate", sequences: [1, 1] },
 		{ name: "backward", sequences: [1, 2, 1] },

@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
-import {
-	PetWindowController,
-	clampWindowPosition,
-	displayForPoint,
-} from "../src/bun/pet-window-controller";
 import type {
 	NativeDragEvent,
 	PetDisplay,
 	PetWindowFrame,
+} from "../src/bun/pet-window-controller";
+import {
+	clampWindowPosition,
+	displayForPoint,
+	PetWindowController,
 } from "../src/bun/pet-window-controller";
 
 const primary: PetDisplay = {
@@ -22,14 +22,22 @@ const secondary: PetDisplay = {
 };
 
 test("chooses the cursor display including negative secondary coordinates", () => {
-	expect(displayForPoint([primary, secondary], { x: -640, y: 100 }, primary).id).toBe(2);
-	expect(displayForPoint([primary, secondary], { x: 700, y: 300 }, primary).id).toBe(1);
+	expect(
+		displayForPoint([primary, secondary], { x: -640, y: 100 }, primary).id,
+	).toBe(2);
+	expect(
+		displayForPoint([primary, secondary], { x: 700, y: 300 }, primary).id,
+	).toBe(1);
 	expect(displayForPoint([], { x: 700, y: 300 }, primary).id).toBe(1);
 });
 
 test("clamps the full pet window to the display work area", () => {
 	expect(
-		clampWindowPosition({ x: 1400, y: 880 }, { width: 320, height: 250 }, primary.workArea),
+		clampWindowPosition(
+			{ x: 1400, y: 880 },
+			{ width: 320, height: 250 },
+			primary.workArea,
+		),
 	).toEqual({ x: 1120, y: 650 });
 	expect(
 		clampWindowPosition(
@@ -39,7 +47,3 @@ test("clamps the full pet window to the display work area", () => {
 		),
 	).toEqual({ x: -1280, y: -120 });
 });
-
-
-
-

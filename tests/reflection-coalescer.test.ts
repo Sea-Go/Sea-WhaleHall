@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
 	DESKTOP_EVENT_SCHEMA_VERSION,
 	DESKTOP_OBSERVATION_SCHEMA_VERSION,
-	SemanticEventCoalescer,
 	type DesktopEventForKind,
 	type EventIdentityFactory,
 	type InputActivityObservationV1,
 	type ProcessScanObservationV1,
+	SemanticEventCoalescer,
 } from "../src/agent/reflection";
 
 class TestIdentityFactory implements EventIdentityFactory {
@@ -22,7 +22,9 @@ class TestIdentityFactory implements EventIdentityFactory {
 }
 
 function createCoalescer(): SemanticEventCoalescer {
-	return new SemanticEventCoalescer({ identityFactory: new TestIdentityFactory() });
+	return new SemanticEventCoalescer({
+		identityFactory: new TestIdentityFactory(),
+	});
 }
 
 function inputSample(
@@ -128,18 +130,14 @@ describe("SemanticEventCoalescer input aggregation", () => {
 		expect(crossed[0]?.kind).toBe("input.activityAggregated");
 		const second = coalescer.flush(10_000);
 		expect(second).toHaveLength(1);
-		if (crossed[0]?.kind === "input.activityAggregated" && second[0]?.kind === "input.activityAggregated") {
+		if (
+			crossed[0]?.kind === "input.activityAggregated" &&
+			second[0]?.kind === "input.activityAggregated"
+		) {
 			expect(crossed[0].payload.bucketStartedAtMs).toBe(0);
 			expect(second[0].payload.bucketStartedAtMs).toBe(5_000);
 		}
 	});
 });
 
-describe("SemanticEventCoalescer process batching and deduplication", () => {
-
-
-
-
-
-
-});
+describe("SemanticEventCoalescer process batching and deduplication", () => {});

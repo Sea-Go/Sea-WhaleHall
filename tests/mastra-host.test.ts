@@ -12,10 +12,10 @@ import {
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
 	type AgentRunEventFrame,
+	errorResponse,
 	isRecord,
 	MAX_MODEL_RELAY_CHUNK_BYTES,
 	type ModelRelayOpenParams,
-	errorResponse,
 	type ProtocolMessage,
 	SIDECAR_HOST_METHODS,
 	type SidecarHostRequest,
@@ -43,840 +43,913 @@ afterAll(() => {
 });
 
 describe("Mastra Node sidecar", () => {
-	fullTest("streams conversation and authoritative structured planning through host calls", async () => {
-		const host = new FakeHost();
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
+	fullTest(
+		"streams conversation and authoritative structured planning through host calls",
+		async () => {
+			const host = new FakeHost();
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
 
-		const conversationResponse = await harness.request("conversation.start", {
-			runId: "conversation-run-1",
-			conversationId: "conversation-1",
-			resourceId: "installation-1",
-			message: "请用一句话说明今天的重点。",
-			expectedVersion: 0,
-		});
-		expect(conversationResponse).toMatchObject({
-			ok: true,
-			result: { accepted: true },
-		});
-		const conversationTerminal =
-			await harness.waitForRunTerminal("conversation-run-1");
-		expect(conversationTerminal.terminalState).toBe("completed");
-		expect(conversationTerminal.event).toMatchObject({
-			kind: "run.completed",
-			result: {
+			const conversationResponse = await harness.request("conversation.start", {
+				runId: "conversation-run-1",
 				conversationId: "conversation-1",
-				message: { role: "assistant", content: "今天先完成最重要的一件事。" },
-			},
-		});
-		const conversationEvents = harness.runEvents("conversation-run-1");
-		expect(conversationEvents.map((event) => event.sequence)).toEqual(
-			conversationEvents.map((_, index) => index + 1),
-		);
-		expect(conversationEvents.map((event) => event.version)).toEqual(
-			conversationEvents.map((_, index) => index + 1),
-		);
-		expect(
-			conversationEvents.some(
-				(event) => event.event.kind === "conversation.text.delta",
-			),
-		).toBe(true);
-		const snapshot = await harness.request("run.snapshot", {
-			runId: "conversation-run-1",
-		});
-		expect(snapshot).toMatchObject({
-			ok: true,
-			result: { runId: "conversation-run-1", terminalState: "completed" },
-		});
-		expect(host.calls).toContain("memory/load");
-		expect(host.calls).toContain("memory/append");
+				resourceId: "installation-1",
+				message: "请用一句话说明今天的重点。",
+				expectedVersion: 0,
+			});
+			expect(conversationResponse).toMatchObject({
+				ok: true,
+				result: { accepted: true },
+			});
+			const conversationTerminal =
+				await harness.waitForRunTerminal("conversation-run-1");
+			expect(conversationTerminal.terminalState).toBe("completed");
+			expect(conversationTerminal.event).toMatchObject({
+				kind: "run.completed",
+				result: {
+					conversationId: "conversation-1",
+					message: { role: "assistant", content: "今天先完成最重要的一件事。" },
+				},
+			});
+			const conversationEvents = harness.runEvents("conversation-run-1");
+			expect(conversationEvents.map((event) => event.sequence)).toEqual(
+				conversationEvents.map((_, index) => index + 1),
+			);
+			expect(conversationEvents.map((event) => event.version)).toEqual(
+				conversationEvents.map((_, index) => index + 1),
+			);
+			expect(
+				conversationEvents.some(
+					(event) => event.event.kind === "conversation.text.delta",
+				),
+			).toBe(true);
+			const snapshot = await harness.request("run.snapshot", {
+				runId: "conversation-run-1",
+			});
+			expect(snapshot).toMatchObject({
+				ok: true,
+				result: { runId: "conversation-run-1", terminalState: "completed" },
+			});
+			expect(host.calls).toContain("memory/load");
+			expect(host.calls).toContain("memory/append");
 
-		const planningInput = {
-			goal: "在年底前完成 WhaleHall Beta",
-			planType: "long-term" as const,
-			deadline: "2099-12-31",
-			priority: "high" as const,
-			weeklyCapacityHours: 10,
-			unavailableDays: ["Sunday"],
-			preferredSessionMinutes: 60 as const,
-			preferredDayPart: "morning" as const,
-			timeZone: "Asia/Shanghai",
-		};
-		await harness.request(
-			"planning.start",
-			{
+			const planningInput = {
+				goal: "在年底前完成 WhaleHall Beta",
+				planType: "long-term" as const,
+				deadline: "2099-12-31",
+				priority: "high" as const,
+				weeklyCapacityHours: 10,
+				unavailableDays: ["Sunday"],
+				preferredSessionMinutes: 60 as const,
+				preferredDayPart: "morning" as const,
+				timeZone: "Asia/Shanghai",
+			};
+			await harness.request(
+				"planning.start",
+				{
+					runId: "planning-run-1",
+					sessionId: "planning-session-1",
+					input: planningInput,
+					expectedVersion: 0,
+				},
+				"host:planning.start:durable-1",
+			);
+			const clarification = await harness.waitForRunSuspended("planning-run-1");
+			expect(clarification.terminalState).toBeNull();
+			expect(clarification.event).toMatchObject({
+				kind: "run.suspended",
+				suspendPayload: {
+					kind: "planning.clarification",
+					status: "clarifying",
+					clarificationRounds: 1,
+					questions: [{ key: "expected_outcome" }],
+				},
+			});
+
+			const mismatchedOrigin = await harness.request("planning.answer", {
 				runId: "planning-run-1",
 				sessionId: "planning-session-1",
-				input: planningInput,
-				expectedVersion: 0,
-			},
-			"host:planning.start:durable-1",
-		);
-		const clarification = await harness.waitForRunSuspended("planning-run-1");
-		expect(clarification.terminalState).toBeNull();
-		expect(clarification.event).toMatchObject({
-			kind: "run.suspended",
-			suspendPayload: {
-				kind: "planning.clarification",
-				status: "clarifying",
-				clarificationRounds: 1,
-				questions: [{ key: "expected_outcome" }],
-			},
-		});
+				originatingRequestId: "host:planning.answer:random-command",
+				answers: [
+					{ questionKey: "expected_outcome", answerText: "不可接受的来源" },
+				],
+				expectedVersion: 1,
+			});
+			expect(mismatchedOrigin).toMatchObject({
+				ok: false,
+				error: { code: "RUN_CONFLICT" },
+			});
 
-		const mismatchedOrigin = await harness.request("planning.answer", {
-			runId: "planning-run-1",
-			sessionId: "planning-session-1",
-			originatingRequestId: "host:planning.answer:random-command",
-			answers: [
-				{ questionKey: "expected_outcome", answerText: "不可接受的来源" },
-			],
-			expectedVersion: 1,
-		});
-		expect(mismatchedOrigin).toMatchObject({
-			ok: false,
-			error: { code: "RUN_CONFLICT" },
-		});
-
-		await harness.request("planning.answer", {
-			runId: "planning-run-1",
-			sessionId: "planning-session-1",
-			originatingRequestId: "host:planning.start:durable-1",
-			answers: [
-				{ questionKey: "expected_outcome", answerText: "可安装并通过核心验收" },
-			],
-			expectedVersion: 1,
-		});
-		const draft = await harness.waitForRunTerminal("planning-run-1");
-		expect(draft.terminalState).toBe("completed");
-		expect(draft.event).toMatchObject({
-			kind: "run.completed",
-			result: {
-				status: "draft",
-				draft: {
-					calendarRevision: 7,
-					schedule: [
-						{
-							taskId: "task-1",
-							start: "2099-12-01T09:00:00+08:00",
-							end: "2099-12-01T10:00:00+08:00",
-							timeZone: "Asia/Shanghai",
-						},
-					],
-					unscheduledTaskIds: [],
+			await harness.request("planning.answer", {
+				runId: "planning-run-1",
+				sessionId: "planning-session-1",
+				originatingRequestId: "host:planning.start:durable-1",
+				answers: [
+					{
+						questionKey: "expected_outcome",
+						answerText: "可安装并通过核心验收",
+					},
+				],
+				expectedVersion: 1,
+			});
+			const draft = await harness.waitForRunTerminal("planning-run-1");
+			expect(draft.terminalState).toBe("completed");
+			expect(draft.event).toMatchObject({
+				kind: "run.completed",
+				result: {
+					status: "draft",
+					draft: {
+						calendarRevision: 7,
+						schedule: [
+							{
+								taskId: "task-1",
+								start: "2099-12-01T09:00:00+08:00",
+								end: "2099-12-01T10:00:00+08:00",
+								timeZone: "Asia/Shanghai",
+							},
+						],
+						unscheduledTaskIds: [],
+					},
 				},
-			},
-		});
-		expect(
-			harness
-				.runEvents("planning-run-1")
-				.some((event) => event.event.kind === "planning.object.delta"),
-		).toBe(true);
-		const planningEvents = harness.runEvents("planning-run-1");
-		expect(planningEvents.map((event) => event.sequence)).toEqual(
-			planningEvents.map((_, index) => index + 1),
-		);
-		expect(
-			planningEvents.some((event) => event.event.kind === "run.resumed"),
-		).toBe(true);
-		expect(
-			host.calls.filter((method) => method === "calendar/query"),
-		).toHaveLength(2);
-		expect(host.calls).toContain("workflow/start");
-		expect(host.calls).toContain("workflow/resume");
-		expect(host.calls).toContain("planning/load");
-		expect(host.calls).toContain("planning/validate");
-		expect(
-			host.calls.filter((method) => method === "planning/save"),
-		).toHaveLength(2);
-		// 会话流与计划输出必须流式；generateTitle 的一次性标题调用除外。
-		expect(
-			host.modelBodies.filter((body) => body.stream !== true),
-		).toHaveLength(1);
-		expect(host.modelCalls).toEqual(
-			expect.arrayContaining([
+			});
+			expect(
+				harness
+					.runEvents("planning-run-1")
+					.some((event) => event.event.kind === "planning.object.delta"),
+			).toBe(true);
+			const planningEvents = harness.runEvents("planning-run-1");
+			expect(planningEvents.map((event) => event.sequence)).toEqual(
+				planningEvents.map((_, index) => index + 1),
+			);
+			expect(
+				planningEvents.some((event) => event.event.kind === "run.resumed"),
+			).toBe(true);
+			expect(
+				host.calls.filter((method) => method === "calendar/query"),
+			).toHaveLength(2);
+			expect(host.calls).toContain("workflow/start");
+			expect(host.calls).toContain("workflow/resume");
+			expect(host.calls).toContain("planning/load");
+			expect(host.calls).toContain("planning/validate");
+			expect(
+				host.calls.filter((method) => method === "planning/save"),
+			).toHaveLength(2);
+			// 会话流与计划输出必须流式；generateTitle 的一次性标题调用除外。
+			expect(
+				host.modelBodies.filter((body) => body.stream !== true),
+			).toHaveLength(1);
+			expect(host.modelCalls).toEqual(
+				expect.arrayContaining([
+					{
+						provider: "whalehall-test",
+						modelId: "test-chat-model",
+						runId: "conversation-run-1",
+					},
+					{
+						provider: "whalehall-planning",
+						modelId: "test-planning-model",
+						runId: "planning-run-1",
+					},
+				]),
+			);
+			expect(host.modelAgentIds).toEqual([
+				MODEL_AGENT_IDS.conversation,
+				// generateTitle 的标题生成调用（走 conversation agent 的模型通道）。
+				MODEL_AGENT_IDS.conversation,
+				MODEL_AGENT_IDS.planning,
+				MODEL_AGENT_IDS.planning,
+			]);
+
+			await harness.shutdown();
+		},
+		30_000,
+	);
+
+	fullTest(
+		"loads required native Skills locally without exposing Skill tools to the reflection model",
+		async () => {
+			const host = new FakeHost();
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+
+			const response = await harness.request("reflection.analyze", {
+				invocationId: "activity-reflection-without-skills",
+				requestId: "activity-window-without-skills",
+				signalSegmentIds: ["segment-1"],
+				candidateActivities: ["development"],
+				userPrompt:
+					'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"synthetic only"}]',
+			});
+			expect(response).toMatchObject({
+				ok: true,
+				result: { score: 0.7 },
+			});
+			expect(host.modelBodies).toHaveLength(1);
+			expect(host.modelCalls).toEqual([
 				{
-					provider: "whalehall-test",
-					modelId: "test-chat-model",
-					runId: "conversation-run-1",
+					provider: "whalehall-activity-reflection",
+					modelId: "test-reflection-model",
+					runId: "activity-reflection-without-skills",
 				},
+			]);
+			expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.activityReflection]);
+			const body = host.modelBodies[0];
+			expect(JSON.stringify(body?.messages)).toContain(
+				"# 已加载的活动反思分析 Skill",
+			);
+			expect(JSON.stringify(body?.messages)).toContain(
+				"# 已加载的活动反思评分 Skill",
+			);
+			expect(JSON.stringify(body?.messages)).not.toContain(
+				resolve(import.meta.dir, ".."),
+			);
+			expect(body?.tools).toBeUndefined();
+			await harness.shutdown();
+		},
+		30_000,
+	);
+
+	fullTest(
+		"runs Dynamic Planning through the live strict planning.analyze entry",
+		async () => {
+			const host = new FakeHost();
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+
+			const response = await harness.request("planning.analyze", {
+				invocationId: "dynamic-planning-invocation",
+				requestId: "planning-analysis:operation-1",
+				analysis: {
+					planId: "plan-1",
+					analysisMode: "manual-proposal",
+					currentGoal: "验证一个长期收入方向",
+					currentType: null,
+					trigger: "initial-analysis",
+					effectiveWindow: {
+						startDate: "2026-08-14",
+						endDateExclusive: "2026-08-21",
+						timeZone: "Asia/Shanghai",
+					},
+					messages: [],
+					currentTasks: [],
+					currentEstimate: null,
+					currentSchedulingPreferences: null,
+					observationEvidence: [],
+					calendarEvents: [],
+					memoryHints: null,
+				},
+			});
+
+			expect(response).toMatchObject({
+				ok: true,
+				result: {
+					outcome: "proposal",
+					recommendedType: "fuzzy",
+					confidence: 0.4,
+				},
+			});
+			expect(host.modelOrigins).toEqual(["planning-analysis:operation-1"]);
+			expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.planningAnalysis]);
+			expect(host.calls).toContain("model/relay.open");
+			expect(host.modelCalls).toEqual([
 				{
 					provider: "whalehall-planning",
 					modelId: "test-planning-model",
-					runId: "planning-run-1",
+					runId: "dynamic-planning-invocation",
 				},
-			]),
-		);
-		expect(host.modelAgentIds).toEqual([
-			MODEL_AGENT_IDS.conversation,
-			// generateTitle 的标题生成调用（走 conversation agent 的模型通道）。
-			MODEL_AGENT_IDS.conversation,
-			MODEL_AGENT_IDS.planning,
-			MODEL_AGENT_IDS.planning,
-		]);
+			]);
+			const body = host.modelBodies[0];
+			// 调研工具声明在请求里，由网关在服务端执行（见 gateway-research-tools）。
+			const toolNames = ((body?.tools as unknown[] | undefined) ?? []).map(
+				(tool) =>
+					(tool as { function?: { name?: string } })?.function?.name ?? "",
+			);
+			expect(toolNames).toContain("zhipu.web_search_prime");
+			expect(
+				body?.tool_choice === undefined || body?.tool_choice === "auto",
+			).toBe(true);
+			expect(body?.response_format).toBeUndefined();
+			const serializedMessages = JSON.stringify(body?.messages);
+			expect(serializedMessages).toContain('\\"outcome\\"');
+			expect(serializedMessages).not.toContain('\\"pattern\\"');
+			// 计划记忆提示进入深思上下文（无先例时为 null，同样显式可见）。
+			expect(serializedMessages).toContain('\\"memoryHints\\"');
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-		await harness.shutdown();
-	}, 30_000);
-
-	fullTest("loads required native Skills locally without exposing Skill tools to the reflection model", async () => {
-		const host = new FakeHost();
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-
-		const response = await harness.request("reflection.analyze", {
-			invocationId: "activity-reflection-without-skills",
-			requestId: "activity-window-without-skills",
-			signalSegmentIds: ["segment-1"],
-			candidateActivities: ["development"],
-			userPrompt:
-				'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"synthetic only"}]',
-		});
-		expect(response).toMatchObject({
-			ok: true,
-			result: { score: 0.7 },
-		});
-		expect(host.modelBodies).toHaveLength(1);
-		expect(host.modelCalls).toEqual([
-			{
-				provider: "whalehall-activity-reflection",
-				modelId: "test-reflection-model",
-				runId: "activity-reflection-without-skills",
-			},
-		]);
-		expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.activityReflection]);
-		const body = host.modelBodies[0];
-		expect(JSON.stringify(body?.messages)).toContain(
-			"# 已加载的活动反思分析 Skill",
-		);
-		expect(JSON.stringify(body?.messages)).toContain(
-			"# 已加载的活动反思评分 Skill",
-		);
-		expect(JSON.stringify(body?.messages)).not.toContain(
-			resolve(import.meta.dir, ".."),
-		);
-		expect(body?.tools).toBeUndefined();
-		await harness.shutdown();
-	}, 30_000);
-
-	fullTest("runs Dynamic Planning through the live strict planning.analyze entry", async () => {
-		const host = new FakeHost();
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-
-		const response = await harness.request("planning.analyze", {
-			invocationId: "dynamic-planning-invocation",
-			requestId: "planning-analysis:operation-1",
-			analysis: {
-				planId: "plan-1",
-				analysisMode: "manual-proposal",
-				currentGoal: "验证一个长期收入方向",
-				currentType: null,
-				trigger: "initial-analysis",
-				effectiveWindow: {
-					startDate: "2026-08-14",
-					endDateExclusive: "2026-08-21",
-					timeZone: "Asia/Shanghai",
-				},
-				messages: [],
-				currentTasks: [],
-				currentEstimate: null,
-				currentSchedulingPreferences: null,
-				observationEvidence: [],
-				calendarEvents: [],
-				memoryHints: null,
-			},
-		});
-
-		expect(response).toMatchObject({
-			ok: true,
-			result: {
-				outcome: "proposal",
-				recommendedType: "fuzzy",
-				confidence: 0.4,
-			},
-		});
-		expect(host.modelOrigins).toEqual(["planning-analysis:operation-1"]);
-		expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.planningAnalysis]);
-		expect(host.calls).toContain("model/relay.open");
-		expect(host.modelCalls).toEqual([
-			{
-				provider: "whalehall-planning",
-				modelId: "test-planning-model",
-				runId: "dynamic-planning-invocation",
-			},
-		]);
-		const body = host.modelBodies[0];
-		// 调研工具声明在请求里，由网关在服务端执行（见 gateway-research-tools）。
-		const toolNames = ((body?.tools as unknown[] | undefined) ?? []).map(
-			(tool) =>
-				(tool as { function?: { name?: string } })?.function?.name ?? "",
-		);
-		expect(toolNames).toContain("zhipu.web_search_prime");
-		expect(body?.tool_choice === undefined || body?.tool_choice === "auto").toBe(
-			true,
-		);
-		expect(body?.response_format).toBeUndefined();
-		const serializedMessages = JSON.stringify(body?.messages);
-		expect(serializedMessages).toContain('\\"outcome\\"');
-		expect(serializedMessages).not.toContain('\\"pattern\\"');
-		// 计划记忆提示进入深思上下文（无先例时为 null，同样显式可见）。
-		expect(serializedMessages).toContain('\\"memoryHints\\"');
-		await harness.shutdown();
-	}, 30_000);
-
-	fullTest("runs activity support through supervisor, specialist, and voice without Tools or Memory", async () => {
-		const host = new FakeHost();
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("activity.start", {
-			runId: "activity-run-1",
-			activityJobId: "activity-job-1",
-			supportContext: activitySupportContextFixture(),
-		});
-		const terminal = await harness.waitForRunTerminal("activity-run-1");
-		expect(terminal.event).toMatchObject({
-			kind: "run.completed",
-			result: {
+	fullTest(
+		"runs activity support through supervisor, specialist, and voice without Tools or Memory",
+		async () => {
+			const host = new FakeHost();
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("activity.start", {
+				runId: "activity-run-1",
 				activityJobId: "activity-job-1",
-				summary: "你似乎正在稳步推进。若愿意，可以先完成眼前这一小步。",
-			},
-		});
-		expect(host.calls).toContain("model/relay.open");
-		expect(host.modelBodies).toHaveLength(3);
-		expect(host.activitySupportStages).toEqual([
-			"supervisor",
-			"specialist",
-			"voice",
-		]);
-		expect(host.modelAgentIds).toEqual([
-			MODEL_AGENT_IDS.activitySupportSupervisor,
-			ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.momentumCoach,
-			MODEL_AGENT_IDS.activitySupportVoice,
-		]);
-		expect(
-			host.calls.some(
-				(method) =>
-					method.startsWith("tool/") ||
-					method.startsWith("memory/") ||
-					method.startsWith("calendar/") ||
-					method.startsWith("planning/"),
-			),
-		).toBeFalse();
-		expect(host.modelBodies.every((body) => body.tools === undefined)).toBe(
-			true,
-		);
-		const modelInput = host.modelBodies
-			.map((body) => JSON.stringify(body.messages))
-			.join("\n");
-		expect(modelInput).toContain("ACTIVE_SUPPORT_CONTEXT_JSON");
-		expect(modelInput).toContain("ASSESSMENT_JSON");
-		expect(modelInput).toContain("SUPPORT_BRIEF_JSON");
-		for (const forbidden of [
-			"score",
-			"score_reason",
-			"consumedScore",
-			"worker-request-1",
-			"sealed-window-id",
-			"activity-run-1",
-			"activity-job-1",
-			"raw_event",
-		]) {
-			expect(modelInput).not.toContain(forbidden);
-		}
-		expect(JSON.stringify(terminal.event)).not.toMatch(
-			/(?:score|评分|分数|得分|百分比)/iu,
-		);
-		await harness.shutdown();
-	}, 30_000);
+				supportContext: activitySupportContextFixture(),
+			});
+			const terminal = await harness.waitForRunTerminal("activity-run-1");
+			expect(terminal.event).toMatchObject({
+				kind: "run.completed",
+				result: {
+					activityJobId: "activity-job-1",
+					summary: "你似乎正在稳步推进。若愿意，可以先完成眼前这一小步。",
+				},
+			});
+			expect(host.calls).toContain("model/relay.open");
+			expect(host.modelBodies).toHaveLength(3);
+			expect(host.activitySupportStages).toEqual([
+				"supervisor",
+				"specialist",
+				"voice",
+			]);
+			expect(host.modelAgentIds).toEqual([
+				MODEL_AGENT_IDS.activitySupportSupervisor,
+				ACTIVITY_SUPPORT_SPECIALIST_AGENT_IDS.momentumCoach,
+				MODEL_AGENT_IDS.activitySupportVoice,
+			]);
+			expect(
+				host.calls.some(
+					(method) =>
+						method.startsWith("tool/") ||
+						method.startsWith("memory/") ||
+						method.startsWith("calendar/") ||
+						method.startsWith("planning/"),
+				),
+			).toBeFalse();
+			expect(host.modelBodies.every((body) => body.tools === undefined)).toBe(
+				true,
+			);
+			const modelInput = host.modelBodies
+				.map((body) => JSON.stringify(body.messages))
+				.join("\n");
+			expect(modelInput).toContain("ACTIVE_SUPPORT_CONTEXT_JSON");
+			expect(modelInput).toContain("ASSESSMENT_JSON");
+			expect(modelInput).toContain("SUPPORT_BRIEF_JSON");
+			for (const forbidden of [
+				"score",
+				"score_reason",
+				"consumedScore",
+				"worker-request-1",
+				"sealed-window-id",
+				"activity-run-1",
+				"activity-job-1",
+				"raw_event",
+			]) {
+				expect(modelInput).not.toContain(forbidden);
+			}
+			expect(JSON.stringify(terminal.event)).not.toMatch(
+				/(?:score|评分|分数|得分|百分比)/iu,
+			);
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-	fullTest("classifies an activity Tool response as deterministic invalid output", async () => {
-		const host = new FakeHost({ activityToolViolation: true });
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("activity.start", {
-			runId: "activity-run-tool-violation",
-			activityJobId: "activity-job-tool-violation",
-			supportContext: activitySupportContextFixture(),
-		});
-		const terminal = await harness.waitForRunTerminal(
-			"activity-run-tool-violation",
-		);
-		expect(terminal.event).toMatchObject({
-			kind: "run.failed",
-			error: {
-				code: "ACTIVITY_OUTPUT_INVALID",
-				retryable: false,
-			},
-		});
-		expect(host.modelBodies).toHaveLength(3);
-		expect(host.activitySupportStages).toEqual([
-			"supervisor",
-			"specialist",
-			"voice",
-		]);
-		expect(host.calls.some((method) => method.startsWith("tool/"))).toBe(false);
-		await harness.shutdown();
-	}, 30_000);
+	fullTest(
+		"classifies an activity Tool response as deterministic invalid output",
+		async () => {
+			const host = new FakeHost({ activityToolViolation: true });
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("activity.start", {
+				runId: "activity-run-tool-violation",
+				activityJobId: "activity-job-tool-violation",
+				supportContext: activitySupportContextFixture(),
+			});
+			const terminal = await harness.waitForRunTerminal(
+				"activity-run-tool-violation",
+			);
+			expect(terminal.event).toMatchObject({
+				kind: "run.failed",
+				error: {
+					code: "ACTIVITY_OUTPUT_INVALID",
+					retryable: false,
+				},
+			});
+			expect(host.modelBodies).toHaveLength(3);
+			expect(host.activitySupportStages).toEqual([
+				"supervisor",
+				"specialist",
+				"voice",
+			]);
+			expect(host.calls.some((method) => method.startsWith("tool/"))).toBe(
+				false,
+			);
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-	fullTest("rejects split raw Tool markup from activity analysis", async () => {
-		const host = new FakeHost({
-			rawToolMarkupChunks: [
-				"Worker summary <to",
-				'ol>{"name":"planning_get_active_plan","arguments":{}}</tool>',
-			],
-		});
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("activity.start", {
-			runId: "activity-run-raw-tool-markup",
-			activityJobId: "activity-job-raw-tool-markup",
-			supportContext: activitySupportContextFixture(),
-		});
-		const terminal = await harness.waitForRunTerminal(
-			"activity-run-raw-tool-markup",
-		);
-		expect(terminal.event).toMatchObject({
-			kind: "run.failed",
-			error: {
-				code: "ACTIVITY_OUTPUT_INVALID",
-				retryable: false,
-			},
-		});
-		await harness.shutdown();
-	}, 30_000);
+	fullTest(
+		"rejects split raw Tool markup from activity analysis",
+		async () => {
+			const host = new FakeHost({
+				rawToolMarkupChunks: [
+					"Worker summary <to",
+					'ol>{"name":"planning_get_active_plan","arguments":{}}</tool>',
+				],
+			});
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("activity.start", {
+				runId: "activity-run-raw-tool-markup",
+				activityJobId: "activity-job-raw-tool-markup",
+				supportContext: activitySupportContextFixture(),
+			});
+			const terminal = await harness.waitForRunTerminal(
+				"activity-run-raw-tool-markup",
+			);
+			expect(terminal.event).toMatchObject({
+				kind: "run.failed",
+				error: {
+					code: "ACTIVITY_OUTPUT_INVALID",
+					retryable: false,
+				},
+			});
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-	fullTest("runs client-owned compressed activity reflection through a non-persistent Mastra workflow", async () => {
-		const host = new FakeHost();
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
+	fullTest(
+		"runs client-owned compressed activity reflection through a non-persistent Mastra workflow",
+		async () => {
+			const host = new FakeHost();
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
 
-		const response = await harness.request("reflection.analyze", {
-			invocationId: "activity-reflection-window-1",
-			requestId: "activity-window-request-1",
-			signalSegmentIds: ["segment-1"],
-			candidateActivities: ["development"],
-			userPrompt:
-				'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"private raw activity"}]\nACTIVITY_CONTEXT_JSON={}',
-		});
-		expect(response).toMatchObject({
-			ok: true,
-			result: {
-				events: [{ action: "推测：正在进行编程", activity: "development" }],
-				score: 0.7,
-			},
-		});
-		expect(host.calls).toContain("model/relay.open");
-		const reflectionBodies = host.modelBodies;
-		expect(reflectionBodies).toHaveLength(1);
-		expect(host.modelCalls).toEqual([
-			{
-				provider: "whalehall-activity-reflection",
-				modelId: "test-reflection-model",
-				runId: "activity-reflection-window-1",
-			},
-		]);
-		expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.activityReflection]);
-		const reflectionBody = reflectionBodies[0];
-		expect(JSON.stringify(reflectionBody?.messages)).toContain(
-			"private raw activity",
-		);
-		expect(JSON.stringify(reflectionBody?.messages)).toContain(
-			"# 活动反思分析",
-		);
-		expect(JSON.stringify(reflectionBody?.messages)).toContain(
-			"# 活动反思评分",
-		);
-		expect(JSON.stringify(reflectionBody?.messages)).not.toContain(
-			"# Available Skills",
-		);
-		expect(reflectionBody?.tools).toBeUndefined();
-		// GLM 时代合同：schema 注入提示词（jsonPromptInjection），响应格式
-		// 头不再上链路（智谱 json_schema 模式会让思考失控）。
-		expect(reflectionBody?.response_format).toBeUndefined();
-		expect(
-			JSON.stringify(reflectionBody?.messages),
-		).toContain("JSON");
-		expect(reflectionBody?.stream).not.toBe(true);
-		expect(host.workflowSnapshotCalls).toEqual([]);
+			const response = await harness.request("reflection.analyze", {
+				invocationId: "activity-reflection-window-1",
+				requestId: "activity-window-request-1",
+				signalSegmentIds: ["segment-1"],
+				candidateActivities: ["development"],
+				userPrompt:
+					'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"private raw activity"}]\nACTIVITY_CONTEXT_JSON={}',
+			});
+			expect(response).toMatchObject({
+				ok: true,
+				result: {
+					events: [{ action: "推测：正在进行编程", activity: "development" }],
+					score: 0.7,
+				},
+			});
+			expect(host.calls).toContain("model/relay.open");
+			const reflectionBodies = host.modelBodies;
+			expect(reflectionBodies).toHaveLength(1);
+			expect(host.modelCalls).toEqual([
+				{
+					provider: "whalehall-activity-reflection",
+					modelId: "test-reflection-model",
+					runId: "activity-reflection-window-1",
+				},
+			]);
+			expect(host.modelAgentIds).toEqual([MODEL_AGENT_IDS.activityReflection]);
+			const reflectionBody = reflectionBodies[0];
+			expect(JSON.stringify(reflectionBody?.messages)).toContain(
+				"private raw activity",
+			);
+			expect(JSON.stringify(reflectionBody?.messages)).toContain(
+				"# 活动反思分析",
+			);
+			expect(JSON.stringify(reflectionBody?.messages)).toContain(
+				"# 活动反思评分",
+			);
+			expect(JSON.stringify(reflectionBody?.messages)).not.toContain(
+				"# Available Skills",
+			);
+			expect(reflectionBody?.tools).toBeUndefined();
+			// GLM 时代合同：schema 注入提示词（jsonPromptInjection），响应格式
+			// 头不再上链路（智谱 json_schema 模式会让思考失控）。
+			expect(reflectionBody?.response_format).toBeUndefined();
+			expect(JSON.stringify(reflectionBody?.messages)).toContain("JSON");
+			expect(reflectionBody?.stream).not.toBe(true);
+			expect(host.workflowSnapshotCalls).toEqual([]);
 
-		await harness.shutdown();
-	}, 30_000);
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-	fullTest("classifies a semantic reflection schema violation as invalid output", async () => {
-		const host = new FakeHost({ reflectionSensorOnlyAction: true });
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
+	fullTest(
+		"classifies a semantic reflection schema violation as invalid output",
+		async () => {
+			const host = new FakeHost({ reflectionSensorOnlyAction: true });
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
 
-		const response = await harness.request("reflection.analyze", {
-			invocationId: "activity-reflection-invalid-output",
-			requestId: "activity-window-invalid-output",
-			signalSegmentIds: ["segment-1"],
-			candidateActivities: ["development"],
-			userPrompt:
-				'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"synthetic observation"}]\nACTIVITY_CONTEXT_JSON={}',
-		});
-		expect(response).toMatchObject({
-			ok: false,
-			error: {
-				code: "ACTIVITY_OUTPUT_INVALID",
-				retryable: false,
-			},
-		});
+			const response = await harness.request("reflection.analyze", {
+				invocationId: "activity-reflection-invalid-output",
+				requestId: "activity-window-invalid-output",
+				signalSegmentIds: ["segment-1"],
+				candidateActivities: ["development"],
+				userPrompt:
+					'COMPRESSED_ACTIVITY_EVENTS_JSON=[{"time":"时间未知","tools":"synthetic","message":"synthetic observation"}]\nACTIVITY_CONTEXT_JSON={}',
+			});
+			expect(response).toMatchObject({
+				ok: false,
+				error: {
+					code: "ACTIVITY_OUTPUT_INVALID",
+					retryable: false,
+				},
+			});
 
-		await harness.shutdown();
-	}, 30_000);
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-	fullTest("recalls Bun-owned conversation history through Mastra Memory", async () => {
-		const host = new FakeHost({
-			memoryMessages: [
-				{ role: "user", content: "请记住项目代号是蓝鲸。" },
-				{ role: "assistant", content: "已记住项目代号。" },
-			],
-		});
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("conversation.start", {
-			runId: "memory-run",
-			conversationId: "memory-conversation",
-			resourceId: "installation-1",
-			message: "项目代号是什么？",
-			expectedVersion: 2,
-		});
-		const terminal = await harness.waitForRunTerminal("memory-run");
-		expect(terminal.event).toMatchObject({
-			kind: "run.completed",
-			result: { memoryVersion: 4 },
-		});
-		const modelMessages = JSON.stringify(host.modelBodies[0]?.messages);
-		expect(modelMessages).toContain("请记住项目代号是蓝鲸。");
-		expect(modelMessages).toContain("已记住项目代号。");
-		expect(modelMessages.indexOf("请记住项目代号是蓝鲸。")).toBeLessThan(
-			modelMessages.indexOf("已记住项目代号。"),
-		);
-		expect(modelMessages.indexOf("已记住项目代号。")).toBeLessThan(
-			modelMessages.indexOf("项目代号是什么？"),
-		);
-		const appendedMessages = host.lastMemoryAppend?.messages;
-		expect(
-			Array.isArray(appendedMessages) ? appendedMessages : [],
-		).toHaveLength(2);
-		expect(host.lastMemoryAppend).toMatchObject({
-			expectedVersion: 2,
-			messages: expect.arrayContaining([
-				{ role: "assistant", content: "今天先完成最重要的一件事。" },
-			]),
-		});
-		await harness.shutdown();
-	}, 30_000);
+	fullTest(
+		"recalls Bun-owned conversation history through Mastra Memory",
+		async () => {
+			const host = new FakeHost({
+				memoryMessages: [
+					{ role: "user", content: "请记住项目代号是蓝鲸。" },
+					{ role: "assistant", content: "已记住项目代号。" },
+				],
+			});
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("conversation.start", {
+				runId: "memory-run",
+				conversationId: "memory-conversation",
+				resourceId: "installation-1",
+				message: "项目代号是什么？",
+				expectedVersion: 2,
+			});
+			const terminal = await harness.waitForRunTerminal("memory-run");
+			expect(terminal.event).toMatchObject({
+				kind: "run.completed",
+				result: { memoryVersion: 4 },
+			});
+			const modelMessages = JSON.stringify(host.modelBodies[0]?.messages);
+			expect(modelMessages).toContain("请记住项目代号是蓝鲸。");
+			expect(modelMessages).toContain("已记住项目代号。");
+			expect(modelMessages.indexOf("请记住项目代号是蓝鲸。")).toBeLessThan(
+				modelMessages.indexOf("已记住项目代号。"),
+			);
+			expect(modelMessages.indexOf("已记住项目代号。")).toBeLessThan(
+				modelMessages.indexOf("项目代号是什么？"),
+			);
+			const appendedMessages = host.lastMemoryAppend?.messages;
+			expect(
+				Array.isArray(appendedMessages) ? appendedMessages : [],
+			).toHaveLength(2);
+			expect(host.lastMemoryAppend).toMatchObject({
+				expectedVersion: 2,
+				messages: expect.arrayContaining([
+					{ role: "assistant", content: "今天先完成最重要的一件事。" },
+				]),
+			});
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-	fullTest("rehydrates a suspended planning Workflow after the Sidecar restarts", async () => {
-		const host = new FakeHost();
-		const firstHarness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => firstHarness.send(message)),
-		);
-		await firstHarness.initialize();
-		await firstHarness.request(
-			"planning.start",
-			{
+	fullTest(
+		"rehydrates a suspended planning Workflow after the Sidecar restarts",
+		async () => {
+			const host = new FakeHost();
+			const firstHarness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => firstHarness.send(message)),
+			);
+			await firstHarness.initialize();
+			await firstHarness.request(
+				"planning.start",
+				{
+					runId: "planning-restart-run",
+					sessionId: "planning-restart-session",
+					input: planningInputFixture(),
+					expectedVersion: 0,
+				},
+				"planning-restart-origin",
+			);
+			await firstHarness.waitForRunSuspended("planning-restart-run");
+			const suspendedSnapshot = host.workflowSnapshotCalls.findLast(
+				(call) =>
+					call.method === "workflow/snapshot.persist" &&
+					call.params.workflowName === "task-planning" &&
+					isRecord(call.params.snapshot) &&
+					call.params.snapshot.status === "suspended",
+			);
+			expect(suspendedSnapshot?.params).toMatchObject({
+				workflowName: "task-planning",
+				runId: "workflow-1",
+				snapshot: {
+					status: "suspended",
+					resumeLabels: {
+						"planning.clarification": { stepId: "planning-cycle" },
+					},
+				},
+			});
+			await firstHarness.shutdown();
+
+			const callsBeforeRestart = host.workflowSnapshotCalls.length;
+			const secondHarness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => secondHarness.send(message)),
+			);
+			await secondHarness.initialize();
+			const modelCallsBeforeRecovery = host.modelBodies.length;
+			await secondHarness.request("planning.answer", {
+				runId: "different-planning-run",
+				sessionId: "planning-restart-session",
+				originatingRequestId: "planning-restart-origin-different",
+				answers: [
+					{ questionKey: "expected_outcome", answerText: "尝试串用会话" },
+				],
+				expectedVersion: 1,
+			});
+			const rejected = await secondHarness.waitForRunTerminal(
+				"different-planning-run",
+			);
+			expect(rejected.event).toMatchObject({
+				kind: "run.failed",
+				error: { code: "SESSION_NOT_FOUND" },
+			});
+			expect(host.modelBodies).toHaveLength(modelCallsBeforeRecovery);
+			const accepted = await secondHarness.request("planning.answer", {
 				runId: "planning-restart-run",
 				sessionId: "planning-restart-session",
+				originatingRequestId: "planning-restart-origin",
+				answers: [
+					{
+						questionKey: "expected_outcome",
+						answerText: "可安装并通过核心验收",
+					},
+				],
+				expectedVersion: 1,
+			});
+			expect(accepted).toMatchObject({
+				ok: true,
+				result: { accepted: true, runId: "planning-restart-run" },
+			});
+			const terminal = await secondHarness.waitForRunTerminal(
+				"planning-restart-run",
+			);
+			expect(terminal.event).toMatchObject({
+				kind: "run.completed",
+				result: { status: "draft", draft: { phases: [{ id: "phase-1" }] } },
+			});
+			expect(host.modelOrigins.at(-1)).toBe("planning-restart-origin");
+			const recoveryCalls =
+				host.workflowSnapshotCalls.slice(callsBeforeRestart);
+			expect(
+				recoveryCalls.filter(
+					(call) =>
+						call.method === "workflow/snapshot.load" &&
+						call.params.workflowName === "task-planning" &&
+						call.params.runId === "workflow-1",
+				),
+			).toHaveLength(2);
+			await secondHarness.shutdown();
+		},
+		30_000,
+	);
+
+	fullTest(
+		"keeps interactive conversation Tool-free and rejects provider tool calls",
+		async () => {
+			const host = new FakeHost({ toolApprovalScenario: true });
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("conversation.start", {
+				runId: "forbidden-tool-run",
+				conversationId: "forbidden-tool-conversation",
+				resourceId: "installation-1",
+				message: "请创建一个明天上午的日程。",
+				expectedVersion: 0,
+			});
+			const terminal = await harness.waitForRunTerminal("forbidden-tool-run");
+			expect(terminal.terminalState).toBe("failed");
+			expect(terminal.event).toMatchObject({
+				kind: "run.failed",
+				error: { code: "MODEL_RELAY_ERROR", retryable: true },
+			});
+			expect(host.modelBodies[0]?.tools).toBeUndefined();
+			expect(host.calls).not.toContain("tool/call");
+			expect(host.calls).not.toContain("tool/propose");
+			expect(host.calls).not.toContain("memory/append");
+			expect(
+				harness
+					.runEvents("forbidden-tool-run")
+					.some((event) => event.event.kind === "agent.tool.call"),
+			).toBe(false);
+			await harness.shutdown();
+		},
+		30_000,
+	);
+
+	fullTest(
+		"rejects split raw Tool markup without displaying or persisting it",
+		async () => {
+			const host = new FakeHost({
+				rawToolMarkupChunks: [
+					"<to",
+					'ol>{"name":"planning_get_active_plan","arguments":{}}</tool>',
+				],
+			});
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("conversation.start", {
+				runId: "raw-tool-markup-run",
+				conversationId: "raw-tool-markup-conversation",
+				resourceId: "installation-1",
+				message: "请说明当前计划。",
+				expectedVersion: 0,
+			});
+			const terminal = await harness.waitForRunTerminal("raw-tool-markup-run");
+			expect(terminal.terminalState).toBe("failed");
+			expect(terminal.event).toMatchObject({
+				kind: "run.failed",
+				error: {
+					code: "MODEL_RELAY_ERROR",
+					message: "The model provider returned unsupported tool-call markup.",
+				},
+			});
+			expect(host.calls).not.toContain("tool/call");
+			expect(host.calls).not.toContain("tool/propose");
+			expect(host.calls).not.toContain("memory/append");
+			expect(
+				harness
+					.runEvents("raw-tool-markup-run")
+					.some((event) => event.event.kind === "conversation.text.delta"),
+			).toBe(false);
+			await harness.shutdown();
+		},
+		30_000,
+	);
+
+	fullTest(
+		"allows ordinary text that only shares the Tool tag prefix",
+		async () => {
+			const host = new FakeHost({
+				rawToolMarkupChunks: ["可以使用 <tool", "tip> 展示帮助。"],
+			});
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("conversation.start", {
+				runId: "safe-tool-prefix-run",
+				conversationId: "safe-tool-prefix-conversation",
+				resourceId: "installation-1",
+				message: "请说明 tooltip。",
+				expectedVersion: 0,
+			});
+			const terminal = await harness.waitForRunTerminal("safe-tool-prefix-run");
+			expect(terminal.event).toMatchObject({
+				kind: "run.completed",
+				result: {
+					message: { content: "可以使用 <tooltip> 展示帮助。" },
+				},
+			});
+			await harness.shutdown();
+		},
+		30_000,
+	);
+
+	fullTest(
+		"retries an invalid draft once and persists a conflict instead of failing the run",
+		async () => {
+			const host = new FakeHost({ planningConflictScenario: true });
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("planning.start", {
+				runId: "planning-conflict-run",
+				sessionId: "planning-conflict-session",
 				input: planningInputFixture(),
 				expectedVersion: 0,
-			},
-			"planning-restart-origin",
-		);
-		await firstHarness.waitForRunSuspended("planning-restart-run");
-		const suspendedSnapshot = host.workflowSnapshotCalls.findLast(
-			(call) =>
-				call.method === "workflow/snapshot.persist" &&
-				call.params.workflowName === "task-planning" &&
-				isRecord(call.params.snapshot) &&
-				call.params.snapshot.status === "suspended",
-		);
-		expect(suspendedSnapshot?.params).toMatchObject({
-			workflowName: "task-planning",
-			runId: "workflow-1",
-			snapshot: {
-				status: "suspended",
-				resumeLabels: {
-					"planning.clarification": { stepId: "planning-cycle" },
+			});
+			const terminal = await harness.waitForRunTerminal(
+				"planning-conflict-run",
+			);
+			expect(terminal.terminalState).toBe("completed");
+			expect(terminal.event).toMatchObject({
+				kind: "run.completed",
+				result: {
+					status: "conflict",
+					draft: { calendarRevision: 8 },
+					validationIssues: [
+						{ code: "calendar-conflict", proposalId: "proposal-1" },
+					],
 				},
-			},
-		});
-		await firstHarness.shutdown();
+			});
+			expect(
+				host.calls.filter((method) => method === "calendar/query"),
+			).toHaveLength(2);
+			expect(
+				host.calls.filter((method) => method === "planning/validate"),
+			).toHaveLength(2);
+			expect(
+				host.modelBodies.filter((body) => body.response_format !== undefined),
+			).toHaveLength(2);
+			expect(
+				host.calls.filter((method) => method === "planning/save"),
+			).toHaveLength(1);
+			expect(host.lastPlanningSave).toMatchObject({
+				result: { status: "conflict", draft: { calendarRevision: 8 } },
+			});
+			expect(
+				harness
+					.runEvents("planning-conflict-run")
+					.some((event) => event.event.kind === "run.failed"),
+			).toBe(false);
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-		const callsBeforeRestart = host.workflowSnapshotCalls.length;
-		const secondHarness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => secondHarness.send(message)),
-		);
-		await secondHarness.initialize();
-		const modelCallsBeforeRecovery = host.modelBodies.length;
-		await secondHarness.request("planning.answer", {
-			runId: "different-planning-run",
-			sessionId: "planning-restart-session",
-			originatingRequestId: "planning-restart-origin-different",
-			answers: [
-				{ questionKey: "expected_outcome", answerText: "尝试串用会话" },
-			],
-			expectedVersion: 1,
-		});
-		const rejected = await secondHarness.waitForRunTerminal(
-			"different-planning-run",
-		);
-		expect(rejected.event).toMatchObject({
-			kind: "run.failed",
-			error: { code: "SESSION_NOT_FOUND" },
-		});
-		expect(host.modelBodies).toHaveLength(modelCallsBeforeRecovery);
-		const accepted = await secondHarness.request("planning.answer", {
-			runId: "planning-restart-run",
-			sessionId: "planning-restart-session",
-			originatingRequestId: "planning-restart-origin",
-			answers: [
-				{ questionKey: "expected_outcome", answerText: "可安装并通过核心验收" },
-			],
-			expectedVersion: 1,
-		});
-		expect(accepted).toMatchObject({
-			ok: true,
-			result: { accepted: true, runId: "planning-restart-run" },
-		});
-		const terminal = await secondHarness.waitForRunTerminal(
-			"planning-restart-run",
-		);
-		expect(terminal.event).toMatchObject({
-			kind: "run.completed",
-			result: { status: "draft", draft: { phases: [{ id: "phase-1" }] } },
-		});
-		expect(host.modelOrigins.at(-1)).toBe("planning-restart-origin");
-		const recoveryCalls = host.workflowSnapshotCalls.slice(callsBeforeRestart);
-		expect(
-			recoveryCalls.filter(
-				(call) =>
-					call.method === "workflow/snapshot.load" &&
-					call.params.workflowName === "task-planning" &&
-					call.params.runId === "workflow-1",
-			),
-		).toHaveLength(2);
-		await secondHarness.shutdown();
-	}, 30_000);
+	fullTest(
+		"cancels an active run and aborts the in-flight model relay",
+		async () => {
+			const host = new FakeHost({ holdModelOpen: true });
+			const harness = new SidecarHarness(sidecarPath, (request) =>
+				host.handle(request, (message) => harness.send(message)),
+			);
+			await harness.initialize();
+			await harness.request("conversation.start", {
+				runId: "cancel-run-1",
+				conversationId: "cancel-conversation",
+				message: "等待模型",
+				expectedVersion: 0,
+			});
+			await harness.waitFor(
+				(message) =>
+					isSidecarRequest(message) && message.method === "model/relay.open",
+			);
+			await harness.request("run.cancel", {
+				runId: "cancel-run-1",
+				reason: "用户停止生成",
+			});
+			const terminal = await harness.waitForRunTerminal("cancel-run-1");
+			expect(terminal.terminalState).toBe("cancelled");
+			expect(terminal.event).toEqual({
+				kind: "run.cancelled",
+				reason: "用户停止生成",
+			});
+			await harness.waitFor(
+				(message) =>
+					isSidecarRequest(message) && message.method === "model/relay.abort",
+			);
+			expect(host.calls).toContain("model/relay.abort");
+			await harness.shutdown();
+		},
+		30_000,
+	);
 
-	fullTest("keeps interactive conversation Tool-free and rejects provider tool calls", async () => {
-		const host = new FakeHost({ toolApprovalScenario: true });
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("conversation.start", {
-			runId: "forbidden-tool-run",
-			conversationId: "forbidden-tool-conversation",
-			resourceId: "installation-1",
-			message: "请创建一个明天上午的日程。",
-			expectedVersion: 0,
-		});
-		const terminal = await harness.waitForRunTerminal("forbidden-tool-run");
-		expect(terminal.terminalState).toBe("failed");
-		expect(terminal.event).toMatchObject({
-			kind: "run.failed",
-			error: { code: "MODEL_RELAY_ERROR", retryable: true },
-		});
-		expect(host.modelBodies[0]?.tools).toBeUndefined();
-		expect(host.calls).not.toContain("tool/call");
-		expect(host.calls).not.toContain("tool/propose");
-		expect(host.calls).not.toContain("memory/append");
-		expect(
-			harness
-				.runEvents("forbidden-tool-run")
-				.some((event) => event.event.kind === "agent.tool.call"),
-		).toBe(false);
-		await harness.shutdown();
-	}, 30_000);
-
-	fullTest("rejects split raw Tool markup without displaying or persisting it", async () => {
-		const host = new FakeHost({
-			rawToolMarkupChunks: [
-				"<to",
-				'ol>{"name":"planning_get_active_plan","arguments":{}}</tool>',
-			],
-		});
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("conversation.start", {
-			runId: "raw-tool-markup-run",
-			conversationId: "raw-tool-markup-conversation",
-			resourceId: "installation-1",
-			message: "请说明当前计划。",
-			expectedVersion: 0,
-		});
-		const terminal = await harness.waitForRunTerminal("raw-tool-markup-run");
-		expect(terminal.terminalState).toBe("failed");
-		expect(terminal.event).toMatchObject({
-			kind: "run.failed",
-			error: {
-				code: "MODEL_RELAY_ERROR",
-				message: "The model provider returned unsupported tool-call markup.",
-			},
-		});
-		expect(host.calls).not.toContain("tool/call");
-		expect(host.calls).not.toContain("tool/propose");
-		expect(host.calls).not.toContain("memory/append");
-		expect(
-			harness
-				.runEvents("raw-tool-markup-run")
-				.some((event) => event.event.kind === "conversation.text.delta"),
-		).toBe(false);
-		await harness.shutdown();
-	}, 30_000);
-
-	fullTest("allows ordinary text that only shares the Tool tag prefix", async () => {
-		const host = new FakeHost({
-			rawToolMarkupChunks: ["可以使用 <tool", "tip> 展示帮助。"],
-		});
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("conversation.start", {
-			runId: "safe-tool-prefix-run",
-			conversationId: "safe-tool-prefix-conversation",
-			resourceId: "installation-1",
-			message: "请说明 tooltip。",
-			expectedVersion: 0,
-		});
-		const terminal = await harness.waitForRunTerminal("safe-tool-prefix-run");
-		expect(terminal.event).toMatchObject({
-			kind: "run.completed",
-			result: {
-				message: { content: "可以使用 <tooltip> 展示帮助。" },
-			},
-		});
-		await harness.shutdown();
-	}, 30_000);
-
-	fullTest("retries an invalid draft once and persists a conflict instead of failing the run", async () => {
-		const host = new FakeHost({ planningConflictScenario: true });
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("planning.start", {
-			runId: "planning-conflict-run",
-			sessionId: "planning-conflict-session",
-			input: planningInputFixture(),
-			expectedVersion: 0,
-		});
-		const terminal = await harness.waitForRunTerminal("planning-conflict-run");
-		expect(terminal.terminalState).toBe("completed");
-		expect(terminal.event).toMatchObject({
-			kind: "run.completed",
-			result: {
-				status: "conflict",
-				draft: { calendarRevision: 8 },
-				validationIssues: [
-					{ code: "calendar-conflict", proposalId: "proposal-1" },
-				],
-			},
-		});
-		expect(
-			host.calls.filter((method) => method === "calendar/query"),
-		).toHaveLength(2);
-		expect(
-			host.calls.filter((method) => method === "planning/validate"),
-		).toHaveLength(2);
-		expect(
-			host.modelBodies.filter((body) => body.response_format !== undefined),
-		).toHaveLength(2);
-		expect(
-			host.calls.filter((method) => method === "planning/save"),
-		).toHaveLength(1);
-		expect(host.lastPlanningSave).toMatchObject({
-			result: { status: "conflict", draft: { calendarRevision: 8 } },
-		});
-		expect(
-			harness
-				.runEvents("planning-conflict-run")
-				.some((event) => event.event.kind === "run.failed"),
-		).toBe(false);
-		await harness.shutdown();
-	}, 30_000);
-
-	fullTest("cancels an active run and aborts the in-flight model relay", async () => {
-		const host = new FakeHost({ holdModelOpen: true });
-		const harness = new SidecarHarness(sidecarPath, (request) =>
-			host.handle(request, (message) => harness.send(message)),
-		);
-		await harness.initialize();
-		await harness.request("conversation.start", {
-			runId: "cancel-run-1",
-			conversationId: "cancel-conversation",
-			message: "等待模型",
-			expectedVersion: 0,
-		});
-		await harness.waitFor(
-			(message) =>
-				isSidecarRequest(message) && message.method === "model/relay.open",
-		);
-		await harness.request("run.cancel", {
-			runId: "cancel-run-1",
-			reason: "用户停止生成",
-		});
-		const terminal = await harness.waitForRunTerminal("cancel-run-1");
-		expect(terminal.terminalState).toBe("cancelled");
-		expect(terminal.event).toEqual({
-			kind: "run.cancelled",
-			reason: "用户停止生成",
-		});
-		await harness.waitFor(
-			(message) =>
-				isSidecarRequest(message) && message.method === "model/relay.abort",
-		);
-		expect(host.calls).toContain("model/relay.abort");
-		await harness.shutdown();
-	}, 30_000);
-
-	fullTest("closes the Sidecar when a host response frame is malformed", async () => {
-		const host = new FakeHost();
-		const harness = new SidecarHarness(sidecarPath, async (request) => {
-			if (request.method === "model/relay.open") {
-				await harness.send({
-					protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
-					type: "response",
-					requestId: request.requestId,
-					ok: true,
-				} as unknown as ProtocolMessage);
-				return;
-			}
-			await host.handle(request, (message) => harness.send(message));
-		});
-		await harness.initialize();
-		await harness.request("conversation.start", {
-			runId: "malformed-response-run",
-			conversationId: "malformed-response-conversation",
-			message: "触发模型调用",
-			expectedVersion: 0,
-		});
-		expect(await harness.waitForExit()).toBe(1);
-	}, 30_000);
+	fullTest(
+		"closes the Sidecar when a host response frame is malformed",
+		async () => {
+			const host = new FakeHost();
+			const harness = new SidecarHarness(sidecarPath, async (request) => {
+				if (request.method === "model/relay.open") {
+					await harness.send({
+						protocolVersion: AGENT_HOST_PROTOCOL_VERSION,
+						type: "response",
+						requestId: request.requestId,
+						ok: true,
+					} as unknown as ProtocolMessage);
+					return;
+				}
+				await host.handle(request, (message) => harness.send(message));
+			});
+			await harness.initialize();
+			await harness.request("conversation.start", {
+				runId: "malformed-response-run",
+				conversationId: "malformed-response-conversation",
+				message: "触发模型调用",
+				expectedVersion: 0,
+			});
+			expect(await harness.waitForExit()).toBe(1);
+		},
+		30_000,
+	);
 });
 
 type HostHandler = (request: SidecarHostRequest) => Promise<void>;
@@ -1790,11 +1863,36 @@ function dynamicPlanningProposalFixture(): Record<string, unknown> {
 			},
 		],
 		evaluations: [
-			{ angle: "goal-alignment", verdict: "pass", summary: "任务与目标对齐。", affectedTaskKeys: [] },
-			{ angle: "time-feasibility", verdict: "pass", summary: "容量足够。", affectedTaskKeys: [] },
-			{ angle: "dependency-risk", verdict: "pass", summary: "依赖链清晰。", affectedTaskKeys: [] },
-			{ angle: "load-recovery", verdict: "pass", summary: "负荷分布均衡。", affectedTaskKeys: [] },
-			{ angle: "evidence-sufficiency", verdict: "pass", summary: "关键约束已确认。", affectedTaskKeys: [] },
+			{
+				angle: "goal-alignment",
+				verdict: "pass",
+				summary: "任务与目标对齐。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "time-feasibility",
+				verdict: "pass",
+				summary: "容量足够。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "dependency-risk",
+				verdict: "pass",
+				summary: "依赖链清晰。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "load-recovery",
+				verdict: "pass",
+				summary: "负荷分布均衡。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "evidence-sufficiency",
+				verdict: "pass",
+				summary: "关键约束已确认。",
+				affectedTaskKeys: [],
+			},
 		],
 	};
 }

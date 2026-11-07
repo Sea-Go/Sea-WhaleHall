@@ -3,9 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
 	MonitoringController,
 	MonitoringPermissionsControl,
-	monitoringSetupStatus,
 	type MonitoringService,
 	type MonitoringSnapshot,
+	monitoringSetupStatus,
 } from "../src/views/client/features/monitoring/public";
 
 function snapshot(
@@ -26,7 +26,12 @@ function snapshot(
 		permissions: [
 			{ id: "accessibility", state: "granted", required: true, detail: null },
 			{ id: "screenRecording", state: "granted", required: true, detail: null },
-			{ id: "inputMonitoring", state: "granted", required: false, detail: null },
+			{
+				id: "inputMonitoring",
+				state: "granted",
+				required: false,
+				detail: null,
+			},
 			{
 				id: "browserAutomation",
 				state: "unavailable",
@@ -111,5 +116,4 @@ describe("one-time content-vault setup UI", () => {
 		expect(markup).not.toContain("<button");
 		expect(markup).not.toContain("开始一次性设置");
 	});
-
 });

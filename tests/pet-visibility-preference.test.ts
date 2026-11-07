@@ -42,7 +42,6 @@ describe("persisted pet visibility synchronization", () => {
 		expect(visible).toEqual([true]);
 		unsubscribe();
 	});
-
 });
 
 function controllerWith(values: PreferenceValues): PreferencesController {

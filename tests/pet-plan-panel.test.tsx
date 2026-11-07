@@ -48,7 +48,4 @@ describe("PetPlanPanel", () => {
 			view.container.querySelectorAll('[data-status="confirmed"]').length,
 		).toBe(1);
 	});
-
-
-
 });

@@ -116,12 +116,4 @@ describe("monitoring status UI", () => {
 		expect(markup).not.toContain("暂停观察");
 		expect(markup).not.toContain("screen_recording_denied");
 	});
-
-
-
-
-
-
-
-
 });

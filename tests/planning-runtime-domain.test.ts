@@ -63,11 +63,36 @@ function validProposal(): PlanningModelProposal {
 			},
 		],
 		evaluations: [
-			{ angle: "goal-alignment", verdict: "pass", summary: "任务与目标对齐。", affectedTaskKeys: [] },
-			{ angle: "time-feasibility", verdict: "pass", summary: "容量足够。", affectedTaskKeys: [] },
-			{ angle: "dependency-risk", verdict: "pass", summary: "依赖链清晰。", affectedTaskKeys: [] },
-			{ angle: "load-recovery", verdict: "pass", summary: "负荷分布均衡。", affectedTaskKeys: [] },
-			{ angle: "evidence-sufficiency", verdict: "pass", summary: "关键约束已确认。", affectedTaskKeys: [] },
+			{
+				angle: "goal-alignment",
+				verdict: "pass",
+				summary: "任务与目标对齐。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "time-feasibility",
+				verdict: "pass",
+				summary: "容量足够。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "dependency-risk",
+				verdict: "pass",
+				summary: "依赖链清晰。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "load-recovery",
+				verdict: "pass",
+				summary: "负荷分布均衡。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "evidence-sufficiency",
+				verdict: "pass",
+				summary: "关键约束已确认。",
+				affectedTaskKeys: [],
+			},
 		],
 	};
 }
@@ -226,15 +251,8 @@ describe("planning structured model boundary", () => {
 			}),
 		).toBeFalse();
 	});
-
 });
 
-describe("planning deterministic time and mutation rules", () => {
+describe("planning deterministic time and mutation rules", () => {});
 
-
-
-
-});
-
-describe("planning persistence payload validation", () => {
-});
+describe("planning persistence payload validation", () => {});

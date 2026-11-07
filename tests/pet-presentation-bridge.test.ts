@@ -81,12 +81,9 @@ describe("ElectrobunPetPresentationBridge", () => {
 		expect(JSON.stringify(diagnostics)).not.toContain("secret plan title");
 		expect(JSON.stringify(diagnostics)).not.toContain("endpoint");
 	});
-
 });
 
-describe("PlanningPetCoordinator", () => {
-
-});
+describe("PlanningPetCoordinator", () => {});
 
 function recordingBridge(
 	events: PetPresentationEvent[],

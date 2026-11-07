@@ -3,9 +3,9 @@ import {
 	assertValidGrowthReport,
 	canMoveToNextReport,
 	completionMetric,
+	type GrowthReport,
 	moveReportAnchor,
 	reportRangeFor,
-	type GrowthReport,
 } from "../src/views/client/features/reports/domain";
 
 describe("report date ranges", () => {
@@ -31,18 +31,12 @@ describe("report date ranges", () => {
 		expect(moveReportAnchor("day", "2026-07-29", -1)).toBe("2026-07-28");
 		expect(moveReportAnchor("week", "2026-07-29", -1)).toBe("2026-07-22");
 		expect(moveReportAnchor("month", "2026-07-29", -1)).toBe("2026-06-29");
-		expect(canMoveToNextReport("week", "2026-07-22", "2026-07-29")).toBe(
-			true,
-		);
-		expect(canMoveToNextReport("week", "2026-07-29", "2026-07-29")).toBe(
-			false,
-		);
+		expect(canMoveToNextReport("week", "2026-07-22", "2026-07-29")).toBe(true);
+		expect(canMoveToNextReport("week", "2026-07-29", "2026-07-29")).toBe(false);
 	});
 });
 
-describe("report metric honesty", () => {
-
-});
+describe("report metric honesty", () => {});
 
 function minimalReport(): GrowthReport {
 	return {

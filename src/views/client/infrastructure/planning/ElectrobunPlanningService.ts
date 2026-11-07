@@ -1,8 +1,8 @@
 import { Temporal } from "temporal-polyfill";
-import type { PlanningProgressStep } from "../../../../shared/planning";
 import type {
 	PlanningPlanProjection,
 	PlanningPlanSummaryProjection,
+	PlanningProgressStep,
 } from "../../../../shared/planning";
 import type {
 	PlanAdjustmentView,
@@ -50,7 +50,9 @@ export class ElectrobunPlanningService implements PlanningService {
 	constructor(private readonly loadApi: PlanningRpcLoader = planningApi) {}
 
 	private progressBound = false;
-	private boundListeners = new Set<(event: { text: string; done: boolean }) => void>();
+	private boundListeners = new Set<
+		(event: { text: string; done: boolean }) => void
+	>();
 
 	private ensureProgressBound(): void {
 		if (this.progressBound) return;

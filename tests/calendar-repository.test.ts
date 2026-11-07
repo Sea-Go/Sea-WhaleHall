@@ -4,10 +4,10 @@ import {
 	type CalendarStorage,
 } from "../src/bun/calendar-repository";
 import {
-	CalendarRevisionConflictError,
 	type AgentCalendarEventRecord,
 	type CalendarBatchCommit,
 	type CalendarEventListOptions,
+	CalendarRevisionConflictError,
 } from "../src/bun/encrypted-agent-repository";
 import type { CalendarEvent, CalendarMutation } from "../src/shared/calendar";
 
@@ -29,12 +29,19 @@ class MemoryCalendarStorage implements CalendarStorage {
 			.slice(offset, offset + limit)
 			.map((item) => structuredClone(item));
 	}
-	async commitCalendarBatch(accountId: string, batch: CalendarBatchCommit): Promise<{ revision: number }> {
+	async commitCalendarBatch(
+		accountId: string,
+		batch: CalendarBatchCommit,
+	): Promise<{ revision: number }> {
 		if (this.failRevision || batch.expectedRevision !== this.revision) {
-			throw new CalendarRevisionConflictError(batch.expectedRevision, this.revision + 1);
+			throw new CalendarRevisionConflictError(
+				batch.expectedRevision,
+				this.revision + 1,
+			);
 		}
 		const next = new Map(this.events);
-		for (const item of batch.upserts) next.set(item.event.id, structuredClone(item));
+		for (const item of batch.upserts)
+			next.set(item.event.id, structuredClone(item));
 		for (const id of batch.deletes) next.delete(id);
 		this.events = next;
 		this.revision += 1;
@@ -72,32 +79,60 @@ function createMutation(event: CalendarEvent): CalendarMutation {
 describe("CalendarRepository", () => {
 	test("commits a validated batch with one calendar revision", async () => {
 		const storage = new MemoryCalendarStorage();
-		const repository = new CalendarRepository(storage, { timeZone: () => "Asia/Shanghai", now: () => 10 });
-		const result = await repository.mutateBatch("account-1", "batch-1", [
-			createMutation(calendarEvent("one", "2026-08-03T01:00:00Z", "2026-08-03T02:00:00Z")),
-			createMutation(calendarEvent("two", "2026-08-03T03:00:00Z", "2026-08-03T04:00:00Z")),
-		], 0);
-		expect(result).toEqual(expect.objectContaining({ ok: true, calendarRevision: 1 }));
+		const repository = new CalendarRepository(storage, {
+			timeZone: () => "Asia/Shanghai",
+			now: () => 10,
+		});
+		const result = await repository.mutateBatch(
+			"account-1",
+			"batch-1",
+			[
+				createMutation(
+					calendarEvent("one", "2026-08-03T01:00:00Z", "2026-08-03T02:00:00Z"),
+				),
+				createMutation(
+					calendarEvent("two", "2026-08-03T03:00:00Z", "2026-08-03T04:00:00Z"),
+				),
+			],
+			0,
+		);
+		expect(result).toEqual(
+			expect.objectContaining({ ok: true, calendarRevision: 1 }),
+		);
 		expect(storage.events.size).toBe(2);
 	});
 
 	test("does not partially write a conflicting batch", async () => {
 		const storage = new MemoryCalendarStorage();
-		const repository = new CalendarRepository(storage, { timeZone: () => "Asia/Shanghai" });
-		const blocker = calendarEvent("blocker", "2026-08-03T01:30:00Z", "2026-08-03T02:30:00Z");
+		const repository = new CalendarRepository(storage, {
+			timeZone: () => "Asia/Shanghai",
+		});
+		const blocker = calendarEvent(
+			"blocker",
+			"2026-08-03T01:30:00Z",
+			"2026-08-03T02:30:00Z",
+		);
 		blocker.kind = "manual-block";
 		blocker.state = "committed";
-		storage.events.set(blocker.id, { accountId: "account-1", event: blocker, updatedAtMs: 1 });
+		storage.events.set(blocker.id, {
+			accountId: "account-1",
+			event: blocker,
+			updatedAtMs: 1,
+		});
 		const result = await repository.mutateBatch("account-1", "batch-2", [
-			createMutation(calendarEvent("safe", "2026-08-03T04:00:00Z", "2026-08-03T05:00:00Z")),
-			createMutation(calendarEvent("conflict", "2026-08-03T02:00:00Z", "2026-08-03T03:00:00Z")),
+			createMutation(
+				calendarEvent("safe", "2026-08-03T04:00:00Z", "2026-08-03T05:00:00Z"),
+			),
+			createMutation(
+				calendarEvent(
+					"conflict",
+					"2026-08-03T02:00:00Z",
+					"2026-08-03T03:00:00Z",
+				),
+			),
 		]);
 		expect(result.ok).toBe(false);
 		expect(storage.events.has("safe")).toBe(false);
 		expect(storage.revision).toBe(0);
 	});
-
-
-
-
 });

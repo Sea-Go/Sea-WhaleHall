@@ -154,10 +154,4 @@ describe("WhaleHall client config.yaml", () => {
 		).toBe(WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL);
 		expect(readFileSync(path, "utf8")).toBe(source);
 	});
-
-
-
-
-
-
 });

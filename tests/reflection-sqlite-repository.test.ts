@@ -88,15 +88,6 @@ describe("SqliteReflectionRepository", () => {
 		expect(await reopened.listWindowsForAccount("account-a")).toEqual([]);
 		reopened.close();
 	});
-
-
-
-
-
-
-
-
-
 });
 
 function createRepository(): {

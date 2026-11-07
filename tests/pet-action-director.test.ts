@@ -71,11 +71,4 @@ describe("PetActionDirector autonomous routines", () => {
 		expect(actions).toEqual(["lookAround", "playToy", "idle"]);
 		expect(director.getSnapshot().activePlan).toBeNull();
 	});
-
-
-
-
-
-
-
 });

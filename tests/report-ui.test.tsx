@@ -3,8 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ReportController } from "../src/views/client/features/reports/ReportController";
 import { ReportsPage } from "../src/views/client/features/reports/ReportsPage";
 import {
-	MockReportService,
 	type MockReportMode,
+	MockReportService,
 } from "../src/views/client/infrastructure/reports/MockReportService";
 
 function setup(mode: MockReportMode = "auto") {
@@ -43,9 +43,4 @@ describe("growth report UI", () => {
 		expect(markup).toContain('tabindex="0"');
 		expect(markup).toContain("计划完成率口径");
 	});
-
-
-
-
-
 });

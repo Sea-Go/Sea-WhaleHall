@@ -120,7 +120,4 @@ describe("planning domain", () => {
 			expect.objectContaining({ message: expect.stringContaining("1000") }),
 		);
 	});
-
-
-
 });

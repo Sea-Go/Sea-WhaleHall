@@ -3,26 +3,26 @@ import FullCalendar, {
 	type DateClickInfo,
 	type DateSelectInfo,
 	type DatesSetInfo,
-	type EventClickInfo,
 	type EventApi,
-	type MountInfo,
+	type EventClickInfo,
 	type EventDisplayInfo,
 	type EventDropInfo,
 	type EventInput,
 	type EventResizeDoneInfo,
+	type MountInfo,
 } from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/react/daygrid";
 import interactionPlugin from "@fullcalendar/react/interaction";
-import timeGridPlugin from "@fullcalendar/react/timegrid";
 import breezyThemePlugin from "@fullcalendar/react/themes/breezy";
+import timeGridPlugin from "@fullcalendar/react/timegrid";
 import rrulePlugin from "@fullcalendar/rrule";
 import {
 	forwardRef,
+	type ReactNode,
 	useEffect,
 	useImperativeHandle,
 	useMemo,
 	useRef,
-	type ReactNode,
 } from "react";
 import { RRule } from "rrule";
 import {
@@ -124,10 +124,7 @@ function recurrenceInput(event: CalendarEvent): Partial<EventInput> {
 		exdate: [...event.recurrence.exceptionDates],
 		duration: schedule.allDay
 			? {
-					days: dateDurationDays(
-						schedule.startDate,
-						schedule.endDateExclusive,
-					),
+					days: dateDurationDays(schedule.startDate, schedule.endDateExclusive),
 				}
 			: { minutes: durationMinutes(schedule.start, schedule.end) },
 	};
@@ -138,14 +135,15 @@ export function calendarEventToFullCalendarInput(
 	pending = false,
 	conflict: CalendarConflict | null = null,
 ): EventInput {
-	const scheduleInput: Partial<EventInput> = event.recurrence && !event.occurrenceId
-		? recurrenceInput(event)
-		: event.schedule.allDay
-			? {
-					start: event.schedule.startDate,
-					end: event.schedule.endDateExclusive,
-				}
-			: { start: event.schedule.start, end: event.schedule.end };
+	const scheduleInput: Partial<EventInput> =
+		event.recurrence && !event.occurrenceId
+			? recurrenceInput(event)
+			: event.schedule.allDay
+				? {
+						start: event.schedule.startDate,
+						end: event.schedule.endDateExclusive,
+					}
+				: { start: event.schedule.start, end: event.schedule.end };
 	const classes = [
 		"whale-event",
 		`whale-event--${event.kind}`,
@@ -245,10 +243,9 @@ function renderEventContent(info: EventDisplayInfo): ReactNode {
 	const kind = String(info.event.extendedProps.kind);
 	const pending = Boolean(info.event.extendedProps.pending);
 	const conflictReason = info.event.extendedProps.conflictReason;
-	const status =
-		conflictReason
-			? "冲突"
-			: state === "proposed"
+	const status = conflictReason
+		? "冲突"
+		: state === "proposed"
 			? "待确认"
 			: kind === "manual-block"
 				? "占用"
@@ -383,9 +380,7 @@ export const WhaleCalendar = forwardRef<
 				calendarEventToFullCalendarInput(
 					event,
 					pendingEventIds.has(event.id),
-					event.kind === "plan"
-						? detectCalendarConflict(event, events)
-						: null,
+					event.kind === "plan" ? detectCalendarConflict(event, events) : null,
 				),
 			),
 		[events, pendingEventIds],

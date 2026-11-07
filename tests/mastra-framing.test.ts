@@ -45,9 +45,4 @@ describe("Mastra sidecar Content-Length framing", () => {
 			`Content-Length: ${Buffer.byteLength(JSON.stringify(value))}`,
 		);
 	});
-
-
-
-
-
 });

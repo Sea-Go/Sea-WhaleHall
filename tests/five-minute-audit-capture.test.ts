@@ -132,26 +132,9 @@ describe("five-minute audit capture coordinator", () => {
 			),
 		).toBeNull();
 	});
-
-
-
-
-
-
-
-
-
-
-
-
-
 });
 
-describe("file audit capture store", () => {
-
-
-
-});
+describe("file audit capture store", () => {});
 
 async function drainMicrotasks(): Promise<void> {
 	for (let index = 0; index < 8; index += 1) {

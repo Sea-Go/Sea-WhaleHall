@@ -1,23 +1,23 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database } from "bun:sqlite";
 import type { ReflectionClock } from "../src/agent/reflection/collector";
 import { WebCryptoReflectionHasher } from "../src/agent/reflection/hash";
 import {
 	DeterministicEpisodeAssembler,
 	DeterministicEvidenceRenderer,
 	DeterministicTimelineHypothesisGenerator,
+	type RawFiveMinuteAuditSource,
+	type SemanticEventV2,
 	SqliteTimelineV2Repository,
 	TIMELINE_RAW_RETENTION_MS,
+	type TimelineCollectorSnapshotV2,
 	TimelineFiveMinuteAuditExporter,
 	TimelineV2Collector,
 	TimelineV2JobRunner,
 	TimelineV2Processor,
-	type RawFiveMinuteAuditSource,
-	type SemanticEventV2,
-	type TimelineCollectorSnapshotV2,
 	type TimelineV2Repository,
 	type TimelineVault,
 	type TimelineVaultDeleteRequest,
@@ -120,11 +120,14 @@ class MemoryVault implements TimelineVault {
 		).length;
 	}
 
-	retainedPlaintextBytes(purpose: TimelineVaultDeleteRequest["purpose"]): number {
+	retainedPlaintextBytes(
+		purpose: TimelineVaultDeleteRequest["purpose"],
+	): number {
 		return [...this.byId.values()]
 			.filter((entry) => entry.request.purpose === purpose)
 			.reduce(
-				(total, entry) => total + new TextEncoder().encode(entry.request.plaintext).length,
+				(total, entry) =>
+					total + new TextEncoder().encode(entry.request.plaintext).length,
 				0,
 			);
 	}
@@ -251,12 +254,12 @@ async function populate(
 	];
 	await collector.ingest(events[0]!);
 	const window = await collector.ingest(events[1]!);
-	expect(
-		await repository.readCursorAuthority(events[1]!.cursor),
-	).toMatchObject({
-		state: "pending",
-		windowId: window!.windowId,
-	});
+	expect(await repository.readCursorAuthority(events[1]!.cursor)).toMatchObject(
+		{
+			state: "pending",
+			windowId: window!.windowId,
+		},
+	);
 	const evidence = new DeterministicEvidenceRenderer(hasher);
 	const episodes = new DeterministicEpisodeAssembler({
 		hasher,
@@ -277,9 +280,7 @@ async function populate(
 		jitter: () => 0,
 	});
 	expect(await runner.runNext()).toBe("completed");
-	expect(
-		await repository.readCursorAuthority(events[1]!.cursor),
-	).toEqual({
+	expect(await repository.readCursorAuthority(events[1]!.cursor)).toEqual({
 		state: "committed",
 		windowId: window!.windowId,
 	});
@@ -288,7 +289,9 @@ async function populate(
 
 describe("Timeline v2 encrypted SQLite and audit", () => {
 	test("durably abandons an aged shutdown claim without spending its retry history", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "whalehall-timeline-v2-abandon-"));
+		const directory = mkdtempSync(
+			join(tmpdir(), "whalehall-timeline-v2-abandon-"),
+		);
 		temporaryDirectories.push(directory);
 		const path = join(directory, "timeline-v2.sqlite3");
 		const vault = new MemoryVault();
@@ -356,11 +359,7 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 	});
 
 	test("keeps redacted raw lineage exportable when production-derived vault data is unavailable", async () => {
-		const event = semantic(
-			1,
-			1_000,
-			"application.foregroundChanged",
-		);
+		const event = semantic(1, 1_000, "application.foregroundChanged");
 		const raw: RawFiveMinuteAuditSource = {
 			async queryAuditRange() {
 				return {
@@ -407,10 +406,4 @@ describe("Timeline v2 encrypted SQLite and audit", () => {
 			}),
 		);
 	});
-
-
-
-
-
-
 });

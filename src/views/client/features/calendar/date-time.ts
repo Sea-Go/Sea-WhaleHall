@@ -201,10 +201,13 @@ export function calendarRangeLabel(
 }
 
 export function timeZoneOffsetLabel(timeZone: string, date: string): string {
-	const offset = Temporal.PlainDate.from(date)
-		.toZonedDateTime({ timeZone, plainTime: "12:00" })
-		.offset;
+	const offset = Temporal.PlainDate.from(date).toZonedDateTime({
+		timeZone,
+		plainTime: "12:00",
+	}).offset;
 	const [hours, minutes] = offset.split(":");
 	const hour = Number(hours);
-	return minutes === "00" ? `GMT${hour >= 0 ? "+" : ""}${hour}` : `GMT${offset}`;
+	return minutes === "00"
+		? `GMT${hour >= 0 ? "+" : ""}${hour}`
+		: `GMT${offset}`;
 }

@@ -85,11 +85,36 @@ function proposalFixture(): PlanningModelProposal {
 			},
 		],
 		evaluations: [
-			{ angle: "goal-alignment", verdict: "pass", summary: "任务与目标对齐。", affectedTaskKeys: [] },
-			{ angle: "time-feasibility", verdict: "pass", summary: "容量足够。", affectedTaskKeys: [] },
-			{ angle: "dependency-risk", verdict: "pass", summary: "依赖链清晰。", affectedTaskKeys: [] },
-			{ angle: "load-recovery", verdict: "pass", summary: "负荷分布均衡。", affectedTaskKeys: [] },
-			{ angle: "evidence-sufficiency", verdict: "adjust", summary: "访谈样本量未确认。", affectedTaskKeys: ["validate-market"] },
+			{
+				angle: "goal-alignment",
+				verdict: "pass",
+				summary: "任务与目标对齐。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "time-feasibility",
+				verdict: "pass",
+				summary: "容量足够。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "dependency-risk",
+				verdict: "pass",
+				summary: "依赖链清晰。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "load-recovery",
+				verdict: "pass",
+				summary: "负荷分布均衡。",
+				affectedTaskKeys: [],
+			},
+			{
+				angle: "evidence-sufficiency",
+				verdict: "adjust",
+				summary: "访谈样本量未确认。",
+				affectedTaskKeys: ["validate-market"],
+			},
 		],
 	};
 }

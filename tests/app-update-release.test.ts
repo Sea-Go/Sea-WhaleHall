@@ -78,9 +78,7 @@ describe("Stable application update release", () => {
 		expect(workflow).toContain(
 			"DATACENTER_WHALEHALL_REPOSITORY_URL: file:///srv/datacenter-ci-sources/Sea-WhaleHall.git",
 		);
-		expect(workflow.split('--release-scope "$RELEASE_SCOPE"')).toHaveLength(
-			5,
-		);
+		expect(workflow.split('--release-scope "$RELEASE_SCOPE"')).toHaveLength(5);
 	});
 
 	test("requires monotonic release versions and minimum supported floors", () => {
@@ -222,19 +220,9 @@ describe("Stable application update release", () => {
 			}),
 		).toThrow("incomplete manifest/signature pair");
 	});
-
-
-
-
-
-
-
 });
 
-describe("Windows Stable Authenticode gate", () => {
-
-
-});
+describe("Windows Stable Authenticode gate", () => {});
 
 function temporaryDirectory(): string {
 	const directory = mkdtempSync(join(tmpdir(), "whalehall-release-test-"));

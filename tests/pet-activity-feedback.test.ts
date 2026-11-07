@@ -13,7 +13,7 @@ import {
 	petActivityFeedbackGraphemeCount,
 	segmentPetActivityFeedback,
 } from "../src/views/pet/activity-feedback";
-import { paginateSafePetMarkdown } from "../src/views/pet/pet-markdown";
+import type { paginateSafePetMarkdown } from "../src/views/pet/pet-markdown";
 
 function pageText(pages: ReturnType<typeof paginateSafePetMarkdown>): string {
 	return pages
@@ -79,21 +79,6 @@ describe("pet activity feedback contract", () => {
 	});
 });
 
-describe("pet activity feedback segmentation", () => {
+describe("pet activity feedback segmentation", () => {});
 
-
-
-
-
-
-
-
-
-
-
-});
-
-describe("pet activity feedback in-memory FIFO", () => {
-
-
-});
+describe("pet activity feedback in-memory FIFO", () => {});

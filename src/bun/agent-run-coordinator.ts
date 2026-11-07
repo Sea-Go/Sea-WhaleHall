@@ -1111,20 +1111,20 @@ export class AgentRunCoordinator
 				throw error;
 			}
 			this.sidecar.trackRun(input.runId);
-				const dispatch = this.sidecar
-					.request(
-						"activity.start",
-						{
-							runId: input.runId,
-							activityJobId: input.jobId,
-							supportContext: structuredClone(supportContext),
-						},
-						{
-							requestId: input.requestId,
-							timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
-						},
-					)
-					.catch((error) => this.failRun(input.runId, modelFailure(error)));
+			const dispatch = this.sidecar
+				.request(
+					"activity.start",
+					{
+						runId: input.runId,
+						activityJobId: input.jobId,
+						supportContext: structuredClone(supportContext),
+					},
+					{
+						requestId: input.requestId,
+						timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
+					},
+				)
+				.catch((error) => this.failRun(input.runId, modelFailure(error)));
 			this.trackRunOperation(run, dispatch);
 		} finally {
 			pendingStart?.settle();
@@ -1173,22 +1173,22 @@ export class AgentRunCoordinator
 		await this.persistRun(run);
 		this.sidecar.trackRun(input.runId);
 		void this.sidecar
-				.request(
-					"planning.answer",
-					{
-						runId: input.runId,
-						sessionId: snapshot.session.id,
-						originatingRequestId,
-						answers: input.answers,
-						...(run.sidecarPlanningVersion !== undefined
-							? { expectedVersion: run.sidecarPlanningVersion }
-							: {}),
-					},
-					{
-						requestId: input.requestId,
-						timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
-					},
-				)
+			.request(
+				"planning.answer",
+				{
+					runId: input.runId,
+					sessionId: snapshot.session.id,
+					originatingRequestId,
+					answers: input.answers,
+					...(run.sidecarPlanningVersion !== undefined
+						? { expectedVersion: run.sidecarPlanningVersion }
+						: {}),
+				},
+				{
+					requestId: input.requestId,
+					timeoutMs: AGENT_RUN_REQUEST_TIMEOUT_MS,
+				},
+			)
 			.catch((error) => this.failRun(input.runId, modelFailure(error)));
 		return {
 			kind: "success",
@@ -1978,9 +1978,7 @@ export class AgentRunCoordinator
 			...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
 			updatedAtMs: this.now(),
 		};
-		await this.inRunSession(run, () =>
-			this.repository.putConversation(next),
-		);
+		await this.inRunSession(run, () => this.repository.putConversation(next));
 		return { title: next.title, metadata: next.metadata };
 	}
 

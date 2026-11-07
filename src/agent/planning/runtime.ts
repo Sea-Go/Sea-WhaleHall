@@ -7,6 +7,7 @@ import {
 	type PlanningModelPort,
 	type PlanningModelProposal,
 } from "./model";
+import { type PlanMemoryHints, planMemoryHints } from "./plan-memory";
 import {
 	PlanNotFoundError,
 	type PlanningCalendarPort,
@@ -15,12 +16,11 @@ import {
 	PlanStateError,
 	PlanVersionConflictError,
 } from "./ports";
-import { planMemoryHints, type PlanMemoryHints } from "./plan-memory";
-import { buildDeterministicSevenDaySchedule } from "./scheduler";
 import {
 	deriveRelevanceHints,
 	type RelevanceSignalTaskInput,
 } from "./relevance-signal";
+import { buildDeterministicSevenDaySchedule } from "./scheduler";
 import {
 	addDays,
 	assertIanaTimeZone,
@@ -510,8 +510,7 @@ export class PlanningRuntime {
 		);
 		if (
 			!plan.tasks.some(
-				(task) =>
-					task.id === request.taskId && displayedTaskIds.has(task.id),
+				(task) => task.id === request.taskId && displayedTaskIds.has(task.id),
 			)
 		) {
 			throw new PlanStateError(
@@ -1871,8 +1870,11 @@ function revisionDemotesStrongTasks(
 	);
 	return proposal.tasks.some((task) => {
 		const previous = activeBySource.get(task.sourceKey);
-		return previous !== undefined && relevanceOf(previous) === "strong" &&
-			relevanceOf(task) === "weak";
+		return (
+			previous !== undefined &&
+			relevanceOf(previous) === "strong" &&
+			relevanceOf(task) === "weak"
+		);
 	});
 }
 
@@ -1952,8 +1954,9 @@ function mapModelTasks(
 	const modelRevisionTasks = modelTasks.map<RevisionTask>((modelTask) => {
 		const task = projectTask(modelTask);
 		// 用户改判优先于模型分级：新修订继承 override，保证改判跨修订稳定。
-		const override = existingBySourceKey.get(modelTask.taskKey)
-			?.relevanceOverride;
+		const override = existingBySourceKey.get(
+			modelTask.taskKey,
+		)?.relevanceOverride;
 		return {
 			taskId: task.id,
 			sourceKey: task.sourceKey,
@@ -2414,8 +2417,7 @@ function relevanceSignalInputsForAnalysis(
 		estimatedMinutes: task.estimatedMinutes,
 		dependencyTaskIds: task.dependencyTaskIds,
 		status: statusById.get(task.taskId) ?? "pending",
-		baseRelevance:
-			overrideById.get(task.taskId) ?? task.relevance ?? "strong",
+		baseRelevance: overrideById.get(task.taskId) ?? task.relevance ?? "strong",
 	}));
 }
 

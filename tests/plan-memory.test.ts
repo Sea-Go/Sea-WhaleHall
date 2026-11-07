@@ -58,9 +58,8 @@ function completedPlanFixture(overrides: {
 			dependencyTaskIds: [],
 			...(overrides.tasks?.find((item) => item.id === task.id)?.relevance
 				? {
-						relevance: overrides.tasks.find(
-							(item) => item.id === task.id,
-						)?.relevance,
+						relevance: overrides.tasks.find((item) => item.id === task.id)
+							?.relevance,
 					}
 				: {}),
 		})),
@@ -142,7 +141,12 @@ describe("plan memory", () => {
 			goal: "三个月准备半程马拉松",
 			tasks: [
 				{ id: "t1", estimatedMinutes: 60, status: "completed" },
-				{ id: "t2", estimatedMinutes: 60, status: "skipped", relevance: "weak" },
+				{
+					id: "t2",
+					estimatedMinutes: 60,
+					status: "skipped",
+					relevance: "weak",
+				},
 			],
 			observationEvidence: [
 				{ taskId: "t1", relevantMinutes: 90 },

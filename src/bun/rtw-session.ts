@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { RTW_SESSION_CREDENTIAL } from "./credential-helper-client";
 import type {
 	RTWProductSession,
 	RTWProductSessionProvider,
 } from "./clients/product/rtw-product-search-client";
+import { RTW_SESSION_CREDENTIAL } from "./credential-helper-client";
 
 /** RTW 公网入口；Bun 侧所有 RTW 产品调用共用这一来源。 */
 export const RTW_WEB_BASE_URL =

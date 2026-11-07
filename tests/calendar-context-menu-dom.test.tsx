@@ -36,7 +36,7 @@ describe("EventContextMenu", () => {
 		const deleted: string[] = [];
 		function Host() {
 			const [open, setOpen] = useState(true);
-				const Menu = source.EventContextMenu ?? null;
+			const Menu = source.EventContextMenu ?? null;
 			if (!Menu) throw new Error("EventContextMenu not exported");
 			return createElement(Menu, {
 				x: 10,
@@ -54,11 +54,13 @@ describe("EventContextMenu", () => {
 		}
 		render(createElement(Host));
 		const menu = document.querySelector('[role="menu"]');
-		expect(document.querySelector('.calendar-context-menu__backdrop')).toBeTruthy();
+		expect(
+			document.querySelector(".calendar-context-menu__backdrop"),
+		).toBeTruthy();
 		expect(menu).toBeTruthy();
-		const btn = [
-			...(menu?.querySelectorAll("button") ?? []),
-		].find((b) => (b.textContent ?? "").includes("删除"));
+		const btn = [...(menu?.querySelectorAll("button") ?? [])].find((b) =>
+			(b.textContent ?? "").includes("删除"),
+		);
 		expect(btn).toBeTruthy();
 		await act(async () => {
 			btn?.dispatchEvent(

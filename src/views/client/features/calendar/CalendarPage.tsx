@@ -56,10 +56,7 @@ import {
 	type RecurrenceScope,
 	withOccurrenceException,
 } from "./domain";
-import {
-	CALENDAR_SCENARIOS,
-	type CalendarScenarioId,
-} from "./fixtures";
+import { CALENDAR_SCENARIOS, type CalendarScenarioId } from "./fixtures";
 import {
 	type CalendarOccurrenceSelection,
 	type CalendarRange,
@@ -300,316 +297,318 @@ export function EventEditor({
 				{bodyOverride ? (
 					bodyOverride
 				) : (
-				<form onSubmit={submit}>
-					<label className="calendar-field calendar-field--wide">
-						<span>标题</span>
-						<input
-							ref={titleRef}
-							value={form.title}
-							readOnly={readOnly}
-							required
-							maxLength={80}
-							onChange={(event) =>
-								setForm((current) => ({
-									...current,
-									title: event.target.value,
-								}))
-							}
-						/>
-					</label>
-
-					<div className="calendar-form-grid">
-						<label className="calendar-field">
-							<span>类型</span>
-							<select
-								value={form.kind}
-								disabled={readOnly || editor.event !== null}
-								onChange={(event) =>
-									setForm((current) => ({
-										...current,
-										kind: event.target.value as EditorForm["kind"],
-									}))
-								}
-							>
-								{editor.event?.kind === "plan" ? (
-									<option value="plan">计划日程</option>
-								) : null}
-								<option value="manual-block">手动占用</option>
-								<option value="break">休息与恢复</option>
-							</select>
-						</label>
-						<label className="calendar-field">
-							<span>状态</span>
-							<select
-								value={form.state}
-								disabled={readOnly || form.kind === "manual-block"}
-								onChange={(event) =>
-									setForm((current) => ({
-										...current,
-										state: event.target.value as CalendarEventState,
-									}))
-								}
-							>
-								<option value="committed">已确认</option>
-								<option value="proposed">待确认</option>
-							</select>
-						</label>
-					</div>
-
-					<label className="calendar-check">
-						<input
-							type="checkbox"
-							checked={form.allDay}
-							disabled={readOnly}
-							onChange={(event) =>
-								setForm((current) => ({
-									...current,
-									allDay: event.target.checked,
-								}))
-							}
-						/>
-						<span>全天日程</span>
-					</label>
-
-					<div className="calendar-form-grid">
-						<label className="calendar-field">
-							<span>开始日期</span>
+					<form onSubmit={submit}>
+						<label className="calendar-field calendar-field--wide">
+							<span>标题</span>
 							<input
-								type="date"
-								value={form.startDate}
+								ref={titleRef}
+								value={form.title}
 								readOnly={readOnly}
 								required
+								maxLength={80}
 								onChange={(event) =>
 									setForm((current) => ({
 										...current,
-										startDate: event.target.value,
+										title: event.target.value,
 									}))
 								}
 							/>
 						</label>
-						{!form.allDay ? (
-							<label className="calendar-field">
-								<span>开始时间</span>
-								<input
-									type="time"
-									step={900}
-									value={form.startTime}
-									readOnly={readOnly}
-									required
-									onChange={(event) =>
-										setForm((current) => ({
-											...current,
-											startTime: event.target.value,
-										}))
-									}
-								/>
-							</label>
-						) : null}
-						<label className="calendar-field">
-							<span>{form.allDay ? "结束日期（不含）" : "结束日期"}</span>
-							<input
-								type="date"
-								value={form.endDate}
-								readOnly={readOnly}
-								required
-								onChange={(event) =>
-									setForm((current) => ({
-										...current,
-										endDate: event.target.value,
-									}))
-								}
-							/>
-						</label>
-						{!form.allDay ? (
-							<label className="calendar-field">
-								<span>结束时间</span>
-								<input
-									type="time"
-									step={900}
-									value={form.endTime}
-									readOnly={readOnly}
-									required
-									onChange={(event) =>
-										setForm((current) => ({
-											...current,
-											endTime: event.target.value,
-										}))
-									}
-								/>
-							</label>
-						) : null}
-					</div>
 
-					{!form.allDay && !readOnly ? (
-						<div
-							className="calendar-nudge"
-							role="toolbar"
-							aria-label="键盘替代操作"
-						>
-							<span>15 分钟微调</span>
-							<Button
-								type="button"
-								variant="ghost"
-								size="small"
-								onClick={() => {
-									shiftBoundary("start", -15);
-									shiftBoundary("end", -15);
-								}}
-							>
-								整体提前
-							</Button>
-							<Button
-								type="button"
-								variant="ghost"
-								size="small"
-								onClick={() => {
-									shiftBoundary("start", 15);
-									shiftBoundary("end", 15);
-								}}
-							>
-								整体延后
-							</Button>
-							<Button
-								type="button"
-								variant="ghost"
-								size="small"
-								onClick={() => shiftBoundary("end", -15)}
-							>
-								缩短
-							</Button>
-							<Button
-								type="button"
-								variant="ghost"
-								size="small"
-								onClick={() => shiftBoundary("end", 15)}
-							>
-								延长
-							</Button>
+						<div className="calendar-form-grid">
+							<label className="calendar-field">
+								<span>类型</span>
+								<select
+									value={form.kind}
+									disabled={readOnly || editor.event !== null}
+									onChange={(event) =>
+										setForm((current) => ({
+											...current,
+											kind: event.target.value as EditorForm["kind"],
+										}))
+									}
+								>
+									{editor.event?.kind === "plan" ? (
+										<option value="plan">计划日程</option>
+									) : null}
+									<option value="manual-block">手动占用</option>
+									<option value="break">休息与恢复</option>
+								</select>
+							</label>
+							<label className="calendar-field">
+								<span>状态</span>
+								<select
+									value={form.state}
+									disabled={readOnly || form.kind === "manual-block"}
+									onChange={(event) =>
+										setForm((current) => ({
+											...current,
+											state: event.target.value as CalendarEventState,
+										}))
+									}
+								>
+									<option value="committed">已确认</option>
+									<option value="proposed">待确认</option>
+								</select>
+							</label>
 						</div>
-					) : null}
 
-					{!readOnly ? (
 						<label className="calendar-check">
 							<input
 								type="checkbox"
-								checked={form.recurring}
-								onChange={(event) =>
-									setForm((current) => ({
-										...current,
-										recurring: event.target.checked,
-									}))
-								}
-							/>
-							<span>每天重复 5 次</span>
-						</label>
-					) : null}
-
-					{hasAmbiguousTime && !readOnly ? (
-						<label className="calendar-field calendar-field--wide">
-							<span>夏令时重复小时</span>
-							<select
-								value={form.disambiguation}
-								onChange={(event) =>
-									setForm((current) => ({
-										...current,
-										disambiguation: event.target
-											.value as EditorForm["disambiguation"],
-									}))
-								}
-							>
-								<option value="earlier">采用第一次出现</option>
-								<option value="later">采用第二次出现</option>
-							</select>
-						</label>
-					) : null}
-
-					{editor.event?.recurrence ? (
-						<label className="calendar-field calendar-field--wide">
-							<span>修改范围</span>
-							<select
-								value={form.scope}
+								checked={form.allDay}
 								disabled={readOnly}
 								onChange={(event) =>
 									setForm((current) => ({
 										...current,
-										scope: event.target.value as RecurrenceScope,
+										allDay: event.target.checked,
 									}))
 								}
-							>
-								<option value="occurrence">仅这一次</option>
-								<option value="following" disabled>
-									本次及以后（即将支持）
-								</option>
-								<option value="series">整个系列</option>
-							</select>
+							/>
+							<span>全天日程</span>
 						</label>
-					) : null}
 
-					{error ? (
-						<div className="calendar-dialog__error" role="alert">
-							<AlertTriangle size={15} aria-hidden="true" />
-							<span>{error}</span>
+						<div className="calendar-form-grid">
+							<label className="calendar-field">
+								<span>开始日期</span>
+								<input
+									type="date"
+									value={form.startDate}
+									readOnly={readOnly}
+									required
+									onChange={(event) =>
+										setForm((current) => ({
+											...current,
+											startDate: event.target.value,
+										}))
+									}
+								/>
+							</label>
+							{!form.allDay ? (
+								<label className="calendar-field">
+									<span>开始时间</span>
+									<input
+										type="time"
+										step={900}
+										value={form.startTime}
+										readOnly={readOnly}
+										required
+										onChange={(event) =>
+											setForm((current) => ({
+												...current,
+												startTime: event.target.value,
+											}))
+										}
+									/>
+								</label>
+							) : null}
+							<label className="calendar-field">
+								<span>{form.allDay ? "结束日期（不含）" : "结束日期"}</span>
+								<input
+									type="date"
+									value={form.endDate}
+									readOnly={readOnly}
+									required
+									onChange={(event) =>
+										setForm((current) => ({
+											...current,
+											endDate: event.target.value,
+										}))
+									}
+								/>
+							</label>
+							{!form.allDay ? (
+								<label className="calendar-field">
+									<span>结束时间</span>
+									<input
+										type="time"
+										step={900}
+										value={form.endTime}
+										readOnly={readOnly}
+										required
+										onChange={(event) =>
+											setForm((current) => ({
+												...current,
+												endTime: event.target.value,
+											}))
+										}
+									/>
+								</label>
+							) : null}
 						</div>
-					) : null}
 
-					<footer className="calendar-dialog__footer">
-						<div className="calendar-dialog__footer-actions">
-							{editor.event?.editable ? (
+						{!form.allDay && !readOnly ? (
+							<div
+								className="calendar-nudge"
+								role="toolbar"
+								aria-label="键盘替代操作"
+							>
+								<span>15 分钟微调</span>
 								<Button
 									type="button"
-									variant="danger"
+									variant="ghost"
 									size="small"
-									icon={<Trash2 size={15} aria-hidden="true" />}
-									disabled={pending}
-									onClick={() => void onDelete(form.scope, setError)}
+									onClick={() => {
+										shiftBoundary("start", -15);
+										shiftBoundary("end", -15);
+									}}
 								>
-									删除
+									整体提前
 								</Button>
-							) : (
-								<span />
-							)}
-							{editor.event === null && secondaryAction ? secondaryAction : null}
-							{editor.event &&
-							canUserUnlockPlanEvent(editor.event) &&
-							onUnlock ? (
+								<Button
+									type="button"
+									variant="ghost"
+									size="small"
+									onClick={() => {
+										shiftBoundary("start", 15);
+										shiftBoundary("end", 15);
+									}}
+								>
+									整体延后
+								</Button>
+								<Button
+									type="button"
+									variant="ghost"
+									size="small"
+									onClick={() => shiftBoundary("end", -15)}
+								>
+									缩短
+								</Button>
+								<Button
+									type="button"
+									variant="ghost"
+									size="small"
+									onClick={() => shiftBoundary("end", 15)}
+								>
+									延长
+								</Button>
+							</div>
+						) : null}
+
+						{!readOnly ? (
+							<label className="calendar-check">
+								<input
+									type="checkbox"
+									checked={form.recurring}
+									onChange={(event) =>
+										setForm((current) => ({
+											...current,
+											recurring: event.target.checked,
+										}))
+									}
+								/>
+								<span>每天重复 5 次</span>
+							</label>
+						) : null}
+
+						{hasAmbiguousTime && !readOnly ? (
+							<label className="calendar-field calendar-field--wide">
+								<span>夏令时重复小时</span>
+								<select
+									value={form.disambiguation}
+									onChange={(event) =>
+										setForm((current) => ({
+											...current,
+											disambiguation: event.target
+												.value as EditorForm["disambiguation"],
+										}))
+									}
+								>
+									<option value="earlier">采用第一次出现</option>
+									<option value="later">采用第二次出现</option>
+								</select>
+							</label>
+						) : null}
+
+						{editor.event?.recurrence ? (
+							<label className="calendar-field calendar-field--wide">
+								<span>修改范围</span>
+								<select
+									value={form.scope}
+									disabled={readOnly}
+									onChange={(event) =>
+										setForm((current) => ({
+											...current,
+											scope: event.target.value as RecurrenceScope,
+										}))
+									}
+								>
+									<option value="occurrence">仅这一次</option>
+									<option value="following" disabled>
+										本次及以后（即将支持）
+									</option>
+									<option value="series">整个系列</option>
+								</select>
+							</label>
+						) : null}
+
+						{error ? (
+							<div className="calendar-dialog__error" role="alert">
+								<AlertTriangle size={15} aria-hidden="true" />
+								<span>{error}</span>
+							</div>
+						) : null}
+
+						<footer className="calendar-dialog__footer">
+							<div className="calendar-dialog__footer-actions">
+								{editor.event?.editable ? (
+									<Button
+										type="button"
+										variant="danger"
+										size="small"
+										icon={<Trash2 size={15} aria-hidden="true" />}
+										disabled={pending}
+										onClick={() => void onDelete(form.scope, setError)}
+									>
+										删除
+									</Button>
+								) : (
+									<span />
+								)}
+								{editor.event === null && secondaryAction
+									? secondaryAction
+									: null}
+								{editor.event &&
+								canUserUnlockPlanEvent(editor.event) &&
+								onUnlock ? (
+									<Button
+										type="button"
+										variant="secondary"
+										size="small"
+										disabled={pending}
+										onClick={() => void onUnlock(setError)}
+									>
+										允许计划重新安排
+									</Button>
+								) : null}
+							</div>
+							<div>
 								<Button
 									type="button"
 									variant="secondary"
 									size="small"
 									disabled={pending}
-									onClick={() => void onUnlock(setError)}
+									onClick={onClose}
 								>
-									允许计划重新安排
+									{readOnly ? "关闭" : "取消"}
 								</Button>
-							) : null}
-						</div>
-						<div>
-							<Button
-								type="button"
-								variant="secondary"
-								size="small"
-								disabled={pending}
-								onClick={onClose}
-							>
-								{readOnly ? "关闭" : "取消"}
-							</Button>
-							{!readOnly ? (
-								<Button
-									type="submit"
-									variant="primary"
-									size="small"
-									disabled={pending}
-								>
-									{pending ? "保存中…" : "保存日程"}
-								</Button>
-							) : null}
-						</div>
+								{!readOnly ? (
+									<Button
+										type="submit"
+										variant="primary"
+										size="small"
+										disabled={pending}
+									>
+										{pending ? "保存中…" : "保存日程"}
+									</Button>
+								) : null}
+							</div>
 						</footer>
 					</form>
 				)}
-				</div>
 			</div>
-		);
+		</div>
+	);
 }
 
 export interface CalendarPageProps {
@@ -762,9 +761,7 @@ export function CalendarPage({
 				result.ok ? "" : JSON.stringify(result.conflict).slice(0, 200),
 			);
 			if (!result.ok) {
-				onNotify(
-					`删除失败：${result.conflict.message}`,
-				);
+				onNotify(`删除失败：${result.conflict.message}`);
 				return;
 			}
 			onNotify(
@@ -1105,19 +1102,13 @@ export function CalendarPage({
 									key={day.date}
 									className={[
 										!day.inMonth ? "mini-calendar__adjacent" : "",
-										day.date === today
-											? "mini-calendar__today"
-											: "",
-										day.date === selectedDate
-											? "mini-calendar__selected"
-											: "",
+										day.date === today ? "mini-calendar__today" : "",
+										day.date === selectedDate ? "mini-calendar__selected" : "",
 									]
 										.filter(Boolean)
 										.join(" ")}
 									aria-label={day.date}
-									aria-current={
-										day.date === today ? "date" : undefined
-									}
+									aria-current={day.date === today ? "date" : undefined}
 									onClick={() => calendarRef.current?.goToDate(day.date)}
 								>
 									{day.day}
@@ -1239,10 +1230,10 @@ export function CalendarPage({
 							openEditor({ presetKind: "manual-block", selection })
 						}
 						onDayClick={(selection) =>
-						openEditor({ presetKind: "manual-block", selection })
-					}
-					onEventClick={selectEvent}
-					onEventContextMenu={openEventContextMenu}
+							openEditor({ presetKind: "manual-block", selection })
+						}
+						onEventClick={selectEvent}
+						onEventContextMenu={openEventContextMenu}
 						onMove={(_before, after) => controller.update(after)}
 						onResize={(_before, after) => controller.update(after)}
 					/>
@@ -1322,46 +1313,42 @@ export function CalendarPage({
 				</section>
 			</div>
 
-				{editor ? (
-					<EventEditor
-						key={`${editor.event?.id ?? "new"}-${editor.occurrenceStart ?? "base"}`}
-						editor={editor}
-						timeZone={calendar.timeZone}
-						pending={editorPending}
-						onClose={closeEditor}
-						onSave={saveEditor}
-						onDelete={deleteEditor}
-						onUnlock={unlockEditor}
-						bodyOverride={
-							editor.event === null &&
-							editorSmart &&
-							planningController ? (
-								<SmartScheduleComposer
-									controller={planningController}
-									onOpenManual={() => setEditorSmart(false)}
-									onPlanned={() => {
-										closeEditor();
-										onNotify("已确认计划安排，日程已写入日历。");
-									}}
-								/>
-							) : undefined
-						}
-						secondaryAction={
-							editor.event === null &&
-							planningController &&
-							!editorSmart ? (
-								<Button
-									type="button"
-									variant="ghost"
-									size="small"
-									onClick={() => setEditorSmart(true)}
-								>
-									✨ 智能安排
-								</Button>
-							) : undefined
-						}
-					/>
-				) : null}
+			{editor ? (
+				<EventEditor
+					key={`${editor.event?.id ?? "new"}-${editor.occurrenceStart ?? "base"}`}
+					editor={editor}
+					timeZone={calendar.timeZone}
+					pending={editorPending}
+					onClose={closeEditor}
+					onSave={saveEditor}
+					onDelete={deleteEditor}
+					onUnlock={unlockEditor}
+					bodyOverride={
+						editor.event === null && editorSmart && planningController ? (
+							<SmartScheduleComposer
+								controller={planningController}
+								onOpenManual={() => setEditorSmart(false)}
+								onPlanned={() => {
+									closeEditor();
+									onNotify("已确认计划安排，日程已写入日历。");
+								}}
+							/>
+						) : undefined
+					}
+					secondaryAction={
+						editor.event === null && planningController && !editorSmart ? (
+							<Button
+								type="button"
+								variant="ghost"
+								size="small"
+								onClick={() => setEditorSmart(true)}
+							>
+								✨ 智能安排
+							</Button>
+						) : undefined
+					}
+				/>
+			) : null}
 
 			{contextMenu ? (
 				<EventContextMenu
@@ -1420,6 +1407,8 @@ export function EventContextMenu({
 		<>
 			{/* 全屏背板：外部点击/右键在这里关闭菜单。不用 window click 监听——
 			    事件顺序竞态在真实 webview 里会让菜单项点击失效。 */}
+			{/* biome-ignore lint/a11y/noStaticElementInteractions: 背板仅响应指针关闭与右键，键盘路径经 Escape 处理，不可聚焦元素 */}
+			{/* biome-ignore lint/a11y/useKeyWithClickEvents: 背板仅作指针关闭目标，键盘关闭走 Escape（上方 window keydown effect），背板不可聚焦 */}
 			<div
 				className="calendar-context-menu__backdrop"
 				onClick={onClose}

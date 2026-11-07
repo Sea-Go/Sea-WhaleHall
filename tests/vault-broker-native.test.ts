@@ -2,16 +2,16 @@ import { describe, expect, test } from "bun:test";
 import {
 	chmodSync,
 	copyFileSync,
-	mkdtempSync,
 	mkdirSync,
+	mkdtempSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-	cStringLiteral,
 	codesignDesignatedRequirementCommand,
+	cStringLiteral,
 } from "../scripts/build-native";
 import { normalizeDesignatedRequirement } from "../scripts/macos-build-security";
 
@@ -40,7 +40,9 @@ function run(command: string[]): string {
 		result.stderr,
 	)}`;
 	if (result.exitCode !== 0) {
-		throw new Error(`Command failed (${result.exitCode}): ${command.join(" ")}\n${output}`);
+		throw new Error(
+			`Command failed (${result.exitCode}): ${command.join(" ")}\n${output}`,
+		);
 	}
 	return output;
 }
@@ -63,121 +65,130 @@ function readAdHocDesignatedRequirement(path: string): string {
 describe.skipIf(process.platform !== "darwin")(
 	"native Vault Broker security tests",
 	() => {
-		fullTest("executes the exact frame and delayed-byte socket regressions", () => {
-			withTemporaryDirectory((directory) => {
-				const executable = join(directory, "frame-tests");
-				run([
-					"/usr/bin/xcrun",
-					"clang",
-					"-std=c17",
-					"-Wall",
-					"-Wextra",
-					"-Werror",
-					"-fsanitize=address,undefined",
-					join(brokerRoot, "frame.c"),
-					join(brokerRoot, "Tests", "frame_tests.c"),
-					"-o",
-					executable,
-				]);
-				run([executable]);
-			});
-		});
+		fullTest(
+			"executes the exact frame and delayed-byte socket regressions",
+			() => {
+				withTemporaryDirectory((directory) => {
+					const executable = join(directory, "frame-tests");
+					run([
+						"/usr/bin/xcrun",
+						"clang",
+						"-std=c17",
+						"-Wall",
+						"-Wextra",
+						"-Werror",
+						"-fsanitize=address,undefined",
+						join(brokerRoot, "frame.c"),
+						join(brokerRoot, "Tests", "frame_tests.c"),
+						"-o",
+						executable,
+					]);
+					run([executable]);
+				});
+			},
+		);
 
-		fullTest("executes migration conflict, duplicate, and idempotency policy regressions", () => {
-			withTemporaryDirectory((directory) => {
-				const executable = join(directory, "keychain-policy-tests");
-				run([
-					"/usr/bin/xcrun",
-					"clang",
-					"-std=c17",
-					"-Wall",
-					"-Wextra",
-					"-Werror",
-					"-Wno-deprecated-declarations",
-					"-fsanitize=address,undefined",
-					join(brokerRoot, "frame.c"),
-					join(brokerRoot, "keychain_store.c"),
-					join(brokerRoot, "Tests", "keychain_policy_tests.c"),
-					"-framework",
-					"CoreFoundation",
-					"-framework",
-					"Security",
-					"-o",
-					executable,
-				]);
-				run([executable]);
-			});
-		});
+		fullTest(
+			"executes migration conflict, duplicate, and idempotency policy regressions",
+			() => {
+				withTemporaryDirectory((directory) => {
+					const executable = join(directory, "keychain-policy-tests");
+					run([
+						"/usr/bin/xcrun",
+						"clang",
+						"-std=c17",
+						"-Wall",
+						"-Wextra",
+						"-Werror",
+						"-Wno-deprecated-declarations",
+						"-fsanitize=address,undefined",
+						join(brokerRoot, "frame.c"),
+						join(brokerRoot, "keychain_store.c"),
+						join(brokerRoot, "Tests", "keychain_policy_tests.c"),
+						"-framework",
+						"CoreFoundation",
+						"-framework",
+						"Security",
+						"-o",
+						executable,
+					]);
+					run([executable]);
+				});
+			},
+		);
 
-		fullTest("executes static core and complete-app signature validation", () => {
-			withTemporaryDirectory((directory) => {
-				const core = join(directory, "core-fixture");
-				copyFileSync("/usr/bin/true", core);
-				chmodSync(core, 0o755);
-				run([
-					"/usr/bin/codesign",
-					"--force",
-					"--sign",
-					"-",
-					"--identifier",
-					"com.seago.whalehall.vault-test-core",
-					"--timestamp=none",
-					core,
-				]);
+		fullTest(
+			"executes static core and complete-app signature validation",
+			() => {
+				withTemporaryDirectory((directory) => {
+					const core = join(directory, "core-fixture");
+					copyFileSync("/usr/bin/true", core);
+					chmodSync(core, 0o755);
+					run([
+						"/usr/bin/codesign",
+						"--force",
+						"--sign",
+						"-",
+						"--identifier",
+						"com.seago.whalehall.vault-test-core",
+						"--timestamp=none",
+						core,
+					]);
 
-				const app = join(directory, "VaultTest.app");
-				const contents = join(app, "Contents");
-				const executableDirectory = join(contents, "MacOS");
-				mkdirSync(executableDirectory, { recursive: true });
-				writeFileSync(
-					join(contents, "Info.plist"),
-					`<?xml version="1.0" encoding="UTF-8"?>\n`
-						+ `<plist version="1.0"><dict>`
-						+ `<key>CFBundleExecutable</key><string>fixture</string>`
-						+ `<key>CFBundleIdentifier</key><string>com.seago.whalehall.vault-test-app</string>`
-						+ `<key>CFBundlePackageType</key><string>APPL</string>`
-						+ `</dict></plist>\n`,
-					{ mode: 0o600 },
-				);
-				const launcher = join(executableDirectory, "fixture");
-				copyFileSync("/usr/bin/true", launcher);
-				chmodSync(launcher, 0o755);
-				run([
-					"/usr/bin/codesign",
-					"--force",
-					"--sign",
-					"-",
-					"--identifier",
-					"com.seago.whalehall.vault-test-app",
-					"--timestamp=none",
-					app,
-				]);
+					const app = join(directory, "VaultTest.app");
+					const contents = join(app, "Contents");
+					const executableDirectory = join(contents, "MacOS");
+					mkdirSync(executableDirectory, { recursive: true });
+					writeFileSync(
+						join(contents, "Info.plist"),
+						`<?xml version="1.0" encoding="UTF-8"?>\n` +
+							`<plist version="1.0"><dict>` +
+							`<key>CFBundleExecutable</key><string>fixture</string>` +
+							`<key>CFBundleIdentifier</key><string>com.seago.whalehall.vault-test-app</string>` +
+							`<key>CFBundlePackageType</key><string>APPL</string>` +
+							`</dict></plist>\n`,
+						{ mode: 0o600 },
+					);
+					const launcher = join(executableDirectory, "fixture");
+					copyFileSync("/usr/bin/true", launcher);
+					chmodSync(launcher, 0o755);
+					run([
+						"/usr/bin/codesign",
+						"--force",
+						"--sign",
+						"-",
+						"--identifier",
+						"com.seago.whalehall.vault-test-app",
+						"--timestamp=none",
+						app,
+					]);
 
-				const coreRequirement = readAdHocDesignatedRequirement(core);
-				const appRequirement = readAdHocDesignatedRequirement(app);
-				const testExecutable = join(directory, "static-code-tests");
-				run([
-					"/usr/bin/xcrun",
-					"clang",
-					"-std=c17",
-					"-Wall",
-					"-Wextra",
-					"-Werror",
-					"-Wno-deprecated-declarations",
-					`-DWHALEHALL_CORE_REQUIREMENT=${cStringLiteral(coreRequirement)}`,
-					`-DWHALEHALL_OUTER_REQUIREMENT=${cStringLiteral(appRequirement)}`,
-					join(brokerRoot, "process_guard.c"),
-					join(brokerRoot, "Tests", "static_code_tests.c"),
-					"-lbsm",
-					"-framework",
-					"CoreFoundation",
-					"-framework",
-					"Security",
-					"-o",
-					testExecutable,
-				]);
-				run([testExecutable, core, app]);
-			});
-		});
+					const coreRequirement = readAdHocDesignatedRequirement(core);
+					const appRequirement = readAdHocDesignatedRequirement(app);
+					const testExecutable = join(directory, "static-code-tests");
+					run([
+						"/usr/bin/xcrun",
+						"clang",
+						"-std=c17",
+						"-Wall",
+						"-Wextra",
+						"-Werror",
+						"-Wno-deprecated-declarations",
+						`-DWHALEHALL_CORE_REQUIREMENT=${cStringLiteral(coreRequirement)}`,
+						`-DWHALEHALL_OUTER_REQUIREMENT=${cStringLiteral(appRequirement)}`,
+						join(brokerRoot, "process_guard.c"),
+						join(brokerRoot, "Tests", "static_code_tests.c"),
+						"-lbsm",
+						"-framework",
+						"CoreFoundation",
+						"-framework",
+						"Security",
+						"-o",
+						testExecutable,
+					]);
+					run([testExecutable, core, app]);
+				});
+			},
+		);
 	},
 );

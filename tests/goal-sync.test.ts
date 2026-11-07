@@ -60,12 +60,9 @@ describe("ActiveGoalSyncCoordinator", () => {
 
 		expect(calls).toBe(2);
 	});
-
 });
 
-describe("account transition ordering", () => {
-
-});
+describe("account transition ordering", () => {});
 
 async function spinUntil(predicate: () => boolean): Promise<void> {
 	for (let index = 0; index < 100; index += 1) {

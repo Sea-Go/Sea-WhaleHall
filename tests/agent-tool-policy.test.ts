@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+	type AgentPermission,
 	AgentToolPolicy,
 	digestArguments,
-	type AgentPermission,
 	type PendingToolApproval,
 	type ToolApprovalRepository,
 } from "../src/bun/agent-tool-policy";
@@ -10,13 +10,19 @@ import {
 class MemoryPolicyRepository implements ToolApprovalRepository {
 	readonly grants = new Set<string>();
 	readonly approvals = new Map<string, PendingToolApproval>();
-	async hasGrant(accountId: string, permission: AgentPermission): Promise<boolean> {
+	async hasGrant(
+		accountId: string,
+		permission: AgentPermission,
+	): Promise<boolean> {
 		return this.grants.has(`${accountId}:${permission}`);
 	}
 	async putApproval(approval: PendingToolApproval): Promise<void> {
 		this.approvals.set(approval.approvalId, structuredClone(approval));
 	}
-	async getApproval(accountId: string, approvalId: string): Promise<PendingToolApproval | null> {
+	async getApproval(
+		accountId: string,
+		approvalId: string,
+	): Promise<PendingToolApproval | null> {
 		const approval = this.approvals.get(approvalId);
 		return approval?.accountId === accountId ? structuredClone(approval) : null;
 	}
@@ -27,7 +33,12 @@ class MemoryPolicyRepository implements ToolApprovalRepository {
 		next: PendingToolApproval["status"],
 	): Promise<boolean> {
 		const approval = this.approvals.get(approvalId);
-		if (!approval || approval.accountId !== accountId || approval.status !== expected) return false;
+		if (
+			!approval ||
+			approval.accountId !== accountId ||
+			approval.status !== expected
+		)
+			return false;
 		this.approvals.set(approvalId, { ...approval, status: next });
 		return true;
 	}
@@ -66,27 +77,28 @@ describe("AgentToolPolicy", () => {
 	test("requires an id and valid expectedVersion only for save-draft updates", async () => {
 		const repository = new MemoryPolicyRepository();
 		const policy = new AgentToolPolicy(repository);
-		await expect(policy.proposeWrite({
-			accountId: "account-a",
-			runId: "run-1",
-			toolCallId: "tool-1",
-			toolName: "planning.save_draft",
-			arguments: { expectedVersion: 3, draft: { title: "缺少标识" } },
-			runRevision: 1,
-		})).rejects.toEqual(expect.objectContaining({ code: "approval-mismatch" }));
-		await expect(policy.proposeWrite({
-			accountId: "account-a",
-			runId: "run-1",
-			toolCallId: "tool-2",
-			toolName: "planning.save_draft",
-			arguments: { expectedVersion: -1, draft: { id: "draft-1", title: "错误版本" } },
-			runRevision: 1,
-		})).rejects.toEqual(expect.objectContaining({ code: "approval-mismatch" }));
+		await expect(
+			policy.proposeWrite({
+				accountId: "account-a",
+				runId: "run-1",
+				toolCallId: "tool-1",
+				toolName: "planning.save_draft",
+				arguments: { expectedVersion: 3, draft: { title: "缺少标识" } },
+				runRevision: 1,
+			}),
+		).rejects.toEqual(expect.objectContaining({ code: "approval-mismatch" }));
+		await expect(
+			policy.proposeWrite({
+				accountId: "account-a",
+				runId: "run-1",
+				toolCallId: "tool-2",
+				toolName: "planning.save_draft",
+				arguments: {
+					expectedVersion: -1,
+					draft: { id: "draft-1", title: "错误版本" },
+				},
+				runRevision: 1,
+			}),
+		).rejects.toEqual(expect.objectContaining({ code: "approval-mismatch" }));
 	});
-
-
-
-
-
-
 });
