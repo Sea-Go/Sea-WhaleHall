@@ -35,3 +35,4 @@ contributing to its individual components. Some detailed guides are in Chinese.
 - [Activity storage and verification](desktop-runtime.md#foreground-application-usage-and-sqlite): lifecycle, recovery, cleanup, and inspection.
 - [Frontend release QA](frontend/RELEASE_QA.md): the acceptance checklist and dated verification records.
 - [Desktop CI compatibility](../.github/CI_COMPATIBILITY.md): supported test environments and real-desktop runner requirements.
+- [Monitoring permission rebind after dev rebuilds](MONITORING_PERMISSIONS_DEV_REBIND.md): why toggles read denied after `electrobun dev` rebuilds, and how to re-bind TCC entries.
