@@ -74,9 +74,35 @@ jobs:
           base-ref: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
           head-ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
 
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, c-cpp, javascript-typescript, rust]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@b7b84b636b4f90c9b31da1bc5f72bfadd5b31410 # v3
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@b7b84b636b4f90c9b31da1bc5f72bfadd5b31410 # v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
   security-gate:
     name: Security gate
-    needs: [gitleaks, workflow-security, dependency-review]
+    needs: [gitleaks, workflow-security, dependency-review, codeql]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -87,8 +113,9 @@ jobs:
           GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
           WORKFLOW_SECURITY_RESULT: ${{ needs.workflow-security.result }}
           DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
         run: |
-          for result in "$GITLEAKS_RESULT" "$WORKFLOW_SECURITY_RESULT"; do
+          for result in "$GITLEAKS_RESULT" "$WORKFLOW_SECURITY_RESULT" "$CODEQL_RESULT"; do
             if [[ "$result" != "success" ]]; then
               echo "::error::A required security check finished with result: $result"
               exit 1

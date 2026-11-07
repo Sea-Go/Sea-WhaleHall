@@ -1,0 +1,12 @@
+# Actions 版 CodeQL 的查询过滤。Default Setup 不支持文件级过滤，
+# 因此 CodeQL 扫描迁移至 security.yml 的 codeql 作业并引用本文件。
+#
+# 登记与仓库既有设计一致的豁免（调整须经 review）：
+# - js/path-injection：开发期 e2e 触发契约。src/bun/index.ts 按 $HOME 拼接
+#   pet-e2e-submit.json / planning-e2e-submit.json 触发文件，仅在显式
+#   WHALEHALL_PET_E2E_TRIGGER / WHALEHALL_PLANNING_E2E_TRIGGER 环境变量
+#   门控下激活，只读消费后即删除；非产品攻击面，不随打包分发。
+#   仓库既有代码同样按 $HOME 解析应用数据目录，属既定模式。
+query-filters:
+  - exclude:
+      id: js/path-injection
