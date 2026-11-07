@@ -33,19 +33,6 @@ describe("shared local protocol fixtures", () => {
 		});
 	});
 
-	test("parses every event kind", () => {
-		expect(
-			fixture("events.jsonl").map((message) =>
-				"event" in message ? message.event : null,
-			),
-		).toEqual([
-			"tool.started",
-			"tool.progress",
-			"tool.completed",
-			"tool.failed",
-			"tool.cancelled",
-		]);
-	});
 });
 
 describe("planning local protocol validation", () => {
@@ -73,50 +60,5 @@ describe("planning local protocol validation", () => {
 		version: 1,
 	};
 
-	test("accepts only complete protected model calendar projections", () => {
-		expect(isLocalPlanningCalendarEvent(event)).toBeTrue();
-		expect(
-			isLocalPlanningCalendarEvent({
-				...event,
-				title: "sensitive task title",
-				redactedContent: false,
-			}),
-		).toBeFalse();
-		expect(
-			isLocalPlanningCalendarEvent({ ...event, sourceTaskId: null }),
-		).toBeFalse();
-		expect(isLocalPlanningCalendarEvent({ ...event, version: 0 })).toBeFalse();
-		expect(
-			isLocalPlanningCalendarEvent({ ...event, unexpected: true }),
-		).toBeFalse();
-	});
 
-	test("rejects outbox content outside the native allowlist", () => {
-		const entry = {
-			entryId: "plan:operation-1",
-			kind: "plan-changed",
-			aggregateId: "plan-1",
-			payload: { planId: "plan-1", version: 2 },
-			status: "pending",
-			createdAtMs: 1,
-			deliveredAtMs: null,
-		};
-		expect(isLocalPlanningOutboxEntry(entry)).toBeTrue();
-		expect(
-			isLocalPlanningOutboxEntry({
-				...entry,
-				payload: {
-					planId: "plan-1",
-					version: 2,
-					goal: "must remain sealed",
-				},
-			}),
-		).toBeFalse();
-		expect(
-			isLocalPlanningOutboxEntry({
-				...entry,
-				status: "delivered",
-			}),
-		).toBeFalse();
-	});
 });

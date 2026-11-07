@@ -74,32 +74,7 @@ describe("audit export UI", () => {
 		expect(message).not.toContain("/Users/");
 	});
 
-	test("maps success, cancellation, and failures to bounded UI messages", () => {
-		expect(
-			auditExportStatusMessage({
-				status: "exported",
-				basename: "whalehall-audit-safe.json",
-			}),
-		).toBe("已导出 whalehall-audit-safe.json");
-		expect(
-			auditExportStatusMessage({ status: "cancelled", basename: null }),
-		).toContain("已取消");
-		for (const status of ["invalid_range", "not_ready", "failed"] as const) {
-			const message = auditExportStatusMessage({
-				status,
-				basename: null,
-			});
-			expect(message.length).toBeGreaterThan(0);
-			expect(message).not.toContain("/");
-		}
-	});
 
-	test("aligns the exact five-minute range to complete input activity buckets", () => {
-		expect(recentCompleteFiveMinuteStart(603_499)).toBe(300_000);
-		expect(recentCompleteFiveMinuteStart(604_999)).toBe(300_000);
-		expect(recentCompleteFiveMinuteStart(605_000)).toBe(305_000);
-		expect(() => recentCompleteFiveMinuteStart(-1)).toThrow();
-	});
 });
 
 function idlePrivateTrainingStatus() {

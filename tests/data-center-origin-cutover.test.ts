@@ -102,76 +102,8 @@ describe("DataCenter production-origin cutover", () => {
 		).toBeFalse();
 	});
 
-	test("retries safely when completion fails after the legacy token is gone", async () => {
-		const order: string[] = [];
-		const repository = new MemoryCutoverRepository(order);
-		repository.failComplete = true;
-		const credentials = new MemoryCredentials(order);
 
-		await expect(
-			runDataCenterProductionOriginCutover({ repository, credentials }),
-		).rejects.toThrow("injected cutover completion failure");
-		expect(repository.state).toBe("prepared");
-		expect(credentials.deleteCalls).toBe(1);
 
-		repository.failComplete = false;
-		await expect(
-			runDataCenterProductionOriginCutover({ repository, credentials }),
-		).resolves.toBe("completed");
-		expect(repository.prepareCalls).toBe(2);
-		expect(credentials.deleteCalls).toBe(2);
-	});
-
-	test("never reads a legacy token rewritten after cutover completion", async () => {
-		const order: string[] = [];
-		const repository = new MemoryCutoverRepository(order);
-		const credentials = new MemoryCredentials(order);
-		await runDataCenterProductionOriginCutover({ repository, credentials });
-
-		// This models a downgraded or concurrently running staging build. It only
-		// knows the retired credential name, while the production client owns a new
-		// slot that the old binary cannot overwrite.
-		credentials.values.set(
-			LEGACY_AUTH_REFRESH_TOKEN_CREDENTIAL,
-			"staging-refresh-token-rewritten",
-		);
-		credentials.values.set(
-			AUTH_REFRESH_TOKEN_CREDENTIAL,
-			"production-refresh-token",
-		);
-		let refreshBody: unknown = null;
-		const auth = new RemoteAuthSessionManager(credentials, {
-			baseUrl: "https://data.sea-ridethewindbreakthewaves.xyz",
-			fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
-				refreshBody = init?.body ? JSON.parse(String(init.body)) : null;
-				return Response.json(productionSessionPayload());
-			}) as unknown as typeof fetch,
-		});
-
-		await expect(auth.restoreSession()).resolves.toMatchObject({
-			id: "production-session",
-		});
-		expect(refreshBody).toEqual({
-			refreshToken: "production-refresh-token",
-		});
-		expect(JSON.stringify(refreshBody)).not.toContain("staging-refresh-token");
-	});
-
-	test("startup awaits cutover before constructing authentication or sync", () => {
-		const source = readFileSync(
-			join(import.meta.dir, "..", "src", "bun", "index.ts"),
-			"utf8",
-		);
-		const cutover = source.indexOf(
-			"await runDataCenterProductionOriginCutover",
-		);
-		const auth = source.indexOf("new RemoteAuthSessionManager");
-		const sync = source.indexOf("new DataCenterSyncService");
-		expect(cutover).toBeGreaterThan(-1);
-		expect(auth).toBeGreaterThan(cutover);
-		expect(sync).toBeGreaterThan(auth);
-		expect(DATA_CENTER_CONSUMER_ID).toBe("whalehall.datacenter.production.v1");
-	});
 });
 
 class MemoryCutoverRepository

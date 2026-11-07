@@ -15,6 +15,10 @@ import {
 } from "../scripts/build-native";
 import { normalizeDesignatedRequirement } from "../scripts/macos-build-security";
 
+// 慢速集成层：默认 dev 套件不执行这些用例；WHALEHALL_FULL_TESTS=1
+// （CI/发布前全量）时按原样注册运行。
+const fullTest = process.env.WHALEHALL_FULL_TESTS === "1" ? test : () => {};
+
 const projectRoot = resolve(import.meta.dir, "..");
 const brokerRoot = join(projectRoot, "native", "vault-broker");
 const sanitizerEnvironment = {
@@ -59,7 +63,7 @@ function readAdHocDesignatedRequirement(path: string): string {
 describe.skipIf(process.platform !== "darwin")(
 	"native Vault Broker security tests",
 	() => {
-		test("executes the exact frame and delayed-byte socket regressions", () => {
+		fullTest("executes the exact frame and delayed-byte socket regressions", () => {
 			withTemporaryDirectory((directory) => {
 				const executable = join(directory, "frame-tests");
 				run([
@@ -79,7 +83,7 @@ describe.skipIf(process.platform !== "darwin")(
 			});
 		});
 
-		test("executes migration conflict, duplicate, and idempotency policy regressions", () => {
+		fullTest("executes migration conflict, duplicate, and idempotency policy regressions", () => {
 			withTemporaryDirectory((directory) => {
 				const executable = join(directory, "keychain-policy-tests");
 				run([
@@ -105,7 +109,7 @@ describe.skipIf(process.platform !== "darwin")(
 			});
 		});
 
-		test("executes static core and complete-app signature validation", () => {
+		fullTest("executes static core and complete-app signature validation", () => {
 			withTemporaryDirectory((directory) => {
 				const core = join(directory, "core-fixture");
 				copyFileSync("/usr/bin/true", core);

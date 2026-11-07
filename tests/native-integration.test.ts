@@ -12,6 +12,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { LocalMessage } from "../src/agent/local-protocol";
 
+// 慢速集成层：默认 dev 套件不执行这些用例；WHALEHALL_FULL_TESTS=1
+// （CI/发布前全量）时按原样注册运行。
+const fullTest = process.env.WHALEHALL_FULL_TESTS === "1" ? test : () => {};
+
 const projectRoot = resolve(import.meta.dir, "..");
 const sensorDirectory = resolve(
 	projectRoot,
@@ -424,7 +428,7 @@ const sensorCiProbes: SensorCiProbe[] = [
 	},
 ];
 
-test("every public Rust sensor has exactly one native CI probe", () => {
+fullTest("every public Rust sensor has exactly one native CI probe", () => {
 	const sensorFiles = readdirSync(sensorDirectory, { withFileTypes: true })
 		.filter((entry) => entry.isFile() && entry.name.endsWith(".rs") && entry.name !== "mod.rs")
 		.map((entry) => entry.name)
@@ -436,7 +440,7 @@ test("every public Rust sensor has exactly one native CI probe", () => {
 	expect(new Set(sensorCiProbes.map((probe) => probe.toolName)).size).toBe(sensorCiProbes.length);
 });
 
-test("whalehall-local lists, calls, streams, and cancels tools over JSONL", async () => {
+fullTest("whalehall-local lists, calls, streams, and cancels tools over JSONL", async () => {
 	const manifest = resolve(projectRoot, "native/local-host/Cargo.toml");
 	const build = Bun.spawnSync(
 		[

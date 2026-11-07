@@ -35,10 +35,17 @@ describe("LocalAgentHostServices workflow storage", () => {
 			},
 			memory: {
 				async load() {
-					return { messages: [], version: 0 };
+					return {
+						messages: [],
+						version: 0,
+						thread: { title: "", metadata: null },
+					};
 				},
 				async append() {
 					return { version: 1 };
+				},
+				async saveThread() {
+					return { title: "", metadata: null };
 				},
 			},
 			tools: {

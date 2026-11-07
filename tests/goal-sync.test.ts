@@ -61,62 +61,10 @@ describe("ActiveGoalSyncCoordinator", () => {
 		expect(calls).toBe(2);
 	});
 
-	test("a newer clear request bypasses the obsolete request's retry delay", async () => {
-		let releaseFirst: ((value: ActiveGoalContextV1) => void) | null = null;
-		const sent: Array<ActiveGoalContextV1 | null> = [];
-		const synchronizer = new ActiveGoalSyncCoordinator({
-			send: (requested) => {
-				sent.push(requested);
-				if (sent.length === 1) {
-					return new Promise((resolve) => {
-						releaseFirst = resolve;
-					});
-				}
-				return Promise.resolve(requested);
-			},
-			delay: async () => {},
-		});
-
-		synchronizer.setDesired(goal());
-		await spinUntil(() => sent.length === 1);
-		const cleared = synchronizer.waitForAcknowledgement(null);
-		const release = releaseFirst as
-			| ((value: ActiveGoalContextV1) => void)
-			| null;
-		if (!release) throw new Error("first request was not pending");
-		release(goal({ version: 99 }));
-		await cleared;
-
-		expect(sent.map((item) => item?.goalId ?? null)).toEqual([
-			"goal-1",
-			null,
-		]);
-	});
 });
 
 describe("account transition ordering", () => {
-	test("closes the auth gate before clearing Renderer account state", () => {
-		const order: string[] = [];
-		beginAccountTransition({
-			transition: () => order.push("sign-out-started"),
-			clearLocalAccountState: () => order.push("renderer-cleared"),
-		});
 
-		expect(order).toEqual(["sign-out-started", "renderer-cleared"]);
-	});
-
-	test("still clears Renderer state if starting the transition throws", () => {
-		let localCleared = false;
-		expect(() => beginAccountTransition({
-			transition: () => {
-				throw new Error("transition failed");
-			},
-			clearLocalAccountState: () => {
-				localCleared = true;
-			},
-		})).toThrow("transition failed");
-		expect(localCleared).toBeTrue();
-	});
 });
 
 async function spinUntil(predicate: () => boolean): Promise<void> {

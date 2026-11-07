@@ -22,6 +22,7 @@ import type {
 } from "../src/agent/reflection/types";
 import { ActivityAnalysisDispatcher } from "../src/bun/activity-analysis-dispatcher";
 import type { StartActivityAnalysisRun } from "../src/bun/agent-run-coordinator";
+import { ActivityAnalysisStartRejectedError } from "../src/bun/agent-run-coordinator";
 import type { DesktopAuthSessionManager } from "../src/bun/auth-session";
 import {
 	CredentialHelperError,
@@ -1920,6 +1921,101 @@ describe("ActivityWindowDeliveryService", () => {
 			expect(
 				store.nextActivityAnalysisJob(1, "account-a", Date.now()).kind,
 			).toBe("ready");
+		} finally {
+			await dispatcher.stop();
+			store.close();
+		}
+	});
+
+	test("abandons a permanently rejected start immediately and keeps the lane moving", async () => {
+		const directory = temporaryDirectory();
+		const databasePath = join(directory, "activity-window-worker.sqlite3");
+		const store = new ActivityWindowDeliveryStore(databasePath);
+		const job = seedActivityAnalysisJob(store, "poison-start");
+		let providerStarts = 0;
+		const dispatcher = new ActivityAnalysisDispatcher({
+			store,
+			scoreThreshold: 1,
+			auth: authenticatedTestSession("account-a"),
+			coordinator: {
+				// 载荷级永久错误（存档一致性校验不过）：重试多少次都一样。
+				startActivityAnalysis: async () => {
+					providerStarts += 1;
+					throw new ActivityAnalysisStartRejectedError(
+						"archive-identity-invalid",
+						"Activity support context archive identity is invalid.",
+					);
+				},
+			},
+			retryDelaysMs: [1],
+		});
+		try {
+			dispatcher.start();
+			await eventually(
+				() =>
+					store.nextActivityAnalysisJob(1, "account-a", Date.now()).kind ===
+					"none",
+			);
+			// 永久拒绝只允许一次尝试：不退避、不占道。
+			expect(providerStarts).toBe(1);
+			const inspector = new Database(databasePath, { strict: true });
+			const rows = inspector
+				.query(
+					`SELECT job_id FROM activity_window_worker_agent_jobs`,
+				)
+				.all();
+			const receipts = inspector
+				.query(
+					`SELECT count(*) AS n FROM activity_window_worker_receipts`,
+				)
+				.get() as { n: number };
+			inspector.close();
+			// 任务行与毒载荷凭证都被清理，且没有终态行残留（终态会永久拒绝新物化）。
+			expect(rows).toEqual([]);
+			expect(receipts.n).toBe(0);
+		} finally {
+			await dispatcher.stop();
+			store.close();
+		}
+	});
+
+	test("gives up an unclassified start failure after the retry budget by abandoning, not by blocking the lane", async () => {
+		const directory = temporaryDirectory();
+		const databasePath = join(directory, "activity-window-worker.sqlite3");
+		const store = new ActivityWindowDeliveryStore(databasePath);
+		const job = seedActivityAnalysisJob(store, "unclassified-start");
+		let providerStarts = 0;
+		const dispatcher = new ActivityAnalysisDispatcher({
+			store,
+			scoreThreshold: 1,
+			auth: authenticatedTestSession("account-a"),
+			coordinator: {
+				startActivityAnalysis: async () => {
+					providerStarts += 1;
+					throw new Error("unknown-but-permanent start failure");
+				},
+			},
+			retryDelaysMs: [1],
+			startRetryAttemptLimit: 3,
+		});
+		try {
+			dispatcher.start();
+			await eventually(
+				() =>
+					store.nextActivityAnalysisJob(1, "account-a", Date.now()).kind ===
+					"none",
+			);
+			expect(providerStarts).toBe(3);
+			const inspector = new Database(databasePath, { strict: true });
+			const row = inspector
+				.query(
+					`SELECT count(*) AS n FROM activity_window_worker_agent_jobs
+					 WHERE job_id = ? OR terminal_failure = 1`,
+				)
+				.get(job.jobId) as { n: number };
+			inspector.close();
+			// 预算耗尽→放弃清理：无任务行、无终态行，车道即刻可服务新窗口。
+			expect(row.n).toBe(0);
 		} finally {
 			await dispatcher.stop();
 			store.close();

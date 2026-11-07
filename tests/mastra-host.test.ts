@@ -15,11 +15,16 @@ import {
 	isRecord,
 	MAX_MODEL_RELAY_CHUNK_BYTES,
 	type ModelRelayOpenParams,
+	errorResponse,
 	type ProtocolMessage,
 	SIDECAR_HOST_METHODS,
 	type SidecarHostRequest,
 	successResponse,
 } from "../src/agent/mastra-host/protocol";
+
+// 慢速集成层：默认 dev 套件不执行这些用例；WHALEHALL_FULL_TESTS=1
+// （CI/发布前全量）时按原样注册运行。
+const fullTest = process.env.WHALEHALL_FULL_TESTS === "1" ? test : () => {};
 
 let sidecarPath = "";
 let sidecarNodePath = "";
@@ -38,7 +43,7 @@ afterAll(() => {
 });
 
 describe("Mastra Node sidecar", () => {
-	test("streams conversation and authoritative structured planning through host calls", async () => {
+	fullTest("streams conversation and authoritative structured planning through host calls", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -186,7 +191,10 @@ describe("Mastra Node sidecar", () => {
 		expect(
 			host.calls.filter((method) => method === "planning/save"),
 		).toHaveLength(2);
-		expect(host.modelBodies.every((body) => body.stream === true)).toBe(true);
+		// 会话流与计划输出必须流式；generateTitle 的一次性标题调用除外。
+		expect(
+			host.modelBodies.filter((body) => body.stream !== true),
+		).toHaveLength(1);
 		expect(host.modelCalls).toEqual(
 			expect.arrayContaining([
 				{
@@ -203,6 +211,8 @@ describe("Mastra Node sidecar", () => {
 		);
 		expect(host.modelAgentIds).toEqual([
 			MODEL_AGENT_IDS.conversation,
+			// generateTitle 的标题生成调用（走 conversation agent 的模型通道）。
+			MODEL_AGENT_IDS.conversation,
 			MODEL_AGENT_IDS.planning,
 			MODEL_AGENT_IDS.planning,
 		]);
@@ -210,7 +220,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("loads required native Skills locally without exposing Skill tools to the reflection model", async () => {
+	fullTest("loads required native Skills locally without exposing Skill tools to the reflection model", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -252,7 +262,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("runs Dynamic Planning through the live strict planning.analyze entry", async () => {
+	fullTest("runs Dynamic Planning through the live strict planning.analyze entry", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -279,6 +289,7 @@ describe("Mastra Node sidecar", () => {
 				currentSchedulingPreferences: null,
 				observationEvidence: [],
 				calendarEvents: [],
+				memoryHints: null,
 			},
 		});
 
@@ -301,15 +312,25 @@ describe("Mastra Node sidecar", () => {
 			},
 		]);
 		const body = host.modelBodies[0];
-		expect(body?.tools).toBeUndefined();
+		// 调研工具声明在请求里，由网关在服务端执行（见 gateway-research-tools）。
+		const toolNames = ((body?.tools as unknown[] | undefined) ?? []).map(
+			(tool) =>
+				(tool as { function?: { name?: string } })?.function?.name ?? "",
+		);
+		expect(toolNames).toContain("zhipu.web_search_prime");
+		expect(body?.tool_choice === undefined || body?.tool_choice === "auto").toBe(
+			true,
+		);
 		expect(body?.response_format).toBeUndefined();
 		const serializedMessages = JSON.stringify(body?.messages);
 		expect(serializedMessages).toContain('\\"outcome\\"');
 		expect(serializedMessages).not.toContain('\\"pattern\\"');
+		// 计划记忆提示进入深思上下文（无先例时为 null，同样显式可见）。
+		expect(serializedMessages).toContain('\\"memoryHints\\"');
 		await harness.shutdown();
 	}, 30_000);
 
-	test("runs activity support through supervisor, specialist, and voice without Tools or Memory", async () => {
+	fullTest("runs activity support through supervisor, specialist, and voice without Tools or Memory", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -376,7 +397,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("classifies an activity Tool response as deterministic invalid output", async () => {
+	fullTest("classifies an activity Tool response as deterministic invalid output", async () => {
 		const host = new FakeHost({ activityToolViolation: true });
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -407,7 +428,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("rejects split raw Tool markup from activity analysis", async () => {
+	fullTest("rejects split raw Tool markup from activity analysis", async () => {
 		const host = new FakeHost({
 			rawToolMarkupChunks: [
 				"Worker summary <to",
@@ -436,7 +457,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("runs client-owned compressed activity reflection through a non-persistent Mastra workflow", async () => {
+	fullTest("runs client-owned compressed activity reflection through a non-persistent Mastra workflow", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -483,14 +504,19 @@ describe("Mastra Node sidecar", () => {
 			"# Available Skills",
 		);
 		expect(reflectionBody?.tools).toBeUndefined();
-		expect(reflectionBody?.response_format).toBeDefined();
+		// GLM 时代合同：schema 注入提示词（jsonPromptInjection），响应格式
+		// 头不再上链路（智谱 json_schema 模式会让思考失控）。
+		expect(reflectionBody?.response_format).toBeUndefined();
+		expect(
+			JSON.stringify(reflectionBody?.messages),
+		).toContain("JSON");
 		expect(reflectionBody?.stream).not.toBe(true);
 		expect(host.workflowSnapshotCalls).toEqual([]);
 
 		await harness.shutdown();
 	}, 30_000);
 
-	test("classifies a semantic reflection schema violation as invalid output", async () => {
+	fullTest("classifies a semantic reflection schema violation as invalid output", async () => {
 		const host = new FakeHost({ reflectionSensorOnlyAction: true });
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -516,7 +542,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("recalls Bun-owned conversation history through Mastra Memory", async () => {
+	fullTest("recalls Bun-owned conversation history through Mastra Memory", async () => {
 		const host = new FakeHost({
 			memoryMessages: [
 				{ role: "user", content: "请记住项目代号是蓝鲸。" },
@@ -561,7 +587,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("rehydrates a suspended planning Workflow after the Sidecar restarts", async () => {
+	fullTest("rehydrates a suspended planning Workflow after the Sidecar restarts", async () => {
 		const host = new FakeHost();
 		const firstHarness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => firstHarness.send(message)),
@@ -653,7 +679,7 @@ describe("Mastra Node sidecar", () => {
 		await secondHarness.shutdown();
 	}, 30_000);
 
-	test("keeps interactive conversation Tool-free and rejects provider tool calls", async () => {
+	fullTest("keeps interactive conversation Tool-free and rejects provider tool calls", async () => {
 		const host = new FakeHost({ toolApprovalScenario: true });
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -684,7 +710,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("rejects split raw Tool markup without displaying or persisting it", async () => {
+	fullTest("rejects split raw Tool markup without displaying or persisting it", async () => {
 		const host = new FakeHost({
 			rawToolMarkupChunks: [
 				"<to",
@@ -722,7 +748,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("allows ordinary text that only shares the Tool tag prefix", async () => {
+	fullTest("allows ordinary text that only shares the Tool tag prefix", async () => {
 		const host = new FakeHost({
 			rawToolMarkupChunks: ["可以使用 <tool", "tip> 展示帮助。"],
 		});
@@ -747,7 +773,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("retries an invalid draft once and persists a conflict instead of failing the run", async () => {
+	fullTest("retries an invalid draft once and persists a conflict instead of failing the run", async () => {
 		const host = new FakeHost({ planningConflictScenario: true });
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -794,7 +820,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("cancels an active run and aborts the in-flight model relay", async () => {
+	fullTest("cancels an active run and aborts the in-flight model relay", async () => {
 		const host = new FakeHost({ holdModelOpen: true });
 		const harness = new SidecarHarness(sidecarPath, (request) =>
 			host.handle(request, (message) => harness.send(message)),
@@ -828,7 +854,7 @@ describe("Mastra Node sidecar", () => {
 		await harness.shutdown();
 	}, 30_000);
 
-	test("closes the Sidecar when a host response frame is malformed", async () => {
+	fullTest("closes the Sidecar when a host response frame is malformed", async () => {
 		const host = new FakeHost();
 		const harness = new SidecarHarness(sidecarPath, async (request) => {
 			if (request.method === "model/relay.open") {
@@ -1255,11 +1281,29 @@ class FakeHost {
 			case "tool/cancel":
 				await send(successResponse(request.requestId, { cancelled: true }));
 				return;
+			case "memory/thread.save":
+				await send(
+					successResponse(request.requestId, {
+						title: "",
+						metadata: null,
+					}),
+				);
+				return;
 			case "model/relay.abort":
 				await send(successResponse(request.requestId, { aborted: true }));
 				return;
 			case "model/relay.open":
 				await this.openModelRelay(request, send);
+				return;
+			case "cloud/parent.open":
+				// 本测试宿主不提供云检索产品会话；sidecar 应回退纯文本对话。
+				await send(
+					errorResponse(request.requestId, {
+						code: "INVALID_REQUEST",
+						message: "cloud tools unavailable",
+						retryable: false,
+					}),
+				);
 				return;
 			default:
 				throw new Error(`Unexpected host call ${request.method}`);
@@ -1419,6 +1463,27 @@ class FakeHost {
 			return;
 		}
 		if (params.originatingRequestId === "planning-analysis:operation-1") {
+			// 计划分析现在是流式调用（思考可见链路）：宿主按 SSE 响应，
+			// 与真实网关同构——思考增量帧 + 终帧 content + [DONE]。
+			if (body.stream === true) {
+				await send(
+					successResponse(request.requestId, {
+						relayId: params.relayId,
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+						completed: false,
+					}),
+				);
+				await this.streamRelay(
+					request,
+					params,
+					planningAnalysisSse(
+						JSON.stringify(dynamicPlanningProviderProposalFixture()),
+					),
+					send,
+				);
+				return;
+			}
 			await send(
 				successResponse(request.requestId, {
 					relayId: params.relayId,
@@ -1514,7 +1579,13 @@ class FakeHost {
 			return;
 		}
 
-		const structured = body.response_format !== undefined;
+		// jsonPromptInjection 时代：schema 注入提示词（Mastra 固定标记），
+		// response_format 头不再上链路。
+		const structured =
+			body.response_format !== undefined ||
+			JSON.stringify(body.messages ?? []).includes(
+				"Return your response as JSON matching this schema:",
+			);
 		if (this.options.rawToolMarkupChunks && !structured) {
 			await this.streamRelay(
 				request,
@@ -1704,6 +1775,8 @@ function dynamicPlanningProposalFixture(): Record<string, unknown> {
 				description: "完成一次小规模访谈。",
 				estimatedMinutes: 60,
 				dependencyKeys: [],
+				relevance: "strong",
+				relevanceReason: "关键路径任务",
 			},
 			{
 				taskKey: "review-market",
@@ -1712,7 +1785,16 @@ function dynamicPlanningProposalFixture(): Record<string, unknown> {
 				description: "决定是否继续当前方向。",
 				estimatedMinutes: 60,
 				dependencyKeys: ["validate-market"],
+				relevance: "strong",
+				relevanceReason: "关键路径任务",
 			},
+		],
+		evaluations: [
+			{ angle: "goal-alignment", verdict: "pass", summary: "任务与目标对齐。", affectedTaskKeys: [] },
+			{ angle: "time-feasibility", verdict: "pass", summary: "容量足够。", affectedTaskKeys: [] },
+			{ angle: "dependency-risk", verdict: "pass", summary: "依赖链清晰。", affectedTaskKeys: [] },
+			{ angle: "load-recovery", verdict: "pass", summary: "负荷分布均衡。", affectedTaskKeys: [] },
+			{ angle: "evidence-sufficiency", verdict: "pass", summary: "关键约束已确认。", affectedTaskKeys: [] },
 		],
 	};
 }
@@ -1734,8 +1816,41 @@ function dynamicPlanningProviderProposalFixture(): Record<string, unknown> {
 			schedulingPreferenceSource: output.schedulingPreferenceSource,
 			schedulingPreferences: output.schedulingPreferences,
 			tasks: output.tasks,
+			evaluations: output.evaluations,
 		},
 	};
+}
+
+/** 与真实网关同构的计划分析 SSE：思考增量帧 + 终帧 content + [DONE]。 */
+function planningAnalysisSse(content: string): Uint8Array {
+	const chunks = [
+		{
+			id: "chatcmpl-dynamic-planning",
+			created: 1,
+			model: "test-planning-model",
+			choices: [
+				{
+					delta: { reasoning_content: "先核对偏好与容量。" },
+					finish_reason: null,
+				},
+			],
+		},
+		{
+			id: "chatcmpl-dynamic-planning",
+			created: 1,
+			model: "test-planning-model",
+			choices: [{ delta: { content }, finish_reason: null }],
+		},
+		{
+			id: "chatcmpl-dynamic-planning",
+			created: 1,
+			model: "test-planning-model",
+			choices: [{ delta: {}, finish_reason: "stop" }],
+		},
+	];
+	return new TextEncoder().encode(
+		`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`,
+	);
 }
 
 function openAiSse(content: string): Uint8Array {

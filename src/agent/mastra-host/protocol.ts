@@ -2,9 +2,11 @@ import type { ActivitySupportContext } from "../../shared/activity-support";
 import type { PlanningModelAnalysisRequest } from "../planning/model";
 import type { ModelAgentId } from "./model-agent-catalog";
 
-/** v3 makes `model/relay.open.agentId` required. Bump this value for every
- * breaking Bun/Sidecar wire-contract change so mixed binaries fail closed. */
-export const AGENT_HOST_PROTOCOL_VERSION = 3 as const;
+/** v3 makes `model/relay.open.agentId` required; v4 adds the cloud tool Port
+ * reverse calls (`cloud/parent.open|search|read-evidence`). Bump this value
+ * for every breaking Bun/Sidecar wire-contract change so mixed binaries fail
+ * closed. */
+export const AGENT_HOST_PROTOCOL_VERSION = 5 as const;
 export const AGENT_HOST_SERVICE = "whalehall-agent-host" as const;
 export const MAX_MODEL_RELAY_CHUNK_BYTES = 64 * 1024;
 
@@ -236,6 +238,8 @@ export type AgentHostMethod =
 	| "activity.start"
 	| "reflection.analyze"
 	| "planning.answer"
+	// 休眠方法对：当前无挂载审批工具（createWhaleHallAgentTools 已摘除），
+	// toolProposals 无写入点；保留协议面等对话 Agent 过 conformance gate 后复用。
 	| "agent.approveTool"
 	| "agent.declineTool"
 	| "run.cancel"
@@ -249,6 +253,7 @@ export type SidecarHostMethod =
 	| "model/relay.abort"
 	| "memory/load"
 	| "memory/append"
+	| "memory/thread.save"
 	| "workflow/start"
 	| "workflow/resume"
 	| "workflow/snapshot.persist"
@@ -266,7 +271,10 @@ export type SidecarHostMethod =
 	| "tool/list"
 	| "tool/propose"
 	| "tool/call"
-	| "tool/cancel";
+	| "tool/cancel"
+	| "cloud/parent.open"
+	| "cloud/search"
+	| "cloud/read-evidence";
 
 interface RequestEnvelope<M extends string, P> {
 	protocolVersion: typeof AGENT_HOST_PROTOCOL_VERSION;
@@ -354,6 +362,7 @@ export type AgentRunEventPayload =
 	| { kind: "run.started"; runKind: AgentRunKind }
 	| { kind: "run.resumed"; decision: "resume" | "approve" | "decline" }
 	| { kind: "conversation.text.delta"; delta: string; text: string }
+	| { kind: "conversation.reasoning.delta"; delta: string }
 	| {
 			kind: "agent.tool.call";
 			toolCallId: string;
@@ -444,6 +453,7 @@ export const SIDECAR_HOST_METHODS: readonly SidecarHostMethod[] = [
 	"model/relay.abort",
 	"memory/load",
 	"memory/append",
+	"memory/thread.save",
 	"workflow/start",
 	"workflow/resume",
 	"workflow/snapshot.persist",
@@ -462,6 +472,9 @@ export const SIDECAR_HOST_METHODS: readonly SidecarHostMethod[] = [
 	"tool/propose",
 	"tool/call",
 	"tool/cancel",
+	"cloud/parent.open",
+	"cloud/search",
+	"cloud/read-evidence",
 ];
 
 export function successResponse<TResult>(
@@ -632,6 +645,8 @@ function isAgentRunEventPayload(
 				isBoundedString(value.delta, 64 * 1024) &&
 				isBoundedString(value.text, 64 * 1024)
 			);
+		case "conversation.reasoning.delta":
+			return isBoundedString(value.delta, 64 * 1024);
 		case "agent.tool.call":
 			return (
 				isBoundedString(value.toolCallId, 512) &&

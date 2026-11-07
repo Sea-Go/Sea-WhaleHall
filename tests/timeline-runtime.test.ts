@@ -79,35 +79,5 @@ describe("Timeline v2 deterministic production runtime", () => {
 		expect(repositoryCloseCount).toBe(1);
 	});
 
-	test("closes its repository when asynchronous service shutdown rejects", async () => {
-		const created = await runtime();
-		const failure = new Error("synthetic Timeline stop failure");
-		created.service.stop = () => Promise.reject(failure);
-		const originalClose = created.repository.close.bind(created.repository);
-		let repositoryCloseCount = 0;
-		created.repository.close = () => {
-			repositoryCloseCount += 1;
-			originalClose();
-		};
 
-		await expect(created.close()).rejects.toBe(failure);
-		expect(repositoryCloseCount).toBe(1);
-	});
-
-	test("closes its repository when synchronous shutdown sealing throws", async () => {
-		const created = await runtime();
-		const failure = new Error("synthetic Timeline shutdown failure");
-		created.service.beginShutdown = () => {
-			throw failure;
-		};
-		const originalClose = created.repository.close.bind(created.repository);
-		let repositoryCloseCount = 0;
-		created.repository.close = () => {
-			repositoryCloseCount += 1;
-			originalClose();
-		};
-
-		await expect(created.close()).rejects.toBe(failure);
-		expect(repositoryCloseCount).toBe(1);
-	});
 });

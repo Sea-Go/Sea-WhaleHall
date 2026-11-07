@@ -95,8 +95,8 @@ class RemoteMemoryStorage extends MemoryStorage {
 		resourceId?: string;
 	}): Promise<StorageThreadType | null> {
 		const context = this.requireContext(threadId, resourceId);
-		await this.load(context);
-		return threadRecord(context);
+		const memory = await this.load(context);
+		return threadRecord(context, memory.thread);
 	}
 
 	async saveThread({
@@ -106,6 +106,13 @@ class RemoteMemoryStorage extends MemoryStorage {
 	}): Promise<StorageThreadType> {
 		const context = this.requireContext(thread.id, thread.resourceId);
 		await this.load(context);
+		await this.persistThread(context, {
+			title: typeof thread.title === "string" ? thread.title : undefined,
+			metadata:
+				thread.metadata && typeof thread.metadata === "object"
+					? (thread.metadata as Record<string, unknown>)
+					: undefined,
+		});
 		return { ...thread, resourceId: context.resourceId };
 	}
 
@@ -269,7 +276,11 @@ class RemoteMemoryStorage extends MemoryStorage {
 	private async load(
 		context: ConversationMemoryExecutionContext,
 		ignoreExpectedVersion = false,
-	): Promise<{ messages: readonly ConversationInputMessage[]; version: number }> {
+	): Promise<{
+		messages: readonly ConversationInputMessage[];
+		version: number;
+		thread: { title: string; metadata: Record<string, unknown> | null };
+	}> {
 		const value = await this.peer.requestHost("memory/load", {
 			namespace: "conversation",
 			threadId: context.threadId,
@@ -278,6 +289,19 @@ class RemoteMemoryStorage extends MemoryStorage {
 		if (!isRecord(value) || !Array.isArray(value.messages) || !isVersion(value.version)) {
 			throw storageError("memory/load returned an invalid conversation record.");
 		}
+		const threadValue = value.thread;
+		const thread =
+			isRecord(threadValue) && typeof threadValue.title === "string"
+				? {
+						title: threadValue.title,
+						metadata:
+							threadValue.metadata &&
+							typeof threadValue.metadata === "object" &&
+							!Array.isArray(threadValue.metadata)
+								? (threadValue.metadata as Record<string, unknown>)
+								: null,
+					}
+				: { title: "", metadata: null };
 		const messages = value.messages.map(parseConversationMessage);
 		if (
 			!ignoreExpectedVersion &&
@@ -296,7 +320,39 @@ class RemoteMemoryStorage extends MemoryStorage {
 			});
 		}
 		context.versionChecked = true;
-		return { messages, version: value.version };
+		return { messages, version: value.version, thread };
+	}
+
+	/** 线程元数据（标题/working memory）经 Bun 持久化到加密会话库。 */
+	private async persistThread(
+		context: ConversationMemoryExecutionContext,
+		update: { title?: string; metadata?: Record<string, unknown> },
+	): Promise<{
+		title: string;
+		metadata: Record<string, unknown> | null;
+	}> {
+		const result = await this.peer.requestHost("memory/thread.save", {
+			namespace: "conversation",
+			threadId: context.threadId,
+			resourceId: context.resourceId,
+			...(update.title !== undefined ? { title: update.title } : {}),
+			...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
+		});
+		if (
+			!isRecord(result) ||
+			typeof result.title !== "string"
+		) {
+			throw storageError("memory/thread.save returned an invalid thread.");
+		}
+		return {
+			title: result.title,
+			metadata:
+				result.metadata &&
+				typeof result.metadata === "object" &&
+				!Array.isArray(result.metadata)
+					? (result.metadata as Record<string, unknown>)
+					: null,
+		};
 	}
 }
 
@@ -467,12 +523,13 @@ function hasPendingToolApproval(message: MastraDBMessage): boolean {
 
 function threadRecord(
 	context: ConversationMemoryExecutionContext,
+	persisted?: { title: string; metadata: Record<string, unknown> | null },
 ): StorageThreadType {
 	return {
 		id: context.threadId,
 		resourceId: context.resourceId,
-		title: "",
-		metadata: {},
+		title: persisted?.title ?? "",
+		metadata: persisted?.metadata ?? {},
 		createdAt: new Date(0),
 		updatedAt: new Date(),
 	};

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { OpenAICompatibleProviderSettings } from "@ai-sdk/openai-compatible";
 import { isModelAgentId, type ModelAgentId } from "./model-agent-catalog";
+import { restoreGatewayToolNames } from "./cloud-tools/gateway-research-tools";
 import {
 	type AgentHostErrorPayload,
 	isRecord,
@@ -98,7 +99,11 @@ export class ModelRelay {
 			}
 		});
 		const requestBody = request.body
-			? Buffer.from(await request.arrayBuffer()).toString("base64")
+			? Buffer.from(
+					restoreGatewayToolNames(
+						Buffer.from(await request.arrayBuffer()),
+					),
+				).toString("base64")
 			: null;
 
 		const abort = (): void => {

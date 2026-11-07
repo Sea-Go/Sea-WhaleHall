@@ -40,9 +40,10 @@ const activityReflectionFinalOutputContract = [
 	"COMPRESSED_ACTIVITY_EVENTS_JSON 是按原始观察逐条压缩后的证据列表；每项只含 time、tools、message、context_only，不能假定存在被省略的事件包络字段。context_only=true 的观察只用于理解窗口开端的连续上下文，不得计数、单独生成事件、改变 signal_segment_ids 或贡献分数。其后的 LOCAL_SIGNAL_INDEX_JSON 仍只由本窗口 context_only=false 的观察生成。其 candidate_activities 与 recommended_action 是保守候选，不是结论；压缩事件列表仍是证据来源。可因证据不足降为 other_unknown 或合并相邻段，但不得无依据发明候选之外的活动类别。每个索引段通常只能产生 0 或 1 个语义活动事件；只有持续主题改变才可拆分。",
 	"一个原始观察永远不是一个事件。不得把某条观察的发生时刻同时写成 started_at_ms 和 ended_at_ms；当索引段包含连续同类观察时，事件必须覆盖该持续段的可判断时间范围。时间端点只能取索引段或完整窗口内的毫秒值，绝不能编造窗口外时间。",
 	"根级只能有 events、score、score_reason 三个字段；绝不能输出 analysis_summary、context_details、事件计数、原始字段或其他根级键。",
-	"events 是 0 至 8 个聚合事件；每个事件必须同时包含 action、activity、goal_relevance、confidence、reason_codes、evidence、signal_segment_ids、started_at_ms、ended_at_ms。signal_segment_ids 只能选择 LOCAL_SIGNAL_INDEX_JSON 中实际存在的 segment-N，可选多个连续段来合并活动；同一个 segment-N 在单个事件或整个 events 数组中都最多出现一次。",
+	"events 是 0 至 8 个聚合事件；每个事件必须同时包含 action、activity、goal_relevance、confidence、reason_codes、evidence、signal_segment_ids、started_at_ms、ended_at_ms。其中 reason_codes 必须是 1 到 4 项的字符串数组，evidence 必须是最多 8 项的字符串数组，绝不能写成单个字符串。signal_segment_ids 只能选择 LOCAL_SIGNAL_INDEX_JSON 中实际存在的 segment-N，可选多个连续段来合并活动；同一个 segment-N 在单个事件或整个 events 数组中都最多出现一次。",
 	"每个 action 必须以“确定：”“推测：”或“不确定：”开头，后面是具体简体中文活动描述；不得把 development、writing、research、communication 等英文枚举写进 action，也不得写应用状态更改、标签页切换、页面导航、输入活动或用户交互活动等观察名称。",
 	"score 必须是 0 至 1 的本窗口贡献；先聚合再按已加载评分 Skill 的公式计算。score_reason 必须是简短、无敏感信息的中文，并说明目标相关性或零分原因与证据强度；不得只写窗口贡献度。started_at_ms 与 ended_at_ms 必须都写为 null；客户端会用所选 segment-N 从完整原始窗口还原真实时间。",
+	'格式对照（仅示意字段形状，不是本窗口数据）：{"action":"推测：正在编写代码并查阅技术资料","activity":"development","goal_relevance":"supporting","confidence":0.75,"reason_codes":["文档变更","持续输入"],"evidence":["编辑器文档修改伴随持续输入"],"signal_segment_ids":["segment-1"],"started_at_ms":null,"ended_at_ms":null}。注意 reason_codes 和 evidence 是字符串数组。',
 ].join("\n");
 
 const activityReflectionActionPrefixes = [
@@ -72,6 +73,45 @@ export const activityReflectionActivitySchema = z.enum(
 export type ActivityReflectionActivity =
 	(typeof activityReflectionActivities)[number];
 
+export const activityReflectionReasonCodesSchema = z
+	.array(z.string().trim().min(1).max(80))
+	.min(1)
+	.max(4);
+export const activityReflectionEvidenceSchema = z
+	.array(z.string().trim().min(1).max(80))
+	.max(8);
+
+/**
+ * 弱结构化输出模型（免费档 OpenAI 兼容模型）可能把列表字段压成单个字符串。
+ * Provider schema 用 z.preprocess 先把这类字符串包装回数组，再按严格契约校验；
+ * zod v4 的 toJSONSchema 取输出侧，模型看到的 JSON Schema 仍是严格的数组形态。
+ */
+export function normalizeActivityReflectionProviderOutput(
+	value: unknown,
+): unknown {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return value;
+	}
+	const record = value as { events?: unknown };
+	if (!Array.isArray(record.events)) return value;
+	const events = record.events.map((event) => {
+		if (typeof event !== "object" || event === null || Array.isArray(event)) {
+			return event;
+		}
+		const item = event as Record<string, unknown>;
+		return {
+			...item,
+			reason_codes:
+				typeof item.reason_codes === "string"
+					? [item.reason_codes]
+					: item.reason_codes,
+			evidence:
+				typeof item.evidence === "string" ? [item.evidence] : item.evidence,
+		};
+	});
+	return { ...record, events };
+}
+
 const activityReflectionEventSchema = z
 	.object({
 		action: z
@@ -83,8 +123,8 @@ const activityReflectionEventSchema = z
 		activity: activityReflectionActivitySchema,
 		goal_relevance: z.enum(["direct", "supporting", "unrelated", "uncertain"]),
 		confidence: z.number().finite().min(0).max(1),
-		reason_codes: z.array(z.string().trim().min(1).max(80)).min(1).max(4),
-		evidence: z.array(z.string().trim().min(1).max(80)).max(8),
+		reason_codes: activityReflectionReasonCodesSchema,
+		evidence: activityReflectionEvidenceSchema,
 		signal_segment_ids: z
 			.array(z.string().regex(/^segment-[1-9][0-9]*$/u))
 			.min(1)
@@ -204,9 +244,12 @@ export function createActivityReflectionProviderOutputSchema(
 	signalSegmentIds: readonly string[],
 	candidateActivities: readonly ActivityReflectionActivity[],
 ) {
-	return createActivityReflectionRuntimeOutputShape(
-		signalSegmentIds,
-		candidateActivities,
+	return z.preprocess(
+		normalizeActivityReflectionProviderOutput,
+		createActivityReflectionRuntimeOutputShape(
+			signalSegmentIds,
+			candidateActivities,
+		),
 	);
 }
 
@@ -858,7 +901,10 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 	} else if (prelude.length > 0) {
 		const startedAtMs = prelude[0]?.timestamp; // 缺时间戳不伪造 1970 起点
 		if (startedAtMs !== undefined) {
-			const fallback = createActivityReflectionSignalSegment("other", startedAtMs);
+			const fallback = createActivityReflectionSignalSegment(
+				"other",
+				startedAtMs,
+			);
 			for (const entry of prelude) addActivityReflectionSignal(fallback, entry);
 			segments.push(fallback);
 		}

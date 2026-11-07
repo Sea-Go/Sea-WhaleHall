@@ -38,13 +38,14 @@ export const activityReflectionAnalysisCaseCards = [
 ] as const;
 
 /** Backwards-compatible export used by calibration-oriented tests. */
-export const activityReflectionAnalysisExamples = activityReflectionAnalysisCaseCards;
+export const activityReflectionAnalysisExamples =
+	activityReflectionAnalysisCaseCards;
 
 export const activityReflectionAnalysisWorkedExample = [
 	"强制对照示例（仅用于校准，不是用户数据）：",
 	"观察序列：编辑器文档修改 → 持续输入 → 技术资料导航 → 持续输入；全程没有明确的人类活动主题切换。",
 	"错误：拆成“应用前台变化”“编辑器文档修改”“输入活动聚合”“浏览器标签导航”等多个 events。",
-	"正确：events 必须只有 1 项，例如 {\"action\":\"推测：正在编写代码并查阅技术资料\",\"activity\":\"development\",\"goal_relevance\":\"supporting\",\"confidence\":0.75}。",
+	'正确：events 必须只有 1 项，例如 {"action":"推测：正在编写代码并查阅技术资料","activity":"development","goal_relevance":"supporting","confidence":0.75,"reason_codes":["文档变更","持续输入"],"evidence":["编辑器文档修改伴随持续输入"],"signal_segment_ids":["segment-1"],"started_at_ms":null,"ended_at_ms":null}；reason_codes 与 evidence 必须是字符串数组，不是单个字符串。',
 	"只有观察到持续且直接支持的另一类人类活动，例如游戏、会议、媒体或交易，才可以拆成第二个时间片段。",
 ].join("\n");
 

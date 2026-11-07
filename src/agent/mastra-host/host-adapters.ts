@@ -40,6 +40,32 @@ export interface HostToolProposal extends HostToolApprovalSummary {
 export class HostStateAdapters {
 	constructor(private readonly peer: HostRequestPeer) {}
 
+	/** 云搜索 Port 桥：会话父操作描述由 Bun 从已认证运行创建（无凭据字段）。 */
+	async openCloudParent(runId: string): Promise<unknown> {
+		return this.peer.requestHost("cloud/parent.open", { runId });
+	}
+
+	async cloudSearch(
+		runId: string,
+		input: {
+			requestKey: string;
+			depth: "fast" | "detailed";
+			query: string;
+			intelligence: "low" | "medium" | "high";
+			continueSearchId?: string;
+			limits: { readCalls: number; quoteRunes: number };
+		},
+	): Promise<unknown> {
+		return this.peer.requestHost("cloud/search", { runId, ...input });
+	}
+
+	async cloudReadEvidence(
+		runId: string,
+		input: { requestKey: string; searchId: string; evidenceId: string },
+	): Promise<unknown> {
+		return this.peer.requestHost("cloud/read-evidence", { runId, ...input });
+	}
+
 	async startPlanningWorkflow(input: {
 		sessionId: string;
 		runId: string;

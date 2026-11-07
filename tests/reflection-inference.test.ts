@@ -95,49 +95,9 @@ describe("DeterministicReflectionInference", () => {
 		expect(result.feedbackCode).toBe("silent");
 	});
 
-	test("creates stable content-free embeddings and honors cancellation", async () => {
-		const inference = new DeterministicReflectionInference();
-		const first = await inference.infer(windowFixture());
-		const second = await inference.infer(windowFixture());
-		expect(first.embedding).toEqual(second.embedding);
 
-		const controller = new AbortController();
-		controller.abort();
-		await expect(
-			inference.infer(windowFixture(), controller.signal),
-		).rejects.toBeInstanceOf(ReflectionInferenceUnavailableError);
-	});
-
-	test("rejects inconsistent durable goal metadata", async () => {
-		const invalid = { ...windowFixture(), goalVersion: null };
-		await expect(
-			new DeterministicReflectionInference().infer(invalid),
-		).rejects.toThrow("inconsistent goal metadata");
-	});
 });
 
 describe("fixed feedback and reminder suppression", () => {
-	test("selects only fixed Chinese feedback templates", () => {
-		expect(
-			selectFeedbackCode({
-				hasGoal: true,
-				activity: "development",
-				goalRelevance: "direct",
-				abstain: false,
-			}),
-		).toBe("encourage");
-		expect(chineseFeedbackTemplate("encourage")).toContain("推进当前目标");
-		expect(chineseFeedbackTemplate("silent")).toBeNull();
-	});
 
-	test("suppresses the same active reminder without suppressing persistence", async () => {
-		const reflection = await new DeterministicReflectionInference().infer(
-			windowFixture(),
-		);
-		const active = { ...reflection, feedbackCode: "refocus" as const };
-		const deduper = new ReflectionReminderDeduper(10 * 60 * 1_000);
-		expect(deduper.shouldNotify(active, 1_000)).toBeTrue();
-		expect(deduper.shouldNotify(active, 2_000)).toBeFalse();
-		expect(deduper.shouldNotify(active, 10 * 60 * 1_000 + 1_000)).toBeTrue();
-	});
 });

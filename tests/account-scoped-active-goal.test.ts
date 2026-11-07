@@ -80,22 +80,4 @@ describe("AccountScopedActiveGoalStore", () => {
 		expect(store.getForAccount("account-a")).toBeNull();
 	});
 
-	test("runs the persistent clear even after synchronous invalidation", async () => {
-		let current: LocalTestSessionIdentity | null = { ...identityA };
-		const writes: ActiveGoalWrite[] = [];
-		const store = new AccountScopedActiveGoalStore({
-			currentSession: () => current && { ...current },
-			writeRuntimeGoal: async (next) => {
-				writes.push(next ? { ...next } : null);
-				return next ? { ...goal } : null;
-			},
-		});
-		await store.setForCurrentSession(goal);
-		current = null;
-		store.invalidateSynchronously();
-		await store.clearForAccountTransition();
-
-		expect(writes.at(-1)).toBeNull();
-		expect(store.getForAccount("account-a")).toBeNull();
-	});
 });

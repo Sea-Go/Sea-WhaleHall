@@ -5,10 +5,14 @@ import type {
 } from "../agent/activity-window-worker";
 import type { AuthSessionIdentity } from "../shared/session-identity";
 import type { AgentRunCoordinator } from "./agent-run-coordinator";
+import { ActivityAnalysisStartRejectedError } from "./agent-run-coordinator";
 import type { DesktopAuthSessionManager } from "./auth-session";
 import type { EncryptedAgentRepository } from "./encrypted-agent-repository";
 
 const DEFAULT_RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 600_000] as const;
+
+/** start 层重试预算：封顶间隔 10 分钟时约 10 小时，之后毒任务转终态。 */
+const START_RETRY_ATTEMPT_LIMIT = 60;
 
 export interface ActivityAnalysisDispatcherOptions {
 	store: ActivityWindowDeliveryStore;
@@ -22,6 +26,8 @@ export interface ActivityAnalysisDispatcherOptions {
 	> &
 		Partial<Pick<EncryptedAgentRepository, "deleteActivityAnalysisRuns">>;
 	retryDelaysMs?: readonly number[];
+	/** start 层重试预算，超出后毒任务转终态；默认 START_RETRY_ATTEMPT_LIMIT。 */
+	startRetryAttemptLimit?: number;
 	nowMs?: () => number;
 	isEligible?: (identity: AuthSessionIdentity) => boolean;
 	onError?: (error: unknown) => void;
@@ -47,6 +53,7 @@ export class ActivityAnalysisDispatcher {
 				Partial<Pick<EncryptedAgentRepository, "deleteActivityAnalysisRuns">>)
 		| undefined;
 	private readonly retryDelaysMs: readonly number[];
+	private readonly startRetryAttemptLimit: number;
 	private readonly nowMs: () => number;
 	private readonly isEligible: (identity: AuthSessionIdentity) => boolean;
 	private readonly onError: (error: unknown) => void;
@@ -71,6 +78,8 @@ export class ActivityAnalysisDispatcher {
 		this.retryDelaysMs = validateRetryDelays(
 			options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS,
 		);
+		this.startRetryAttemptLimit =
+			options.startRetryAttemptLimit ?? START_RETRY_ATTEMPT_LIMIT;
 		this.nowMs = options.nowMs ?? Date.now;
 		this.isEligible = options.isEligible ?? (() => true);
 		this.onError = options.onError ?? (() => {});
@@ -392,15 +401,34 @@ export class ActivityAnalysisDispatcher {
 			this.attemptsByRunId.delete(runId);
 			try {
 				const now = this.nowMs();
-				this.store.deferActivityAnalysisJob(
-					claimed.jobId,
-					accountId,
-					runId,
-					now + this.delayForAttempt(claimed.transportAttempt),
-					"start_failed",
-					now,
-					false,
-				);
+				// 载荷级永久拒绝（存档不一致等）重试无意义：立即放弃并清理，
+				// 车道继续。未分类错误先按瞬时退避；打满预算仍起不来也放弃
+				// （防"未知但实际永久"的毒任务占道）。放弃=删任务+凭证+扣分
+				// 并物化下一个，绝不落终态——终态行会永久拒绝新物化。
+				const permanent = error instanceof ActivityAnalysisStartRejectedError;
+				if (permanent || claimed.transportAttempt + 1 >= this.startRetryAttemptLimit) {
+					const materialized = this.store.abandonActivityAnalysisJob(
+						claimed.jobId,
+						accountId,
+						runId,
+						permanent
+							? `start_rejected_${error.code}`
+							: "start_retry_exhausted",
+						this.scoreThreshold,
+						now,
+					);
+					if (materialized) this.wake();
+				} else {
+					this.store.deferActivityAnalysisJob(
+						claimed.jobId,
+						accountId,
+						runId,
+						now + this.delayForAttempt(claimed.transportAttempt),
+						"start_failed",
+						now,
+						false,
+					);
+				}
 				await this.deleteFinishedAttempt(accountId, runId);
 			} catch (deferError) {
 				this.report(deferError);

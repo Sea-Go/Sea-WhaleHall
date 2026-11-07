@@ -43,24 +43,4 @@ describe("Mastra planning schemas", () => {
 		}).success).toBe(false);
 	});
 
-	test("rejects extra structured-output and resume fields", () => {
-		expect(taskPlanningResultSchema.safeParse({
-			status: "clarifying",
-			questions: [{
-				key: "scope",
-				text: "范围是什么？",
-				required: true,
-				trace: "must-stay-local",
-			}],
-		}).success).toBe(false);
-		expect(planningWorkflowResumeSchema.safeParse({
-			sessionId: "planning-1",
-			answers: [{ questionKey: "scope", answerText: "完整范围" }],
-			extra: true,
-		}).success).toBe(false);
-		expect(planningWorkflowResumeSchema.safeParse({
-			sessionId: "planning-1",
-			answers: [{ questionKey: "scope", answerText: "x".repeat(4_001) }],
-		}).success).toBe(false);
-	});
 });

@@ -1257,6 +1257,88 @@ export class ActivityWindowDeliveryStore {
 		}
 	}
 
+	/**
+	 * 放弃一条永久起不来的分析任务：与 complete 相同的账务（扣减已消费
+	 * 积分、删除任务行与其分配凭证），但没有运行结果。放弃后立即物化
+	 * 下一个任务——毒载荷绝不能按瞬时故障退避占住唯一的串行车道，也
+	 * 不落终态（终态行会让 hasTerminalActivityAnalysisFailure 永久拒绝
+	 * 新物化，只有账号切换清理才能解除）。
+	 */
+	abandonActivityAnalysisJob(
+		jobId: string,
+		accountId: string,
+		runId: string,
+		errorCode: string,
+		scoreThreshold: number,
+		abandonedAtMs = Date.now(),
+	): boolean {
+		const id = boundedString(
+			jobId,
+			"jobId",
+			MAXIMUM_ACTIVITY_ANALYSIS_JOB_ID_LENGTH,
+		);
+		const account = boundedString(
+			accountId,
+			"accountId",
+			MAXIMUM_ACCOUNT_ID_LENGTH,
+		);
+		const run = boundedString(runId, "runId", MAXIMUM_RUN_ID_LENGTH);
+		const error = boundedString(errorCode, "errorCode", 80);
+		const threshold = validScoreThreshold(scoreThreshold);
+		const abandonedAt = nonNegativeSafeInteger(
+			abandonedAtMs,
+			"abandonedAtMs",
+		);
+		if (this.stateRow().owner_account_id !== account) {
+			throw new Error("Activity analysis job belongs to another account.");
+		}
+		const transaction = this.database.transaction(() => {
+			const job = this.activityAnalysisJobById(id);
+			if (
+				job === null ||
+				job.status !== "running" ||
+				job.account_id !== account ||
+				job.run_id !== run
+			) {
+				throw new Error("Activity analysis job cannot be abandoned.");
+			}
+			const state = this.stateRow();
+			const remaining = state.accumulated_score - job.consumed_score;
+			if (!Number.isFinite(remaining) || remaining < -SCORE_EPSILON) {
+				throw new Error("Activity analysis job score ledger is corrupt.");
+			}
+			const normalizedRemaining = remaining <= SCORE_EPSILON ? 0 : remaining;
+			const receiptRows = this.database
+				.query(
+					`SELECT request_id FROM activity_window_worker_agent_job_receipts
+					 WHERE job_id = ?`,
+				)
+				.all(id) as Array<{ request_id: string }>;
+			this.database
+				.query(
+					`UPDATE activity_window_worker_state
+					 SET accumulated_score = ?, trigger_pending = 0, updated_at_ms = ?
+					 WHERE id = 1`,
+				)
+				.run(normalizedRemaining, abandonedAt);
+			// 外键顺序与 complete 一致：先删引用方（分配凭证与源凭证），再删任务行。
+			this.database
+				.query(
+					"DELETE FROM activity_window_worker_agent_job_receipts WHERE job_id = ?",
+				)
+				.run(id);
+			const deleteReceipt = this.database.query(
+				"DELETE FROM activity_window_worker_receipts WHERE request_id = ?",
+			);
+			for (const receipt of receiptRows) deleteReceipt.run(receipt.request_id);
+			this.database
+				.query("DELETE FROM activity_window_worker_agent_jobs WHERE job_id = ?")
+				.run(id);
+			return this.materializeActivityAnalysisJob(threshold, abandonedAt);
+		});
+		return transaction.immediate();
+	}
+
 	clearPendingActivityAnalysisData(
 		accountId: string,
 		updatedAtMs = Date.now(),
@@ -1382,9 +1464,18 @@ export class ActivityWindowDeliveryStore {
 			response_json: string;
 		}>;
 		if (receipts.length === 0) {
-			throw new Error(
-				"Activity analysis score has no unprocessed Worker receipts.",
-			);
+			// 积分已达阈值但凭证已全部被消费：一次被中断的触发留下的账本
+			// 毒化（进程在消费凭证与落任务/扣分之间被杀）。自愈而不是永远
+			// 抛错卡死投递循环——按阈值扣减并等待新凭证累积。
+			this.database
+				.query(
+					`UPDATE activity_window_worker_state
+					 SET accumulated_score = MAX(0, accumulated_score - ?),
+					     trigger_pending = 0, updated_at_ms = ?
+					 WHERE id = 1`,
+				)
+				.run(scoreThreshold, nowMs);
+			return false;
 		}
 		const analyses: ActivityAnalysisWorkerResult[] = [];
 		const selectedReceipts: Array<{ request_id: string }> = [];
@@ -1418,36 +1509,41 @@ export class ActivityWindowDeliveryStore {
 		}
 		const jobId = `activity_analysis_${crypto.randomUUID()}`;
 		const serialized = JSON.stringify(analyses);
-		this.database
-			.query(
-				`INSERT INTO activity_window_worker_agent_jobs
-				 (job_id, account_id, run_id, status, analyses_json, consumed_score,
-				  attempt, transport_attempt, originating_request_id, terminal_failure,
-				  next_attempt_at_ms, created_at_ms, updated_at_ms, last_error)
-				 VALUES (?, ?, NULL, 'pending', ?, ?, 0, 0, ?, 0, ?, ?, ?, NULL)`,
-			)
-			.run(
-				jobId,
-				this.requireLedgerAccount(),
-				serialized,
-				consumedScore,
-				`activity-request-${jobId}-1`,
-				nowMs,
-				nowMs,
-				nowMs,
+		// 任务行、凭证指派与触发位必须一次落账：分开的自动提交在进程被杀时
+		// 会留下孤儿指派/未扣积分的毒化账本（2026-09 实例：指派在、任务无）。
+		const materialize = this.database.transaction(() => {
+			this.database
+				.query(
+					`INSERT INTO activity_window_worker_agent_jobs
+					 (job_id, account_id, run_id, status, analyses_json, consumed_score,
+					  attempt, transport_attempt, originating_request_id, terminal_failure,
+					  next_attempt_at_ms, created_at_ms, updated_at_ms, last_error)
+					 VALUES (?, ?, NULL, 'pending', ?, ?, 0, 0, ?, 0, ?, ?, ?, NULL)`,
+				)
+				.run(
+					jobId,
+					this.requireLedgerAccount(),
+					serialized,
+					consumedScore,
+					`activity-request-${jobId}-1`,
+					nowMs,
+					nowMs,
+					nowMs,
+				);
+			const assign = this.database.query(
+				`INSERT INTO activity_window_worker_agent_job_receipts (job_id, request_id)
+				 VALUES (?, ?)`,
 			);
-		const assign = this.database.query(
-			`INSERT INTO activity_window_worker_agent_job_receipts (job_id, request_id)
-			 VALUES (?, ?)`,
-		);
-		for (const receipt of selectedReceipts)
-			assign.run(jobId, receipt.request_id);
-		this.database
-			.query(
-				`UPDATE activity_window_worker_state
-				 SET trigger_pending = 1, updated_at_ms = ? WHERE id = 1`,
-			)
-			.run(nowMs);
+			for (const receipt of selectedReceipts)
+				assign.run(jobId, receipt.request_id);
+			this.database
+				.query(
+					`UPDATE activity_window_worker_state
+					 SET trigger_pending = 1, updated_at_ms = ? WHERE id = 1`,
+				)
+				.run(nowMs);
+		});
+		materialize.immediate();
 		return true;
 	}
 

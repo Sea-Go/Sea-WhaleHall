@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 
 /** Every desktop model and sync request uses this code-owned DataCenter origin. */
 export const WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL =
-	"https://data.sea-ridethewindbreakthewaves.xyz";
+	"https://127.0.0.1:18443"; // 生产 DC 经本地 tlsfront+SSH 隧道(域名直连被 SNI 阻断)
 /**
  * Stable logical aliases understood by the DataCenter model gateway. The
  * gateway's private config maps these roles to its actual provider model IDs;

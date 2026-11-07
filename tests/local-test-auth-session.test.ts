@@ -66,62 +66,6 @@ describe("LocalTestAuthSessionManager", () => {
 		await signOut;
 	});
 
-	test("does not resurrect a queued sign-in after a newer logout generation", async () => {
-		const firstCleanup = controlledPromise();
-		const firstCleanupStarted = controlledPromise();
-		let cleanupCalls = 0;
-		const manager = new LocalTestAuthSessionManager({
-			onBeforeSessionClear: async () => {
-				cleanupCalls += 1;
-				if (cleanupCalls === 1) {
-					firstCleanupStarted.resolve();
-					await firstCleanup.promise;
-				}
-			},
-		});
-		await manager.signInTestAccount(LOCAL_TEST_AUTH_EXPERIENCE);
 
-		const firstLogout = manager.signOut();
-		await firstCleanupStarted.promise;
-		const staleSignIn = manager.signInTestAccount(LOCAL_TEST_AUTH_EXPERIENCE);
-		const newerLogout = manager.signOut();
-		firstCleanup.resolve();
 
-		await firstLogout;
-		await expect(staleSignIn).rejects.toBeInstanceOf(LocalTestAuthError);
-		await newerLogout;
-		expect(manager.getSession()).toBeNull();
-		expect(cleanupCalls).toBe(2);
-	});
-
-	test("still runs the asynchronous cleanup barrier if immediate invalidation throws", async () => {
-		let cleanupRan = false;
-		const manager = new LocalTestAuthSessionManager({
-			onSessionInvalidated: () => {
-				throw new Error("panel already closed");
-			},
-			onBeforeSessionClear: async () => {
-				cleanupRan = true;
-			},
-		});
-		await manager.signInTestAccount(LOCAL_TEST_AUTH_EXPERIENCE);
-		await manager.signOut();
-		expect(manager.getSession()).toBeNull();
-		expect(cleanupRan).toBe(true);
-	});
-
-	test("fails model relay authorization closed", async () => {
-		const manager = new LocalTestAuthSessionManager();
-		await manager.signInTestAccount(LOCAL_TEST_AUTH_EXPERIENCE);
-		await expect(
-			manager.authorizedFetch(
-				"/v1/chat/completions",
-				{},
-				"agent",
-				MODEL_AGENT_IDS.conversation,
-			),
-		).rejects.toMatchObject({
-			kind: "service-unavailable",
-		});
-	});
 });

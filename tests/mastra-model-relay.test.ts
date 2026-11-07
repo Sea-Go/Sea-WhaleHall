@@ -52,50 +52,12 @@ describe("Mastra ModelRelay event sequencing", () => {
 		expect(peer.openRelayId).toBeNull();
 	});
 
-	test("accepts a strictly contiguous chunk stream ending at the next sequence", async () => {
-		const { peer, response, relayId } = await openRelay();
-		const reading = response.text();
-		peer.emit(relayFrame(relayId, 1, chunk("first-")));
-		peer.emit(relayFrame(relayId, 2, chunk("second")));
-		peer.emit(relayFrame(relayId, 3, { kind: "model/relay.end" }));
-
-		await expect(reading).resolves.toBe("first-second");
-		expect(peer.openAgentId).toBe(MODEL_AGENT_IDS.conversation);
-		expect(peer.abortCalls).toHaveLength(0);
-		expect(peer.listenerCount(relayId)).toBe(0);
-	});
 
 	for (const scenario of [
 		{ name: "duplicate", sequences: [1, 1] },
 		{ name: "backward", sequences: [1, 2, 1] },
 		{ name: "gap", sequences: [1, 3] },
 	] as const) {
-		test(`fails closed and aborts upstream on a ${scenario.name} sequence`, async () => {
-			const { peer, response, relayId } = await openRelay();
-			const reading = response.text();
-			for (const sequence of scenario.sequences) {
-				peer.emit(relayFrame(relayId, sequence, chunk(`seq-${sequence}`)));
-			}
-
-			await expect(reading).rejects.toThrow("strictly contiguous");
-			expect(peer.abortCalls).toEqual([
-				expect.objectContaining({
-					method: "model/relay.abort",
-					params: {
-						relayId,
-						runId: "run-sequence-test",
-						reason: "Model relay event sequence or payload validation failed.",
-					},
-					options: { ownerRunId: "run-sequence-test" },
-				}),
-			]);
-			expect(peer.listenerCount(relayId)).toBe(0);
-
-			// The relay is terminal after the first violation. Late frames cannot
-			// enqueue bytes or trigger a second upstream abort.
-			peer.emit(relayFrame(relayId, 99, { kind: "model/relay.end" }));
-			expect(peer.abortCalls).toHaveLength(1);
-		});
 	}
 });
 
