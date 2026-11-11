@@ -7,7 +7,10 @@ import { z } from "zod";
  * 执行并回填续生成——Mastra 永远不会在本地收到这些调用。这里的 execute 只是
  * 网关桥不可用（密钥缺失降级、直连供应商等）时的兜底，保证模型能继续收敛。
  */
-export const GATEWAY_RESEARCH_TOOL_NAMES = ["zhipu.web_search_prime"] as const;
+export const GATEWAY_RESEARCH_TOOL_NAMES = [
+	"zhipu.web_search_prime",
+	"btw.knowledge_search",
+] as const;
 
 /**
  * Mastra 在工具注册层把工具名规范成 [a-zA-Z0-9_-]（点→下划线），而网关桥
@@ -59,6 +62,19 @@ const gatewaySearchInput = z
 	})
 	.strict();
 
+const knowledgeSearchInput = z
+	.object({
+		query: z.string().trim().min(1).max(200),
+		module_id: z.string().trim().min(1).max(100),
+		top_k: z.number().int().min(1).max(8).optional(),
+	})
+	.strict();
+
+const KNOWLEDGE_FALLBACK_RESULT = {
+	content:
+		"知识模块检索当前不可用：请改用 zhipu.web_search_prime 调研，并在 assumptions 中注明课程结构未经知识库核实。",
+};
+
 /** 计划调研可用的网关桥接工具集。键名即发给供应商的工具名，不可改。 */
 export function gatewayResearchTools(): Record<
 	(string & {}) | (typeof GATEWAY_RESEARCH_TOOL_NAMES)[number],
@@ -71,6 +87,13 @@ export function gatewayResearchTools(): Record<
 				"全网搜索，返回网页标题、链接、摘要与引用。用于计划前调研：需要联网确认的事实（做法/时长/截止日期/开放时间/费用等）。search_query 建议不超过 70 字；结果要汇入 rationaleSummary 与 estimateBasis，不得虚构需要联网确认的事实。",
 			inputSchema: gatewaySearchInput,
 			execute: async () => FALLBACK_RESULT,
+		}),
+		"btw.knowledge_search": createTool({
+			id: "btw.knowledge_search",
+			description:
+				"在正式知识模块的当前发布版本中做三路检索（稠密/稀疏/多向量融合），返回带 locator 与 release_id 的课程证据（章节、概念、考点）。制定学习类计划前必须先用它检索知识模块获取课程结构；module_id 填知识模块 id（如课程模块），query 用主题或概念名。",
+			inputSchema: knowledgeSearchInput,
+			execute: async () => KNOWLEDGE_FALLBACK_RESULT,
 		}),
 	};
 }
