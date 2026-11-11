@@ -8,7 +8,11 @@ import {
 describe("gateway research tools", () => {
 	test("declares exactly the gateway bridge contract names", () => {
 		const names = Object.keys(gatewayResearchTools());
-		expect(names).toEqual(["zhipu.web_search_prime", "btw.knowledge_search"]);
+		expect(names).toEqual([
+			"zhipu.web_search_prime",
+			"btw.knowledge_modules",
+			"btw.knowledge_search",
+		]);
 	});
 
 	test("restore map covers the Mastra-sanitized underscore form", () => {
@@ -17,6 +21,9 @@ describe("gateway research tools", () => {
 		);
 		expect(GATEWAY_TOOL_NAME_RESTORE.get("btw_knowledge_search")).toBe(
 			"btw.knowledge_search",
+		);
+		expect(GATEWAY_TOOL_NAME_RESTORE.get("btw_knowledge_modules")).toBe(
+			"btw.knowledge_modules",
 		);
 	});
 

@@ -10,6 +10,7 @@ import { z } from "zod";
 export const GATEWAY_RESEARCH_TOOL_NAMES = [
 	"zhipu.web_search_prime",
 	"btw.knowledge_search",
+	"btw.knowledge_modules",
 ] as const;
 
 /**
@@ -87,6 +88,13 @@ export function gatewayResearchTools(): Record<
 				"全网搜索，返回网页标题、链接、摘要与引用。用于计划前调研：需要联网确认的事实（做法/时长/截止日期/开放时间/费用等）。search_query 建议不超过 70 字；结果要汇入 rationaleSummary 与 estimateBasis，不得虚构需要联网确认的事实。",
 			inputSchema: gatewaySearchInput,
 			execute: async () => FALLBACK_RESULT,
+		}),
+		"btw.knowledge_modules": createTool({
+			id: "btw.knowledge_modules",
+			description:
+				"列出全部已发布的知识模块(id/标题/类别)。学习类目标先用它发现模块 id,再用 btw.knowledge_search 检索该模块的课程证据。",
+			inputSchema: z.object({}).strict(),
+			execute: async () => KNOWLEDGE_FALLBACK_RESULT,
 		}),
 		"btw.knowledge_search": createTool({
 			id: "btw.knowledge_search",

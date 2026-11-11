@@ -2125,10 +2125,22 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 					confirm?: unknown;
 					ack?: unknown;
 					calendarDelete?: unknown;
+					goal?: unknown;
 				};
 				const runtime = await requirePlanningRuntime();
-				const plans = await runtime.listPlans();
-				const plan = plans.find((item) => item.status !== "archived");
+				let plans = await runtime.listPlans();
+				let plan = plans.find((item) => item.status !== "archived");
+				if (!plan && typeof parsed.goal === "string" && parsed.goal.trim()) {
+					// 无活动计划时经真实 clientRequestHandlers.createPlanDraft
+					// RPC 处理链建草稿(与登录页表单同链,不注入 UI)。
+					diag(`[planning][e2e] create draft goal=${parsed.goal.slice(0, 40)}`);
+					await clientRequestHandlers.createPlanDraft({
+						input: { goal: parsed.goal },
+						operationId: `e2e-create-${randomUUID()}`,
+					});
+					plans = await runtime.listPlans();
+					plan = plans.find((item) => item.status !== "archived");
+				}
 				if (!plan) {
 					diag("[planning][e2e] no active plan");
 					return;
