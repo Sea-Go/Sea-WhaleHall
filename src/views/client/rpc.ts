@@ -194,6 +194,7 @@ export const clientApi = {
 	cancelFiveMinuteAuditCapture: (captureId: string) =>
 		rpc.request.cancelFiveMinuteAuditCapture({ captureId }),
 	setPetVisible: (visible: boolean) => rpc.request.setPetVisible({ visible }),
+	setPetModel: (modelId: string) => rpc.request.setPetModel({ modelId }),
 	presentPetEvent: (event: PetPresentationEvent) =>
 		rpc.request.presentPetEvent(event),
 	setActiveGoalContext: (goal: ActiveGoalContextV1 | null) =>

@@ -54,6 +54,7 @@ import Electrobun, {
 	Updater,
 	Utils,
 } from "electrobun/bun";
+import { setApplicationMenu } from "electrobun/bun/app-menu";
 import {
 	ActivityWindowDeliveryService,
 	ActivityWindowDeliveryStore,
@@ -2150,6 +2151,7 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 					retryAnalysis?: unknown;
 					restore?: unknown;
 					dump?: unknown;
+					reloadClient?: unknown;
 				};
 				const runtime = await requirePlanningRuntime();
 				let plans = await runtime.listPlans();
@@ -2220,6 +2222,12 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 					diag(
 						`[calendar][e2e] delete result ok=${result.ok} detail=${JSON.stringify(result).slice(0, 300)}`,
 					);
+					return;
+				}
+				if (parsed.reloadClient === true) {
+					// 引导竞态恢复:重载客户端窗口,AuthGate 重新走恢复链。
+					diag("[planning][e2e] reload client window");
+					clientWindow?.webview.loadURL(await viewUrl("client"));
 					return;
 				}
 				if (parsed.dump === true) {
@@ -2750,6 +2758,24 @@ appUpdateController.subscribe((snapshot) => {
 	if (clientWindow !== null) clientRPC.send.appUpdateStatusChanged(snapshot);
 });
 appUpdateController.startAutomaticChecks();
+
+// macOS 无应用菜单时 WKWebView 收不到标准编辑选择器,Cmd+C/V/A 全部失效。
+// 标准编辑 role 由原生层转发到聚焦的 webview,补齐复制/粘贴能力。
+setApplicationMenu([
+	{
+		label: "编辑",
+		submenu: [
+			{ role: "undo", label: "撤销" },
+			{ role: "redo", label: "重做" },
+			{ type: "separator" },
+			{ role: "cut", label: "剪切" },
+			{ role: "copy", label: "复制" },
+			{ role: "paste", label: "粘贴" },
+			{ role: "selectAll", label: "全选" },
+		],
+	},
+]);
+
 await clientLifecycle.open();
 
 petActivityFeedbackDelivery.beginRendererLoad();
