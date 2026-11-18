@@ -142,6 +142,11 @@ import {
 	planningModelConfigurationFromConfiguration,
 	WHALEHALL_DATA_CENTER_PRODUCTION_BASE_URL,
 } from "./client-config";
+import {
+	loadPetModelPreference,
+	savePetModelPreference,
+} from "./pet-model-preference";
+import { isPetModelChoiceId } from "../shared/pet-actions";
 import { RTWCloudToolsClient } from "./clients/product/rtw-cloud-tools-client";
 import { RTWProductSearchError } from "./clients/product/rtw-product-search-client";
 import {
@@ -254,6 +259,8 @@ const clientConfiguration = loadOrCreateClientConfiguration({
 	userDataDirectory: Utils.paths.userData,
 	bundledTemplatePath: join(PATHS.RESOURCES_FOLDER, "app", "config.yaml"),
 });
+// 桌宠形象（皮肤）：Bun 侧持久化，PetState 下发链路统一盖章 modelId。
+let petModelId = loadPetModelPreference(Utils.paths.userData).modelId;
 if (clientConfiguration.status === "invalid") {
 	console.warn(
 		"WhaleHall client config.yaml is invalid; safe defaults remain active.",
@@ -277,6 +284,12 @@ const agentDataPath = join(Utils.paths.userData, "agent");
 const installationId = await loadOrCreateInstallationId(agentDataPath);
 const credentialStore = new CredentialHelperClient(credentialHelperPath, {
 	installationId,
+	// dev 构建重签名会反复失效钥匙串 ACL：dev 通道改用本地文件存储凭据，
+	// 生产构建保持钥匙串语义不变。
+	devStorePath:
+		runtimeChannel === "dev"
+			? join(Utils.paths.userData, "dev-secrets.json")
+			: undefined,
 });
 // RTW 会话与 DC 登录共用同一 keychain 凭据库：登录一次，重启自动恢复。
 bindRtwCredentialStore(credentialStore);
@@ -1213,6 +1226,9 @@ async function authRpc<T>(
 	try {
 		return { kind: "success", data: await operation() };
 	} catch (error) {
+		diag(
+			`authRpc failure: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+		);
 		if (error instanceof RemoteAuthError) {
 			return {
 				kind: "error",
@@ -1782,6 +1798,7 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		}
 		return { visible };
 	},
+	setPetModel: async ({ modelId }) => applyPetModelChoice(modelId),
 	presentPetEvent: (event): { accepted: boolean } => {
 		petStateArbiter.showPresentationEvent(event);
 		return { accepted: true };
@@ -2047,7 +2064,10 @@ const petChatAvailabilityTimer = setInterval(() => {
 // [DEV-ONLY E2E] 环境变量门控的确定性提交触发器：OS 合成点击不稳定，用它
 // 直接驱动真实 startPetChatTurn 链路（bun→coordinator→sidecar→服务器→事件流）。
 // 出现 ~/pet-e2e-submit.json（{"text":"..."}）即消费并提交一轮桌宠对话。
-if (process.env.WHALEHALL_PET_E2E_TRIGGER === "1") {
+const petE2eEnabled =
+	process.env.WHALEHALL_PET_E2E_TRIGGER === "1" ||
+	existsSync(join(process.env.HOME ?? "/tmp", ".whalehall-pet-e2e-enabled"));
+if (petE2eEnabled) {
 	const petE2eTriggerPath = join(
 		process.env.HOME ?? "/tmp",
 		"pet-e2e-submit.json",
@@ -2126,6 +2146,10 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 					ack?: unknown;
 					calendarDelete?: unknown;
 					goal?: unknown;
+					startToday?: unknown;
+					retryAnalysis?: unknown;
+					restore?: unknown;
+					dump?: unknown;
 				};
 				const runtime = await requirePlanningRuntime();
 				let plans = await runtime.listPlans();
@@ -2135,7 +2159,10 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 					// RPC 处理链建草稿(与登录页表单同链,不注入 UI)。
 					diag(`[planning][e2e] create draft goal=${parsed.goal.slice(0, 40)}`);
 					await clientRequestHandlers.createPlanDraft({
-						input: { goal: parsed.goal },
+						input: {
+							goal: parsed.goal,
+							startToday: parsed.startToday === true,
+						},
 						operationId: `e2e-create-${randomUUID()}`,
 					});
 					plans = await runtime.listPlans();
@@ -2192,6 +2219,63 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 					});
 					diag(
 						`[calendar][e2e] delete result ok=${result.ok} detail=${JSON.stringify(result).slice(0, 300)}`,
+					);
+					return;
+				}
+				if (parsed.dump === true) {
+					// 取证输出:解封后的任务/估算/对话尾部(含知识引用)。
+					const detail = await runtime.getPlan(plan.id);
+					diag(
+						`[planning][e2e] dump plan=${plan.id} status=${detail.status} type=${detail.type ?? "?"} window=${detail.scheduleWindow.startDate}~${detail.scheduleWindow.endDateExclusive}`,
+					);
+					if (detail.estimate) {
+						diag(
+							`[planning][e2e] dump estimate completion=${detail.estimate.estimatedCompletionDate} confidence=${detail.estimate.confidence}`,
+						);
+					}
+					for (const task of detail.tasks) {
+						diag(
+							`[planning][e2e] dump task ${task.id.slice(0, 12)} [${task.purpose}] ${task.estimatedMinutes}min ${task.title}`,
+						);
+						if (task.description) {
+							diag(
+								`[planning][e2e] dump task desc ${task.description.slice(0, 900)}`,
+							);
+						}
+					}
+					for (const message of detail.messages.slice(-4)) {
+						diag(
+							`[planning][e2e] dump msg ${message.role}: ${message.content.slice(0, 500)}`,
+						);
+					}
+					return;
+				}
+				if (parsed.restore === true) {
+					// 无 UI 场景代行客户端启动时的会话恢复 RPC。
+					diag("[planning][e2e] restore session");
+					const result = await clientRequestHandlers.restoreAuthSession();
+					diag(
+						`[planning][e2e] restore result kind=${result.kind} ok=${result.kind === "success"}`,
+					);
+					return;
+				}
+				if (parsed.retryAnalysis === true) {
+					// 无 UI 场景代行 PlanningController 的无人值守分析重跑:
+					// 与客户端按钮同一条 retryPendingPlanAnalysis RPC 链。
+					const before = await runtime.getPlan(plan.id);
+					diag(
+						`[planning][e2e] analysis retry plan=${plan.id} v=${before.version} pending=${before.messages.some((m) => m.state === "pending-analysis")}`,
+					);
+					await clientRequestHandlers.retryPendingPlanAnalysis({
+						planId: plan.id,
+						operationId: `e2e-retry-${randomUUID()}`,
+						expectedVersion: before.version,
+					});
+					const after = await runtime.getPlan(plan.id);
+					const last =
+						after.messages[after.messages.length - 1] ?? null;
+					diag(
+						`[planning][e2e] after retry status=${after.status} v=${after.version} msgs=${after.messages.length} last=${last ? `${last.role}:${last.state}` : "none"} proposed=${after.proposedRevision ? "yes" : "none"}`,
 					);
 					return;
 				}
@@ -2459,8 +2543,95 @@ petActivityFeedbackDelivery = new PetActivityFeedbackDelivery({
 });
 
 petStateArbiter = new PetStateArbiter((state) =>
-	petRPC.send.setPetState(state),
+	petRPC.send.setPetState({
+		...state,
+		modelId: petModelId,
+		// dev 通道专属：生产构建恒 false，桌宠窗口据此决定是否叠加
+		// "活动区/对话区"调试框（接触范围可视化）。
+		debugOverlays: runtimeChannel === "dev",
+	}),
 );
+
+/** 应用一次桌宠形象选择：持久化 + 盖章 + 立即重发运行时状态。 */
+async function applyPetModelChoice(
+	modelId: string,
+): Promise<{ modelId: string }> {
+	if (!isPetModelChoiceId(modelId) || !petModelId) {
+		throw new Error("未知的桌宠形象。");
+	}
+	if (modelId !== petModelId) {
+		petModelId = modelId;
+		savePetModelPreference(Utils.paths.userData, modelId);
+	}
+	// 立即以当前运行时状态重发，渲染器读到 modelId 后热切换形象。
+	petStateArbiter.resetToRuntime(agent.getLocalStatus());
+	return { modelId };
+}
+
+// 桌宠链路协议级 E2E 触发器：WHALEHALL_PET_E2E_TRIGGER=1 时消费
+// ~/pet-model-e2e-submit.json。{"modelId":"…"} 驱动真实 setPetModel
+// 处理链（校验→持久化→PetState 盖章→渲染器热切换），绕过渲染器表单，
+// 不注入任何 UI，与 planning 触发器同构。
+if (
+	process.env.WHALEHALL_PET_E2E_TRIGGER === "1" ||
+	existsSync(join(process.env.HOME ?? "/tmp", ".whalehall-pet-e2e-enabled"))
+) {
+	const petModelE2ePath = join(
+		process.env.HOME ?? "/tmp",
+		"pet-model-e2e-submit.json",
+	);
+	const petModelE2eTimer = setInterval(() => {
+		if (shutdownRequested) {
+			clearInterval(petModelE2eTimer);
+			return;
+		}
+		let raw: string;
+		try {
+			raw = readFileSync(petModelE2ePath, "utf8");
+		} catch {
+			return;
+		}
+		try {
+			unlinkSync(petModelE2ePath);
+		} catch {
+			// 消费失败不影响重试语义
+		}
+		void (async () => {
+			try {
+				const parsed = JSON.parse(raw) as {
+					modelId?: unknown;
+					email?: unknown;
+					password?: unknown;
+				};
+				if (
+					typeof parsed.email === "string" &&
+					typeof parsed.password === "string"
+				) {
+					// 开发登录：驱动与登录页完全相同的 signIn 处理链
+					// （校验 → authSession.signIn → 凭据写入 dev 存储）。
+					const result = await clientRequestHandlers.signIn({
+						email: parsed.email,
+						password: parsed.password,
+					});
+					const message =
+						result.kind === "success"
+							? `signIn ok account=${result.data.user.id}`
+							: `signIn failed: ${result.failure} ${result.message}`;
+					diag(`[dev-e2e] ${message}`);
+					console.log(`[dev-e2e] ${message}`);
+					return;
+				}
+				if (typeof parsed.modelId !== "string") {
+					return;
+				}
+				const result = await applyPetModelChoice(parsed.modelId);
+				console.log(`[pet][e2e] model switched: ${result.modelId}`);
+			} catch (error) {
+				console.log(`[pet][e2e] switch failed: ${String(error)}`);
+			}
+		})();
+	}, 400);
+}
 
 const hmrAvailable = (async (): Promise<boolean> => {
 	if (runtimeChannel !== "dev") return false;

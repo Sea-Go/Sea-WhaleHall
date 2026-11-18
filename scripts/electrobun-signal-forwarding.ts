@@ -59,13 +59,49 @@ export const ELECTROBUN_WHALEHALL_SIGNAL_FORWARDING = `  let whaleHallAppWorker 
   }`;
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const electrobunRuntimeMainPath = join(
-	projectRoot,
-	"node_modules",
-	"electrobun",
-	"dist",
-	"main.js",
-);
+
+function resolveElectrobunRuntimeMainPath(): string {
+	const legacy = join(
+		projectRoot,
+		"node_modules",
+		"electrobun",
+		"dist",
+		"main.js",
+	);
+	if (existsSync(legacy)) return legacy;
+	// Electrobun 2.x 没有 npm 分发的 runtime main:启动器在 Hutch 管理的
+	// release 目录里,版本取自已安装的 electrobun 包,需同样打信号补丁。
+	try {
+		const manifest = JSON.parse(
+			readFileSync(
+				join(projectRoot, "node_modules", "electrobun", "package.json"),
+				"utf8",
+			),
+		) as { version?: unknown };
+		const platform =
+			process.platform === "darwin" && process.arch === "arm64"
+				? "macos-arm64"
+				: null;
+		if (typeof manifest.version === "string" && platform) {
+			const hutchHome =
+				process.env.HUTCH_HOME ?? join(process.env.HOME ?? "", ".hutch");
+			const hutchMain = join(
+				hutchHome,
+				"releases",
+				"electrobun",
+				manifest.version,
+				platform,
+				"main.js",
+			);
+			if (existsSync(hutchMain)) return hutchMain;
+		}
+	} catch {
+		// 回落到 legacy 路径,让原有错误信息保持准确。
+	}
+	return legacy;
+}
+
+const electrobunRuntimeMainPath = resolveElectrobunRuntimeMainPath();
 
 export type ElectrobunSignalForwardingRewrite = {
 	readonly source: string;
