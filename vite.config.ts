@@ -5,7 +5,6 @@ import { defineConfig } from "vite";
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 const viewsRoot = resolve(projectRoot, "src/views");
-
 export default defineConfig(({ command }) => {
 	const developmentConnectSources =
 		command === "serve"
@@ -14,6 +13,21 @@ export default defineConfig(({ command }) => {
 	return {
 		root: viewsRoot,
 		base: "./",
+		// electrobun 2.x 的 npm 包只剩迁移 stub(moved.cjs),真正的 view API
+		// 由 Hutch 投影在 .hutch/devkit。视图构建必须解析到 devkit,否则
+		// Electroview 在模块初始化即 throw,客户端/桌宠的全部 RPC 静默死亡。
+		resolve: {
+			alias: {
+				"electrobun/view": resolve(
+					projectRoot,
+					".hutch/devkit/api/browser/index.ts",
+				),
+			},
+		},
+		// 皮肤不再走 publicDir 静态直通：skins/ 现在包含皮肤源码（不该被
+		// 原样打进视图产物）。序列帧由 decode-pet-skins.ts 解帧直写
+		// dist/views/pet/deepseek/（见该脚本与 skins/README.md）。
+		publicDir: false,
 		plugins: [
 			react(),
 			{
