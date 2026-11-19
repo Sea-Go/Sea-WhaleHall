@@ -27,13 +27,13 @@
 		"check": "bun run guards && bun run typecheck && bun run check:rust && bun test"
 	},
 	"dependencies": {
-		"@ai-sdk/openai-compatible": "3.0.85",
-		"@fullcalendar/react": "7.1.4",
-		"@fullcalendar/rrule": "7.1.4",
-		"@mastra/core": "1.82.0",
-		"@mastra/memory": "1.41.0",
+		"@ai-sdk/openai-compatible": "3.0.92",
+		"@fullcalendar/react": "7.1.5",
+		"@fullcalendar/rrule": "7.1.5",
+		"@mastra/core": "1.83.0",
+		"@mastra/memory": "1.41.1",
 		"electrobun": "2.0.6",
-		"lucide-react": "1.69.0",
+		"lucide-react": "1.72.0",
 		"react": "19.3.1",
 		"react-dom": "19.3.1",
 		"rrule": "2.8.1",
@@ -44,19 +44,19 @@
 		"electrobun@1.18.1": "patches/electrobun@1.18.1.patch"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.6.5",
+		"@biomejs/biome": "2.6.7",
 		"@happy-dom/global-registrator": "21.0.4",
 		"@testing-library/dom": "10.4.2",
 		"@testing-library/react": "16.3.3",
-		"@testing-library/user-event": "14.6.8",
+		"@testing-library/user-event": "14.6.10",
 		"@types/bun": "1.4.4",
 		"@types/react": "19.3.0",
 		"@types/react-dom": "19.3.0",
 		"@types/three": "0.187.0",
-		"@vitejs/plugin-react": "6.2.1",
-		"concurrently": "10.0.6",
+		"@vitejs/plugin-react": "6.3.0",
+		"concurrently": "10.0.7",
 		"happy-dom": "21.0.4",
 		"typescript": "7.0.2",
-		"vite": "8.3.6"
+		"vite": "8.3.8"
 	}
 }
