@@ -210,6 +210,12 @@ export interface PetModel {
   readonly label: string;
   readonly skeleton: PetModelSkeleton;
   readonly theme: PetModelTheme;
+  /**
+   * 皮肤包自持特效与道具：声明后场景不再叠加共享引擎的 effects/props
+   * （声波、问号、气泡等矢量特效属于旧皮肤的动作语言）。序列帧皮肤
+   * 应声明此项以保持动作表情完全自包含。
+   */
+  readonly selfContainedOverlays?: boolean;
   preload?(): Promise<void>;
   draw(context: CanvasRenderingContext2D, frame: PetFrame): void;
   hitTest(localPoint: PetVector2, frame: PetFrame, padding?: number): PetHitZone | null;

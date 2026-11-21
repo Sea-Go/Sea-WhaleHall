@@ -104,13 +104,10 @@ export class PetPackModelBridge implements PetModel {
 		return action?.clip;
 	}
 
-	private static debugLogged = false;
-
 	/** 帧图片就绪回调:通知场景重绘(图片加载是异步的,需要触发一帧)。 */
 	private onImageReady: (() => void) | null = null;
 
-	/** 场景层注入重绘触发器(CanvasPetRenderer.render 递归安全:仅在
-	 * 图片从无到有时触发一次,不产生无限循环)。 */
+	/** 场景层注入重绘触发器(经 scheduleFrame 合并,不产生递归渲染)。 */
 	setOnImageReady(callback: () => void): void {
 		this.onImageReady = callback;
 	}
@@ -119,16 +116,6 @@ export class PetPackModelBridge implements PetModel {
 	private lastDrawnUrl = "";
 
 	draw(context: CanvasRenderingContext2D, frame: PetFrame): void {
-		if (!PetPackModelBridge.debugLogged) {
-			PetPackModelBridge.debugLogged = true;
-			const probe = new Image();
-			probe.onload = () => console.log(`[pack-bridge] probe OK: ${probe.width}x${probe.height}`);
-			probe.onerror = () => console.log(`[pack-bridge] probe FAIL: ${probe.src}`);
-			probe.src = `${this.pack.assetBase}idle/f_01.png`;
-			console.log(
-				`[pack-bridge] draw action=${frame.action.id} opacity=${frame.root.opacity.toFixed(2)} scaleX=${frame.root.scaleX.toFixed(2)} clipIdx=${Object.keys(this.clipIndex).length} assetBase=${this.pack.assetBase}`,
-			);
-		}
 		const actionId = frame.action.id;
 		petRenderObserver.onActionSwitch(actionId, performance.now());
 		if (actionId !== this.lastActionId) {
@@ -179,6 +166,10 @@ export class PetPackModelBridge implements PetModel {
 		const { canvas, sprite } = this.pack;
 		const centerX = sprite.left + canvas.width / 2;
 		switch (anchor) {
+			case "ground":
+				// 地面线:立足锚(阴影绘制用)。局部坐标原点在精灵中心,
+				// 立足线 = groundAnchorY + sprite.top(贴底画布即 h/2)。
+				return { x: centerX, y: canvas.groundAnchorY + sprite.top };
 			case "message":
 				return { x: centerX, y: canvas.groundAnchorY };
 			default:

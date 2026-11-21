@@ -245,7 +245,7 @@ export class CanvasPetRenderer implements PetRenderer {
 		);
 		this.resize();
 		this.applyChatBubbleAnchor();
-		this.render(this.startedAt);
+		this.scheduleFrame();
 	}
 
 	setState(state: PetState): void {
@@ -297,9 +297,7 @@ export class CanvasPetRenderer implements PetRenderer {
 
 	/** 外部触发一帧渲染(桥接模型图片加载就绪后调用)。 */
 	requestRender(): void {
-		if (this.canvas && this.startedAt) {
-			this.render(performance.now());
-		}
+		this.scheduleFrame();
 	}
 
 	getModel(): PetModel {
@@ -333,6 +331,7 @@ export class CanvasPetRenderer implements PetRenderer {
 
 	dispose(): void {
 		if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
+		this.framePending = false;
 		window.removeEventListener("resize", this.resize);
 		this.canvas?.removeEventListener("pointermove", this.handlePointerMove);
 		this.canvas?.removeEventListener("pointerleave", this.handlePointerLeave);
@@ -714,13 +713,28 @@ export class CanvasPetRenderer implements PetRenderer {
 	}
 
 	private lastThrottledAt = 0;
+	private framePending = false;
 	private static readonly MIN_FRAME_INTERVAL_MS = 1000 / 60; // 60fps 上限
 
+	/**
+	 * 合并所有渲染触发源为单一待决帧。直接 render() 调用(图片就绪回调等)
+	 * 与 rAF 回调若各自再排 rAF,会繁殖出无法取消的并行链(animationFrame
+	 * 只保存最后一个句柄)——多条空转链让帧间隔抖动、图片查询计数暴涨。
+	 * 任何时刻至多一个待决 rAF;dispose 取消它即彻底停机。
+	 */
+	private scheduleFrame(): void {
+		if (this.framePending || !this.canvas) return;
+		this.framePending = true;
+		this.animationFrame = requestAnimationFrame(this.render);
+	}
+
 	private readonly render = (now: number) => {
+		this.framePending = false;
+		if (!this.canvas) return;
 		// 帧率节流:rAF 在高刷屏上可达 120fps+,动画计时以 60fps 校准,
 		// 超速渲染导致 GIF 帧快速循环→视觉闪烁。跳过不足间隔的帧。
 		if (now - this.lastThrottledAt < CanvasPetRenderer.MIN_FRAME_INTERVAL_MS) {
-			this.animationFrame = requestAnimationFrame(this.render);
+			this.scheduleFrame();
 			return;
 		}
 		this.lastThrottledAt = now;
@@ -733,7 +747,7 @@ export class CanvasPetRenderer implements PetRenderer {
 			console.error("[pet] render frame failed", error);
 		}
 		petRenderObserver.onFrameEnd(performance.now(), renderStart);
-		this.animationFrame = requestAnimationFrame(this.render);
+		this.scheduleFrame();
 	};
 
 	private drawFrame(now: number): void {
