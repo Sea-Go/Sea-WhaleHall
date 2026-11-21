@@ -713,7 +713,17 @@ export class CanvasPetRenderer implements PetRenderer {
 		else delete this.canvas.dataset.hitZone;
 	}
 
+	private lastThrottledAt = 0;
+	private static readonly MIN_FRAME_INTERVAL_MS = 1000 / 60; // 60fps 上限
+
 	private readonly render = (now: number) => {
+		// 帧率节流:rAF 在高刷屏上可达 120fps+,动画计时以 60fps 校准,
+		// 超速渲染导致 GIF 帧快速循环→视觉闪烁。跳过不足间隔的帧。
+		if (now - this.lastThrottledAt < CanvasPetRenderer.MIN_FRAME_INTERVAL_MS) {
+			this.animationFrame = requestAnimationFrame(this.render);
+			return;
+		}
+		this.lastThrottledAt = now;
 		petRenderObserver.onFrameStart(now);
 		const renderStart = performance.now();
 		try {

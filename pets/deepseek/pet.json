@@ -5,13 +5,13 @@
   "version": "1.0.0",
   "renderer": "sequence",
   "canvas": {
-    "width": 267,
-    "height": 139,
-    "groundAnchorY": 139
+    "width": 192,
+    "height": 208,
+    "groundAnchorY": 208
   },
   "sprite": {
-    "left": -80,
-    "top": -80
+    "left": -96,
+    "top": -104
   },
   "tier": "core",
   "fallbackAction": "idle",
@@ -19,9 +19,16 @@
     {
       "id": "body",
       "cx": 0,
-      "cy": 0,
+      "cy": 10,
       "rx": 80,
-      "ry": 80
+      "ry": 85
+    },
+    {
+      "id": "head",
+      "cx": 0,
+      "cy": -50,
+      "rx": 60,
+      "ry": 50
     }
   ],
   "cover": "cover.png",

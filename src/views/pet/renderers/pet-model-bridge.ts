@@ -116,6 +116,7 @@ export class PetPackModelBridge implements PetModel {
 	}
 
 	private lastLoadedUrl = "";
+	private lastDrawnUrl = "";
 
 	draw(context: CanvasRenderingContext2D, frame: PetFrame): void {
 		if (!PetPackModelBridge.debugLogged) {
@@ -140,6 +141,10 @@ export class PetPackModelBridge implements PetModel {
 			Math.floor(Math.min(0.9999, Math.max(0, frame.action.progress)) * total) + 1;
 		const url = this.frameUrlFor(actionId, index);
 		if (url === undefined) return;
+		// 帧号未变时跳过 drawImage(减少无效重绘;透明画布上重复绘制
+		// 同一帧不产生可见差异但消耗 GPU)。
+		if (url === this.lastDrawnUrl) return;
+		this.lastDrawnUrl = url;
 		ensureImage(url, () => {
 			if (url !== this.lastLoadedUrl) {
 				this.lastLoadedUrl = url;
