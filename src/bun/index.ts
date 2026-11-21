@@ -275,7 +275,7 @@ const petPackageManager = new PetPackageManager({
 			: join(process.cwd(), "pets"),
 		join(Utils.paths.userData, "pets"),
 	],
-	assetBasePrefix: "../petpacks/",
+	assetBasePrefix: "petpacks/",
 	log: (message) => diag(`[pet-package] ${message}`),
 });
 await petPackageManager.scan().catch((error: unknown) => {

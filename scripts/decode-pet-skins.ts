@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const petsRoot = resolve(projectRoot, "pets");
 const stickersRoot = resolve(projectRoot, "stickers");
-const outputRoot = resolve(projectRoot, "dist/views/petpacks");
+const outputRoot = resolve(projectRoot, "dist/views/pet/petpacks");
 
 function whichFfmpeg(): boolean {
 	const probe = spawnSync("ffmpeg", ["-version"]);

@@ -99,7 +99,17 @@ export class PetPackModelBridge implements PetModel {
 		return action?.clip;
 	}
 
+	private static debugLogged = false;
+
 	draw(context: CanvasRenderingContext2D, frame: PetFrame): void {
+		if (!PetPackModelBridge.debugLogged) {
+			PetPackModelBridge.debugLogged = true;
+			const probe = new Image();
+			probe.onload = () => console.log(`[pack-bridge] probe OK: ${probe.width}x${probe.height}`);
+			probe.onerror = () => console.log(`[pack-bridge] probe FAIL`);
+			probe.src = `${this.pack.assetBase}idle/f_01.png`;
+			console.log(`[pack-bridge] draw called action=${frame.action.id} opacity=${frame.root.opacity} clipIdx=${JSON.stringify(Object.keys(this.clipIndex).slice(0, 3))}`);
+		}
 		const actionId = frame.action.id;
 		if (actionId !== this.lastActionId) {
 			this.lastActionId = actionId;
