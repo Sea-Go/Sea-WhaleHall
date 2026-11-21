@@ -74,7 +74,7 @@ const WHALE_FACTS: SkinFacts = {
 		);
 		return plan?.clip;
 	},
-	isDefault: true,
+	isDefault: false,
 };
 
 const CAT_FACTS: SkinFacts = {
@@ -97,6 +97,7 @@ const CAT_FACTS: SkinFacts = {
 };
 
 const DEEPSEEK_FACTS: SkinFacts = {
+	isDefault: true,
 	label: "DeepSeek 娘",
 	sprite: { left: -80, top: -80 },
 	hitZones: [{ id: "body", cx: 0, cy: 0, rx: 80, ry: 80 }],

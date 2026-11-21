@@ -294,6 +294,13 @@ export class CanvasPetRenderer implements PetRenderer {
 		this.applyChatBubbleAnchor();
 	}
 
+	/** 外部触发一帧渲染(桥接模型图片加载就绪后调用)。 */
+	requestRender(): void {
+		if (this.canvas && this.startedAt) {
+			this.render(performance.now());
+		}
+	}
+
 	getModel(): PetModel {
 		return this.model;
 	}

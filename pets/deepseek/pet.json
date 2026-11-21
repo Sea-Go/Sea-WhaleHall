@@ -29,5 +29,6 @@
     "Sea"
   ],
   "license": "见 SKIN.md(社区二创,非商业许可)",
-  "summary": "DeepSeek 娘桌宠包"
+  "summary": "DeepSeek 娘桌宠包",
+  "default": true
 }

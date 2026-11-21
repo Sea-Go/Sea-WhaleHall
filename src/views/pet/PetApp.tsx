@@ -84,19 +84,27 @@ export function PetApp() {
 		behavior.setEnabled(false);
 		renderer.mount(canvas);
 		let bridgedPackId = "";
+		let lastBehaviorEnabled = false;
 		const unsubscribeState = petApi.onState((state) => {
 			// dev 通道盖章的调试开关：true 时叠加"活动区/对话区"接触范围框。
 			setDebugOverlays(Boolean(state.debugOverlays));
 			// 包描述符(《桌宠包标准 v1》):经桥适配为模型,场景零改动热切换。
 			if (state.pack && state.pack.id !== bridgedPackId) {
 				bridgedPackId = state.pack.id;
-				renderer.setModel(new PetPackModelBridge(state.pack));
+				const bridge = new PetPackModelBridge(state.pack);
+				bridge.setOnImageReady(() => renderer.requestRender());
+				renderer.setModel(bridge);
 			}
 			renderer.setState(state);
+			// 包模式:行为启停只在 mood 边沿变化时操作,不每次推送都重设——
+			// 反复 setEnabled 会打断动作控制器造成桌宠闪缩。
 			const stateAction = state.action ?? state.animation;
-			behavior.setEnabled(
-				state.mood === "idle" && (!stateAction || stateAction === "idle"),
-			);
+			const shouldBeEnabled =
+				state.mood === "idle" && (!stateAction || stateAction === "idle");
+			if (shouldBeEnabled !== lastBehaviorEnabled) {
+				lastBehaviorEnabled = shouldBeEnabled;
+				behavior.setEnabled(shouldBeEnabled);
+			}
 			if (state.environment) behavior.setEnvironment(state.environment);
 		});
 		const unsubscribeNativeDrag = petApi.onNativeDrag((state) => {

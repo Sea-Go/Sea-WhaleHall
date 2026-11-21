@@ -101,14 +101,27 @@ export class PetPackModelBridge implements PetModel {
 
 	private static debugLogged = false;
 
+	/** 帧图片就绪回调:通知场景重绘(图片加载是异步的,需要触发一帧)。 */
+	private onImageReady: (() => void) | null = null;
+
+	/** 场景层注入重绘触发器(CanvasPetRenderer.render 递归安全:仅在
+	 * 图片从无到有时触发一次,不产生无限循环)。 */
+	setOnImageReady(callback: () => void): void {
+		this.onImageReady = callback;
+	}
+
+	private lastLoadedUrl = "";
+
 	draw(context: CanvasRenderingContext2D, frame: PetFrame): void {
 		if (!PetPackModelBridge.debugLogged) {
 			PetPackModelBridge.debugLogged = true;
 			const probe = new Image();
 			probe.onload = () => console.log(`[pack-bridge] probe OK: ${probe.width}x${probe.height}`);
-			probe.onerror = () => console.log(`[pack-bridge] probe FAIL`);
+			probe.onerror = () => console.log(`[pack-bridge] probe FAIL: ${probe.src}`);
 			probe.src = `${this.pack.assetBase}idle/f_01.png`;
-			console.log(`[pack-bridge] draw called action=${frame.action.id} opacity=${frame.root.opacity} clipIdx=${JSON.stringify(Object.keys(this.clipIndex).slice(0, 3))}`);
+			console.log(
+				`[pack-bridge] draw action=${frame.action.id} opacity=${frame.root.opacity.toFixed(2)} scaleX=${frame.root.scaleX.toFixed(2)} clipIdx=${Object.keys(this.clipIndex).length} assetBase=${this.pack.assetBase}`,
+			);
 		}
 		const actionId = frame.action.id;
 		if (actionId !== this.lastActionId) {
@@ -121,7 +134,12 @@ export class PetPackModelBridge implements PetModel {
 			Math.floor(Math.min(0.9999, Math.max(0, frame.action.progress)) * total) + 1;
 		const url = this.frameUrlFor(actionId, index);
 		if (url === undefined) return;
-		ensureImage(url, () => undefined);
+		ensureImage(url, () => {
+			if (url !== this.lastLoadedUrl) {
+				this.lastLoadedUrl = url;
+				this.onImageReady?.();
+			}
+		});
 		const image = imageCache.get(url);
 		if (image === undefined) return;
 		context.drawImage(
