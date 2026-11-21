@@ -2743,11 +2743,17 @@ async function viewUrl(view: "client" | "pet"): Promise<string> {
 	return bundled;
 }
 
-const petWidth = 320;
-// 窗口是透明但整框吃鼠标事件的：高度必须紧贴实际内容（鲸鱼 139 + 顶部
-// 气泡余量 + 底部聊天面板），多余的顶部空带会挡住用户对桌面/其他应用的
-// 点击。聊天面板 max-height 232（8 底边距）= 240 < 250，流式回答仍完整。
-const petHeight = 250;
+// 桌宠窗口尺寸自适应(《桌宠包标准 v1》):画布来自默认包声明,装饰带
+// 与形象无关——头顶消息气泡带、立足线以下聊天面板带、左右触边余量。
+// 切换默认包=窗口随包变,代码零形象知识。窗口透明但整框吃鼠标事件,
+// 高度必须紧贴实际内容,多余的空带会挡住用户对桌面/其他应用的点击。
+const PET_SIDE_MARGIN = 32;
+const PET_TOP_BAND = 33;
+const PET_BOTTOM_BAND = 78;
+const defaultPetPackCanvas = petPackageManager.defaultPack()?.manifest.canvas;
+const petWidth = (defaultPetPackCanvas?.width ?? 192) + PET_SIDE_MARGIN * 2;
+const petHeight =
+	(defaultPetPackCanvas?.height ?? 139) + PET_TOP_BAND + PET_BOTTOM_BAND;
 const display = Screen.getPrimaryDisplay();
 const clientWidth = Math.min(1280, Math.max(1000, display.workArea.width - 80));
 const clientHeight = Math.min(800, Math.max(720, display.workArea.height - 80));

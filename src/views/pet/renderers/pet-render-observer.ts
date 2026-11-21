@@ -23,6 +23,8 @@ export interface PetRenderMetrics {
 	imageLoads: { hit: number; miss: number; error: number };
 	/** 动作切换计数(频繁切换=闪烁风险)。 */
 	actionSwitches: number;
+	/** 精灵空窗(目标帧缺失、回退帧也无):计数与累计时长。 */
+	spriteBlanks: { count: number; totalMs: number; lastReason: string };
 	/** 动作切换历史(最近 20 次,用于闪烁诊断)。 */
 	recentActions: readonly { action: string; atMs: number }[];
 	/** 窗口可见性变化计数。 */
@@ -62,6 +64,11 @@ export class PetRenderObserver {
 	private visibilityChanges = 0;
 	private lastReportAt = 0;
 	private lastActionSwitchAt = 0;
+	private blankStartAt = 0;
+	private blankReason = "";
+	private blankCount = 0;
+	private blankTotalMs = 0;
+	private lastBlankReason = "";
 
 	/** 渲染帧开始:记录时间戳,检测掉帧。 */
 	onFrameStart(now: number): void {
@@ -132,6 +139,31 @@ export class PetRenderObserver {
 		this.lastActionSwitchAt = now;
 	}
 
+	/**
+	 * 精灵空窗:目标帧不可绘制(加载中/无 clip)。回退帧兜底下用户看不到
+	 * 空窗,但该指标暴露加载延迟与缺失映射;持续超过 150ms 立即告警。
+	 */
+	onSpriteBlank(reason: string | null): void {
+		if (reason !== null) {
+			if (this.blankStartAt === 0) {
+				this.blankStartAt = performance.now();
+				this.blankReason = reason;
+				this.blankCount++;
+				this.lastBlankReason = reason;
+			}
+			return;
+		}
+		if (this.blankStartAt === 0) return;
+		const duration = performance.now() - this.blankStartAt;
+		this.blankStartAt = 0;
+		this.blankTotalMs += duration;
+		if (duration > 150) {
+			console.warn(
+				`[pet-obs] SPRITE BLANK ${Math.round(duration)}ms (${this.blankReason})`,
+			);
+		}
+	}
+
 	/** 窗口可见性变化。 */
 	onVisibilityChange(visible: boolean, now: number): void {
 		this.visibilityChanges++;
@@ -158,6 +190,11 @@ export class PetRenderObserver {
 				error: this.imageErrors,
 			},
 			actionSwitches: this.actionSwitches,
+			spriteBlanks: {
+				count: this.blankCount,
+				totalMs: Math.round(this.blankTotalMs),
+				lastReason: this.lastBlankReason,
+			},
 			recentActions: [...this.recentActions],
 			visibilityChanges: this.visibilityChanges,
 			startedAtMs: this.startedAt,
@@ -181,9 +218,15 @@ export class PetRenderObserver {
 			`[pet-obs] ${uptime}s | fps=${fps} | drops=${snap.framesDropped}(${dropRate}%) ` +
 			`| render=${snap.avgRenderMs}ms(max ${snap.maxRenderMs}) ` +
 			`| img(hit=${snap.imageLoads.hit}/miss=${snap.imageLoads.miss}/err=${snap.imageLoads.error}) ` +
-			`| switches=${snap.actionSwitches} | vis=${snap.visibilityChanges}`;
+			`| switches=${snap.actionSwitches} | blanks=${snap.spriteBlanks.count}(${snap.spriteBlanks.totalMs}ms) ` +
+			`| vis=${snap.visibilityChanges}`;
 
-		if (snap.framesDropped > 10 || snap.imageLoads.error > 0 || snap.actionSwitches > 50) {
+		if (
+			snap.framesDropped > 10 ||
+			snap.imageLoads.error > 0 ||
+			snap.actionSwitches > 50 ||
+			snap.spriteBlanks.count > 20
+		) {
 			console.warn(summary, snap.dropReasons);
 		} else {
 			console.log(summary);

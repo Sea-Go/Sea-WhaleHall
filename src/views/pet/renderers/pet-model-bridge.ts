@@ -59,6 +59,21 @@ export class PetPackModelBridge implements PetModel {
 	private readonly pack: PetPackDescriptor;
 	private clipIndex: Record<string, number> = {};
 	private lastActionId = "";
+	private lastImage: HTMLImageElement | null = null;
+	private prefetchedClips = new Set<string>();
+
+	/** 整段片段预热:动作首启时把该 clip 全部帧提交加载(本地小图,量有限),
+	 * 消除逐帧冷加载造成的逐帧空窗。 */
+	private prefetchClip(actionId: string): void {
+		const clip = this.clipFor(actionId);
+		if (clip === undefined || this.prefetchedClips.has(clip)) return;
+		this.prefetchedClips.add(clip);
+		const total = Math.max(1, this.clipIndex[clip] ?? 1);
+		for (let index = 1; index <= total; index += 1) {
+			const url = this.frameUrlFor(actionId, index);
+			if (url !== undefined) ensureImage(url);
+		}
+	}
 
 	constructor(pack: PetPackDescriptor) {
 		this.pack = pack;
@@ -90,6 +105,9 @@ export class PetPackModelBridge implements PetModel {
 		} catch {
 			// 帧数表缺失时逐帧 1 兜底;构建管线保证其存在。
 		}
+		// 帧数表就绪后重做当前动作的整段预热(启动早期索引未到时只预了 1 帧)。
+		this.prefetchedClips.clear();
+		if (this.lastActionId !== "") this.prefetchClip(this.lastActionId);
 	}
 
 	preload(): Promise<void> {
@@ -112,34 +130,35 @@ export class PetPackModelBridge implements PetModel {
 		this.onImageReady = callback;
 	}
 
-	private lastLoadedUrl = "";
-	private lastDrawnUrl = "";
-
 	draw(context: CanvasRenderingContext2D, frame: PetFrame): void {
 		const actionId = frame.action.id;
 		petRenderObserver.onActionSwitch(actionId, performance.now());
 		if (actionId !== this.lastActionId) {
 			this.lastActionId = actionId;
-			const first = this.frameUrlFor(actionId, 1);
-			if (first !== undefined) ensureImage(first);
+			this.prefetchClip(actionId);
 		}
 		const total = Math.max(1, this.clipIndex[this.clipFor(actionId) ?? ""] ?? 1);
 		const index =
 			Math.floor(Math.min(0.9999, Math.max(0, frame.action.progress)) * total) + 1;
 		const url = this.frameUrlFor(actionId, index);
-		if (url === undefined) return;
-		// 帧号未变时跳过 drawImage(减少无效重绘;透明画布上重复绘制
-		// 同一帧不产生可见差异但消耗 GPU)。
-		if (url === this.lastDrawnUrl) return;
-		this.lastDrawnUrl = url;
-		ensureImage(url, () => {
-			if (url !== this.lastLoadedUrl) {
-				this.lastLoadedUrl = url;
-				this.onImageReady?.();
+		const image = url === undefined ? undefined : imageCache.get(url);
+		if (url === undefined || image === undefined) {
+			// 目标帧未就绪:提交加载并请求补帧;期间回退上一成功帧,
+			// 绝不空窗(空窗=用户看到的闪帧/消失)。
+			if (url !== undefined) {
+				ensureImage(url, () => this.onImageReady?.());
 			}
-		});
-		const image = imageCache.get(url);
-		if (image === undefined) return;
+			petRenderObserver.onSpriteBlank(url === undefined ? "no-clip" : "loading");
+			if (this.lastImage === null) return;
+			context.drawImage(
+				this.lastImage,
+				this.pack.sprite.left,
+				this.pack.sprite.top,
+			);
+			return;
+		}
+		petRenderObserver.onSpriteBlank(null);
+		this.lastImage = image;
 		context.drawImage(
 			image,
 			this.pack.sprite.left,

@@ -90,15 +90,12 @@ interface ExtendedPetState extends PetState {
 	modelId?: string;
 }
 
-const BASE_X_RATIO = 0.56;
-// 锚定鲸鱼身体中心。窗口 320×250（见 bun/index.ts petWidth/petHeight 注释）：
-// y：0.41*250≈102.5，鲸鱼(视觉高139)占 y≈33..172，顶部余量只够消息气泡
-// 与 ≤26px 的跳跃峰值（jumpArc 上限同步压到 26）；x：267 宽鲸鱼在 320 内
-// 近似水平居中。底部避开聊天面板——不与面板重叠。
-const BASE_Y_RATIO = 0.41;
 const PETTING_DISTANCE = 42;
 const RAPID_CLICK_WINDOW_MS = 2_400;
 const DOUBLE_CLICK_WINDOW_MS = 330;
+// 场景原点自适应常数(与形象无关的窗口装饰带):
+// 立足线固定在窗底以上 78px(聊天面板带),头顶余量自然留给消息气泡。
+const BOTTOM_BAND_PX = 78;
 
 function createNeutralFrame(): PetFrame {
 	return {
@@ -658,11 +655,23 @@ export class CanvasPetRenderer implements PetRenderer {
 		return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 	}
 
+	/**
+	 * 场景原点由模型视觉包围盒自适应推导(替代为鲸鱼非对称足迹调死的
+	 * 固定比例):水平方向包围盒居中;垂直方向立足线(包围盒底)固定在
+	 * 窗底装饰带之上。空模型(0 尺寸)退化为窗口中心,不绘制任何形象。
+	 */
 	private sceneOrigin(
 		width = this.canvas?.clientWidth ?? 0,
 		height = this.canvas?.clientHeight ?? 0,
 	): Point {
-		return { x: width * BASE_X_RATIO, y: height * BASE_Y_RATIO };
+		const bounds = this.model.skeleton.visualBounds;
+		return {
+			x: width / 2 - (bounds.x + bounds.width / 2),
+			y:
+				height -
+				BOTTOM_BAND_PX -
+				(bounds.y + bounds.height),
+		};
 	}
 
 	private toLocalPoint(point: Point): Point {
@@ -788,9 +797,11 @@ export class CanvasPetRenderer implements PetRenderer {
 			deltaSeconds,
 		);
 
+		const origin = this.sceneOrigin(width, height);
 		const animationContext = this.buildAnimationContext(
 			width,
 			height,
+			origin,
 			time,
 			deltaSeconds,
 		);
@@ -806,7 +817,6 @@ export class CanvasPetRenderer implements PetRenderer {
 		this.currentFrame = frame;
 		this.refreshPointerHit();
 
-		const origin = this.sceneOrigin(width, height);
 		// dev 调试框画在桌宠之下：精灵压过下缘线，读作"站在框的立足线上"。
 		if (this.state.debugOverlays) {
 			this.drawDebugActivityZone(context, origin, frame);
@@ -846,6 +856,7 @@ export class CanvasPetRenderer implements PetRenderer {
 	private buildAnimationContext(
 		width: number,
 		height: number,
+		origin: Point,
 		time: number,
 		deltaSeconds: number,
 	): AnimationContext {
@@ -869,16 +880,17 @@ export class CanvasPetRenderer implements PetRenderer {
 						y: this.pointerCanvas.y - this.pressStart.y,
 					}
 				: { x: 0, y: 0 };
-		// 行走夹紧按当前朝向取有效足迹：非对称包围盒（鲸鱼左伸 153/右伸 114）
-		// 翻面后左右互换，按原始包络夹紧会让朝左贴右边界时镜像尾巴越出窗外。
+		// 行走夹紧按当前朝向取有效足迹：非对称包围盒翻面后左右互换,
+		// 按原始包络夹紧会让朝左贴右边界时镜像尾巴越出窗外。活动范围
+		// 覆盖整个窗口宽度(原点自适应推导,不再用固定比例)。
 		const facing = this.currentFrame?.root.facingX ?? 1;
 		const footprint = facingFootprint(visualBounds, facing);
 		return {
 			width,
 			height,
 			travelBounds: {
-				minX: -width * BASE_X_RATIO - footprint.x,
-				maxX: width * (1 - BASE_X_RATIO) - footprint.x - footprint.width,
+				minX: -origin.x - footprint.x,
+				maxX: width - origin.x - footprint.x - footprint.width,
 			},
 			time,
 			deltaSeconds,
