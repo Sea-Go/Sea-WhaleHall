@@ -957,7 +957,7 @@ const rawOnlyAuditExporter = new TimelineFiveMinuteAuditExporter(
 );
 // The renderer publishes the persisted preference after it has loaded. Until
 // then both the native window and sensitive feedback delivery stay fail closed.
-let petVisible = false;
+let petVisible = true;
 let shutdownRequested = false;
 let shutdownPromise: Promise<void> | null = null;
 const completedShutdownSteps = new Set<string>();
@@ -2573,6 +2573,18 @@ async function provePetRenderer(
 		if (petActivityFeedbackDelivery?.markRendererReady(response)) {
 			console.log("[pet] React renderer ready");
 			petActivityFeedbackRendererQuarantined = false;
+			// 从客户端偏好恢复桌宠可见性(petVisible 是内存变量,启动恒 false)。
+			void clientRPC.request
+				.getPreferences({})
+				.then((prefs: { values?: { pet?: { visible?: boolean } } }) => {
+					const preferred = prefs.values?.pet?.visible === true;
+					if (preferred && !petVisible) {
+						petVisible = true;
+					petWindowController?.setVisible(true);
+					console.log("[pet] visibility restored from preferences: true");
+					}
+				})
+				.catch(() => undefined);
 			petWindowController?.setVisible(petVisible);
 			petStateArbiter.resetToRuntime(agent.getLocalStatus());
 			return;
