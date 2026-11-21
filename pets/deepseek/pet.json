@@ -1,0 +1,33 @@
+{
+  "schema": "whalehall.pet-package.v1",
+  "id": "deepseek",
+  "label": "DeepSeek 娘",
+  "version": "1.0.0",
+  "renderer": "sequence",
+  "canvas": {
+    "width": 267,
+    "height": 139,
+    "groundAnchorY": 139
+  },
+  "sprite": {
+    "left": -80,
+    "top": -80
+  },
+  "tier": "core",
+  "fallbackAction": "idle",
+  "hitZones": [
+    {
+      "id": "body",
+      "cx": 0,
+      "cy": 0,
+      "rx": 80,
+      "ry": 80
+    }
+  ],
+  "cover": "cover.png",
+  "authors": [
+    "Sea"
+  ],
+  "license": "见 SKIN.md(社区二创,非商业许可)",
+  "summary": "DeepSeek 娘桌宠包"
+}

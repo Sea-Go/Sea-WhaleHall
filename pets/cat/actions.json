@@ -1,0 +1,949 @@
+{
+  "schema": "whalehall.pet-actions.v1",
+  "actions": [
+    {
+      "id": "idle",
+      "clip": "idle",
+      "durationMs": 2400,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "breathe",
+      "clip": "breathe",
+      "durationMs": 2200,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "blink",
+      "clip": "blink",
+      "durationMs": 240,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "lookAround",
+      "clip": "lookAround",
+      "durationMs": 2200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "stretch",
+      "clip": "stretch",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "yawn",
+      "clip": "yawn",
+      "durationMs": 2100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "walkLeft",
+      "clip": "walk",
+      "durationMs": 720,
+      "loop": true,
+      "next": "idle",
+      "facing": -1
+    },
+    {
+      "id": "walkRight",
+      "clip": "walk",
+      "durationMs": 720,
+      "loop": true,
+      "next": "idle",
+      "facing": 1
+    },
+    {
+      "id": "stopWalking",
+      "clip": "stopWalking",
+      "durationMs": 420,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "turnLeft",
+      "clip": "turn",
+      "durationMs": 480,
+      "loop": false,
+      "next": "idle",
+      "facing": -1
+    },
+    {
+      "id": "turnRight",
+      "clip": "turn",
+      "durationMs": 480,
+      "loop": false,
+      "next": "idle",
+      "facing": 1
+    },
+    {
+      "id": "dragged",
+      "clip": "dragged",
+      "durationMs": 560,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "drop",
+      "clip": "drop",
+      "durationMs": 650,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "clickFeedback",
+      "clip": "clickFeedback",
+      "durationMs": 900,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sleepIn",
+      "clip": "sleepIn",
+      "durationMs": 1200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sleepLoop",
+      "clip": "sleepLoop",
+      "durationMs": 2800,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "wake",
+      "clip": "wake",
+      "durationMs": 1000,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "enter",
+      "clip": "enter",
+      "durationMs": 720,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "exit",
+      "clip": "exit",
+      "durationMs": 650,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "runLeft",
+      "clip": "run",
+      "durationMs": 420,
+      "loop": true,
+      "next": "idle",
+      "facing": -1
+    },
+    {
+      "id": "runRight",
+      "clip": "run",
+      "durationMs": 420,
+      "loop": true,
+      "next": "idle",
+      "facing": 1
+    },
+    {
+      "id": "jump",
+      "clip": "jump",
+      "durationMs": 850,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "takeOff",
+      "clip": "takeOff",
+      "durationMs": 260,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "land",
+      "clip": "land",
+      "durationMs": 420,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "fallDown",
+      "clip": "fallDown",
+      "durationMs": 780,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "recoverFromFall",
+      "clip": "recoverFromFall",
+      "durationMs": 1100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sitDown",
+      "clip": "sitDown",
+      "durationMs": 650,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "standUp",
+      "clip": "standUp",
+      "durationMs": 650,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "lieDown",
+      "clip": "lieDown",
+      "durationMs": 720,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "riseFromLie",
+      "clip": "riseFromLie",
+      "durationMs": 760,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "slide",
+      "clip": "slide",
+      "durationMs": 900,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "climbScreenEdge",
+      "clip": "climbScreenEdge",
+      "durationMs": 920,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "holdWindowEdge",
+      "clip": "holdWindowEdge",
+      "durationMs": 1200,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "peekFromEdge",
+      "clip": "peekFromEdge",
+      "durationMs": 2100,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "fallFromHeight",
+      "clip": "fallFromHeight",
+      "durationMs": 700,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "pushedByWindow",
+      "clip": "pushedByWindow",
+      "durationMs": 620,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "doubleClick",
+      "clip": "doubleClick",
+      "durationMs": 1200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "rapidClickAnnoyed",
+      "clip": "rapidClickAnnoyed",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "hoverLookAtPointer",
+      "clip": "hoverLookAtPointer",
+      "durationMs": 900,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "trackPointerGaze",
+      "clip": "trackPointerGaze",
+      "durationMs": 900,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "dragStruggle",
+      "clip": "dragStruggle",
+      "durationMs": 480,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "petHead",
+      "clip": "petHead",
+      "durationMs": 1000,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "pokeFace",
+      "clip": "pokeFace",
+      "durationMs": 620,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "pokeBody",
+      "clip": "pokeBody",
+      "durationMs": 620,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "chasedByPointer",
+      "clip": "chasedByPointer",
+      "durationMs": 520,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "catchPointer",
+      "clip": "catchPointer",
+      "durationMs": 900,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sitOnPointer",
+      "clip": "sitOnPointer",
+      "durationMs": 1500,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "pushPointerAway",
+      "clip": "pushPointerAway",
+      "durationMs": 950,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "happy",
+      "clip": "happy",
+      "durationMs": 1500,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "laugh",
+      "clip": "laugh",
+      "durationMs": 1600,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "shy",
+      "clip": "shy",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "angry",
+      "clip": "angry",
+      "durationMs": 1700,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "wronged",
+      "clip": "wronged",
+      "durationMs": 1900,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sad",
+      "clip": "sad",
+      "durationMs": 2000,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "cry",
+      "clip": "cry",
+      "durationMs": 1600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "surprised",
+      "clip": "surprised",
+      "durationMs": 1100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "afraid",
+      "clip": "afraid",
+      "durationMs": 680,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "confused",
+      "clip": "confused",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "bored",
+      "clip": "bored",
+      "durationMs": 2800,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "sleepy",
+      "clip": "sleepy",
+      "durationMs": 2400,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "proud",
+      "clip": "proud",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "impatient",
+      "clip": "impatient",
+      "durationMs": 1700,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "expectant",
+      "clip": "expectant",
+      "durationMs": 1300,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "loveReaction",
+      "clip": "loveReaction",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "eat",
+      "clip": "eat",
+      "durationMs": 2400,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "drink",
+      "clip": "drink",
+      "durationMs": 2200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "receiveFood",
+      "clip": "receiveFood",
+      "durationMs": 1100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "refuseFood",
+      "clip": "refuseFood",
+      "durationMs": 1600,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "full",
+      "clip": "full",
+      "durationMs": 1900,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "hungry",
+      "clip": "hungry",
+      "durationMs": 2600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "bathe",
+      "clip": "bathe",
+      "durationMs": 1800,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "dryOff",
+      "clip": "dryOff",
+      "durationMs": 1700,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "groom",
+      "clip": "groom",
+      "durationMs": 2100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "playToy",
+      "clip": "playToy",
+      "durationMs": 1600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "readBook",
+      "clip": "readBook",
+      "durationMs": 3000,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "usePhone",
+      "clip": "usePhone",
+      "durationMs": 2400,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "listenMusic",
+      "clip": "listenMusic",
+      "durationMs": 1900,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "exercise",
+      "clip": "exercise",
+      "durationMs": 900,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "sick",
+      "clip": "sick",
+      "durationMs": 2600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "takeMedicine",
+      "clip": "takeMedicine",
+      "durationMs": 2100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "recoverEnergy",
+      "clip": "recoverEnergy",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "levelUp",
+      "clip": "levelUp",
+      "durationMs": 2400,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "receiveGift",
+      "clip": "receiveGift",
+      "durationMs": 1500,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "unwrapGift",
+      "clip": "unwrapGift",
+      "durationMs": 2600,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "changeOutfit",
+      "clip": "changeOutfit",
+      "durationMs": 2100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "remindUser",
+      "clip": "remindUser",
+      "durationMs": 1600,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "holdSign",
+      "clip": "holdSign",
+      "durationMs": 1800,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "knockScreen",
+      "clip": "knockScreen",
+      "durationMs": 1200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "pointNotification",
+      "clip": "pointNotification",
+      "durationMs": 1300,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "think",
+      "clip": "think",
+      "durationMs": 2200,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "searching",
+      "clip": "searching",
+      "durationMs": 1400,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "loading",
+      "clip": "loading",
+      "durationMs": 1100,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "answerQuestion",
+      "clip": "answerQuestion",
+      "durationMs": 2200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "recordTodo",
+      "clip": "recordTodo",
+      "durationMs": 2200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "startPomodoro",
+      "clip": "startPomodoro",
+      "durationMs": 1400,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "focus",
+      "clip": "focus",
+      "durationMs": 2600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "breakReminder",
+      "clip": "breakReminder",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "alarm",
+      "clip": "alarm",
+      "durationMs": 700,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "taskComplete",
+      "clip": "taskComplete",
+      "durationMs": 2200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "operationFailed",
+      "clip": "operationFailed",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "networkDisconnected",
+      "clip": "networkDisconnected",
+      "durationMs": 2300,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "updateComplete",
+      "clip": "updateComplete",
+      "durationMs": 2000,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "morningWakeUp",
+      "clip": "morningWakeUp",
+      "durationMs": 2100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "lunchTime",
+      "clip": "lunchTime",
+      "durationMs": 2400,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "eveningSleepy",
+      "clip": "eveningSleepy",
+      "durationMs": 2600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "lateNightRestReminder",
+      "clip": "lateNightRestReminder",
+      "durationMs": 2200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "birthdayCelebrate",
+      "clip": "birthdayCelebrate",
+      "durationMs": 3200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "holidayAction",
+      "clip": "holidayAction",
+      "durationMs": 3000,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "rainUmbrella",
+      "clip": "rainUmbrella",
+      "durationMs": 1900,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "winterShiver",
+      "clip": "winterShiver",
+      "durationMs": 620,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "summerFan",
+      "clip": "summerFan",
+      "durationMs": 980,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "idleSelfEntertainment",
+      "clip": "idleSelfEntertainment",
+      "durationMs": 3600,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "welcomeUserBack",
+      "clip": "welcomeUserBack",
+      "durationMs": 2100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "overworkRestReminder",
+      "clip": "overworkRestReminder",
+      "durationMs": 2400,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "hiddenEasterEgg",
+      "clip": "hiddenEasterEgg",
+      "durationMs": 4200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "enterToIdle",
+      "clip": "enterToIdle",
+      "durationMs": 320,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "idleToWalk",
+      "clip": "idleToWalk",
+      "durationMs": 320,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "walkToIdle",
+      "clip": "walkToIdle",
+      "durationMs": 420,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "walkToTurn",
+      "clip": "walkToTurn",
+      "durationMs": 360,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "turnToWalk",
+      "clip": "turnToWalk",
+      "durationMs": 360,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "idleToSit",
+      "clip": "idleToSit",
+      "durationMs": 520,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sitToIdle",
+      "clip": "sitToIdle",
+      "durationMs": 560,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "idleToSleep",
+      "clip": "idleToSleep",
+      "durationMs": 1050,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sleepToWake",
+      "clip": "sleepToWake",
+      "durationMs": 900,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "dragToDrop",
+      "clip": "dragToDrop",
+      "durationMs": 300,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "takeOffToAirborne",
+      "clip": "takeOffToAirborne",
+      "durationMs": 200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "airborneToLand",
+      "clip": "airborneToLand",
+      "durationMs": 220,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "idleToExit",
+      "clip": "idleToExit",
+      "durationMs": 360,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sittingLoop",
+      "clip": "sittingLoop",
+      "durationMs": 2600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "lyingLoop",
+      "clip": "lyingLoop",
+      "durationMs": 2800,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "airborneLoop",
+      "clip": "airborneLoop",
+      "durationMs": 680,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "heldLoop",
+      "clip": "heldLoop",
+      "durationMs": 560,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "hidden",
+      "clip": "hidden",
+      "durationMs": 1000,
+      "loop": true,
+      "next": "idle"
+    }
+  ],
+  "toneMap": {
+    "error": "fallDown",
+    "sleepy": "sleepLoop",
+    "happy": "petHead",
+    "celebration": "jump",
+    "confused": "lookAround"
+  }
+}

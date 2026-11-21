@@ -1,0 +1,358 @@
+{
+  "schema": "whalehall.pet-actions.v1",
+  "actions": [
+    {
+      "id": "idle",
+      "clip": "idle",
+      "durationMs": 2400,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "breathe",
+      "clip": "idle",
+      "durationMs": 2200,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "blink",
+      "clip": "idle",
+      "durationMs": 240,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "lookAround",
+      "clip": "idle",
+      "durationMs": 2200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "stretch",
+      "clip": "waving",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "yawn",
+      "clip": "waving",
+      "durationMs": 2100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "walkLeft",
+      "clip": "running",
+      "durationMs": 720,
+      "loop": true,
+      "next": "idle",
+      "facing": -1
+    },
+    {
+      "id": "walkRight",
+      "clip": "running",
+      "durationMs": 720,
+      "loop": true,
+      "next": "idle",
+      "facing": 1
+    },
+    {
+      "id": "turnLeft",
+      "clip": "running",
+      "durationMs": 480,
+      "loop": false,
+      "next": "idle",
+      "facing": -1
+    },
+    {
+      "id": "turnRight",
+      "clip": "running",
+      "durationMs": 480,
+      "loop": false,
+      "next": "idle",
+      "facing": 1
+    },
+    {
+      "id": "dragged",
+      "clip": "jumping",
+      "durationMs": 560,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "drop",
+      "clip": "jumping",
+      "durationMs": 650,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "clickFeedback",
+      "clip": "waving",
+      "durationMs": 900,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sleepIn",
+      "clip": "waiting",
+      "durationMs": 1200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sleepLoop",
+      "clip": "waiting",
+      "durationMs": 2800,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "wake",
+      "clip": "waving",
+      "durationMs": 1000,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "enter",
+      "clip": "waving",
+      "durationMs": 720,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "exit",
+      "clip": "waving",
+      "durationMs": 650,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "runLeft",
+      "clip": "running",
+      "durationMs": 420,
+      "loop": true,
+      "next": "idle",
+      "facing": -1
+    },
+    {
+      "id": "runRight",
+      "clip": "running",
+      "durationMs": 420,
+      "loop": true,
+      "next": "idle",
+      "facing": 1
+    },
+    {
+      "id": "jump",
+      "clip": "jumping",
+      "durationMs": 850,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "takeOff",
+      "clip": "jumping",
+      "durationMs": 260,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "land",
+      "clip": "jumping",
+      "durationMs": 420,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sitDown",
+      "clip": "waiting",
+      "durationMs": 650,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "standUp",
+      "clip": "waiting",
+      "durationMs": 650,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "happy",
+      "clip": "waving",
+      "durationMs": 1500,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "laugh",
+      "clip": "waving",
+      "durationMs": 1600,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "shy",
+      "clip": "waving",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "angry",
+      "clip": "failed",
+      "durationMs": 1700,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "wronged",
+      "clip": "failed",
+      "durationMs": 1900,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "sad",
+      "clip": "failed",
+      "durationMs": 2000,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "cry",
+      "clip": "failed",
+      "durationMs": 1600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "surprised",
+      "clip": "jumping",
+      "durationMs": 1100,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "afraid",
+      "clip": "failed",
+      "durationMs": 680,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "confused",
+      "clip": "waiting",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "bored",
+      "clip": "waiting",
+      "durationMs": 2800,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "sleepy",
+      "clip": "waiting",
+      "durationMs": 2400,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "proud",
+      "clip": "waving",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "impatient",
+      "clip": "failed",
+      "durationMs": 1700,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "expectant",
+      "clip": "waiting",
+      "durationMs": 1300,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "loveReaction",
+      "clip": "waving",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "exercise",
+      "clip": "running",
+      "durationMs": 900,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "levelUp",
+      "clip": "waving",
+      "durationMs": 2400,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "think",
+      "clip": "waiting",
+      "durationMs": 2200,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "searching",
+      "clip": "running",
+      "durationMs": 1400,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "loading",
+      "clip": "waiting",
+      "durationMs": 1100,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "focus",
+      "clip": "waiting",
+      "durationMs": 2600,
+      "loop": true,
+      "next": "idle"
+    },
+    {
+      "id": "taskComplete",
+      "clip": "waving",
+      "durationMs": 2200,
+      "loop": false,
+      "next": "idle"
+    },
+    {
+      "id": "operationFailed",
+      "clip": "failed",
+      "durationMs": 1800,
+      "loop": false,
+      "next": "idle"
+    }
+  ],
+  "toneMap": {
+    "error": "failed",
+    "happy": "waving"
+  }
+}
