@@ -24,9 +24,10 @@ export function loadPetModelPreference(
 			return { modelId: raw.modelId };
 		}
 	} catch {
-		// 读取或解析失败：按未配置处理，回退默认鲸鱼。
+		// 读取或解析失败：按未配置处理。
 	}
-	return { modelId: "whale" };
+	// 未配置:交由 PackageManager 按资源清单 default 标记解析(标准 §1.2)。
+	return { modelId: "" };
 }
 
 export function savePetModelPreference(
