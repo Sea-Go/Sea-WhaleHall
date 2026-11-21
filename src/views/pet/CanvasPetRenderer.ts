@@ -1,5 +1,6 @@
 import type { PetMood, PetState } from "../../shared/contracts";
 import type { PetActionId } from "../../shared/pet-actions";
+import { petRenderObserver } from "./renderers/pet-render-observer";
 import { type AnimationContext, PetAnimator } from "./animations";
 import type {
 	PetAnchorId,
@@ -713,12 +714,15 @@ export class CanvasPetRenderer implements PetRenderer {
 	}
 
 	private readonly render = (now: number) => {
+		petRenderObserver.onFrameStart(now);
+		const renderStart = performance.now();
 		try {
 			this.drawFrame(now);
 		} catch (error) {
 			// 单帧异常不能杀死 rAF 循环：clearRect 之后抛错会让桌宠永久空白。
 			console.error("[pet] render frame failed", error);
 		}
+		petRenderObserver.onFrameEnd(performance.now(), renderStart);
 		this.animationFrame = requestAnimationFrame(this.render);
 	};
 

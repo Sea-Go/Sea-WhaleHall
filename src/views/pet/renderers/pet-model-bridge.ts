@@ -15,24 +15,29 @@ import type {
 	PetVector2,
 } from "../core/types";
 import type { PetPackDescriptor } from "../../../shared/contracts";
+import { petRenderObserver } from "./pet-render-observer";
 
 const imageCache = new Map<string, HTMLImageElement>();
 const pendingLoads = new Set<string>();
 
 function ensureImage(url: string, onReady?: () => void): void {
 	if (imageCache.has(url)) {
+		petRenderObserver.onImageHit();
 		onReady?.();
 		return;
 	}
 	if (pendingLoads.has(url)) return;
+	petRenderObserver.onImageMiss(url);
 	pendingLoads.add(url);
 	const image = new Image();
 	image.onload = () => {
+		petRenderObserver.onImageHit();
 		pendingLoads.delete(url);
 		imageCache.set(url, image);
 		onReady?.();
 	};
 	image.onerror = () => {
+		petRenderObserver.onImageError(url);
 		pendingLoads.delete(url);
 	};
 	image.src = url;
@@ -124,6 +129,7 @@ export class PetPackModelBridge implements PetModel {
 			);
 		}
 		const actionId = frame.action.id;
+		petRenderObserver.onActionSwitch(actionId, performance.now());
 		if (actionId !== this.lastActionId) {
 			this.lastActionId = actionId;
 			const first = this.frameUrlFor(actionId, 1);

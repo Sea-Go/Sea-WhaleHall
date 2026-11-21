@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { PetBehaviorController } from "./behavior";
 import { CanvasPetRenderer } from "./CanvasPetRenderer";
 import { PetPackModelBridge } from "./renderers/pet-model-bridge";
+import { petRenderObserver } from "./renderers/pet-render-observer";
 import { PetChatController } from "./chat";
 import { PetActivityFeedbackBubble } from "./PetActivityFeedbackBubble";
 import { PetDevDebugOverlay } from "./PetDevDebugOverlay";
@@ -110,7 +111,10 @@ export function PetApp() {
 		const unsubscribeNativeDrag = petApi.onNativeDrag((state) => {
 			if (!state.dragging) renderer.play("drop");
 		});
-		const handleVisibility = () => behavior.setPresent(!document.hidden);
+		const handleVisibility = () => {
+				petRenderObserver.onVisibilityChange(!document.hidden, performance.now());
+				behavior.setPresent(!document.hidden);
+			};
 		document.addEventListener("visibilitychange", handleVisibility);
 		const behaviorTimer = window.setTimeout(() => behavior.start(true), 900);
 		petApi.ready();
