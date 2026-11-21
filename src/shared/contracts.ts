@@ -166,6 +166,39 @@ export type {
 
 export type PetMood = "idle" | "happy" | "busy" | "error";
 
+/**
+ * 桌宠包描述符(《桌宠包标准 v1》):bun 侧 PetPackageManager 解析后
+ * 随状态下发,渲染器据此经适配器注册表实例化渲染。manifest/actions 为
+ * 包内三声明的运行时投影;assetBase 相对 pet 视图根。
+ */
+export type PetPackDescriptor = {
+	id: string;
+	label: string;
+	renderer: "sequence" | "live2d";
+	tier: "full" | "core";
+	assetBase: string;
+	canvas: { width: number; height: number; groundAnchorY: number };
+	sprite: { left: number; top: number };
+	fallbackAction: string;
+	hitZones: readonly {
+		id: "head" | "face" | "body" | "tail" | "limb";
+		cx: number;
+		cy: number;
+		rx: number;
+		ry: number;
+	}[];
+	summary: string;
+	actions: readonly {
+		id: string;
+		clip?: string;
+		motionGroup?: string;
+		durationMs: number;
+		loop: boolean;
+		next?: string;
+		facing?: -1 | 0 | 1;
+	}[];
+};
+
 /** Canonical, model-independent action identifier shared by every pet surface. */
 export type PetAnimationId = PetActionId;
 
@@ -173,8 +206,16 @@ export type PetState = {
 	mood: PetMood;
 	message: string;
 	action?: PetAnimationId;
-	/** Registry id resolved by the renderer; unknown ids safely fall back to whale. */
+	/** 包 id(由 PetPackageManager 清单解析;未知 id 走清单默认,无代码回退)。 */
 	modelId?: string;
+	/** 解析后的桌宠包描述符;渲染器据此创建适配器(标准 §6)。 */
+	pack?: PetPackDescriptor;
+	/**
+	 * dev 通道专属调试开关：true 时桌宠窗口叠加"活动区/对话区"调试框，
+	 * 可视化桌宠的可接触范围边界。仅由 Bun 侧按 runtimeChannel==="dev" 盖章，
+	 * 生产构建恒缺省，渲染器无需自行判定环境。
+	 */
+	debugOverlays?: boolean;
 	environment?: {
 		weather?: "clear" | "cloudy" | "rain" | "snow";
 		temperatureC?: number;
@@ -526,6 +567,20 @@ export type ClientRPC = {
 				params: { visible: boolean };
 				response: { visible: boolean };
 			};
+			setPetModel: {
+				params: { modelId: string };
+				response: {
+					modelId: string;
+					/** 全部可用包(动态清单,替代静态 PET_MODEL_CHOICES)。 */
+					packs: readonly { id: string; label: string; tier: "full" | "core" }[];
+				};
+			};
+			listPetPacks: {
+				params: Record<string, never>;
+				response: {
+					packs: readonly { id: string; label: string; tier: "full" | "core" }[];
+				};
+			};
 			presentPetEvent: {
 				params: PetPresentationEvent;
 				response: { accepted: boolean };
@@ -613,6 +668,8 @@ export type PetRPC = {
 		messages: {
 			setPetState: PetState;
 			nativeDragChanged: NativePetDragState;
+			/** 行为解释器直派播放(环境/例程/情绪动作,标准 §4/§7)。 */
+			playAction: { actionId: string };
 		};
 	}>;
 };

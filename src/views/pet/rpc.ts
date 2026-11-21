@@ -12,6 +12,8 @@ type PetStateListener = (state: PetState) => void;
 const listeners = new Set<PetStateListener>();
 type NativeDragListener = (state: NativePetDragState) => void;
 const nativeDragListeners = new Set<NativeDragListener>();
+type PlayActionListener = (actionId: string) => void;
+const playActionListeners = new Set<PlayActionListener>();
 type ActivityFeedbackListener = (
 	presentation: PetActivityFeedbackPresentation,
 ) => void;
@@ -63,6 +65,9 @@ const rpc = Electroview.defineRPC<PetChatRPC>({
 			nativeDragChanged: (state) => {
 				for (const listener of nativeDragListeners) listener(state);
 			},
+			playAction: ({ actionId }) => {
+				for (const listener of playActionListeners) listener(actionId);
+			},
 			presentActivityFeedback: (presentation) => {
 				for (const listener of activityFeedbackListeners) {
 					listener(presentation);
@@ -111,6 +116,10 @@ export const petApi = {
 	},
 	unready: () => setRendererMounted(false),
 	interacted: (event: PetInteractionMessage) => rpc.send.interacted(event),
+	onPlayAction(listener: PlayActionListener): () => void {
+		playActionListeners.add(listener);
+		return () => playActionListeners.delete(listener);
+	},
 	onState(listener: PetStateListener): () => void {
 		listeners.add(listener);
 		return () => listeners.delete(listener);

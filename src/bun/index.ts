@@ -148,6 +148,7 @@ import {
 	savePetModelPreference,
 } from "./pet-model-preference";
 import { isPetModelChoiceId } from "../shared/pet-actions";
+import { PetPackageManager, type PetPackage } from "./pet";
 import { RTWCloudToolsClient } from "./clients/product/rtw-cloud-tools-client";
 import { RTWProductSearchError } from "./clients/product/rtw-product-search-client";
 import {
@@ -262,6 +263,63 @@ const clientConfiguration = loadOrCreateClientConfiguration({
 });
 // 桌宠形象（皮肤）：Bun 侧持久化，PetState 下发链路统一盖章 modelId。
 let petModelId = loadPetModelPreference(Utils.paths.userData).modelId;
+
+// 桌宠包管理(《桌宠包标准 v1》):dev 扫仓库 pets/,生产另有用户数据
+// pets/;存储的形象 id 不在清单时按资源清单默认解析——代码零形象回退。
+const petPackageManager = new PetPackageManager({
+	scanDirs: [
+		join(import.meta.dir, "../../pets"),
+		join(Utils.paths.userData, "pets"),
+	],
+	assetBasePrefix: "petpacks/",
+	log: (message) => diag(`[pet-package] ${message}`),
+});
+await petPackageManager.scan().catch((error: unknown) => {
+	diag(`[pet-package] 扫描失败: ${String(error)}`);
+});
+if (petPackageManager.get(petModelId) === undefined) {
+	const resolvedDefault = petPackageManager.defaultPack()?.manifest.id;
+	if (resolvedDefault !== undefined && resolvedDefault !== petModelId) {
+		diag(
+			`[pet-package] 存储形象 ${petModelId} 不在清单,按资源默认切换为 ${resolvedDefault}`,
+		);
+		petModelId = resolvedDefault;
+		savePetModelPreference(Utils.paths.userData, petModelId);
+	}
+}
+
+/** 当前形象的包描述符(经 setPetState 下发,渲染器据此建适配器)。 */
+function currentPetPackDescriptor() {
+	const pack = petPackageManager.get(petModelId);
+	if (pack === undefined) return undefined;
+	return {
+		id: pack.manifest.id,
+		label: pack.manifest.label,
+		renderer: pack.manifest.renderer,
+		tier: pack.tier,
+		assetBase: pack.assetBase,
+		canvas: pack.manifest.canvas,
+		sprite: pack.manifest.sprite,
+		fallbackAction: pack.manifest.fallbackAction,
+		hitZones: pack.manifest.hitZones,
+		summary: pack.manifest.summary,
+		actions: pack.actions.actions,
+	};
+}
+
+function petPackSummaries(): readonly {
+	id: string;
+	label: string;
+	tier: "full" | "core";
+}[] {
+	return petPackageManager
+		.list()
+		.map((pack: PetPackage) => ({
+			id: pack.manifest.id,
+			label: pack.manifest.label,
+			tier: pack.tier as "full" | "core",
+		}));
+}
 if (clientConfiguration.status === "invalid") {
 	console.warn(
 		"WhaleHall client config.yaml is invalid; safe defaults remain active.",
@@ -1800,6 +1858,7 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		return { visible };
 	},
 	setPetModel: async ({ modelId }) => applyPetModelChoice(modelId),
+	listPetPacks: async () => ({ packs: petPackSummaries() }),
 	presentPetEvent: (event): { accepted: boolean } => {
 		petStateArbiter.showPresentationEvent(event);
 		return { accepted: true };
@@ -2261,7 +2320,7 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 				if (parsed.restore === true) {
 					// 无 UI 场景代行客户端启动时的会话恢复 RPC。
 					diag("[planning][e2e] restore session");
-					const result = await clientRequestHandlers.restoreAuthSession();
+					const result = await clientRequestHandlers.restoreAuthSession({});
 					diag(
 						`[planning][e2e] restore result kind=${result.kind} ok=${result.kind === "success"}`,
 					);
@@ -2554,6 +2613,7 @@ petStateArbiter = new PetStateArbiter((state) =>
 	petRPC.send.setPetState({
 		...state,
 		modelId: petModelId,
+		pack: currentPetPackDescriptor(),
 		// dev 通道专属：生产构建恒 false，桌宠窗口据此决定是否叠加
 		// "活动区/对话区"调试框（接触范围可视化）。
 		debugOverlays: runtimeChannel === "dev",
@@ -2563,17 +2623,20 @@ petStateArbiter = new PetStateArbiter((state) =>
 /** 应用一次桌宠形象选择：持久化 + 盖章 + 立即重发运行时状态。 */
 async function applyPetModelChoice(
 	modelId: string,
-): Promise<{ modelId: string }> {
-	if (!isPetModelChoiceId(modelId) || !petModelId) {
+): Promise<{
+	modelId: string;
+	packs: readonly { id: string; label: string; tier: "full" | "core" }[];
+}> {
+	if (petPackageManager.get(modelId) === undefined) {
 		throw new Error("未知的桌宠形象。");
 	}
 	if (modelId !== petModelId) {
 		petModelId = modelId;
 		savePetModelPreference(Utils.paths.userData, modelId);
 	}
-	// 立即以当前运行时状态重发，渲染器读到 modelId 后热切换形象。
+	// 立即以当前运行时状态重发，渲染器读到 pack 后热切换形象。
 	petStateArbiter.resetToRuntime(agent.getLocalStatus());
-	return { modelId };
+	return { modelId, packs: petPackSummaries() };
 }
 
 // 桌宠链路协议级 E2E 触发器：WHALEHALL_PET_E2E_TRIGGER=1 时消费

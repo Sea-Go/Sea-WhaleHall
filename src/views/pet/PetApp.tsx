@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { PetBehaviorController } from "./behavior";
 import { CanvasPetRenderer } from "./CanvasPetRenderer";
+import { PetPackModelBridge } from "./renderers/pet-model-bridge";
 import { PetChatController } from "./chat";
 import { PetActivityFeedbackBubble } from "./PetActivityFeedbackBubble";
+import { PetDevDebugOverlay } from "./PetDevDebugOverlay";
 import { PetChatPanel } from "./PetChatPanel";
 import { createPetChatPort, petApi } from "./rpc";
 
@@ -10,6 +12,10 @@ export function PetApp() {
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const [chatController, setChatController] =
 		useState<PetChatController | null>(null);
+	const [debugOverlays, setDebugOverlays] = useState(false);
+	const [petHovered, setPetHovered] = useState(false);
+	// dev 对话区调试框与气泡同隐同显：可见性由 PetChatPanel 上报。
+	const [chatVisible, setChatVisible] = useState(false);
 
 	// 必须先于 petApi.ready() 注册，Bun 会在 ready 时推送当前可用性；事件流
 	// 终身订阅（控制器内部按 requestId 过滤本面板的 turn）。
@@ -48,6 +54,12 @@ export function PetApp() {
 			model: "whale",
 			onInteract: (event) => {
 				behavior.markInteraction();
+				// 兼容模式显隐信号：悬停/拖拽桌宠即唤出对话气泡。
+				if (event.kind === "hover" || event.kind === "dragStart") {
+					setPetHovered(true);
+				} else if (event.kind === "hoverEnd") {
+					setPetHovered(false);
+				}
 				if (
 					event.kind === "hover" ||
 					event.kind === "pet" ||
@@ -70,7 +82,15 @@ export function PetApp() {
 		});
 		behavior.setEnabled(false);
 		renderer.mount(canvas);
+		let bridgedPackId = "";
 		const unsubscribeState = petApi.onState((state) => {
+			// dev 通道盖章的调试开关：true 时叠加"活动区/对话区"接触范围框。
+			setDebugOverlays(Boolean(state.debugOverlays));
+			// 包描述符(《桌宠包标准 v1》):经桥适配为模型,场景零改动热切换。
+			if (state.pack && state.pack.id !== bridgedPackId) {
+				bridgedPackId = state.pack.id;
+				renderer.setModel(new PetPackModelBridge(state.pack));
+			}
 			renderer.setState(state);
 			const stateAction = state.action ?? state.animation;
 			behavior.setEnabled(
@@ -99,8 +119,13 @@ export function PetApp() {
 	return (
 		<div className="pet-stage">
 			<canvas ref={canvasRef} aria-label="WhaleHall 可交互桌面伙伴" />
+			<PetDevDebugOverlay active={debugOverlays && chatVisible} />
 			<PetActivityFeedbackBubble />
-			<PetChatPanel controller={chatController} />
+			<PetChatPanel
+				controller={chatController}
+				petHovered={petHovered}
+				onVisibleChange={setChatVisible}
+			/>
 		</div>
 	);
 }
