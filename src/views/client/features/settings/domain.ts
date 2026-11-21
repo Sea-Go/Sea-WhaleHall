@@ -1,3 +1,8 @@
+import {
+	isPetModelChoiceId,
+	type PetModelChoiceId,
+} from "../../../../shared/pet-actions";
+
 export const SETTINGS_CATEGORY_IDS = [
 	"account",
 	"appearance",
@@ -48,6 +53,8 @@ export interface PreferenceValues {
 	pet: {
 		visible: boolean;
 		reactionsEnabled: boolean;
+		/** 桌宠形象（皮肤），registry 内的合法 id。 */
+		modelId: string;
 	};
 	notifications: {
 		enabled: boolean;
@@ -80,6 +87,7 @@ export function createDefaultPreferences(): PreferenceValues {
 		pet: {
 			visible: true,
 			reactionsEnabled: true,
+			modelId: "whale",
 		},
 		notifications: {
 			enabled: true,
@@ -129,6 +137,7 @@ export function preferenceValuesEqual(
 		left.appearance.reduceMotion === right.appearance.reduceMotion &&
 		left.pet.visible === right.pet.visible &&
 		left.pet.reactionsEnabled === right.pet.reactionsEnabled &&
+		left.pet.modelId === right.pet.modelId &&
 		left.notifications.enabled === right.notifications.enabled &&
 		left.notifications.planReminders === right.notifications.planReminders &&
 		left.notifications.weeklyReview === right.notifications.weeklyReview &&
@@ -186,6 +195,10 @@ function parsePreferenceValues(
 		return null;
 	}
 
+	// modelId 为增量字段：缺失或非法时回退默认鲸鱼，旧快照不被整体拒绝。
+	const petModelId: string = typeof pet.modelId === "string" && pet.modelId.length > 0
+			? pet.modelId
+			: "whale";
 	const theme = isAppearanceTheme(appearance.theme)
 		? appearance.theme
 		: allowLegacyTheme && appearance.theme === "ocean"
@@ -224,6 +237,7 @@ function parsePreferenceValues(
 		pet: {
 			visible: pet.visible,
 			reactionsEnabled: pet.reactionsEnabled,
+			modelId: petModelId,
 		},
 		notifications: {
 			enabled: notifications.enabled,

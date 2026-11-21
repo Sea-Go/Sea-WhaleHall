@@ -24,6 +24,7 @@ import {
 	hasAnyAgentReadPermission,
 } from "../../../../shared/agent-permissions";
 import { Button } from "../../shared/ui/Button";
+import { clientApi } from "../../rpc";
 import { ConfirmationDialog } from "../../shared/ui/ConfirmationDialog";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { PageHeader } from "../../shared/ui/PageHeader";
@@ -62,6 +63,11 @@ import {
 	SETTINGS_CATEGORY_LABELS,
 	type SettingsCategory,
 } from "./domain";
+import {
+	isPetModelChoiceId,
+	type PetModelChoiceId,
+	
+} from "../../../../shared/pet-actions";
 import type { PreferencesController } from "./PreferencesController";
 import "./SettingsPage.css";
 
@@ -551,6 +557,23 @@ function ThemePicker({
 }
 
 function PetSettings({ values, disabled, onUpdate }: SettingsPanelProps) {
+	// 动态包清单(《桌宠包标准 v1》):bun 侧 PetPackageManager 的运行时
+	// 投影;拉取失败时按单条默认回退,id 由 bun 终校验。
+	const [petPacks, setPetPacks] = useState<
+		readonly { id: string; label: string; tier: "full" | "core" }[]
+	>([]);
+	useEffect(() => {
+		let cancelled = false;
+		void clientApi
+			.listPetPacks()
+			.then((result) => {
+				if (!cancelled && result.packs.length > 0) setPetPacks(result.packs);
+			})
+			.catch(() => undefined);
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 	return (
 		<SettingsSection
 			eyebrow="桌宠"
@@ -569,6 +592,35 @@ function PetSettings({ values, disabled, onUpdate }: SettingsPanelProps) {
 							onUpdate("pet", { ...values.pet, visible: checked })
 						}
 					/>
+				}
+			/>
+			<SettingRow
+				title="桌宠形象"
+				description="切换桌宠的皮肤与配套动作表情，立即生效并保存在这台设备。"
+				control={
+					<label className="settings-select">
+						<span className="sr-only">桌宠形象</span>
+						<select
+							value={values.pet.modelId}
+							disabled={disabled}
+							onChange={(event) => {
+								const raw = event.currentTarget.value;
+								// 动态清单时代:id 由 bun 侧 PetPackageManager 终校验;
+								// 这里只透传用户选择。
+								onUpdate("pet", { ...values.pet, modelId: raw });
+							}}
+						>
+							{(petPacks.length > 0
+								? petPacks
+								: [{ id: "whale", label: "深海鲸", tier: "core" as const }]
+							).map((choice) => (
+								<option key={choice.id} value={choice.id}>
+									{choice.label}
+									{choice.tier === "core" ? "(精简)" : ""}
+								</option>
+							))}
+						</select>
+					</label>
 				}
 			/>
 			<SettingRow

@@ -14,8 +14,6 @@ import {
 	PET_ACTION_IDS,
 } from "../src/shared/pet-actions";
 import { CLIP_PLANS } from "../src/views/pet/skins/pet/clip-plans";
-// @ts-expect-error 迁移期读取旧皮肤常量(转换后本脚本与旧皮肤一并退役)。
-
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SKINS_ROOT = join(projectRoot, "src/views/pet/skins/pet");
 const PETS_ROOT = join(projectRoot, "pets");
