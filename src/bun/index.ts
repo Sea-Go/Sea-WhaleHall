@@ -267,7 +267,12 @@ let petModelId = loadPetModelPreference(Utils.paths.userData).modelId;
 // pets/;存储的形象 id 不在清单时按资源清单默认解析——代码零形象回退。
 const petPackageManager = new PetPackageManager({
 	scanDirs: [
+		// dev 构建从 app 包内运行,import.meta.dir 指向 build 产物;
+		// 仓库根的 pets/ 用环境变量兜底(electrobun dev 从仓库根启动)。
 		join(import.meta.dir, "../../pets"),
+		process.env.SEA_WHALEHALL_REPO_ROOT !== undefined
+			? join(process.env.SEA_WHALEHALL_REPO_ROOT, "pets")
+			: join(process.cwd(), "pets"),
 		join(Utils.paths.userData, "pets"),
 	],
 	assetBasePrefix: "petpacks/",
