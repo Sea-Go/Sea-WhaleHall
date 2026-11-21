@@ -1,6 +1,6 @@
 /**
  * Regression-calibration material for the native filesystem Skill at
- * skills/activity-reflection-analysis/SKILL.md. Production reflection calls
+ * src/agent/skills/activity-reflection-analysis/SKILL.md. Production reflection calls
  * must load that file through Mastra Agent Skills; this module is never
  * concatenated into a model prompt.
  */

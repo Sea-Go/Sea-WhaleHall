@@ -50,6 +50,8 @@ export interface CredentialHelperClientOptions {
 	timeoutMs?: number;
 	runner?: CredentialHelperRunner;
 	environment?: Readonly<Record<string, string>>;
+	/** 开发模式文件存储路径；设置后凭据写入该 JSON 文件而非系统钥匙串。 */
+	devStorePath?: string;
 }
 
 export class CredentialHelperError extends Error {
@@ -73,9 +75,11 @@ export class CredentialHelperClient
 {
 	private readonly runner: CredentialHelperRunner;
 	private readonly installationId: string;
+	private readonly devStorePath: string | null;
 
 	constructor(binaryPath: string, options: CredentialHelperClientOptions) {
 		validateComponent(options.installationId, "installationId");
+		this.devStorePath = options.devStorePath ?? null;
 		if (
 			options.timeoutMs !== undefined &&
 			(!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1)
@@ -204,9 +208,12 @@ export class CredentialHelperClient
 	}
 
 	private async request(
-		header: Readonly<Record<string, unknown>>,
+		baseHeader: Readonly<Record<string, unknown>>,
 		secret?: Uint8Array,
 	): Promise<HelperResponse> {
+		const header: Readonly<Record<string, unknown>> = this.devStorePath
+			? { ...baseHeader, devStorePath: this.devStorePath }
+			: baseHeader;
 		const headerBytes = new TextEncoder().encode(`${JSON.stringify(header)}\n`);
 		const input = new Uint8Array(
 			headerBytes.byteLength + (secret?.byteLength ?? 0),

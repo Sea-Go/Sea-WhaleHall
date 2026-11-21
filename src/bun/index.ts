@@ -147,7 +147,7 @@ import {
 	loadPetModelPreference,
 	savePetModelPreference,
 } from "./pet-model-preference";
-import { PetPackageManager, type PetPackage } from "./pet";
+import { PetPackageManager, StickerPackManager, type PetPackage } from "./pet";
 import { RTWCloudToolsClient } from "./clients/product/rtw-cloud-tools-client";
 import { RTWProductSearchError } from "./clients/product/rtw-product-search-client";
 import {
@@ -280,6 +280,23 @@ const petPackageManager = new PetPackageManager({
 });
 await petPackageManager.scan().catch((error: unknown) => {
 	diag(`[pet-package] 扫描失败: ${String(error)}`);
+});
+
+// 表情包管理(标准 §8):与形象解耦的第二类资源;命名空间动作
+// `@<packId>/<stickerId>` 经 playAction 下发,任何桌宠包可引用。
+const stickerPackManager = new StickerPackManager({
+	scanDirs: [
+		join(import.meta.dir, "../../stickers"),
+		process.env.SEA_WHALEHALL_REPO_ROOT !== undefined
+			? join(process.env.SEA_WHALEHALL_REPO_ROOT, "stickers")
+			: join(process.cwd(), "stickers"),
+		join(Utils.paths.userData, "stickers"),
+	],
+	assetBasePrefix: "petpacks/",
+	log: (message) => diag(`[sticker-pack] ${message}`),
+});
+await stickerPackManager.scan().catch((error: unknown) => {
+	diag(`[sticker-pack] 扫描失败: ${String(error)}`);
 });
 if (petPackageManager.get(petModelId) === undefined) {
 	const resolvedDefault = petPackageManager.defaultPack()?.manifest.id;
@@ -2689,7 +2706,29 @@ if (
 					modelId?: unknown;
 					email?: unknown;
 					password?: unknown;
+					playAction?: unknown;
 				};
+				if (typeof parsed.playAction === "string") {
+					// 动作/表情直派:命名空间引用由 StickerPackManager 解析,
+					// 命中则附带表情播放信息(标准 §7/§8 的同一播放通道)。
+					const sticker =
+						stickerPackManager.resolveReference(parsed.playAction);
+					petRPC.send.playAction({
+						actionId: parsed.playAction,
+						sticker:
+							sticker === undefined
+								? undefined
+								: {
+										packId: sticker.packId,
+										stickerId: sticker.entry.id,
+										durationMs: sticker.entry.durationMs,
+									},
+					});
+					diag(
+						`[pet][e2e] playAction ${parsed.playAction}${sticker === undefined ? "" : " (sticker)"}`,
+					);
+					return;
+				}
 				if (
 					typeof parsed.email === "string" &&
 					typeof parsed.password === "string"

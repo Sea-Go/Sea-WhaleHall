@@ -1,0 +1,4 @@
+interface:
+  display_name: "活动反思评分"
+  short_description: "按目标相关有效投入规则校准窗口分数、零分条件与累计语义"
+  default_prompt: "使用 $activity-reflection-scoring 审核活动反思的评分公式、零分边界、累计语义和评测用例。"

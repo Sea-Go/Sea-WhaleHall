@@ -1,0 +1,25 @@
+{
+  "schema": "whalehall.sticker-pack.v1",
+  "id": "test-memes",
+  "label": "测试表情包一号",
+  "version": "1.0.0",
+  "cover": "汗流浃背.gif",
+  "license": "测试夹具:仓库内 deepseek 皮肤 GIF 加工,同源授权",
+  "stickers": [
+    {
+      "id": "汗流浃背",
+      "file": "汗流浃背.gif",
+      "durationMs": 1220
+    },
+    {
+      "id": "疑惑",
+      "file": "疑惑.gif",
+      "durationMs": 700
+    },
+    {
+      "id": "笑死",
+      "file": "笑死.gif",
+      "durationMs": 1110
+    }
+  ]
+}

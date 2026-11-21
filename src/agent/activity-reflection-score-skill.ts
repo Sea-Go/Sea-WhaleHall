@@ -1,6 +1,6 @@
 /**
  * Calibration data for the native filesystem Skill at
- * skills/activity-reflection-scoring/SKILL.md. Production reflection calls
+ * src/agent/skills/activity-reflection-scoring/SKILL.md. Production reflection calls
  * load that Skill through Mastra and keep the returned model score authoritative;
  * this module is not a prompt-building fallback and does not recalculate scores.
  */

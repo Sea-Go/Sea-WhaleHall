@@ -753,7 +753,10 @@ export class CanvasPetRenderer implements PetRenderer {
 			this.drawFrame(now);
 		} catch (error) {
 			// 单帧异常不能杀死 rAF 循环：clearRect 之后抛错会让桌宠永久空白。
-			console.error("[pet] render frame failed", error);
+			console.error(
+				"[pet] render frame failed",
+				error instanceof Error ? `${error.message} @ ${error.stack?.split("\n")[1]?.trim() ?? ""}` : String(error),
+			);
 		}
 		petRenderObserver.onFrameEnd(performance.now(), renderStart);
 		this.scheduleFrame();

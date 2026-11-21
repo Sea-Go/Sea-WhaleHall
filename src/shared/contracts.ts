@@ -669,7 +669,15 @@ export type PetRPC = {
 			setPetState: PetState;
 			nativeDragChanged: NativePetDragState;
 			/** 行为解释器直派播放(环境/例程/情绪动作,标准 §4/§7)。 */
-			playAction: { actionId: string };
+			playAction: {
+				actionId: string;
+				/** 命中表情命名空间 `@<packId>/<stickerId>` 时由 Bun 侧解析附加(标准 §8)。 */
+				sticker?: {
+					packId: string;
+					stickerId: string;
+					durationMs: number;
+				};
+			};
 		};
 	}>;
 };

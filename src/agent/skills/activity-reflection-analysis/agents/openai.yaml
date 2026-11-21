@@ -1,0 +1,4 @@
+interface:
+  display_name: "活动反思分析"
+  short_description: "将封闭活动窗口聚合为可核对中文事件，并校准状态、证据与隐私边界"
+  default_prompt: "使用 $activity-reflection-analysis 将封闭活动窗口归纳为可核对的中文事件，并验证状态、证据、时间片与隐私边界。"

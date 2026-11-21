@@ -20,10 +20,14 @@ import { petRenderObserver } from "./pet-render-observer";
 const imageCache = new Map<string, HTMLImageElement>();
 const pendingLoads = new Set<string>();
 
-function ensureImage(url: string, onReady?: () => void): void {
+function ensureImage(
+	url: string,
+	onReady?: (image: HTMLImageElement) => void,
+): void {
 	if (imageCache.has(url)) {
 		petRenderObserver.onImageHit();
-		onReady?.();
+		const cached = imageCache.get(url);
+		if (cached !== undefined) onReady?.(cached);
 		return;
 	}
 	if (pendingLoads.has(url)) return;
@@ -34,7 +38,7 @@ function ensureImage(url: string, onReady?: () => void): void {
 		petRenderObserver.onImageHit();
 		pendingLoads.delete(url);
 		imageCache.set(url, image);
-		onReady?.();
+		onReady?.(image);
 	};
 	image.onerror = () => {
 		petRenderObserver.onImageError(url);
@@ -46,6 +50,8 @@ function ensureImage(url: string, onReady?: () => void): void {
 interface ClipIndexFile {
 	schema: "whalehall.pet-clip-index.v1";
 	clips: Record<string, number>;
+	/** 表情包专用:中文 sticker id → ASCII slug 目录(规避 views:// 中文路径悬挂)。 */
+	stickerDirs?: Record<string, string>;
 	fps?: number;
 }
 
@@ -61,6 +67,62 @@ export class PetPackModelBridge implements PetModel {
 	private lastActionId = "";
 	private lastImage: HTMLImageElement | null = null;
 	private prefetchedClips = new Set<string>();
+	/** 外部表情包的帧数索引缓存(packId → clipIndex)。 */
+	/** 表情播放模式(标准 §8):任意宽高比 GIF 帧等比缩放居中,时长截断。 */
+	private stickerPlayback: {
+		packId: string;
+		stickerId: string;
+		dir: string;
+		frames: number;
+		fps: number;
+		startedAt: number;
+		untilMs: number;
+		lastImage: HTMLImageElement | null;
+	} | null = null;
+
+	/** 播放表情包条目(命名空间动作经 Bun 解析后下发);播完自动回当前行为动作。 */
+	async playSticker(sticker: {
+		packId: string;
+		stickerId: string;
+		durationMs: number;
+	}): Promise<void> {
+		let dir = sticker.stickerId;
+		let frames = 1;
+		try {
+			const index = await this.foreignClipIndex(sticker.packId);
+			dir = index.stickerDirs?.[sticker.stickerId] ?? sticker.stickerId;
+			frames = Math.max(1, index.clips[dir] ?? 1);
+		} catch {
+			// 索引缺失按单帧兜底;构建管线保证其存在。
+		}
+		const fps = Math.min(
+			30,
+			Math.max(4, frames / Math.max(0.2, sticker.durationMs / 1000)),
+		);
+		const now = performance.now();
+		this.stickerPlayback = {
+			...sticker,
+			dir,
+			frames,
+			fps,
+			startedAt: now,
+			untilMs: now + sticker.durationMs,
+			lastImage: null,
+		};
+		this.onImageReady?.();
+	}
+
+	private foreignClipIndexes = new Map<string, ClipIndexFile>();
+
+	private async foreignClipIndex(packId: string): Promise<ClipIndexFile> {
+		const cached = this.foreignClipIndexes.get(packId);
+		if (cached !== undefined) return cached;
+		const response = await fetch(`petpacks/${packId}/clips.json`);
+		if (!response.ok) throw new Error(`clips.json unavailable for ${packId}`);
+		const index = (await response.json()) as ClipIndexFile;
+		this.foreignClipIndexes.set(packId, index);
+		return index;
+	}
 
 	/** 整段片段预热:动作首启时把该 clip 全部帧提交加载(本地小图,量有限),
 	 * 消除逐帧冷加载造成的逐帧空窗。 */
@@ -131,6 +193,10 @@ export class PetPackModelBridge implements PetModel {
 	}
 
 	draw(context: CanvasRenderingContext2D, frame: PetFrame): void {
+		if (this.stickerPlayback !== null) {
+			this.drawSticker(context);
+			return;
+		}
 		const actionId = frame.action.id;
 		petRenderObserver.onActionSwitch(actionId, performance.now());
 		if (actionId !== this.lastActionId) {
@@ -170,6 +236,64 @@ export class PetPackModelBridge implements PetModel {
 		const clip = this.clipFor(actionId);
 		if (clip === undefined) return undefined;
 		return `${this.pack.assetBase}${clip}/f_${String(index).padStart(2, "0")}.png`;
+	}
+
+	/** 表情渲染:等比缩放居中(letterbox)画进本包画布,时长到期回行为动作。 */
+	private drawSticker(context: CanvasRenderingContext2D): void {
+		const sticker = this.stickerPlayback;
+		if (sticker === null) return;
+		const now = performance.now();
+		if (now >= sticker.untilMs) {
+			this.stickerPlayback = null;
+			petRenderObserver.onActionSwitch(this.lastActionId || "idle", now);
+			return;
+		}
+		petRenderObserver.onActionSwitch(
+			`@${sticker.packId}/${sticker.stickerId}`,
+			now,
+		);
+		const elapsedSeconds = (now - sticker.startedAt) / 1000;
+		const frameIndex =
+			(Math.floor(elapsedSeconds * sticker.fps) % sticker.frames) + 1;
+		const url = `petpacks/${sticker.packId}/${sticker.dir}/f_${String(frameIndex).padStart(2, "0")}.png`;
+		const image = imageCache.get(url);
+		if (image === undefined) {
+			// 目标帧未就绪:提交加载,加载完成即"收养"为保持帧——加载速度
+			// 落后于播放步进时按住最近已加载的表情帧,绝不回退桌宠本体。
+			ensureImage(url, (loaded) => {
+				const current = this.stickerPlayback;
+				if (current !== null) current.lastImage = loaded;
+				this.onImageReady?.();
+			});
+			petRenderObserver.onSpriteBlank("sticker-loading");
+			const fallback = sticker.lastImage;
+			if (fallback === null) return;
+			this.drawLetterboxed(context, fallback);
+			return;
+		}
+		petRenderObserver.onSpriteBlank(null);
+		sticker.lastImage = image;
+		this.drawLetterboxed(context, image);
+	}
+
+	private drawLetterboxed(
+		context: CanvasRenderingContext2D,
+		image: HTMLImageElement,
+	): void {
+		const { canvas, sprite } = this.pack;
+		const scale = Math.min(
+			canvas.width / image.width,
+			canvas.height / image.height,
+		);
+		const width = image.width * scale;
+		const height = image.height * scale;
+		context.drawImage(
+			image,
+			sprite.left + (canvas.width - width) / 2,
+			sprite.top + (canvas.height - height) / 2,
+			width,
+			height,
+		);
 	}
 
 	hitTest(localPoint: PetVector2): PetHitZone | null {

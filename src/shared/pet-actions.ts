@@ -573,3 +573,23 @@ export const PET_FIRST_RELEASE_CHECKLIST = [
   readonly label: string;
   readonly actionIds: readonly PetActionId[];
 }[];
+
+/**
+ * 可替换的桌宠形象（皮肤）清单。PetModel 注册表（src/views/pet/models）按
+ * id 实现绘图适配器；设置页与 bun 侧校验共用这份清单，未知 id 在渲染器
+ * 内安全回退为默认鲸鱼。
+ */
+export const PET_MODEL_CHOICES = [
+	{ id: "whale", label: "深海鲸" },
+	{ id: "cat", label: "橘子猫" },
+	{ id: "deepseek", label: "DeepSeek 娘" },
+] as const satisfies readonly { readonly id: string; readonly label: string }[];
+
+export type PetModelChoiceId = (typeof PET_MODEL_CHOICES)[number]["id"];
+
+export function isPetModelChoiceId(value: unknown): value is PetModelChoiceId {
+	return (
+		typeof value === "string" &&
+		PET_MODEL_CHOICES.some((choice) => choice.id === value)
+	);
+}

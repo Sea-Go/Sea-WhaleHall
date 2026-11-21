@@ -115,33 +115,38 @@ export async function decodePetSkins(): Promise<void> {
 			const packDir = resolve(stickersRoot, packId);
 			const manifestPath = resolve(packDir, "stickers.json");
 			if (!existsSync(manifestPath)) continue;
-			const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-				stickers: { file: string }[];
-			};
-			const clipIndex: Record<string, number> = {};
-			for (const sticker of manifest.stickers) {
-				const name = sticker.file.replace(/\.gif$/, "");
-				const source = resolve(packDir, sticker.file);
-				const outputDirectory = resolve(outputRoot, packId, name);
-				rmSync(outputDirectory, { recursive: true, force: true });
-				mkdirSync(outputDirectory, { recursive: true });
-				const extraction = spawnSync("ffmpeg", [
-					"-hide_banner", "-loglevel", "error", "-y",
-					"-i", source,
-					resolve(outputDirectory, "f_%02d.png"),
-				]);
-				if (extraction.error !== undefined || extraction.status !== 0) {
-					throw new Error(`ffmpeg 解帧表情 ${packId}/${sticker.file} 失败。`);
+				const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+					stickers: { id: string; file: string }[];
+				};
+				// 目录名用 ASCII slug(st-NN):中文 sticker id 进 views:// 自定义协议
+				// 路径会悬挂(请求既不成功也不失败),素材布局必须 ASCII;中文 id
+				// 经 clips.json 的 stickerDirs 映射,命名空间动作仍用中文 id。
+				const clipIndex: Record<string, number> = {};
+				const stickerDirs: Record<string, string> = {};
+				for (const [index, sticker] of manifest.stickers.entries()) {
+					const name = `st-${String(index + 1).padStart(2, "0")}`;
+					stickerDirs[sticker.id] = name;
+					const source = resolve(packDir, sticker.file);
+					const outputDirectory = resolve(outputRoot, packId, name);
+					rmSync(outputDirectory, { recursive: true, force: true });
+					mkdirSync(outputDirectory, { recursive: true });
+					const extraction = spawnSync("ffmpeg", [
+						"-hide_banner", "-loglevel", "error", "-y",
+						"-i", source,
+						resolve(outputDirectory, "f_%02d.png"),
+					]);
+					if (extraction.error !== undefined || extraction.status !== 0) {
+						throw new Error(`ffmpeg 解帧表情 ${packId}/${sticker.file} 失败。`);
+					}
+					clipIndex[name] = readdirSync(outputDirectory).filter((n) =>
+						n.endsWith(".png"),
+					).length;
 				}
-				clipIndex[name] = readdirSync(outputDirectory).filter((n) =>
-					n.endsWith(".png"),
-				).length;
-			}
-			writeFileSync(
-				resolve(outputRoot, packId, "clips.json"),
-				`${JSON.stringify({ schema: "whalehall.pet-clip-index.v1", clips: clipIndex, fps: 16 }, null, 2)}\n`,
-			);
-			console.log(`[pet-packs] 表情包 ${packId}: ${manifest.stickers.length} 条 ✓`);
+				writeFileSync(
+					resolve(outputRoot, packId, "clips.json"),
+					`${JSON.stringify({ schema: "whalehall.pet-clip-index.v1", clips: clipIndex, stickerDirs, fps: 16 }, null, 2)}\n`,
+				);
+				console.log(`[pet-packs] 表情包 ${packId}: ${manifest.stickers.length} 条 ✓`);
 		}
 	}
 }

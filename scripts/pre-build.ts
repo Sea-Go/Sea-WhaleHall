@@ -1,5 +1,6 @@
 import { buildAgentHost } from "./build-agent-host";
 import { buildNative } from "./build-native";
+import { decodePetSkins } from "./decode-pet-skins";
 import { ensureElectrobunSignalForwarding } from "./electrobun-signal-forwarding";
 import { stageViewAssets } from "./stage-view-assets";
 
@@ -21,6 +22,8 @@ ensureElectrobunSignalForwarding();
 console.log("[prebuild] building React views");
 run(["bun", "x", "vite", "build"]);
 stageViewAssets();
+console.log("[prebuild] decoding pet skins (GIF → frames)");
+await decodePetSkins();
 console.log("[prebuild] building Rust child processes");
 buildNative();
 console.log("[prebuild] staging pinned Node and building local Mastra sidecar");
