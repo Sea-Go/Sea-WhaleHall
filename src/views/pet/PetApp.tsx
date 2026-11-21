@@ -50,8 +50,9 @@ export function PetApp() {
 		const canvas = canvasRef.current;
 		if (!canvas) return;
 		let behavior: PetBehaviorController;
+		// 形象一律来自 PetState.pack(《桌宠包标准 v1》):构造期不注入
+		// 任何形象,包描述符到达即经桥热切换——代码零形象知识。
 		const renderer = new CanvasPetRenderer({
-			model: "whale",
 			onInteract: (event) => {
 				behavior.markInteraction();
 				// 兼容模式显隐信号：悬停/拖拽桌宠即唤出对话气泡。

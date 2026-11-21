@@ -612,11 +612,11 @@ function PetSettings({ values, disabled, onUpdate }: SettingsPanelProps) {
 						>
 							{(petPacks.length > 0
 								? petPacks
-								: [{ id: "whale", label: "深海鲸", tier: "core" as const }]
+								: [{ id: "", label: "正在读取桌宠清单…", tier: "core" as const }]
 							).map((choice) => (
-								<option key={choice.id} value={choice.id}>
+								<option key={choice.id || "loading"} value={choice.id}>
 									{choice.label}
-									{choice.tier === "core" ? "(精简)" : ""}
+									{choice.tier === "core" && choice.id ? "(精简)" : ""}
 								</option>
 							))}
 						</select>
