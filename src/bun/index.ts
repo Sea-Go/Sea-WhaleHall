@@ -147,7 +147,6 @@ import {
 	loadPetModelPreference,
 	savePetModelPreference,
 } from "./pet-model-preference";
-import { isPetModelChoiceId } from "../shared/pet-actions";
 import { PetPackageManager, type PetPackage } from "./pet";
 import { RTWCloudToolsClient } from "./clients/product/rtw-cloud-tools-client";
 import { RTWProductSearchError } from "./clients/product/rtw-product-search-client";

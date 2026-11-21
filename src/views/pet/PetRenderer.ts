@@ -1,15 +1,12 @@
 /**
  * Compatibility entry point.
  *
- * New code should import CanvasPetRenderer and a model from CanvasPetRenderer
- * or models/registry. The historical CanvasWhaleRenderer name remains available
- * for the production React view while model selection is wired through RPC.
+ * New code should import CanvasPetRenderer directly and inject a PetModel
+ * (e.g. PetPackModelBridge from renderers/pet-model-bridge). Model selection
+ * arrives via PetState.pack from the Bun package manager.
  */
 export {
   CanvasPetRenderer,
-  CanvasWhaleRenderer,
-  CAT_MODEL,
-  WHALE_MODEL,
   type CanvasPetRendererOptions,
   type PetInteractionEvent,
   type PetInteractionKind,

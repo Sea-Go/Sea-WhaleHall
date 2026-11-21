@@ -10,7 +10,6 @@ import type {
 	PetProp,
 	PetVector2,
 } from "./core/types";
-import { CAT_MODEL, getPetModel, WHALE_MODEL } from "./models/registry";
 import {
 	canvasPointToLocal,
 	clamp,
@@ -72,7 +71,7 @@ const EMPTY_MODEL: PetModel = {
 };
 
 export interface CanvasPetRendererOptions {
-	model?: PetModel | string;
+	model?: PetModel;
 	onInteract?: (event: PetInteractionEvent) => void;
 	onFrame?: (snapshot: PetRenderSnapshot) => void;
 }
@@ -215,10 +214,7 @@ export class CanvasPetRenderer implements PetRenderer {
 	constructor(options: CanvasPetRendererOptions = {}) {
 		// 形象由 PetState.pack 经 PetPackModelBridge 注入(标准 v1);
 		// 构造期未提供时使用占位空模型,首帧 setModel 前不绘制形象。
-		this.model =
-			typeof options.model === "string"
-				? getPetModel(options.model)
-				: (options.model ?? EMPTY_MODEL);
+		this.model = options.model ?? EMPTY_MODEL;
 		this.onInteract = options.onInteract;
 		this.onFrame = options.onFrame;
 	}
@@ -253,8 +249,8 @@ export class CanvasPetRenderer implements PetRenderer {
 
 	setState(state: PetState): void {
 		this.state = state;
-		const extended = state as ExtendedPetState;
-		if (extended.modelId) this.setModel(extended.modelId);
+		// 模型注入唯一入口是 setModel(PetModel):PetApp 依据 state.pack
+		// 经 PetPackModelBridge 注入(标准 v1),此处不消费 modelId 字符串。
 		this.applyStateAnimation(state);
 	}
 
@@ -288,8 +284,8 @@ export class CanvasPetRenderer implements PetRenderer {
 		);
 	}
 
-	setModel(model: PetModel | string): void {
-		const nextModel = typeof model === "string" ? getPetModel(model) : model;
+	setModel(model: PetModel): void {
+		const nextModel = model;
 		if (nextModel === this.model) return;
 		this.model = nextModel;
 		this.hoverZone = null;
@@ -1412,16 +1408,4 @@ export class CanvasPetRenderer implements PetRenderer {
 	}
 }
 
-/** Production-compatible default while callers migrate to model selection. */
-export class CanvasWhaleRenderer extends CanvasPetRenderer {
-	constructor(onInteract: () => void) {
-		super({
-			model: WHALE_MODEL,
-			onInteract: (event) => {
-				if (event.kind === "click") onInteract();
-			},
-		});
-	}
-}
 
-export { CAT_MODEL, WHALE_MODEL };
