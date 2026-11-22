@@ -932,10 +932,12 @@ export class CanvasPetRenderer implements PetRenderer {
 		context.strokeRect(rect.x, rect.y, rect.width, rect.height);
 		context.setLineDash([]);
 		context.font = "700 9px ui-sans-serif, system-ui, sans-serif";
+		// 标签不截断:pill 宽度按实测文本自适应,"活动区 192×208" 必须完整可读。
 		const label = `活动区 ${Math.round(rect.width)}×${Math.round(rect.height)}`;
 		const textWidth = context.measureText(label).width;
 		const pillX = rect.x + 4;
-		const pillY = rect.height >= 20 ? rect.y + 3 : Math.max(2, rect.y - 18);
+		// 标签放框外上方:框内左上角会被角色发丝遮挡("208" 被盖读作截断)。
+		const pillY = Math.max(2, rect.y - 18);
 		const pillW = textWidth + 12;
 		const pillH = 15;
 		context.fillStyle = "rgba(83, 200, 216, 0.78)";
@@ -968,9 +970,11 @@ export class CanvasPetRenderer implements PetRenderer {
 		const centerY =
 			origin.y + ground.y * frame.root.scaleY + frame.shadow.offsetY;
 		const radiusX = Math.max(45, width * 0.36) * frame.shadow.scaleX;
-		const radiusY = 14 * frame.shadow.scaleY;
+		// 阴影主体收在活动区内:立足线即框底,半径 9 + 上移 3 让下缘
+		// 只越线 ~6px(此前 ry14 满越 14px,读作"框没框住脚下")。
+		const radiusY = 9 * frame.shadow.scaleY;
 		context.save();
-		context.translate(centerX, centerY);
+		context.translate(centerX, centerY - 3);
 		const gradient = context.createRadialGradient(0, 0, 4, 0, 0, radiusX);
 		gradient.addColorStop(
 			0,

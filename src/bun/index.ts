@@ -2912,6 +2912,9 @@ petWindow = new BrowserWindow({
 	// Electrobun 1.18 applies passthrough to the whole WebView, so interactive pets
 	// must keep it disabled in order to receive hover and click pointer events.
 	passthrough: false,
+		// 桌宠窗口尺寸由默认包画布推导(自适应),不允许手动拖拽——
+		// 无边框透明窗被拖动边缘会塌缩(实测塌到 25px),框/精灵/面板全错位。
+		styleMask: { Resizable: false },
 	renderer: process.platform === "linux" ? "cef" : "native",
 	activate: false,
 	frame: {
