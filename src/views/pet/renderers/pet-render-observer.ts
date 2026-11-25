@@ -19,6 +19,8 @@ export interface PetRenderMetrics {
 	maxRenderMs: number;
 	/** 最近 60 帧平均帧间隔(ms)。 */
 	avgFrameIntervalMs: number;
+	/** rAF 刷新节拍(Hz):渲染帧率的上限来源,用于区分"系统没给刷新"与"节流丢帧"。 */
+	rafHz: number;
 	/** 图片加载:成功/失败/未命中缓存计数。 */
 	imageLoads: { hit: number; miss: number; error: number };
 	/** 动作切换计数(频繁切换=闪烁风险)。 */
@@ -55,6 +57,8 @@ export class PetRenderObserver {
 	private renderTimes: number[] = [];
 	private frameIntervals: number[] = [];
 	private lastFrameAt = 0;
+	private tickIntervals: number[] = [];
+	private lastTickAt = 0;
 	private imageHits = 0;
 	private imageMisses = 0;
 	private imageErrors = 0;
@@ -84,6 +88,15 @@ export class PetRenderObserver {
 			}
 		}
 		this.lastFrameAt = now;
+	}
+
+	/** rAF 回调节拍(不论是否真的渲染):刷新机会的来源。 */
+	onTick(now: number): void {
+		if (this.lastTickAt > 0) {
+			this.tickIntervals.push(now - this.lastTickAt);
+			if (this.tickIntervals.length > RENDER_WINDOW) this.tickIntervals.shift();
+		}
+		this.lastTickAt = now;
 	}
 
 	/** 渲染帧结束:记录耗时。 */
@@ -164,6 +177,27 @@ export class PetRenderObserver {
 		}
 	}
 
+	/**
+	 * 表情播放完成对账(标准 §8):帧覆盖、按住次数、计时/墙钟与素材时长。
+	 * 缺帧只可能来自显示刷新率低于素材帧率(自然丢帧)或加载按住。
+	 */
+	onStickerFinished(info: {
+		ref: string;
+		frames: number;
+		shown: number;
+		starvedTicks: number;
+		clockMs: number;
+		wallMs: number;
+		durationMs: number;
+	}): void {
+		const line =
+			`[pet-obs] sticker ${info.ref} | 显示 ${info.shown}/${info.frames} 帧` +
+			` | 按住 ${info.starvedTicks} 次 | 计时 ${Math.round(info.clockMs)}ms` +
+			` / 墙钟 ${Math.round(info.wallMs)}ms(素材 ${info.durationMs}ms)`;
+		if (info.clockMs + 1 < info.durationMs || info.shown === 0) console.warn(line);
+		else console.log(line);
+	}
+
 	/** 窗口可见性变化。 */
 	onVisibilityChange(visible: boolean, now: number): void {
 		this.visibilityChanges++;
@@ -184,6 +218,7 @@ export class PetRenderObserver {
 			avgRenderMs: Number(avg(this.renderTimes).toFixed(2)),
 			maxRenderMs: Number(max(this.renderTimes).toFixed(2)),
 			avgFrameIntervalMs: Number(avg(this.frameIntervals).toFixed(2)),
+			rafHz: Number((1000 / (avg(this.tickIntervals) || 1000)).toFixed(1)),
 			imageLoads: {
 				hit: this.imageHits,
 				miss: this.imageMisses,
@@ -215,7 +250,7 @@ export class PetRenderObserver {
 				: "0";
 
 		const summary =
-			`[pet-obs] ${uptime}s | fps=${fps} | drops=${snap.framesDropped}(${dropRate}%) ` +
+			`[pet-obs] ${uptime}s | fps=${fps} raf=${snap.rafHz}Hz | drops=${snap.framesDropped}(${dropRate}%) ` +
 			`| render=${snap.avgRenderMs}ms(max ${snap.maxRenderMs}) ` +
 			`| img(hit=${snap.imageLoads.hit}/miss=${snap.imageLoads.miss}/err=${snap.imageLoads.error}) ` +
 			`| switches=${snap.actionSwitches} | blanks=${snap.spriteBlanks.count}(${snap.spriteBlanks.totalMs}ms) ` +

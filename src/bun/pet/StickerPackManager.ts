@@ -24,9 +24,6 @@ export interface StickerPackManagerOptions {
 	log?: (message: string) => void;
 }
 
-const MAX_GIF_BYTES = 2 * 1024 * 1024;
-const MAX_PACK_BYTES = 50 * 1024 * 1024;
-
 async function pathExists(path: string): Promise<boolean> {
 	try {
 		await stat(path);
@@ -69,29 +66,24 @@ export class StickerPackManager {
 						);
 						continue;
 					}
-					// 存在性与大小上限校验(标准 §8)。
-					let packBytes = 0;
-					let sizeOk = true;
+					// 素材存在性校验(标准 §8):清单引用的文件必须真实存在。
+					// 不按 GIF 字节数设限——运行时只加载解帧后的 PNG,从不读 GIF
+					// 原件,文件大小不构成任何运行时代价;按字节拦截只会误伤
+					// 正常的高帧率/大尺寸表情(真实的解帧成本在构建解码处把关)。
+					let complete = true;
 					for (const sticker of result.pack.stickers) {
-						const filePath = join(packDir, sticker.file);
-						const info = await stat(filePath).catch(() => undefined);
+						const info = await stat(join(packDir, sticker.file)).catch(
+							() => undefined,
+						);
 						if (info === undefined) {
 							this.options.log?.(
 								`[sticker-pack] ${dirName}: 素材缺失 ${sticker.file},剔除`,
 							);
-							sizeOk = false;
+							complete = false;
 							break;
 						}
-						if (info.size > MAX_GIF_BYTES) {
-							this.options.log?.(
-								`[sticker-pack] ${dirName}: ${sticker.file} 超过 2MB 上限,剔除`,
-							);
-							sizeOk = false;
-							break;
-						}
-						packBytes += info.size;
 					}
-					if (!sizeOk || packBytes > MAX_PACK_BYTES) continue;
+					if (!complete) continue;
 					this.packs.set(dirName, result.pack);
 				} catch (error) {
 					this.options.log?.(

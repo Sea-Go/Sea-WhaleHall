@@ -224,6 +224,8 @@ export class CanvasPetRenderer implements PetRenderer {
 		if (!this.context) throw new Error("Canvas 2D context is unavailable.");
 		this.startedAt = performance.now();
 		this.lastFrameAt = this.startedAt;
+		this.lastTickAt = this.startedAt;
+		this.frameDebt = CanvasPetRenderer.MIN_FRAME_INTERVAL_MS;
 		this.reducedMotion =
 			window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 		this.animator = new PetAnimator(this.reducedMotion);
@@ -329,6 +331,8 @@ export class CanvasPetRenderer implements PetRenderer {
 	dispose(): void {
 		if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
 		this.framePending = false;
+		this.lastTickAt = 0;
+		this.frameDebt = 0;
 		window.removeEventListener("resize", this.resize);
 		this.canvas?.removeEventListener("pointermove", this.handlePointerMove);
 		this.canvas?.removeEventListener("pointerleave", this.handlePointerLeave);
@@ -721,7 +725,8 @@ export class CanvasPetRenderer implements PetRenderer {
 		else delete this.canvas.dataset.hitZone;
 	}
 
-	private lastThrottledAt = 0;
+	private lastTickAt = 0;
+	private frameDebt = 0;
 	private framePending = false;
 	private static readonly MIN_FRAME_INTERVAL_MS = 1000 / 60; // 60fps 上限
 
@@ -740,13 +745,22 @@ export class CanvasPetRenderer implements PetRenderer {
 	private readonly render = (now: number) => {
 		this.framePending = false;
 		if (!this.canvas) return;
-		// 帧率节流:rAF 在高刷屏上可达 120fps+,动画计时以 60fps 校准,
-		// 超速渲染导致 GIF 帧快速循环→视觉闪烁。跳过不足间隔的帧。
-		if (now - this.lastThrottledAt < CanvasPetRenderer.MIN_FRAME_INTERVAL_MS) {
+		petRenderObserver.onTick(now);
+		// 帧率上限 60fps(素材与动画计时都不超过 60,更高刷新只是重复绘制):
+		// 按自上次渲染以来累计的时间判定,到点即渲染并扣掉一个间隔,欠账至多
+		// 保留一个间隔(卡顿后不连发补帧)。不能用"距上一帧 ≥ 间隔"的硬门槛
+		// ——rAF 节拍与目标间隔同量级(60Hz)时,时间戳抖动会把约 1/3 的刷新
+		// 误判为太早而丢弃(实测 raf=60Hz 只渲染出 40fps)。
+		this.frameDebt += Math.min(100, Math.max(0, now - this.lastTickAt));
+		this.lastTickAt = now;
+		if (this.frameDebt + 1 < CanvasPetRenderer.MIN_FRAME_INTERVAL_MS) {
 			this.scheduleFrame();
 			return;
 		}
-		this.lastThrottledAt = now;
+		this.frameDebt = Math.min(
+			this.frameDebt - CanvasPetRenderer.MIN_FRAME_INTERVAL_MS,
+			CanvasPetRenderer.MIN_FRAME_INTERVAL_MS,
+		);
 		petRenderObserver.onFrameStart(now);
 		const renderStart = performance.now();
 		try {

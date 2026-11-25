@@ -17,6 +17,9 @@ import type {
 import type { PetPackDescriptor } from "../../../shared/contracts";
 import { petRenderObserver } from "./pet-render-observer";
 
+/** 表情卡死保护:超过时长这么久仍未播完即释放桌宠。 */
+const STICKER_STALL_LIMIT_MS = 2_000;
+
 const imageCache = new Map<string, HTMLImageElement>();
 const pendingLoads = new Set<string>();
 
@@ -67,20 +70,36 @@ export class PetPackModelBridge implements PetModel {
 	private lastActionId = "";
 	private lastImage: HTMLImageElement | null = null;
 	private prefetchedClips = new Set<string>();
-	/** 外部表情包的帧数索引缓存(packId → clipIndex)。 */
-	/** 表情播放模式(标准 §8):任意宽高比 GIF 帧等比缩放居中,时长截断。 */
+	/**
+	 * 表情播放态(标准 §8):任意宽高比 GIF 帧等比缩放居中。播放头只在
+	 * 目标帧就绪的刷新间隔内推进——加载延迟既不吃表情时长,也不会空窗。
+	 */
 	private stickerPlayback: {
 		packId: string;
 		stickerId: string;
 		dir: string;
 		frames: number;
-		fps: number;
+		frameIntervalMs: number;
+		durationMs: number;
+		/** 起表时刻(墙钟),仅用于卡死保护。 */
 		startedAt: number;
-		untilMs: number;
-		lastImage: HTMLImageElement | null;
+		lastTickAt: number;
+		/** 已播放时长(ms):只在目标帧就绪的刷新间隔内累加。 */
+		playheadMs: number;
+		starved: boolean;
+		hold: HTMLImageElement | null;
+		/** 对账:实际显示过的帧号、按住旧帧的刷新次数。 */
+		shown: Set<number>;
+		starvedTicks: number;
 	} | null = null;
+	/** 连发时后到的表情优先:令牌不匹配的旧请求不再切入。 */
+	private stickerRequest = 0;
+	private foreignClipIndexes = new Map<string, ClipIndexFile>();
 
-	/** 播放表情包条目(命名空间动作经 Bun 解析后下发);播完自动回当前行为动作。 */
+	/**
+	 * 播放表情包条目(命名空间动作经 Bun 解析后下发);播满时长自动回到
+	 * 当前行为动作。
+	 */
 	async playSticker(sticker: {
 		packId: string;
 		stickerId: string;
@@ -95,24 +114,36 @@ export class PetPackModelBridge implements PetModel {
 		} catch {
 			// 索引缺失按单帧兜底;构建管线保证其存在。
 		}
-		const fps = Math.min(
-			30,
-			Math.max(4, frames / Math.max(0.2, sticker.durationMs / 1000)),
-		);
-		const now = performance.now();
-		this.stickerPlayback = {
-			...sticker,
-			dir,
-			frames,
-			fps,
-			startedAt: now,
-			untilMs: now + sticker.durationMs,
-			lastImage: null,
-		};
-		this.onImageReady?.();
+		const frameUrl = (index: number): string =>
+			this.stickerFrameUrl(sticker.packId, dir, index);
+		// 首帧就绪才切入表情模式并起表:此前桌宠照常绘制,加载延迟不产生
+		// 空窗、也不吞掉短表情的时长。其余帧整段预热。
+		const request = ++this.stickerRequest;
+		ensureImage(frameUrl(1), () => {
+			if (request !== this.stickerRequest) return;
+			const now = performance.now();
+			const durationMs = Math.max(1, sticker.durationMs);
+			this.stickerPlayback = {
+				packId: sticker.packId,
+				stickerId: sticker.stickerId,
+				dir,
+				frames,
+				// 素材原生节拍(时长/解帧数),不设帧率上限:高帧率表情由显示
+				// 刷新自然丢帧,节拍与时长保持原样(钳到 30fps 会截掉尾部帧)。
+				frameIntervalMs: durationMs / frames,
+				durationMs,
+				startedAt: now,
+				lastTickAt: now,
+				playheadMs: 0,
+				starved: false,
+				hold: null,
+				shown: new Set(),
+				starvedTicks: 0,
+			};
+			this.onImageReady?.();
+		});
+		for (let index = 2; index <= frames; index += 1) ensureImage(frameUrl(index));
 	}
-
-	private foreignClipIndexes = new Map<string, ClipIndexFile>();
 
 	private async foreignClipIndex(packId: string): Promise<ClipIndexFile> {
 		const cached = this.foreignClipIndexes.get(packId);
@@ -194,8 +225,19 @@ export class PetPackModelBridge implements PetModel {
 
 	draw(context: CanvasRenderingContext2D, frame: PetFrame): void {
 		if (this.stickerPlayback !== null) {
-			this.drawSticker(context);
-			return;
+			// 表情是独立素材:抵消场景的朝向镜像/按压形变/旋转(带文字的
+			// 表情不能跟着桌宠翻面),只保留位置偏移。
+			context.save();
+			const scaleX = frame.root.scaleX * frame.root.facingX;
+			const scaleY = frame.root.scaleY;
+			if (scaleX !== 0 && scaleY !== 0) {
+				context.scale(1 / scaleX, 1 / scaleY);
+				context.rotate(-frame.root.rotation);
+			}
+			// 表情播放中画表情;播满时长的这次刷新直接落回行为动作,同帧不空窗。
+			const playing = this.drawSticker(context);
+			context.restore();
+			if (playing) return;
 		}
 		const actionId = frame.action.id;
 		petRenderObserver.onActionSwitch(actionId, performance.now());
@@ -238,42 +280,70 @@ export class PetPackModelBridge implements PetModel {
 		return `${this.pack.assetBase}${clip}/f_${String(index).padStart(2, "0")}.png`;
 	}
 
-	/** 表情渲染:等比缩放居中(letterbox)画进本包画布,时长到期回行为动作。 */
-	private drawSticker(context: CanvasRenderingContext2D): void {
+	private stickerFrameUrl(packId: string, dir: string, index: number): string {
+		return `petpacks/${packId}/${dir}/f_${String(index).padStart(2, "0")}.png`;
+	}
+
+	/**
+	 * 表情渲染:等比缩放居中(letterbox)画进本包画布。返回 false 表示表情
+	 * 已播完,调用方在这次刷新继续画行为动作。
+	 */
+	private drawSticker(context: CanvasRenderingContext2D): boolean {
 		const sticker = this.stickerPlayback;
-		if (sticker === null) return;
+		if (sticker === null) return false;
 		const now = performance.now();
-		if (now >= sticker.untilMs) {
-			this.stickerPlayback = null;
-			petRenderObserver.onActionSwitch(this.lastActionId || "idle", now);
-			return;
+		// 卡死保护:素材帧缺失或加载停滞时不让表情占住桌宠。
+		if (now - sticker.startedAt > sticker.durationMs + STICKER_STALL_LIMIT_MS) {
+			this.finishSticker(now);
+			return false;
+		}
+		// 上个刷新间隔里显示的是就绪帧才计时;按住旧帧的间隔不计入时长。
+		const delta = Math.min(100, Math.max(0, now - sticker.lastTickAt));
+		sticker.lastTickAt = now;
+		if (!sticker.starved) sticker.playheadMs += delta;
+		const frameIndex =
+			Math.floor(sticker.playheadMs / sticker.frameIntervalMs) + 1;
+		if (frameIndex > sticker.frames) {
+			this.finishSticker(now);
+			return false;
 		}
 		petRenderObserver.onActionSwitch(
 			`@${sticker.packId}/${sticker.stickerId}`,
 			now,
 		);
-		const elapsedSeconds = (now - sticker.startedAt) / 1000;
-		const frameIndex =
-			(Math.floor(elapsedSeconds * sticker.fps) % sticker.frames) + 1;
-		const url = `petpacks/${sticker.packId}/${sticker.dir}/f_${String(frameIndex).padStart(2, "0")}.png`;
+		const url = this.stickerFrameUrl(sticker.packId, sticker.dir, frameIndex);
 		const image = imageCache.get(url);
 		if (image === undefined) {
-			// 目标帧未就绪:提交加载,加载完成即"收养"为保持帧——加载速度
-			// 落后于播放步进时按住最近已加载的表情帧,绝不回退桌宠本体。
-			ensureImage(url, (loaded) => {
-				const current = this.stickerPlayback;
-				if (current !== null) current.lastImage = loaded;
-				this.onImageReady?.();
-			});
-			petRenderObserver.onSpriteBlank("sticker-loading");
-			const fallback = sticker.lastImage;
-			if (fallback === null) return;
-			this.drawLetterboxed(context, fallback);
-			return;
+			// 目标帧未就绪:按住上一帧且播放头暂停,绝不空窗。
+			ensureImage(url, () => this.onImageReady?.());
+			sticker.starvedTicks += 1;
+			sticker.starved = true;
+			if (sticker.hold !== null) this.drawLetterboxed(context, sticker.hold);
+			return true;
 		}
 		petRenderObserver.onSpriteBlank(null);
-		sticker.lastImage = image;
+		sticker.starved = false;
+		sticker.hold = image;
+		sticker.shown.add(frameIndex);
 		this.drawLetterboxed(context, image);
+		return true;
+	}
+
+	private finishSticker(now: number): void {
+		const sticker = this.stickerPlayback;
+		this.stickerPlayback = null;
+		if (sticker !== null) {
+			petRenderObserver.onStickerFinished({
+				ref: `@${sticker.packId}/${sticker.stickerId}`,
+				frames: sticker.frames,
+				shown: sticker.shown.size,
+				starvedTicks: sticker.starvedTicks,
+				clockMs: sticker.playheadMs,
+				wallMs: now - sticker.startedAt,
+				durationMs: sticker.durationMs,
+			});
+		}
+		petRenderObserver.onActionSwitch(this.lastActionId || "idle", now);
 	}
 
 	private drawLetterboxed(

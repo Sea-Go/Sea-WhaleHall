@@ -269,6 +269,44 @@ describe("StickerPackManager", () => {
 		expect(manager.resolveReference("idle")).toBeUndefined();
 		await rm(root, { recursive: true, force: true });
 	});
+
+	test("不按 GIF 字节数拦截;素材缺失的包才剔除", async () => {
+		const root = join(tmpdir(), `stk-size-${Date.now()}`);
+		const manifest = (id: string): string =>
+			JSON.stringify({
+				schema: "whalehall.sticker-pack.v1",
+				id,
+				label: "夹具表情包",
+				version: "1.0.0",
+				cover: "big.gif",
+				license: "fixture",
+				stickers: [{ id: "大图", file: "big.gif", durationMs: 1000 }],
+			});
+		const bigDir = join(root, "stickers", "bigpack");
+		await mkdir(bigDir, { recursive: true });
+		await writeFile(join(bigDir, "stickers.json"), manifest("bigpack"));
+		// 运行时只加载解帧 PNG、从不读 GIF 原件:素材存在即入册,与体积无关。
+		await writeFile(join(bigDir, "big.gif"), Buffer.alloc(6 * 1024 * 1024));
+		const brokenDir = join(root, "stickers", "brokenpack");
+		await mkdir(brokenDir, { recursive: true });
+		await writeFile(join(brokenDir, "stickers.json"), manifest("brokenpack"));
+		const diagnostics: string[] = [];
+		const manager = new StickerPackManager({
+			scanDirs: [join(root, "stickers")],
+			assetBasePrefix: "petpacks/",
+			log: (message) => diagnostics.push(message),
+		});
+		await manager.scan();
+		expect(manager.resolveReference("@bigpack/大图")).toBeDefined();
+		expect(manager.resolveReference("@brokenpack/大图")).toBeUndefined();
+		expect(
+			diagnostics.some(
+				(message) =>
+					message.includes("brokenpack") && message.includes("素材缺失"),
+			),
+		).toBe(true);
+		await rm(root, { recursive: true, force: true });
+	});
 });
 
 describe("PetBehaviorInterpreter", () => {
