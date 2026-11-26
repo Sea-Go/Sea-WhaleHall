@@ -200,6 +200,7 @@ import { PetActivityFeedbackDelivery } from "./pet-activity-feedback-delivery";
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { PlanningAuthorityService } from "./planning-authority-service";
+import { PlanningGoalReconciler } from "./planning-goal-reconciler";
 import { WhaleHallPlanningRuntime } from "./planning-runtime";
 import { PrivateTrainingWindowExportCoordinator } from "./private-training-window-export";
 import { ProactiveFeedbackRuntime } from "./proactive-feedback-runtime";
@@ -1041,6 +1042,7 @@ let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let planningRuntime: WhaleHallPlanningRuntime | null = null;
 let planningMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
+let planningGoalReconciler: PlanningGoalReconciler | null = null;
 let activityWindowDelivery: ActivityWindowDeliveryService | null = null;
 let activityWindowDeliveryStore: ActivityWindowDeliveryStore | null = null;
 interface ActivityWindowDeliveryLifecycleKey {
@@ -1423,14 +1425,14 @@ const clientRequestHandlers: ClientRequestHandlers = {
 	confirmPlanRevision: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.confirmPlanRevision(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	setPlanningTaskStatus: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.setTaskStatus(command);
 		throwIfPlanningAnalysisUnavailable(plan);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	setPlanningTaskRelevance: async (command) => {
@@ -1447,32 +1449,32 @@ const clientRequestHandlers: ClientRequestHandlers = {
 	pausePlan: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.pausePlan(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	resumePlan: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.resumePlan(command);
 		throwIfPlanningAnalysisUnavailable(plan);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	completePlan: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.completePlan(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	archivePlan: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.archivePlan(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	undoPlanAdjustment: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.undoPlanAdjustment(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	retryPendingPlanAnalysis: async (command) => {
@@ -3368,6 +3370,7 @@ startupPromise = (async () => {
 				agent,
 				{
 					planChanged(change) {
+						planningGoalReconciler?.invalidate();
 						if (clientWindow !== null) clientRPC.send.planChanged(change);
 					},
 					calendarChanged(version) {
@@ -3381,7 +3384,23 @@ startupPromise = (async () => {
 				// 结算钟点锚点：未配置=现行"午夜后首 tick"行为；坏值按未配置处理。
 				{ settlementLocalTime: readPlanningSettlementLocalTime() },
 			);
-			await reconcileExecutingPlanningGoal();
+			planningGoalReconciler = new PlanningGoalReconciler({
+				loadCalendar: () => agent.listAllPlanningCalendar(),
+				loadPlans: async () =>
+					(await requirePlanningRuntime()).runtime.listPlans(),
+				currentGoal: () =>
+					reflectionRuntime?.service.getActiveGoalContext() ?? null,
+				applyGoal: async (goal) => {
+					const reflection = reflectionRuntime;
+					if (!reflection) {
+						throw new Error("Reflection runtime is not ready.");
+					}
+					return setRuntimeGoal(reflection, goal);
+				},
+				afterChange: () => timelineLifecycle.current?.service.pullNow(),
+				diag,
+			});
+			await reconcilePlanningGoal();
 			startPlanningMaintenance();
 			try {
 				await timelineLifecycle.ensureStarted({
@@ -4029,7 +4048,7 @@ async function mutateRendererCalendar(
 			},
 			{
 				stage: "execution-reconciliation",
-				run: reconcileExecutingPlanningGoal,
+				run: reconcilePlanningGoal,
 			},
 		],
 		onDeferredFailure: reportCommittedCalendarFailure,
@@ -4125,7 +4144,7 @@ async function runPlanningMaintenance(): Promise<void> {
 				if (batch.inputs.length < 32) break;
 			}
 		}
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		await planning.collectVaultGarbageIfDue();
 	} catch (error) {
 		console.warn(
@@ -4137,50 +4156,7 @@ async function runPlanningMaintenance(): Promise<void> {
 	}
 }
 
-async function reconcileExecutingPlanningGoal(): Promise<void> {
-	const planning = planningRuntime;
-	const reflection = reflectionRuntime;
-	if (!planning || !reflection) return;
-	const now = Date.now();
-	const events = (await agent.listAllPlanningCalendar())
-		.filter(
-			(event) =>
-				event.kind === "plan" &&
-				event.state === "committed" &&
-				!event.schedule.allDay &&
-				event.sourcePlanId !== null &&
-				event.sourceTaskId !== null &&
-				Date.parse(event.schedule.start) <= now &&
-				Date.parse(event.schedule.end) > now,
-		)
-		.sort((left, right) =>
-			left.schedule.allDay || right.schedule.allDay
-				? 0
-				: left.schedule.start.localeCompare(right.schedule.start),
-		);
-	const event = events[0];
-	if (
-		!event ||
-		event.schedule.allDay ||
-		!event.sourcePlanId ||
-		!event.sourceTaskId
-	) {
-		await setRuntimeGoal(reflection, null);
-		return;
-	}
-	const plan = await planning.runtime
-		.getPlan(event.sourcePlanId)
-		.catch(() => null);
-	const task = plan?.tasks.find((item) => item.id === event.sourceTaskId);
-	if (!plan || !task || plan.status !== "active" || task.status !== "pending") {
-		await setRuntimeGoal(reflection, null);
-		return;
-	}
-	await setRuntimeGoal(reflection, {
-		goalId: task.id,
-		planId: plan.id,
-		text: task.title,
-		activatedAtMs: Date.parse(event.schedule.start),
-	});
-	await timelineLifecycle.current?.service.pullNow();
+async function reconcilePlanningGoal(): Promise<void> {
+	if (!planningRuntime || !reflectionRuntime || !planningGoalReconciler) return;
+	await planningGoalReconciler.reconcile();
 }
