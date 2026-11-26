@@ -82,7 +82,7 @@ function modelOutputFixture(): ActivityReflectionModelOutput {
 
 describe("MastraActivityReflectionAnalyzer", () => {
 	test("delegates analysis and scoring instructions to Mastra-native filesystem Skills", () => {
-		const skillRoot = resolve(import.meta.dir, "../skills");
+		const skillRoot = resolve(import.meta.dir, "../src/agent/skills");
 		for (const skillName of ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES) {
 			const skillPath = resolve(skillRoot, skillName, "SKILL.md");
 			expect(existsSync(skillPath)).toBeTrue();

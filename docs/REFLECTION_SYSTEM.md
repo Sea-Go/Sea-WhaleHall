@@ -221,8 +221,8 @@ Reflection 原语义：64 条有效语义事件、第一条有效事件后的 5 
 
 每个封闭窗口只产生一次投递任务；一次模型反思可有有限的本地 Mastra Skill 加载轮次。完整且未裁剪的
 `EventWindowV1`（包含原始 `events` 数组、目标快照、时间范围和封窗原因）由 Bun 构造成中文反思 prompt。
-Sidecar 把随应用打包的 `skills/activity-reflection-analysis/` 和
-`skills/activity-reflection-scoring/` 作为 Mastra Agent 的原生文件型 Skills：模型必须通过框架的本地
+Sidecar 把随应用打包的 `agent/skills/activity-reflection-analysis/` 和
+`agent/skills/activity-reflection-scoring/`（源码位于 `src/agent/skills/`）作为 Mastra Agent 的原生文件型 Skills：模型必须通过框架的本地
 `skill` 元工具分别加载它们，必要时通过 `skill_read` 读取参考资料。前者负责六维状态判断、活动聚合、中文
 action、短时间片与隐私边界，后者负责目标相关有效投入的评分公式、零分条件、累计语义和校准示例。已确认的
 暂离、恢复、锁屏、解锁、睡眠、唤醒由客户端从原始窗口确定性追加为零分 `idle_transition`，模型不猜测或生成它。
