@@ -250,4 +250,68 @@ describe("activity support output firewall", () => {
 	}
 });
 
-describe("activity support deterministic routing", () => {});
+describe("activity support deterministic routing", () => {
+	function contextWithoutGoal(goalRelevance: "supporting" | "unrelated") {
+		return createActivitySupportContext({
+			activeGoal: null,
+			recentFeedback: [],
+			analyses: [
+				workerResult({
+					events: [
+						{
+							source_event_ids: ["source-window-no-goal"],
+							time: "10:00–10:05",
+							action: "推测：正在撰写或修改文本",
+							activity: "writing",
+							goal_relevance: goalRelevance,
+							confidence: 0.75,
+							reason_codes: ["文档变更", "持续输入"],
+							evidence: ["文本控件内容持续变化并伴随连续输入"],
+							started_at_ms: 1_700_000_000_000,
+							ended_at_ms: 1_700_000_300_000,
+						},
+					],
+				}),
+			],
+		});
+	}
+
+	const proposed = {
+		route: "momentum" as const,
+		certainty: "medium" as const,
+		situation: "模型给出的情境判断",
+		userNeed: "模型给出的帮助需求",
+	};
+
+	test("describes sustained focus rather than goal progress without an active goal", () => {
+		const guarded = guardActivitySupportAssessment(
+			contextWithoutGoal("supporting"),
+			proposed,
+		);
+
+		expect(guarded.route).toBe("momentum");
+		expect(guarded.situation).toBe("现有线索显示用户正在持续专注手头的事情");
+		expect(guarded.situation).not.toContain("目标");
+		expect(isSafeActivitySupportMessage(guarded.situation)).toBeTrue();
+	});
+
+	test("keeps goal progress wording while an active goal exists", () => {
+		const guarded = guardActivitySupportAssessment(validContext(), proposed);
+
+		expect(guarded.situation).toBe("现有线索显示用户正在推进目标相关的事情");
+	});
+
+	test("never routes to attention drift without an active goal", () => {
+		const guarded = guardActivitySupportAssessment(
+			contextWithoutGoal("unrelated"),
+			{ ...proposed, route: "attention_drift" },
+		);
+
+		expect(guarded).toEqual({
+			route: "gentle_check_in",
+			certainty: "low",
+			situation: "现有线索不足以判断用户此刻的具体状态",
+			userNeed: "用不打扰的方式让用户自己选择需要的帮助",
+		});
+	});
+});
