@@ -88,6 +88,24 @@ Cleanup scopes have exact meanings:
 
 The cleanup result includes `deletedSessions`, `retentionDays`, and cutoff time. Deletion uses a strict `ended_at_ms < cutoff` boundary, so a session ending exactly at the cutoff is retained.
 
+## Observer bridge into the EventJournal
+
+The local host mirrors a bounded subset of Observer semantic projections into
+the legacy EventJournal so the activity reflection can score real evidence.
+`core/src/legacy_event_mirror.rs` owns the mapping; `server/src/legacy_mirror.rs`
+appends each mirrored event only after the Observer frame that produced it has
+been acknowledged, so a slow EventJournal write can never make the helper drop
+frames.
+
+| Observer semantic event | Legacy desktop event | Mirrors when |
+| --- | --- | --- |
+| `input.activityBucket` | `input.activityAggregated` | keys, clicks or scrolling are non-zero |
+| `application.textValueChanged` | `accessibility.documentChanged` | a real delta against the prior value exists |
+| `application.visibleContentChanged` | `application.foregroundChanged` with `windowTitle` | a sealed window title exists and changed |
+| `browser.visiblePageChanged` | `browser.tabNavigated` with host and `title` | on open or navigation |
+
+Visible text, typed text, control labels and full URLs never cross the bridge. A window title or host that matches a sensitive-page marker (sign-in, payment, verification code, private browsing) mirrors nothing at all. Each event uses the deduplication key `observer-mirror:<observation id>`, so a replayed frame appends nothing twice. A failed append is reported as `observer_legacy_mirror_failed` in the monitoring status and leaves the observation itself untouched. `tests/fixtures/legacy-event-mirror.json` is the contract both the Rust mapping and the TypeScript desktop-event validator are tested against.
+
 ## Verification
 
 From this directory run:

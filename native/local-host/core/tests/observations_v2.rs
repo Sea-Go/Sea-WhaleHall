@@ -12,12 +12,12 @@ use whalehall_local_core::observations::{
     ObservationKeyError, ObservationKeyProvider, UnavailableObservationKeyProvider,
 };
 use whalehall_local_protocol::{
-    AuditQueryFiveMinutesParams, CoverageLevelV2, EventGoalChangeParams, EvidenceReliabilityV2,
-    GoalContext, ObservationIntervalV2, ObservationSensorV2, ObservationSourceV2,
-    ObservationSubjectV2, RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2,
-    SemanticCommitParams, SemanticContentStateV2, SemanticCountClassV2, SemanticQueryParams,
-    VaultDeleteBatchParams, VaultListRecordsParams, VaultOpenBatchParams, VaultSealBatchParams,
-    VaultSealRecord, semantic_event_kinds,
+    AuditQueryFiveMinutesParams, CoverageLevelV2, DesktopEventSensitivity, EventGoalChangeParams,
+    EvidenceReliabilityV2, GoalContext, ObservationIntervalV2, ObservationSensorV2,
+    ObservationSourceV2, ObservationSubjectV2, RAW_OBSERVATION_SCHEMA_VERSION,
+    RawObservationInputV2, SemanticCommitParams, SemanticContentStateV2, SemanticCountClassV2,
+    SemanticQueryParams, VaultDeleteBatchParams, VaultListRecordsParams, VaultOpenBatchParams,
+    VaultSealBatchParams, VaultSealRecord, semantic_event_kinds,
 };
 
 const SECRET: &str = "绝不能出现在SQLite明文里的浏览器正文";
@@ -1446,5 +1446,125 @@ fn vault_metadata_inventory_is_namespace_scoped_paginated_and_key_independent() 
             .map(|record| record.record_id.as_str())
             .collect::<Vec<_>>(),
         ["record-a", "record-c"]
+    );
+}
+
+fn input_bucket(at_ms: i64, key_count: u64) -> RawObservationInputV2 {
+    RawObservationInputV2 {
+        schema_version: RAW_OBSERVATION_SCHEMA_VERSION.to_owned(),
+        kind: "input.activityBucket".to_owned(),
+        interval: ObservationIntervalV2 {
+            started_at_ms: at_ms,
+            ended_at_ms: at_ms + 5_000,
+        },
+        source: ObservationSourceV2 {
+            sensor: ObservationSensorV2::CgActivity,
+            adapter_version: "observer-test.v2".to_owned(),
+        },
+        subject: ObservationSubjectV2 {
+            app_id: "device".to_owned(),
+            app_name: "Device".to_owned(),
+            opaque_window_id: None,
+        },
+        reliability: EvidenceReliabilityV2::High,
+        coverage: vec![CoverageLevelV2::Metadata],
+        redactions: Vec::new(),
+        metadata: json!({
+            "keyCount": key_count,
+            "clickCount": 0,
+            "scrollDelta": 0,
+            "mouseDistance": 40,
+        }),
+        content: None,
+    }
+}
+
+#[test]
+fn ingest_offers_a_legacy_mirror_only_for_newly_inserted_observations() {
+    let directory = tempfile::tempdir().expect("create observation mirror directory");
+    let journal = memory_journal(&directory, Duration::from_secs(60));
+
+    journal
+        .ingest(
+            "mirror-focus",
+            ax_text_observation(1_000, "ax.focusChanged", "area-1", Some("draft"), true),
+        )
+        .expect("seed the control baseline");
+    assert!(
+        journal
+            .ingest(
+                "mirror-focus",
+                ax_text_observation(1_000, "ax.focusChanged", "area-1", Some("draft"), true),
+            )
+            .expect("replay the baseline")
+            .legacy_mirror
+            .is_none()
+    );
+
+    let baseline = journal
+        .ingest(
+            "mirror-baseline",
+            ax_text_observation(1_500, "ax.valueChanged", "area-2", Some("first look"), true),
+        )
+        .expect("ingest a control's first value");
+    assert!(baseline.inserted);
+    assert!(baseline.legacy_mirror.is_none());
+
+    let edited = journal
+        .ingest(
+            "mirror-edit",
+            ax_text_observation(
+                2_000,
+                "ax.valueChanged",
+                "area-2",
+                Some("first look edited"),
+                true,
+            ),
+        )
+        .expect("ingest a real edit");
+    let mirror = edited.legacy_mirror.expect("a real edit mirrors");
+    assert_eq!(mirror.kind, "accessibility.documentChanged");
+    assert_eq!(mirror.sensitivity, DesktopEventSensitivity::Metadata);
+    assert_eq!(
+        mirror.deduplication_key,
+        format!("observer-mirror:{}", edited.observation.observation_id)
+    );
+    assert_eq!(
+        mirror.payload,
+        json!({ "appId": "com.example.Editor", "insertedChars": 7, "deletedChars": 0 })
+    );
+
+    let typed = journal
+        .ingest("mirror-input", input_bucket(3_000, 4))
+        .expect("ingest a typed input bucket");
+    assert_eq!(
+        typed.legacy_mirror.expect("typed input mirrors").kind,
+        "input.activityAggregated"
+    );
+    assert!(
+        journal
+            .ingest("mirror-pointer", input_bucket(10_000, 0))
+            .expect("ingest a pointer-only bucket")
+            .legacy_mirror
+            .is_none()
+    );
+
+    let navigated = journal
+        .ingest(
+            "mirror-browser",
+            browser_observation(20_000, "HTTP overview"),
+        )
+        .expect("ingest a browser navigation");
+    let mirror = navigated.legacy_mirror.expect("a navigation mirrors");
+    assert_eq!(mirror.kind, "browser.tabNavigated");
+    assert_eq!(mirror.sensitivity, DesktopEventSensitivity::Content);
+    assert_eq!(
+        mirror.payload,
+        json!({
+            "browserId": "com.google.Chrome",
+            "tabId": "window-opaque-1",
+            "url": "example.com",
+            "title": "HTTP overview",
+        })
     );
 }

@@ -50,6 +50,11 @@ Reflection collector 从本地事件流形成不可变窗口。正常窗口最�
 该路径保留 journal、重试、回放、retention 与下游账本合同，同时避免在没有经过认证的
 远端合同前伪造高置信度本地结论。
 
+EventJournal 的内容级证据来自 Observer 语义事件的有界镜像（本地宿主内完成，映射与
+隐私边界见 `native/local-host/ACTIVITY_SENSOR.md` 的 “Observer bridge” 一节）：键鼠计数桶、
+带真实增删量的文本变更、带窗口标题的可见内容变化，以及仅含主机名与标题的浏览器导航。
+可见文本、输入的文字、控件标签与完整 URL 不进 EventJournal。
+
 ### Durable job 状态
 
 每个窗口先持久化再推理。Job 使用单并发 claim/lease，并区分 inference 与 commit 阶段：
@@ -175,6 +180,15 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 拉起未对账的传感器进程。同步采用 latest-wins 队列并持续重试到 runtime
 对同一目标返回精确 ACK。退出账号会先清空本地目标并等待 `null` ACK，再
 切换账号，避免旧目标继续影响相关性判断。
+
+当前目标由 `src/bun/planning-goal-reconciler.ts` 按三级解析：覆盖当前时刻的已提交
+任务块对应任务；否则全部 active 计划的 pending 任务（目标文本为
+“待办任务：1. …；2. …”，按排期先后排列）；否则无目标。对账每分钟及每次计划写入后
+执行，计划读取失败时保持现有目标不变；目标层级变化写入 `[planning-goal]` 诊断行。
+
+没有当前目标时评分不按目标过滤：持续、可核对的活动按 `supporting` 计，其
+`goal_relevance` 填 `supporting`（不填 `direct` 或 `unrelated`）；敏感支付、账户、
+结算页面、状态事件、未知或不确定活动仍为 `0`。
 
 ## 模型运行配置
 

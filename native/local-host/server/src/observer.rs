@@ -15,12 +15,15 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
+use whalehall_local_core::events::EventJournal;
 use whalehall_local_core::observations::{ObservationJournal, ObservationKeyStorageMode};
 use whalehall_local_protocol::{
     CoverageLevelV2, MonitoringConfigureParams, MonitoringPermissionCheckState,
     MonitoringPermissionState, MonitoringPermissions, MonitoringState, MonitoringStatusResult,
     RAW_OBSERVATION_SCHEMA_VERSION, RawObservationInputV2,
 };
+
+use crate::legacy_mirror::LegacyMirrorSink;
 
 const HELPER_PATH_ENV: &str = "WHALEHALL_OBSERVER_HELPER_PATH";
 const RUNTIME_CHANNEL_ENV: &str = "WHALEHALL_RUNTIME_CHANNEL";
@@ -658,7 +661,13 @@ pub struct ObserverSupervisor {
 }
 
 impl ObserverSupervisor {
-    pub fn start(config: ObserverSupervisorConfig, journal: ObservationJournal) -> Self {
+    /// `legacy_event_journal` receives the bounded mirror of observations that
+    /// the activity reflection reads; `None` disables the mirror.
+    pub fn start(
+        config: ObserverSupervisorConfig,
+        journal: ObservationJournal,
+        legacy_event_journal: Option<EventJournal>,
+    ) -> Self {
         let settings_store = MonitoringSettingsStore::for_observation_journal(&journal);
         let (settings, settings_warning) = load_runtime_settings(config, &settings_store);
         let identity_fingerprint = settings
@@ -722,6 +731,7 @@ impl ObserverSupervisor {
             settings_store,
             permissions_store,
             journal,
+            legacy_event_journal,
             status.clone(),
             receiver,
         ));
@@ -841,6 +851,7 @@ struct PendingPermissionRefresh {
 
 struct HelperSessionContext<'a> {
     journal: &'a ObservationJournal,
+    legacy_event_journal: Option<&'a EventJournal>,
     status: &'a Arc<Mutex<MonitoringStatusResult>>,
     settings_store: &'a MonitoringSettingsStore,
     permissions_store: &'a MonitoringPermissionsStore,
@@ -950,6 +961,7 @@ async fn run_supervisor(
     settings_store: MonitoringSettingsStore,
     permissions_store: MonitoringPermissionsStore,
     journal: ObservationJournal,
+    legacy_event_journal: Option<EventJournal>,
     status: Arc<Mutex<MonitoringStatusResult>>,
     mut commands: mpsc::Receiver<SupervisorCommand>,
 ) {
@@ -1059,6 +1071,7 @@ async fn run_supervisor(
                     stderr_task,
                     HelperSessionContext {
                         journal: &journal,
+                        legacy_event_journal: legacy_event_journal.as_ref(),
                         status: &status,
                         settings_store: &settings_store,
                         permissions_store: &permissions_store,
@@ -1131,11 +1144,13 @@ async fn run_helper_session(
 ) -> SessionOutcome {
     let HelperSessionContext {
         journal,
+        legacy_event_journal,
         status,
         settings_store,
         permissions_store,
         permission_check_before_start,
     } = context;
+    let mut legacy_mirror = LegacyMirrorSink::new(legacy_event_journal);
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill().await;
         stderr_task.abort();
@@ -1213,6 +1228,7 @@ async fn run_helper_session(
                         match handle_helper_frame(
                             &line,
                             journal,
+                            &mut legacy_mirror,
                             status,
                             permissions_store,
                             &mut stdin,
@@ -1854,6 +1870,7 @@ struct InputActivityHealthFrame {
 async fn handle_helper_frame(
     bytes: &[u8],
     journal: &ObservationJournal,
+    legacy_mirror: &mut LegacyMirrorSink<'_>,
     status: &Arc<Mutex<MonitoringStatusResult>>,
     permissions_store: &MonitoringPermissionsStore,
     stdin: &mut ChildStdin,
@@ -1906,12 +1923,20 @@ async fn handle_helper_frame(
                 current.last_error = Some("observer_sequence_gap".to_owned());
             }
             let deduplication_key = format!("observer:{}:{}", frame.boot_id, frame.sequence);
-            journal
+            let appended = journal
                 .ingest(&deduplication_key, frame.observation)
                 .map_err(|_| "observer_persistence_failed")?;
-            send_ack(stdin, &frame.boot_id, frame.sequence)
-                .await
-                .map_err(|_| "observer_ack_failed")?;
+            let ack = send_ack(stdin, &frame.boot_id, frame.sequence).await;
+            // The helper is acknowledged before the legacy journal is touched,
+            // so a slow write there can never make it drop frames.
+            legacy_mirror.append(
+                appended
+                    .inserted
+                    .then_some(appended.legacy_mirror)
+                    .flatten(),
+                status,
+            );
+            ack.map_err(|_| "observer_ack_failed")?;
             frame_state.last_sequence = frame_state.last_sequence.max(frame.sequence);
             frame_state.last_observation_at_ms = Some(
                 frame_state
