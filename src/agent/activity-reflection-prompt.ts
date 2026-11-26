@@ -929,6 +929,7 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 type ActivityReflectionSignalFamily =
 	| "development"
 	| "writing"
+	| "editing"
 	| "research"
 	| "gaming"
 	| "media"
@@ -977,6 +978,17 @@ function toActivityReflectionSignalObservation(
 		return isCodeLanguage(language)
 			? { timestamp, family: "development", label: "代码文档变更观察" }
 			: { timestamp, family: "writing", label: "文档变更观察" };
+	}
+	if (
+		kind === "accessibility.documentChanged" ||
+		kind === "accessibility.valueChanged"
+	) {
+		// The accessibility monitor cannot tell code from prose, so the model
+		// picks the activity from the raw observation instead of the index.
+		return { timestamp, family: "editing", label: "文本内容变更观察" };
+	}
+	if (kind === "accessibility.focusChanged") {
+		return { timestamp, family: "auxiliary", label: "界面焦点变化观察" };
 	}
 	if (kind.startsWith("terminal.")) {
 		return { timestamp, family: "development", label: "终端操作观察" };
@@ -1037,6 +1049,17 @@ function activityReflectionCandidatesFor(
 		case "writing":
 			return {
 				candidate_activities: ["writing"],
+				recommended_action: "推测：正在撰写或修改文本",
+			};
+		case "editing":
+			return {
+				candidate_activities: [
+					"writing",
+					"development",
+					"data_work",
+					"communication",
+					"other_unknown",
+				],
 				recommended_action: "推测：正在撰写或修改文本",
 			};
 		case "research":
