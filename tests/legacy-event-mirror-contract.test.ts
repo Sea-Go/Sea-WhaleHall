@@ -19,15 +19,20 @@ type Contract = {
 		};
 		expected: (MirroredEvent & { deduplicationKey: string }) | null;
 	}>;
-	rejectedShapes: Array<{
-		name: string;
-	} & MirroredEvent>;
+	rejectedShapes: Array<
+		{
+			name: string;
+		} & MirroredEvent
+	>;
 };
 
 // The same file drives a Rust test that asserts what the local host's bridge
 // emits, so neither side can drift away from the other.
 const contract = JSON.parse(
-	readFileSync(resolve(import.meta.dir, "fixtures/legacy-event-mirror.json"), "utf8"),
+	readFileSync(
+		resolve(import.meta.dir, "fixtures/legacy-event-mirror.json"),
+		"utf8",
+	),
 ) as Contract;
 
 function desktopEvent(

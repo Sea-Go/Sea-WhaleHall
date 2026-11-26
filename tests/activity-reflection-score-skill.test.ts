@@ -2,20 +2,25 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+	type ActivityReflectionScoreCalibrationCase,
 	activityReflectionScoreCalibrationCases,
 	activityReflectionScoreExamples,
 	activityReflectionScoreFormula,
 	activityReflectionScoreRuleSet,
 	activityReflectionScoreSelfChecks,
-	type ActivityReflectionScoreCalibrationCase,
 } from "../src/agent/activity-reflection-score-skill";
 
-function calibratedScore(caseDefinition: ActivityReflectionScoreCalibrationCase): number {
+function calibratedScore(
+	caseDefinition: ActivityReflectionScoreCalibrationCase,
+): number {
 	const total = caseDefinition.contributions.reduce((sum, contribution) => {
 		if (contribution.zero_condition !== undefined) return sum;
-		const relevance = activityReflectionScoreRuleSet.relevance[contribution.relevance];
-		const evidence = activityReflectionScoreRuleSet.evidence[contribution.evidence];
-		const duration = activityReflectionScoreRuleSet.duration[contribution.duration];
+		const relevance =
+			activityReflectionScoreRuleSet.relevance[contribution.relevance];
+		const evidence =
+			activityReflectionScoreRuleSet.evidence[contribution.evidence];
+		const duration =
+			activityReflectionScoreRuleSet.duration[contribution.duration];
 		const confidence =
 			contribution.certainty === "confirmed"
 				? contribution.confidence

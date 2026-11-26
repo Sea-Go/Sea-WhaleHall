@@ -200,7 +200,7 @@ function resolveExecutingTaskGoal(input: {
 	const task = plan?.tasks.find(
 		(candidate) => candidate.id === block.event.sourceTaskId,
 	);
-	if (!plan || plan.status !== "active" || !task || task.status !== "pending") {
+	if (plan?.status !== "active" || !task || task.status !== "pending") {
 		return null;
 	}
 	return {
