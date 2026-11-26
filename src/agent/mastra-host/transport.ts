@@ -1,19 +1,19 @@
-import type { Writable } from "node:stream";
 import { randomUUID } from "node:crypto";
+import type { Writable } from "node:stream";
 import { encodeContentLengthFrame } from "./framing";
 import {
 	AGENT_HOST_PROTOCOL_VERSION,
+	type AgentHostErrorPayload,
+	type AgentHostRequest,
 	errorResponse,
 	isAgentHostRequest,
 	isModelRelayEventFrame,
 	isProtocolResponse,
 	isRecord,
-	successResponse,
-	type AgentHostErrorPayload,
-	type AgentHostRequest,
 	type ModelRelayEventFrame,
 	type ProtocolMessage,
 	type SidecarHostMethod,
+	successResponse,
 } from "./protocol";
 
 export interface ProtocolWriter {
@@ -27,15 +27,17 @@ export class NodeProtocolWriter implements ProtocolWriter {
 
 	write(message: ProtocolMessage): Promise<void> {
 		const frame = encodeContentLengthFrame(message);
-		const operation = this.tail.catch(() => undefined).then(
-			() =>
-				new Promise<void>((resolve, reject) => {
-					this.output.write(frame, (error) => {
-						if (error) reject(error);
-						else resolve();
-					});
-				}),
-		);
+		const operation = this.tail
+			.catch(() => undefined)
+			.then(
+				() =>
+					new Promise<void>((resolve, reject) => {
+						this.output.write(frame, (error) => {
+							if (error) reject(error);
+							else resolve();
+						});
+					}),
+			);
 		this.tail = operation;
 		return operation;
 	}
@@ -183,7 +185,11 @@ export class DuplexProtocolPeer implements HostRequestPeer {
 		this.relayListeners.clear();
 	}
 
-	private acceptResponse(response: ReturnType<typeof successResponse> | ReturnType<typeof errorResponse>): void {
+	private acceptResponse(
+		response:
+			| ReturnType<typeof successResponse>
+			| ReturnType<typeof errorResponse>,
+	): void {
 		const pending = this.pending.get(response.requestId);
 		if (!pending) return;
 		this.pending.delete(response.requestId);
@@ -207,7 +213,9 @@ export class DuplexProtocolPeer implements HostRequestPeer {
 			const result = await this.handler(request);
 			await this.writer.write(successResponse(request.requestId, result));
 		} catch (error) {
-			await this.writer.write(errorResponse(request.requestId, protocolError(error)));
+			await this.writer.write(
+				errorResponse(request.requestId, protocolError(error)),
+			);
 		}
 	}
 }
@@ -219,6 +227,27 @@ export class HostCallError extends Error {
 	}
 }
 
+/**
+ * A Workflow that re-throws a HostCallError hands back a plain copy of it.
+ * Its message was written by this client's Bun side (relay, auth, tool
+ * host), so it is the one failure text that may leave the sidecar verbatim.
+ * Model and provider failures keep their opaque generic text.
+ */
+export function relayedHostCallMessage(error: unknown): string | null {
+	if (typeof error !== "object" || error === null || Array.isArray(error)) {
+		return null;
+	}
+	const candidate = error as { name?: unknown; message?: unknown };
+	if (candidate.name !== "HostCallError") return null;
+	const message = candidate.message;
+	if (typeof message !== "string") return null;
+	return message.length > 0 &&
+		message.length <= 200 &&
+		!/[\u0000-\u001f\u007f]/u.test(message)
+		? message
+		: null;
+}
+
 export class AgentHostRuntimeError extends Error {
 	constructor(readonly payload: AgentHostErrorPayload) {
 		super(payload.message);
@@ -227,7 +256,10 @@ export class AgentHostRuntimeError extends Error {
 }
 
 export function protocolError(error: unknown): AgentHostErrorPayload {
-	if (error instanceof AgentHostRuntimeError || error instanceof HostCallError) {
+	if (
+		error instanceof AgentHostRuntimeError ||
+		error instanceof HostCallError
+	) {
 		return error.payload;
 	}
 	if (error instanceof DOMException && error.name === "AbortError") {
@@ -246,7 +278,9 @@ export function protocolError(error: unknown): AgentHostErrorPayload {
 
 function abortError(reason: unknown): DOMException {
 	return new DOMException(
-		typeof reason === "string" && reason.length > 0 ? reason : "The operation was aborted.",
+		typeof reason === "string" && reason.length > 0
+			? reason
+			: "The operation was aborted.",
 		"AbortError",
 	);
 }

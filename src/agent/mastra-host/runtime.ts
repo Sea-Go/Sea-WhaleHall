@@ -123,6 +123,7 @@ import {
 	type HostRequestPeer,
 	type ProtocolWriter,
 	protocolError,
+	relayedHostCallMessage,
 } from "./transport";
 
 const defaultRelayBaseUrl = "https://model-relay.whalehall.invalid/v1";
@@ -2565,8 +2566,11 @@ function asError(error: unknown): Error {
 		// 诊断失败不干扰主流程
 	}
 	if (error instanceof AgentHostRuntimeError) return error;
-	if (isRecord(error) && typeof error.diagnostic === "string") {
-		return new Error(error.diagnostic.replace(/[\r\n]+/g, " ").slice(0, 1_000));
+	// A relayed host-call failure keeps its own text; all else stays generic.
+	const diagnostic =
+		isRecord(error) ? error.diagnostic : relayedHostCallMessage(error);
+	if (typeof diagnostic === "string") {
+		return new Error(diagnostic.replace(/[\r\n]+/g, " ").slice(0, 1_000));
 	}
 	return new Error("Agent runtime operation failed.");
 }
