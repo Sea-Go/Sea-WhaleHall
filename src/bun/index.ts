@@ -3721,6 +3721,11 @@ async function startActivityWindowDelivery(
 					throw new Error("Activity source belongs to another account.");
 				}
 			},
+			onAcceptedAnalysis: ({ response, status }) => {
+				diag(
+					`[heartbeat] receipt score=${response.score} accumulated=${status.accumulatedScore.toFixed(2)} triggerPending=${status.agentTriggerPending}`,
+				);
+			},
 			onAgentTriggerRequired: () => dispatcher.wake(),
 			currentSession: () => {
 				if (!isAttemptCurrent()) return null;
