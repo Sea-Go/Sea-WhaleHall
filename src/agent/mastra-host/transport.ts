@@ -275,6 +275,37 @@ export function relayedProtocolError(
 		: new AgentHostRuntimeError(rebuilt);
 }
 
+/**
+ * The class and HTTP status of a model or provider failure, which reaches this
+ * host as the plain copy a Workflow hands back. Its message may echo a private
+ * prompt and stays in the sidecar log; the class and the status are enough to
+ * tell a quota, an authentication failure and a timeout apart.
+ */
+export function failureOrigin(error: unknown): string | null {
+	if (typeof error !== "object" || error === null || Array.isArray(error)) {
+		return null;
+	}
+	const { name, statusCode } = error as {
+		name?: unknown;
+		statusCode?: unknown;
+	};
+	const kind =
+		typeof name === "string" &&
+		name !== "Error" &&
+		/^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(name)
+			? name
+			: null;
+	const status =
+		typeof statusCode === "number" &&
+		Number.isInteger(statusCode) &&
+		statusCode >= 100 &&
+		statusCode <= 599
+			? ` status=${statusCode}`
+			: "";
+	if (kind === null && status === "") return null;
+	return `${kind ?? "Error"}${status}`;
+}
+
 export class AgentHostRuntimeError extends Error {
 	constructor(readonly payload: AgentHostErrorPayload) {
 		super(payload.message);

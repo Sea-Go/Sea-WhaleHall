@@ -119,6 +119,7 @@ import {
 } from "./tools";
 import {
 	AgentHostRuntimeError,
+	failureOrigin,
 	HostCallError,
 	type HostRequestOptions,
 	type HostRequestPeer,
@@ -2579,7 +2580,12 @@ export function asError(error: unknown, scope = "analyze"): Error {
 	if (typeof diagnostic === "string") {
 		return new Error(diagnostic.replace(/[\r\n]+/g, " ").slice(0, 1_000));
 	}
-	return new Error("Agent runtime operation failed.");
+	const origin = failureOrigin(error);
+	return new Error(
+		origin === null
+			? "Agent runtime operation failed."
+			: `Agent runtime operation failed. [${origin}]`,
+	);
 }
 
 function isActivityReflectionInvalidOutput(error: unknown): boolean {
