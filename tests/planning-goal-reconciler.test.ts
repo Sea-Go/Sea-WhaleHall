@@ -44,10 +44,12 @@ function plan(input: {
 	status?: PlanStatus;
 	tasks?: PlanTask[];
 	scheduledTaskIds?: readonly string[];
+	createdAt?: string;
 }): PlanningPlan {
 	const id = input.id ?? "plan-1";
 	const tasks = input.tasks ?? [];
 	const scheduledTaskIds = input.scheduledTaskIds ?? [];
+	const createdAt = input.createdAt ?? "2026-11-26T09:00:00+08:00";
 	const revision: PlanRevision = {
 		id: `${id}-revision-1`,
 		planId: id,
@@ -93,7 +95,7 @@ function plan(input: {
 		pendingAnalysis: null,
 		autoAdjustAuthorized: true,
 		version: 1,
-		createdAt: "2026-11-26T09:00:00+08:00",
+		createdAt,
 		updatedAt: "2026-11-26T09:00:00+08:00",
 		activeRevisionId: revision.id,
 		proposedRevisionId: null,
@@ -272,13 +274,18 @@ describe("resolvePlanningGoal", () => {
 			plan({ id: "plan-a", tasks: [task("task-a1", "甲")] }),
 		];
 		const first = resolvePlanningGoal({ nowMs: NOW_MS, calendar: [], plans });
-		const second = resolvePlanningGoal({ nowMs: NOW_MS, calendar: [], plans });
+		const second = resolvePlanningGoal({
+			nowMs: NOW_MS,
+			calendar: [],
+			plans: [...plans].reverse(),
+		});
 
 		expect(first.tier).toBe("pending-tasks");
 		expect(first.goal?.planId).toBeNull();
-		expect(first.goal?.text).toBe("待办任务：1. 乙；2. 甲");
+		// Plans created at the same time keep the order of their ids.
+		expect(first.goal?.text).toBe("待办任务：1. 甲；2. 乙");
 		expect(first.goal?.goalId).toMatch(/^pending-tasks:[0-9a-f]{32}$/u);
-		expect(second.goal?.goalId).toBe(first.goal?.goalId);
+		expect(second.goal).toEqual(first.goal);
 		expect(
 			resolvePlanningGoal({
 				nowMs: NOW_MS,
@@ -286,6 +293,49 @@ describe("resolvePlanningGoal", () => {
 				plans: [plan({ id: "plan-c", tasks: [task("task-c1", "丙")] })],
 			}).goal?.goalId,
 		).not.toBe(first.goal?.goalId);
+	});
+
+	test("orders several active plans by creation time, not by the store's list order", () => {
+		const older = plan({
+			id: "plan-newer-id",
+			createdAt: "2026-11-20T09:00:00+08:00",
+			tasks: [task("task-old", "较早创建的计划任务")],
+		});
+		const newer = plan({
+			id: "plan-aaaa",
+			createdAt: "2026-11-25T09:00:00+08:00",
+			tasks: [task("task-new", "较晚创建的计划任务")],
+		});
+		const touched = { ...newer, updatedAt: "2026-11-26T10:29:00+08:00" };
+
+		// The native store lists the most recently written plan first.
+		const before = resolvePlanningGoal({
+			nowMs: NOW_MS,
+			calendar: [],
+			plans: [newer, older],
+		});
+		const after = resolvePlanningGoal({
+			nowMs: NOW_MS,
+			calendar: [],
+			plans: [touched, older],
+		});
+
+		expect(before.goal?.text).toBe(
+			"待办任务：1. 较早创建的计划任务；2. 较晚创建的计划任务",
+		);
+		expect(after.goal).toEqual(before.goal);
+	});
+
+	test("strips control characters a task title may carry", () => {
+		const resolution = resolvePlanningGoal({
+			nowMs: NOW_MS,
+			calendar: [],
+			plans: [
+				plan({ tasks: [task("task-1", "网络\u0007层\u001f\t\r\n基础")] }),
+			],
+		});
+
+		expect(resolution.goal?.text).toBe("待办任务：1. 网络层 基础");
 	});
 
 	test("resolves no goal when nothing is active or nothing is pending", () => {
@@ -464,13 +514,178 @@ describe("PlanningGoalReconciler", () => {
 		expect(await reconciler.reconcile()).toEqual({
 			tier: "unavailable",
 			goal: null,
+			stage: "lookup",
 		});
 		await reconciler.reconcile();
 
 		expect(applied).toHaveLength(1);
 		expect(diag).toEqual([
 			"[planning-goal] tier=pending-tasks plans=1 tasks=1",
-			"[planning-goal] tier=unavailable error=Error",
+			'[planning-goal] tier=unavailable stage=lookup error=Error message="vault key unavailable"',
+		]);
+	});
+
+	test("keeps the current goal and reports a failed goal write", async () => {
+		let fail = true;
+		const diag: string[] = [];
+		const applied: Array<Record<string, unknown> | null> = [];
+		const current: CurrentPlanningGoal = {
+			goalId: "task-old",
+			planId: "plan-1",
+			text: "上一个任务",
+			activatedAtMs: NOW_MS - 60_000,
+		};
+		const reconciler = new PlanningGoalReconciler({
+			loadCalendar: async () => [],
+			loadPlans: async () => [
+				plan({ tasks: [task("task-1", "应用层第一遍")] }),
+			],
+			currentGoal: () => ({ ...current }),
+			applyGoal: async (goal) => {
+				if (fail)
+					throw new Error("goal text must contain printable characters");
+				applied.push(goal && { ...goal });
+				return current;
+			},
+			diag: (line) => diag.push(line),
+			nowMs: () => NOW_MS,
+		});
+
+		expect(await reconciler.reconcile()).toEqual({
+			tier: "unavailable",
+			goal: null,
+			stage: "apply",
+		});
+		expect(applied).toHaveLength(0);
+		// The same failure is reported once; a recovery is reported again.
+		expect(await reconciler.reconcile()).toMatchObject({ tier: "unavailable" });
+		fail = false;
+		expect(await reconciler.reconcile()).toMatchObject({
+			tier: "pending-tasks",
+		});
+
+		expect(applied).toHaveLength(1);
+		expect(diag).toEqual([
+			'[planning-goal] tier=unavailable stage=apply error=Error message="goal text must contain printable characters"',
+			"[planning-goal] tier=pending-tasks plans=1 tasks=1",
+		]);
+	});
+
+	test("keeps the resolution when the timeline pull fails", async () => {
+		const diag: string[] = [];
+		const reconciler = new PlanningGoalReconciler({
+			loadCalendar: async () => [],
+			loadPlans: async () => [
+				plan({ tasks: [task("task-1", "应用层第一遍")] }),
+			],
+			currentGoal: () => null,
+			applyGoal: async (goal) => {
+				return goal && { ...goal, activatedAtMs: goal.activatedAtMs };
+			},
+			afterChange: () => {
+				throw new Error("DesktopReflectionService is shutting down.");
+			},
+			diag: (line) => diag.push(line),
+			nowMs: () => NOW_MS,
+		});
+
+		expect(await reconciler.reconcile()).toMatchObject({
+			tier: "pending-tasks",
+		});
+		expect(diag).toEqual([
+			'[planning-goal] pull-failed error=Error message="DesktopReflectionService is shutting down."',
+			"[planning-goal] tier=pending-tasks plans=1 tasks=1",
+		]);
+	});
+
+	test("reloads plans when a write lands during a load", async () => {
+		function deferred<T>() {
+			let resolve!: (value: T) => void;
+			const promise = new Promise<T>((done) => {
+				resolve = done;
+			});
+			return { promise, resolve };
+		}
+		let planLoads = 0;
+		let title = "旧标题";
+		const started = deferred<void>();
+		const vault = deferred<void>();
+		const reconciler = new PlanningGoalReconciler({
+			loadCalendar: async () => [],
+			loadPlans: () => {
+				planLoads += 1;
+				// The rows are read before the write; the vault RPCs settle later.
+				const rows = [plan({ tasks: [task("task-1", title)] })];
+				started.resolve();
+				return vault.promise.then(() => rows);
+			},
+			currentGoal: () => null,
+			applyGoal: async (goal) =>
+				goal && { ...goal, activatedAtMs: goal.activatedAtMs },
+			nowMs: () => NOW_MS,
+			planCacheTtlMs: 60_000,
+		});
+
+		const inFlight = reconciler.reconcile();
+		await started.promise;
+		title = "新标题";
+		reconciler.invalidate();
+		vault.resolve();
+		await inFlight;
+		const next = await reconciler.reconcile();
+
+		expect(planLoads).toBe(2);
+		expect(next.goal?.text).toBe("待办任务：1. 新标题");
+	});
+
+	test("sets no goal and clears a leftover one while signed out", async () => {
+		let signedIn = true;
+		let planLoads = 0;
+		const applied: Array<Record<string, unknown> | null> = [];
+		let current: CurrentPlanningGoal | null = {
+			goalId: "pending-tasks:plan-1",
+			planId: "plan-1",
+			text: "待办任务：1. 应用层第一遍",
+			activatedAtMs: NOW_MS - 60_000,
+		};
+		const diag: string[] = [];
+		const reconciler = new PlanningGoalReconciler({
+			loadCalendar: async () => [],
+			loadPlans: async () => {
+				planLoads += 1;
+				return [plan({ tasks: [task("task-1", "应用层第一遍")] })];
+			},
+			currentGoal: () => current && { ...current },
+			applyGoal: async (goal) => {
+				applied.push(goal && { ...goal });
+				current = goal && { ...goal, activatedAtMs: goal.activatedAtMs };
+				return current && { ...current };
+			},
+			hasSession: () => signedIn,
+			diag: (line) => diag.push(line),
+			nowMs: () => NOW_MS,
+		});
+
+		signedIn = false;
+		expect(await reconciler.reconcile()).toEqual({
+			tier: "signed-out",
+			goal: null,
+		});
+		expect(await reconciler.reconcile()).toEqual({
+			tier: "signed-out",
+			goal: null,
+		});
+		expect(applied).toEqual([null]);
+		expect(planLoads).toBe(0);
+
+		signedIn = true;
+		expect(await reconciler.reconcile()).toMatchObject({
+			tier: "pending-tasks",
+		});
+		expect(current?.text).toBe("待办任务：1. 应用层第一遍");
+		expect(diag).toEqual([
+			"[planning-goal] tier=signed-out",
+			"[planning-goal] tier=pending-tasks plans=1 tasks=1",
 		]);
 	});
 

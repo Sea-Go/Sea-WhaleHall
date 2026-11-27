@@ -487,7 +487,13 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 	},
 	onSessionActivated: (identity) => {
 		diag(`auth onSessionActivated account=${identity.accountId}`);
-		return proactiveFeedbackRuntime.sessionReadyForAuth(identity);
+		const ready = proactiveFeedbackRuntime.sessionReadyForAuth(identity);
+		// The goal is only resolved for a signed-in session, so a restore or a
+		// re-login aligns it now instead of at the next maintenance tick.
+		void ready
+			.then(() => reconcilePlanningGoal())
+			.catch(() => undefined);
+		return ready;
 	},
 	onSessionExpired: () => {
 		try {
@@ -3398,6 +3404,7 @@ startupPromise = (async () => {
 					return setRuntimeGoal(reflection, goal);
 				},
 				afterChange: () => timelineLifecycle.current?.service.pullNow(),
+				hasSession: () => authSession.captureCurrentSession() !== null,
 				diag,
 			});
 			await reconcilePlanningGoal();

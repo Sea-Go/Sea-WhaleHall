@@ -35,7 +35,8 @@ export type PlanningGoalResolution =
 
 export type PlanningGoalReconcileResult =
 	| PlanningGoalResolution
-	| { tier: "unavailable"; goal: null };
+	| { tier: "unavailable"; goal: null; stage: "lookup" | "apply" }
+	| { tier: "signed-out"; goal: null };
 
 export const PENDING_TASKS_GOAL_PREFIX = "待办任务：";
 export const DEFAULT_PLAN_CACHE_TTL_MS = 10 * 60_000;
@@ -43,7 +44,8 @@ export const DEFAULT_PLAN_CACHE_TTL_MS = 10 * 60_000;
 /**
  * Resolves the reflection goal in priority order: the task whose committed
  * calendar block is executing now, otherwise the pending tasks of every active
- * plan, otherwise no goal.
+ * plan, otherwise no goal. The plan order is stable (creation time, then id)
+ * so that routine plan writes cannot turn the same tasks into a new goal.
  */
 export function resolvePlanningGoal(input: {
 	nowMs: number;
@@ -62,6 +64,8 @@ export type PlanningGoalReconcilerOptions = {
 	currentGoal: () => CurrentPlanningGoal | null;
 	applyGoal: (goal: ActiveGoalWrite) => Promise<CurrentPlanningGoal | null>;
 	afterChange?: () => Promise<void> | void;
+	/** While it reports false no goal is set and a leftover goal is cleared. */
+	hasSession?: () => boolean;
 	diag?: (line: string) => void;
 	nowMs?: () => number;
 	planCacheTtlMs?: number;
@@ -69,14 +73,17 @@ export type PlanningGoalReconcilerOptions = {
 
 /**
  * Keeps the reflection goal aligned with the planning store. A failed lookup
- * leaves the current goal untouched so a transient Vault outage neither clears
- * the goal nor seals an open window with a goal boundary.
+ * or write leaves the current goal untouched, is reported once per distinct
+ * failure and never reaches the caller, so a transient Vault outage neither
+ * clears the goal, seals an open window with a goal boundary, nor fails the
+ * plan mutation that triggered the reconciliation.
  */
 export class PlanningGoalReconciler {
 	private cachedPlans: {
 		plans: readonly PlanningPlan[];
 		fetchedAtMs: number;
 	} | null = null;
+	private planGeneration = 0;
 	private lastReportedState: string | null = null;
 	private readonly nowMs: () => number;
 	private readonly planCacheTtlMs: number;
@@ -88,27 +95,51 @@ export class PlanningGoalReconciler {
 
 	invalidate(): void {
 		this.cachedPlans = null;
+		this.planGeneration += 1;
 	}
 
 	async reconcile(): Promise<PlanningGoalReconcileResult> {
+		if (this.options.hasSession?.() === false) {
+			// The logout barrier clears the goal; nothing may set it again
+			// before a session is active.
+			await this.clearForSignedOut();
+			return { tier: "signed-out", goal: null };
+		}
 		let calendar: readonly LocalPlanningCalendarEvent[];
 		let plans: readonly PlanningPlan[];
 		try {
 			calendar = await this.options.loadCalendar();
 			plans = await this.loadPlans();
 		} catch (error) {
-			const state = `tier=unavailable error=${errorName(error)}`;
-			this.report(state);
-			return { tier: "unavailable", goal: null };
+			this.report(`tier=unavailable stage=lookup ${describeError(error)}`);
+			return { tier: "unavailable", goal: null, stage: "lookup" };
 		}
 		const resolution = resolvePlanningGoal({
 			nowMs: this.nowMs(),
 			calendar,
 			plans,
 		});
-		await this.apply(resolution);
+		try {
+			await this.apply(resolution);
+		} catch (error) {
+			this.report(`tier=unavailable stage=apply ${describeError(error)}`);
+			return { tier: "unavailable", goal: null, stage: "apply" };
+		}
 		this.report(describeResolution(resolution));
 		return resolution;
+	}
+
+	private async clearForSignedOut(): Promise<void> {
+		this.cachedPlans = null;
+		if (this.options.currentGoal() !== null) {
+			try {
+				await this.options.applyGoal(null);
+			} catch (error) {
+				this.report(`tier=signed-out clear-failed ${describeError(error)}`);
+				return;
+			}
+		}
+		this.report("tier=signed-out");
 	}
 
 	private async loadPlans(): Promise<readonly PlanningPlan[]> {
@@ -119,8 +150,14 @@ export class PlanningGoalReconciler {
 		) {
 			return cached.plans;
 		}
+		// A plan written while this load is in flight must not be hidden by
+		// the stale result it captured.
+		const generation = this.planGeneration;
 		const plans = await this.options.loadPlans();
-		this.cachedPlans = { plans, fetchedAtMs: this.nowMs() };
+		this.cachedPlans =
+			generation === this.planGeneration
+				? { plans, fetchedAtMs: this.nowMs() }
+				: null;
 		return plans;
 	}
 
@@ -130,7 +167,7 @@ export class PlanningGoalReconciler {
 		if (resolved === null) {
 			if (current === null) return;
 			await this.options.applyGoal(null);
-			await this.options.afterChange?.();
+			await this.pullTimeline();
 			return;
 		}
 		// The reflection service keeps the existing goal when a request is
@@ -148,7 +185,17 @@ export class PlanningGoalReconciler {
 			current.planId !== applied.planId ||
 			current.text !== applied.text
 		) {
+			await this.pullTimeline();
+		}
+	}
+
+	private async pullTimeline(): Promise<void> {
+		try {
 			await this.options.afterChange?.();
+		} catch (error) {
+			this.options.diag?.(
+				`[planning-goal] pull-failed ${describeError(error)}`,
+			);
 		}
 	}
 
@@ -220,7 +267,12 @@ function resolvePendingTasksGoal(input: {
 	nowMs: number;
 	plans: readonly PlanningPlan[];
 }): PlanningGoalResolution {
-	const activePlans = input.plans.filter((plan) => plan.status === "active");
+	const activePlans = input.plans
+		.filter((plan) => plan.status === "active")
+		.sort(
+			(left, right) =>
+				compareCreatedAt(left, right) || compareText(left.id, right.id),
+		);
 	if (activePlans.length === 0) {
 		return { tier: "none", goal: null, reason: "no-active-plan" };
 	}
@@ -280,7 +332,12 @@ export function composePendingTasksGoalText(titles: readonly string[]): string {
 }
 
 function normalizeGoalText(value: string): string {
-	return value.replace(/\s+/gu, " ").trim();
+	// The reflection service rejects control characters other than line
+	// whitespace, and a plan title may carry any of them.
+	return value
+		.replace(/\s+/gu, " ")
+		.replace(/\p{Cc}/gu, "")
+		.trim();
 }
 
 function truncateGoalText(text: string): string {
@@ -310,6 +367,31 @@ function describeResolution(resolution: PlanningGoalResolution): string {
 	}
 }
 
-function errorName(error: unknown): string {
-	return error instanceof Error ? error.name : "UNKNOWN";
+function compareCreatedAt(left: PlanningPlan, right: PlanningPlan): number {
+	const leftMs = Date.parse(left.createdAt);
+	const rightMs = Date.parse(right.createdAt);
+	if (
+		Number.isFinite(leftMs) &&
+		Number.isFinite(rightMs) &&
+		leftMs !== rightMs
+	) {
+		return leftMs < rightMs ? -1 : 1;
+	}
+	return 0;
+}
+
+function compareText(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** `error=<name> message="<text>"`, single line and bounded, for diag.log. */
+function describeError(error: unknown): string {
+	const name = error instanceof Error ? error.name : typeof error;
+	const message = error instanceof Error ? error.message : String(error);
+	const text = message
+		.replace(/[\p{Cc}\p{Zl}\p{Zp}"`]/gu, " ")
+		.replace(/\s+/gu, " ")
+		.trim()
+		.slice(0, 160);
+	return `error=${name} message="${text}"`;
 }
