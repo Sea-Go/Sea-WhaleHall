@@ -103,13 +103,20 @@ frames.
 | `application.textValueChanged` | `accessibility.documentChanged` | a real delta against the prior value exists and the change was not redacted |
 | `application.visibleContentChanged` | `application.foregroundChanged` with `windowTitle` | a sealed window title exists and differs from the last title event |
 | `application.foregroundChanged` | `application.foregroundChanged` with `windowTitle` | the application switched to has a title the bridge has already seen, and it differs from the last title event |
-| `browser.visiblePageChanged` | `browser.tabNavigated` with host and `title` | the host and title of that tab differ from the last navigation mirrored for it |
+| `browser.visiblePageChanged` | `browser.tabNavigated` with host and `title` | the host and title differ from the last navigation mirrored for that tab, and a tab seen for the first time repeats no page the browser already showed |
 
 A foreground switch carries no content of its own. The bridge remembers the
 newest title it has mirrored for each application and pairs a later switch to
 that application with it, so returning to a document whose title did not
 change is still described. Window titles are reported against the single last
-title event, whichever application it described.
+title event, whichever application it described. Once an application is
+observed without a title the bridge may mirror — a search results page, a
+title that is an address, a window without one — the remembered title is
+dropped, so a later switch is never described with a title older than the
+window. The observer reports a moved or resized window under a new tab, so a
+tab seen for the first time adds nothing when the same host and title were
+already mirrored for that browser. A page without host and title cannot be
+told from another one and is reported once per tab.
 
 Visible text, typed text, control labels and full URLs never cross the bridge.
 The bridge reads a page URL only to recognise a search request, and withholds

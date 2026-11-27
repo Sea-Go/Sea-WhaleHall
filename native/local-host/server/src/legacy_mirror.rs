@@ -70,6 +70,9 @@ impl<'a> LegacyMirrorSink<'a> {
         let Some(mirror) = mirror else {
             return;
         };
+        if let Some(app_id) = mirror.stale_title_app_id.as_ref() {
+            self.known_titles.remove(app_id);
+        }
         if let Some(app_id) = mirror.sensitive_app_id.as_ref() {
             if self.sensitive_apps.len() >= MAX_REMEMBERED_APPS
                 && !self.sensitive_apps.contains(app_id)
@@ -153,18 +156,32 @@ impl<'a> LegacyMirrorSink<'a> {
                 else {
                     return false;
                 };
-                // The page was not withheld, so the browser is no longer
-                // sensitive, and the page title describes it at the next switch.
-                self.note_window_title(browser_id, text(payload, "title"));
                 // The journal reports a navigation whenever a page's visible
                 // text changes, which says nothing about where the user is.
                 let page = (
                     text(payload, "url").map(ToOwned::to_owned),
                     text(payload, "title").map(ToOwned::to_owned),
                 );
-                self.last_navigations
+                let named = page.0.is_some() || page.1.is_some();
+                let repeat = match self
+                    .last_navigations
                     .get(&(browser_id.to_owned(), tab_id.to_owned()))
-                    != Some(&page)
+                {
+                    Some(last) => *last == page,
+                    // A window that moved or was resized is reported under a
+                    // new tab although it shows a page the bridge already named.
+                    None => {
+                        named
+                            && self
+                                .last_navigations
+                                .iter()
+                                .any(|((browser, _), last)| browser == browser_id && *last == page)
+                    }
+                };
+                // The page was not withheld, so the browser is no longer
+                // sensitive, and the page title describes it at the next switch.
+                self.note_window_title(browser_id, text(payload, "title"));
+                !repeat
             }
             "application.foregroundChanged" => {
                 let (Some(app_id), Some(title)) =
@@ -182,10 +199,12 @@ impl<'a> LegacyMirrorSink<'a> {
     }
 
     /// Ends a sensitive period of an application and records the title that
-    /// ended it, when the event carries one.
+    /// ended it. An event without a title shows a page the bridge may not name,
+    /// so the title remembered for the application is older than that page.
     fn note_window_title(&mut self, app_id: &str, title: Option<&str>) {
         self.sensitive_apps.remove(app_id);
         let Some(title) = title else {
+            self.known_titles.remove(app_id);
             return;
         };
         if self.known_titles.len() >= MAX_REMEMBERED_APPS && !self.known_titles.contains_key(app_id)
@@ -334,6 +353,7 @@ mod tests {
         LegacyMirror {
             draft: None,
             sensitive_app_id: None,
+            stale_title_app_id: None,
             foreground: Some(LegacyForegroundSwitch {
                 app_id: app_id.to_owned(),
                 app_name: "App".to_owned(),
@@ -348,6 +368,7 @@ mod tests {
         LegacyMirror {
             draft: Some(draft),
             sensitive_app_id: None,
+            stale_title_app_id: None,
             foreground: None,
         }
     }
@@ -356,6 +377,16 @@ mod tests {
         LegacyMirror {
             draft: Some(edit_event(app_id, "withheld")),
             sensitive_app_id: Some(app_id.to_owned()),
+            stale_title_app_id: None,
+            foreground: None,
+        }
+    }
+
+    fn stale_title(app_id: &str) -> LegacyMirror {
+        LegacyMirror {
+            draft: None,
+            sensitive_app_id: None,
+            stale_title_app_id: Some(app_id.to_owned()),
             foreground: None,
         }
     }
@@ -518,14 +549,31 @@ mod tests {
         sink.append(Some(mirrored(page("tab-1", "Welcome", "k1"))), &status);
         sink.append(Some(mirrored(page("tab-1", "Welcome", "k2"))), &status);
         sink.append(Some(mirrored(page("tab-1", "Chapter 2", "k3"))), &status);
+        // The window was moved: the observer reports the same page as a new tab.
         sink.append(Some(mirrored(page("tab-2", "Chapter 2", "k4"))), &status);
+        sink.append(Some(mirrored(page("tab-2", "Chapter 3", "k5"))), &status);
+        // A page without host or title cannot be told from any other one.
+        sink.append(
+            Some(mirrored(navigation_event("tab-3", None, None, "k6"))),
+            &status,
+        );
+        sink.append(
+            Some(mirrored(navigation_event("tab-3", None, None, "k7"))),
+            &status,
+        );
+        sink.append(
+            Some(mirrored(navigation_event("tab-4", None, None, "k8"))),
+            &status,
+        );
 
         assert_eq!(
             appended(&journal),
             vec![
                 "browser.tabNavigated:Welcome",
                 "browser.tabNavigated:Chapter 2",
-                "browser.tabNavigated:Chapter 2",
+                "browser.tabNavigated:Chapter 3",
+                "browser.tabNavigated:",
+                "browser.tabNavigated:",
             ]
         );
         assert_eq!(last_error(&status), None);
@@ -659,6 +707,56 @@ mod tests {
                 "accessibility.documentChanged:",
             ]
         );
+    }
+
+    #[test]
+    fn names_no_window_with_a_title_older_than_the_page_it_shows() {
+        let (_directory, journal) = journal("forgotten-title");
+        let status = status();
+        let mut sink = LegacyMirrorSink::new(Some(&journal));
+
+        // A search results page mirrors its host and not the query in its title.
+        sink.append(
+            Some(mirrored(navigation_event(
+                "tab-1",
+                Some("example.com"),
+                Some("Repo - GitHub"),
+                "k1",
+            ))),
+            &status,
+        );
+        sink.append(
+            Some(mirrored(navigation_event(
+                "tab-1",
+                Some("www.google.com"),
+                None,
+                "k2",
+            ))),
+            &status,
+        );
+        sink.append(Some(switch("com.example.browser", "k3")), &status);
+
+        // A native window whose title was withheld reports that it has none.
+        sink.append(
+            Some(mirrored(title_event(
+                "com.example.notes",
+                "Meeting notes",
+                "k4",
+            ))),
+            &status,
+        );
+        sink.append(Some(stale_title("com.example.notes")), &status);
+        sink.append(Some(switch("com.example.notes", "k5")), &status);
+
+        assert_eq!(
+            appended(&journal),
+            vec![
+                "browser.tabNavigated:Repo - GitHub",
+                "browser.tabNavigated:",
+                "application.foregroundChanged:Meeting notes",
+            ]
+        );
+        assert_eq!(last_error(&status), None);
     }
 
     #[test]

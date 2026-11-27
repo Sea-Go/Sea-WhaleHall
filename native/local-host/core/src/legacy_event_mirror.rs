@@ -108,6 +108,10 @@ pub struct LegacyMirror {
     /// The application whose window title or page was withheld as sensitive.
     /// Nothing of that application is mirrored until its title changes.
     pub sensitive_app_id: Option<String>,
+    /// The application whose window was just observed and mirrors no title,
+    /// because the window has none or its title was withheld. A title the
+    /// bridge remembers for it is older than the window.
+    pub stale_title_app_id: Option<String>,
     pub foreground: Option<LegacyForegroundSwitch>,
 }
 
@@ -132,6 +136,7 @@ pub fn project_legacy_mirror(projection: &LegacyMirrorProjection<'_>) -> Option<
         return Some(LegacyMirror {
             draft: None,
             sensitive_app_id: None,
+            stale_title_app_id: None,
             foreground: Some(LegacyForegroundSwitch {
                 app_id,
                 app_name,
@@ -149,12 +154,25 @@ pub fn project_legacy_mirror(projection: &LegacyMirrorProjection<'_>) -> Option<
     } else {
         legacy_mirror_draft(projection)
     };
-    if draft.is_none() && sensitive_app_id.is_none() {
+    // A window that was observed, could be read and still mirrors no title
+    // leaves a title remembered for its application older than the window.
+    let stale_title_app_id = if projection.kind
+        == semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED
+        && sensitive_app_id.is_none()
+        && content_readable(projection)
+        && draft.is_none()
+    {
+        bounded_string(metadata_object(projection)?.get("appId"), 512)
+    } else {
+        None
+    };
+    if draft.is_none() && sensitive_app_id.is_none() && stale_title_app_id.is_none() {
         return None;
     }
     Some(LegacyMirror {
         draft,
         sensitive_app_id,
+        stale_title_app_id,
         foreground: None,
     })
 }
@@ -262,7 +280,8 @@ fn document_change(projection: &LegacyMirrorProjection<'_>) -> Option<Mirrored> 
         || projection.coverage.contains(&CoverageLevelV2::Redacted)
     {
         return None;
-    } // Without a prior value the projector reports a zero baseline, and caret
+    }
+    // Without a prior value the projector reports a zero baseline, and caret
     // moves report zero deltas. Neither is evidence of an edit.
     if metadata.get("deltaAvailable") != Some(&Value::Bool(true)) {
         return None;
@@ -352,14 +371,7 @@ fn browser_navigation(projection: &LegacyMirrorProjection<'_>) -> Option<Mirrore
 /// Reads one content hint. It fails closed unless the content was sealed for
 /// this observation and no coverage level limits it.
 fn content_hint(projection: &LegacyMirrorProjection<'_>, key: &str) -> Option<String> {
-    if projection.content_state != SemanticContentStateV2::Available
-        || projection.coverage.iter().any(|level| {
-            matches!(
-                level,
-                CoverageLevelV2::Denied | CoverageLevelV2::Unavailable | CoverageLevelV2::Redacted
-            )
-        })
-    {
+    if !content_readable(projection) {
         return None;
     }
     let content = projection.content?.as_object()?;
@@ -379,6 +391,18 @@ fn content_hint(projection: &LegacyMirrorProjection<'_>, key: &str) -> Option<St
             .trim_end()
             .to_owned(),
     )
+}
+
+/// Whether the content of an observation could be read: it was sealed for this
+/// observation and no coverage level limits it.
+fn content_readable(projection: &LegacyMirrorProjection<'_>) -> bool {
+    projection.content_state == SemanticContentStateV2::Available
+        && !projection.coverage.iter().any(|level| {
+            matches!(
+                level,
+                CoverageLevelV2::Denied | CoverageLevelV2::Unavailable | CoverageLevelV2::Redacted
+            )
+        })
 }
 
 fn content_url<'a>(projection: &LegacyMirrorProjection<'a>) -> Option<&'a str> {
@@ -1186,6 +1210,49 @@ mod tests {
         .expect("the host of a search mirrors");
         assert_eq!(payload(&draft)["url"], "www.google.com");
         assert!(payload(&draft).get("title").is_none());
+    }
+
+    #[test]
+    fn reports_a_window_that_could_be_read_but_shows_no_mirrorable_title() {
+        for title in [
+            Some("rust - Google 搜索"),
+            Some("example.test/untitled"),
+            None,
+        ] {
+            let (metadata, content) = visible(title);
+            let mirror = project_legacy_mirror(&projection(
+                semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED,
+                &metadata,
+                content.as_ref(),
+            ))
+            .expect("a window without a title is reported");
+            assert!(mirror.draft.is_none());
+            assert_eq!(
+                mirror.stale_title_app_id.as_deref(),
+                Some("com.example.reader"),
+                "{title:?}"
+            );
+        }
+
+        // A window whose content could not be read says nothing about its title.
+        let (metadata, content) = visible(Some("example.test/untitled"));
+        let mut unreadable = projection(
+            semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED,
+            &metadata,
+            content.as_ref(),
+        );
+        unreadable.content_state = SemanticContentStateV2::Unavailable;
+        assert!(project_legacy_mirror(&unreadable).is_none());
+
+        let (metadata, content) = visible(Some("Chapter 1"));
+        let mirror = project_legacy_mirror(&projection(
+            semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED,
+            &metadata,
+            content.as_ref(),
+        ))
+        .expect("a window title mirrors");
+        assert!(mirror.draft.is_some());
+        assert!(mirror.stale_title_app_id.is_none());
     }
 
     #[test]
