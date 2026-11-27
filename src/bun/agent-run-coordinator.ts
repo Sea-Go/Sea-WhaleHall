@@ -1695,11 +1695,6 @@ export class AgentRunCoordinator
 					await this.persistRun(run);
 					return;
 				}
-				if (run.snapshot.kind === "activity-analysis") {
-					// A sidecar restart is no verdict on the job. Classified as
-					// terminal it would make the ledger refuse every later job.
-					run.activityFailureClass = "transient";
-				}
 				await this.interruptRun(run, reason, true);
 			}),
 		);
@@ -2723,9 +2718,11 @@ export class AgentRunCoordinator
 									? "transient"
 									: terminalFailure?.retryable
 										? "transient"
-										: run.snapshot.status === "completed"
-											? null
-											: "terminal",
+										: run.snapshot.status === "interrupted"
+											? "transient"
+											: run.snapshot.status === "completed"
+												? null
+												: "terminal",
 						feedback,
 					});
 				}

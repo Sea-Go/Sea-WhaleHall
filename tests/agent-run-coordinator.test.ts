@@ -198,29 +198,7 @@ describe("AgentRunCoordinator", () => {
 
 	test("advances the activity model relay only after supervisor, one specialist, and voice open successfully", async () => {
 		const harness = createHarness();
-		const runId = "activity-run-model-stages";
-		const analysis = activityAnalysisResult(
-			"worker-request-model-stages",
-			"sealed-window-model-stages",
-		);
-		await harness.repository.archiveProactiveFeedbackEventStream({
-			accountId: "account-a",
-			id: analysis.request_id,
-			sourceWindowId: "sealed-window-model-stages",
-			windowStartedAtMs: 1,
-			windowEndedAtMs: 2,
-			analysis,
-			archivedAtMs: harness.clock(),
-			consumedAtMs: null,
-			consumedRunId: null,
-		});
-		await harness.coordinator.startActivityAnalysis({
-			jobId: "activity-job-model-stages",
-			runId,
-			requestId: "activity-request-model-stages",
-			consumedScore: 1,
-			analyses: [analysis],
-		});
+		const runId = await startArchivedActivity(harness, "model-stages");
 
 		let openCalls = 0;
 		const open = (
@@ -297,29 +275,7 @@ describe("AgentRunCoordinator", () => {
 
 	test("fails closed when activity completion arrives before all model relay stages", async () => {
 		const harness = createHarness();
-		const runId = "activity-run-early-completion";
-		const analysis = activityAnalysisResult(
-			"worker-request-early-completion",
-			"sealed-window-early-completion",
-		);
-		await harness.repository.archiveProactiveFeedbackEventStream({
-			accountId: "account-a",
-			id: analysis.request_id,
-			sourceWindowId: "sealed-window-early-completion",
-			windowStartedAtMs: 1,
-			windowEndedAtMs: 2,
-			analysis,
-			archivedAtMs: harness.clock(),
-			consumedAtMs: null,
-			consumedRunId: null,
-		});
-		await harness.coordinator.startActivityAnalysis({
-			jobId: "activity-job-early-completion",
-			runId,
-			requestId: "activity-request-early-completion",
-			consumedScore: 1,
-			analyses: [analysis],
-		});
+		const runId = await startArchivedActivity(harness, "early-completion");
 		harness.coordinator.acceptSidecarEvent(
 			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
 		);
@@ -408,29 +364,7 @@ describe("AgentRunCoordinator", () => {
 
 	test("reports an interrupted activity run as retryable, never as a terminal verdict", async () => {
 		const harness = createHarness();
-		const analysis = activityAnalysisResult(
-			"worker-request-interrupted",
-			"sealed-interrupted",
-		);
-		await harness.repository.archiveProactiveFeedbackEventStream({
-			accountId: "account-a",
-			id: analysis.request_id,
-			sourceWindowId: "sealed-interrupted",
-			windowStartedAtMs: 1,
-			windowEndedAtMs: 2,
-			analysis,
-			archivedAtMs: harness.clock(),
-			consumedAtMs: null,
-			consumedRunId: null,
-		});
-		const runId = "activity-run-interrupted";
-		await harness.coordinator.startActivityAnalysis({
-			jobId: "activity-job-interrupted",
-			runId,
-			requestId: "activity-request-interrupted",
-			consumedScore: 1,
-			analyses: [analysis],
-		});
+		const runId = await startArchivedActivity(harness, "interrupted");
 
 		// The sidecar process exits while the support run is in flight.
 		await harness.coordinator.interruptRuns([runId], "本地 Agent 进程已中断。");
@@ -519,6 +453,36 @@ function activityAnalysisResult(requestId: string, sourceEventId: string) {
 			},
 		],
 	};
+}
+
+async function startArchivedActivity(
+	harness: ReturnType<typeof createHarness>,
+	suffix: string,
+) {
+	const analysis = activityAnalysisResult(
+		`worker-request-${suffix}`,
+		`sealed-${suffix}`,
+	);
+	await harness.repository.archiveProactiveFeedbackEventStream({
+		accountId: "account-a",
+		id: analysis.request_id,
+		sourceWindowId: `sealed-${suffix}`,
+		windowStartedAtMs: 1,
+		windowEndedAtMs: 2,
+		analysis,
+		archivedAtMs: harness.clock(),
+		consumedAtMs: null,
+		consumedRunId: null,
+	});
+	const runId = `activity-run-${suffix}`;
+	await harness.coordinator.startActivityAnalysis({
+		jobId: `activity-job-${suffix}`,
+		runId,
+		requestId: `activity-request-${suffix}`,
+		consumedScore: 1,
+		analyses: [analysis],
+	});
+	return runId;
 }
 
 async function advanceActivityModelRelayStages(
