@@ -4009,4 +4009,131 @@ TeamIdentifier=not set
             );
         }
     }
+
+    fn typed_bucket_frame(sequence: u64, at_ms: i64) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "type": "observation",
+            "schemaVersion": "observer-frame.v1",
+            "bootId": "boot-7f3e9c1a",
+            "sequence": sequence,
+            "observedAtMs": at_ms + 5_000,
+            "observation": RawObservationInputV2 {
+                schema_version: RAW_OBSERVATION_SCHEMA_VERSION.to_owned(),
+                kind: "input.activityBucket".to_owned(),
+                interval: whalehall_local_protocol::ObservationIntervalV2 {
+                    started_at_ms: at_ms,
+                    ended_at_ms: at_ms + 5_000,
+                },
+                source: whalehall_local_protocol::ObservationSourceV2 {
+                    sensor: whalehall_local_protocol::ObservationSensorV2::CgActivity,
+                    adapter_version: "observer-test.v2".to_owned(),
+                },
+                subject: whalehall_local_protocol::ObservationSubjectV2 {
+                    app_id: "system.input".to_owned(),
+                    app_name: "macOS".to_owned(),
+                    opaque_window_id: None,
+                },
+                reliability: whalehall_local_protocol::EvidenceReliabilityV2::High,
+                coverage: vec![CoverageLevelV2::Metadata],
+                redactions: Vec::new(),
+                metadata: json!({
+                    "keyCount": 4,
+                    "clickCount": 0,
+                    "scrollDelta": 0,
+                    "mouseDistance": 10,
+                }),
+                content: None,
+            },
+        }))
+        .expect("encode an observation frame")
+    }
+
+    #[tokio::test]
+    async fn an_observation_frame_is_acknowledged_before_its_mirror_is_appended_once() {
+        use whalehall_local_core::events::EventJournal;
+        use whalehall_local_protocol::EventQueryParams;
+
+        let directory = tempfile::tempdir().expect("create observer mirror directory");
+        let journal = test_journal(directory.path());
+        let permissions_store = test_permissions_store(directory.path());
+        let status = test_status();
+        let legacy = EventJournal::open(directory.path().join("events.sqlite3"))
+            .expect("open legacy journal");
+        let mut sink = LegacyMirrorSink::new(Some(&legacy));
+        let mut frame_state = HelperFrameState {
+            active_boot_id: None,
+            last_sequence: 0,
+            last_observation_at_ms: None,
+            last_heartbeat: Instant::now(),
+            permission_frame_received: false,
+        };
+        // `cat` echoes its stdin, which stands in for the helper's pipe.
+        let mut echo = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn the echo process");
+        let mut stdin = echo.stdin.take().expect("piped stdin");
+        let mut reader = BufReader::new(echo.stdout.take().expect("piped stdout"));
+
+        let frame = typed_bucket_frame(1, 1_700_000_000_000);
+        handle_helper_frame(
+            &frame,
+            &journal,
+            &mut sink,
+            &status,
+            &permissions_store,
+            &mut stdin,
+            &mut frame_state,
+        )
+        .await
+        .expect("the observation frame is accepted");
+
+        let mut ack = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut ack))
+            .await
+            .expect("the acknowledgement is written")
+            .expect("read the acknowledgement");
+        assert_eq!(
+            serde_json::from_str::<Value>(&ack).expect("acknowledgement is JSON")["sequence"],
+            1
+        );
+
+        // The helper resends the frame after a reconnect: it is acknowledged
+        // again and nothing reaches the legacy journal a second time.
+        handle_helper_frame(
+            &frame,
+            &journal,
+            &mut sink,
+            &status,
+            &permissions_store,
+            &mut stdin,
+            &mut frame_state,
+        )
+        .await
+        .expect("the replayed observation frame is accepted");
+        ack.clear();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut ack))
+            .await
+            .expect("the replay is acknowledged")
+            .expect("read the replayed acknowledgement");
+        drop(stdin);
+
+        let mirrored = legacy
+            .query(&EventQueryParams {
+                after_cursor: None,
+                consumer_id: None,
+                limit: 10,
+            })
+            .expect("query the legacy journal")
+            .events;
+        assert_eq!(
+            mirrored
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["input.activityAggregated"]
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(2), echo.wait()).await;
+    }
 }

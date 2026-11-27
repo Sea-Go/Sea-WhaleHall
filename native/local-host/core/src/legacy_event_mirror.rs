@@ -87,6 +87,94 @@ struct Mirrored {
     payload: Map<String, Value>,
 }
 
+/// A foreground switch. It carries no content of its own, so the bridge pairs
+/// it with the newest title it has already seen for that application.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyForegroundSwitch {
+    pub app_id: String,
+    pub app_name: String,
+    pub occurred_at_ms: i64,
+    pub observed_at_ms: i64,
+    pub observation_id: String,
+}
+
+/// What one inserted observation contributes to the legacy reflection journal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LegacyMirror {
+    /// The event to append. It is always absent for a sensitive observation.
+    pub draft: Option<DesktopEventDraft>,
+    /// The application whose window title or page was withheld as sensitive.
+    /// Nothing of that application is mirrored until its title changes.
+    pub sensitive_app_id: Option<String>,
+    pub foreground: Option<LegacyForegroundSwitch>,
+}
+
+/// Returns what a projection contributes to the legacy reflection journal, or
+/// `None` when it contributes nothing.
+pub fn project_legacy_mirror(projection: &LegacyMirrorProjection<'_>) -> Option<LegacyMirror> {
+    if projection.count_class != SemanticCountClassV2::Effective {
+        return None;
+    }
+    if projection.kind == semantic_event_kinds::APPLICATION_FOREGROUND_CHANGED {
+        let metadata = metadata_object(projection)?;
+        let (Some(app_id), Some(app_name)) = (
+            bounded_string(metadata.get("appId"), 512),
+            bounded_string(metadata.get("appName"), 512),
+        ) else {
+            return None;
+        };
+        return Some(LegacyMirror {
+            draft: None,
+            sensitive_app_id: None,
+            foreground: Some(LegacyForegroundSwitch {
+                app_id,
+                app_name,
+                occurred_at_ms: projection.occurred_at_ms,
+                observed_at_ms: projection.observed_at_ms,
+                observation_id: projection.observation_id.to_owned(),
+            }),
+        });
+    }
+    let sensitive_app_id = sensitive_app(projection);
+    // Nothing of an observation that was withheld as sensitive is mirrored:
+    // a title alone would still tell which page the user is on.
+    let draft = if sensitive_app_id.is_some() {
+        None
+    } else {
+        legacy_mirror_draft(projection)
+    };
+    if draft.is_none() && sensitive_app_id.is_none() {
+        return None;
+    }
+    Some(LegacyMirror {
+        draft,
+        sensitive_app_id,
+        foreground: None,
+    })
+}
+
+/// The title-bearing event of a foreground switch. The caller supplies a title
+/// the bridge has already admitted through [`legacy_mirror_draft`].
+pub fn legacy_mirror_foreground_draft(
+    switch: &LegacyForegroundSwitch,
+    title: &str,
+) -> DesktopEventDraft {
+    let mut payload = Map::new();
+    payload.insert("appId".to_owned(), Value::String(switch.app_id.clone()));
+    payload.insert("appName".to_owned(), Value::String(switch.app_name.clone()));
+    payload.insert("windowTitle".to_owned(), Value::String(title.to_owned()));
+    let mut draft = DesktopEventDraft::metadata(
+        "application.foregroundChanged",
+        MIRROR_SOURCE_WORKSPACE,
+        switch.occurred_at_ms,
+        Value::Object(payload),
+        format!("{MIRROR_DEDUP_PREFIX}{}", switch.observation_id),
+    );
+    draft.observed_at_ms = switch.observed_at_ms.max(switch.occurred_at_ms);
+    draft.sensitivity = DesktopEventSensitivity::Content;
+    draft
+}
+
 /// Returns the legacy desktop event a projection mirrors to, if any.
 ///
 /// The deduplication key is derived from the observation, so replaying the
@@ -99,8 +187,7 @@ pub fn legacy_mirror_draft(projection: &LegacyMirrorProjection<'_>) -> Option<De
         semantic_event_kinds::INPUT_ACTIVITY_BUCKET => input_activity(projection),
         semantic_event_kinds::APPLICATION_TEXT_VALUE_CHANGED => document_change(projection),
         semantic_event_kinds::BROWSER_VISIBLE_PAGE_CHANGED => browser_navigation(projection),
-        semantic_event_kinds::APPLICATION_FOREGROUND_CHANGED
-        | semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED => window_title(projection),
+        semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED => window_title(projection),
         _ => None,
     }?;
     let mut draft = DesktopEventDraft::metadata(
@@ -164,6 +251,12 @@ fn input_activity(projection: &LegacyMirrorProjection<'_>) -> Option<Mirrored> {
 
 fn document_change(projection: &LegacyMirrorProjection<'_>) -> Option<Mirrored> {
     let metadata = metadata_object(projection)?;
+    // A redacted change belongs to a field the observer refuses to describe.
+    if projection.content_state == SemanticContentStateV2::Redacted
+        || projection.coverage.contains(&CoverageLevelV2::Redacted)
+    {
+        return None;
+    }
     // Without a prior value the projector reports a zero baseline, and caret
     // moves report zero deltas. Neither is evidence of an edit.
     if metadata.get("deltaAvailable") != Some(&Value::Bool(true)) {
@@ -278,6 +371,40 @@ fn mentions_sensitive_page(value: &str) -> bool {
     SENSITIVE_MARKERS
         .iter()
         .any(|marker| lowercase.contains(marker))
+}
+
+/// The application of a window or page observation whose content was withheld
+/// as sensitive: the journal redacted it, or an available title, host or URL
+/// matches a sensitive-page marker. Text changes say nothing about the whole
+/// surface, so a redacted password field never marks its application.
+fn sensitive_app(projection: &LegacyMirrorProjection<'_>) -> Option<String> {
+    let describes_surface = matches!(
+        projection.kind,
+        semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED
+            | semantic_event_kinds::BROWSER_VISIBLE_PAGE_CHANGED
+    );
+    if !describes_surface {
+        return None;
+    }
+    // Coverage that is only unavailable says nothing about the page: without
+    // the Automation permission every browser observation is redacted.
+    let redacted = projection.content_state == SemanticContentStateV2::Redacted;
+    let matches_marker = projection.content_state == SemanticContentStateV2::Available
+        && projection
+            .content
+            .and_then(Value::as_object)
+            .is_some_and(|content| {
+                ["windowTitle", "title", "domain", "url"].iter().any(|key| {
+                    content
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(mentions_sensitive_page)
+                })
+            });
+    if !(redacted || matches_marker) {
+        return None;
+    }
+    bounded_string(metadata_object(projection)?.get("appId"), 512)
 }
 
 fn is_host(value: &str) -> bool {
@@ -686,6 +813,175 @@ mod tests {
             .is_none()
         );
         assert!(legacy_mirror_draft(&projection("coverage.gap", &metadata, None)).is_none());
+        // A foreground switch has no content of its own to mirror.
+        let (metadata, content) = visible(Some("Chapter 1"));
+        assert!(
+            legacy_mirror_draft(&projection(
+                semantic_event_kinds::APPLICATION_FOREGROUND_CHANGED,
+                &metadata,
+                content.as_ref(),
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn reports_a_foreground_switch_without_content() {
+        let metadata =
+            json!({ "appId": "com.example.reader", "appName": "Reader", "processId": 42 });
+        let mirror = project_legacy_mirror(&projection(
+            semantic_event_kinds::APPLICATION_FOREGROUND_CHANGED,
+            &metadata,
+            None,
+        ))
+        .expect("a foreground switch is reported");
+
+        assert!(mirror.draft.is_none());
+        assert!(mirror.sensitive_app_id.is_none());
+        let switch = mirror
+            .foreground
+            .expect("the switch is described for the bridge");
+        assert_eq!(switch.app_id, "com.example.reader");
+        assert_eq!(switch.observation_id, OBSERVATION_ID);
+
+        let draft = legacy_mirror_foreground_draft(&switch, "Chapter 1");
+        assert_eq!(draft.kind, "application.foregroundChanged");
+        assert_eq!(draft.source, MIRROR_SOURCE_WORKSPACE);
+        assert_eq!(draft.sensitivity, DesktopEventSensitivity::Content);
+        assert_eq!(
+            draft.deduplication_key,
+            format!("{MIRROR_DEDUP_PREFIX}{OBSERVATION_ID}")
+        );
+        assert_eq!(draft.occurred_at_ms, STARTED_AT_MS);
+        assert_eq!(draft.observed_at_ms, ENDED_AT_MS);
+        assert_eq!(
+            payload(&draft),
+            json!({
+                "appId": "com.example.reader",
+                "appName": "Reader",
+                "windowTitle": "Chapter 1",
+            })
+            .as_object()
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn marks_a_sensitive_window_or_page_and_mirrors_nothing_of_it() {
+        let (metadata, content) = visible(Some("Stripe Dashboard - Payments"));
+        let window = project_legacy_mirror(&projection(
+            semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED,
+            &metadata,
+            content.as_ref(),
+        ))
+        .expect("a sensitive window is reported");
+        assert_eq!(
+            window.sensitive_app_id.as_deref(),
+            Some("com.example.reader")
+        );
+        assert!(window.draft.is_none());
+
+        // A host that matches a marker withholds the title as well.
+        let navigation = json!({
+            "appId": "com.example.browser",
+            "appName": "Browser",
+            "changeKind": "navigated",
+            "opaqueWindowId": "ow1_tab",
+            "contentHash": "deadbeef",
+        });
+        let page = json!({
+            "domain": "bank.example.com",
+            "title": "Overview",
+            "url": "https://bank.example.com/overview",
+            "visibleText": "private body",
+        });
+        let tab = project_legacy_mirror(&projection(
+            semantic_event_kinds::BROWSER_VISIBLE_PAGE_CHANGED,
+            &navigation,
+            Some(&page),
+        ))
+        .expect("a sensitive page is reported");
+        assert_eq!(tab.sensitive_app_id.as_deref(), Some("com.example.browser"));
+        assert!(tab.draft.is_none());
+
+        // Only the URL reveals this one; it is enough to withhold the page.
+        let sign_in = json!({
+            "domain": "example.com",
+            "title": "Welcome",
+            "url": "https://example.com/login?next=/dashboard",
+            "visibleText": "private body",
+        });
+        let tab = project_legacy_mirror(&projection(
+            semantic_event_kinds::BROWSER_VISIBLE_PAGE_CHANGED,
+            &navigation,
+            Some(&sign_in),
+        ))
+        .expect("a sign-in page is reported");
+        assert_eq!(tab.sensitive_app_id.as_deref(), Some("com.example.browser"));
+        assert!(tab.draft.is_none());
+    }
+
+    #[test]
+    fn marks_a_redacted_window_but_never_mirrors_a_redacted_text_change() {
+        let (metadata, content) = visible(Some("Untitled"));
+        let mut redacted_window = projection(
+            semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED,
+            &metadata,
+            content.as_ref(),
+        );
+        redacted_window.content_state = SemanticContentStateV2::Redacted;
+        let window =
+            project_legacy_mirror(&redacted_window).expect("a redacted window is reported");
+        assert_eq!(
+            window.sensitive_app_id.as_deref(),
+            Some("com.example.reader")
+        );
+        assert!(window.draft.is_none());
+
+        let edit = text_change(true, 3, 0);
+        let mut redacted_edit = projection(
+            semantic_event_kinds::APPLICATION_TEXT_VALUE_CHANGED,
+            &edit,
+            None,
+        );
+        redacted_edit.content_state = SemanticContentStateV2::Redacted;
+        assert!(project_legacy_mirror(&redacted_edit).is_none());
+
+        // Without the Automation permission every browser observation carries a
+        // redacted coverage level; that alone does not make the browser sensitive.
+        let navigation = json!({
+            "appId": "com.example.browser",
+            "appName": "Browser",
+            "changeKind": "navigated",
+            "opaqueWindowId": "ow1_tab",
+            "contentHash": "deadbeef",
+        });
+        let coverage = [CoverageLevelV2::Unavailable, CoverageLevelV2::Redacted];
+        let unknown_privacy = LegacyMirrorProjection {
+            kind: semantic_event_kinds::BROWSER_VISIBLE_PAGE_CHANGED,
+            count_class: SemanticCountClassV2::Effective,
+            content_state: SemanticContentStateV2::Unavailable,
+            coverage: &coverage,
+            metadata: &navigation,
+            content: None,
+            occurred_at_ms: STARTED_AT_MS,
+            observed_at_ms: ENDED_AT_MS,
+            observation_id: OBSERVATION_ID,
+        };
+        let tab = project_legacy_mirror(&unknown_privacy).expect("a navigation is mirrored");
+        assert!(tab.sensitive_app_id.is_none());
+        assert_eq!(
+            tab.draft.expect("a metadata navigation").sensitivity,
+            DesktopEventSensitivity::Metadata
+        );
+    }
+
+    #[test]
+    fn contributes_nothing_for_a_counted_boundary() {
+        let metadata = json!({ "state": "afk_started", "idleForMs": 300_000 });
+        let mut boundary = projection(semantic_event_kinds::PRESENCE_CHANGED, &metadata, None);
+        boundary.count_class = SemanticCountClassV2::Boundary;
+        assert!(project_legacy_mirror(&boundary).is_none());
     }
 
     #[derive(serde::Deserialize)]

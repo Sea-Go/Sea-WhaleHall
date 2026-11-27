@@ -27,8 +27,7 @@ use whalehall_local_protocol::{
 };
 use zeroize::Zeroizing;
 
-use crate::events::DesktopEventDraft;
-use crate::legacy_event_mirror::{LegacyMirrorProjection, legacy_mirror_draft};
+use crate::legacy_event_mirror::{LegacyMirror, LegacyMirrorProjection, project_legacy_mirror};
 
 const SCHEMA_VERSION: i64 = 3;
 const RAW_CURSOR_PREFIX: &str = "sc2_";
@@ -589,9 +588,9 @@ pub struct ObservationAppendResult {
     pub observation: RawObservationV2,
     pub semantic_event: SemanticEventV2,
     pub inserted: bool,
-    /// The legacy desktop event this projection mirrors to for the activity
-    /// reflection journal. It is only set for a newly inserted observation.
-    pub legacy_mirror: Option<DesktopEventDraft>,
+    /// What this projection contributes to the legacy activity reflection
+    /// journal. It is only set for a newly inserted observation.
+    pub legacy_mirror: Option<LegacyMirror>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1243,7 +1242,7 @@ impl ObservationJournal {
             effective_coverage,
             current_goal_version,
         )?;
-        let legacy_mirror = legacy_mirror_draft(&LegacyMirrorProjection {
+        let legacy_mirror = project_legacy_mirror(&LegacyMirrorProjection {
             kind: projected.kind,
             count_class: projected.count_class,
             content_state: projected.content_state,

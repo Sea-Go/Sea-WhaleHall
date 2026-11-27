@@ -100,11 +100,39 @@ frames.
 | Observer semantic event | Legacy desktop event | Mirrors when |
 | --- | --- | --- |
 | `input.activityBucket` | `input.activityAggregated` | keys, clicks or scrolling are non-zero |
-| `application.textValueChanged` | `accessibility.documentChanged` | a real delta against the prior value exists |
-| `application.visibleContentChanged` | `application.foregroundChanged` with `windowTitle` | a sealed window title exists and changed |
-| `browser.visiblePageChanged` | `browser.tabNavigated` with host and `title` | on open or navigation |
+| `application.textValueChanged` | `accessibility.documentChanged` | a real delta against the prior value exists and the change was not redacted |
+| `application.visibleContentChanged` | `application.foregroundChanged` with `windowTitle` | a sealed window title exists and differs from the last title event |
+| `application.foregroundChanged` | `application.foregroundChanged` with `windowTitle` | the application switched to has a title the bridge has already seen, and it differs from the last title event |
+| `browser.visiblePageChanged` | `browser.tabNavigated` with host and `title` | the host and title of that tab differ from the last navigation mirrored for it |
 
-Visible text, typed text, control labels and full URLs never cross the bridge. A window title or host that matches a sensitive-page marker (sign-in, payment, verification code, private browsing) mirrors nothing at all. Each event uses the deduplication key `observer-mirror:<observation id>`, so a replayed frame appends nothing twice. A failed append is reported as `observer_legacy_mirror_failed` in the monitoring status and leaves the observation itself untouched. `tests/fixtures/legacy-event-mirror.json` is the contract both the Rust mapping and the TypeScript desktop-event validator are tested against.
+A foreground switch carries no content of its own. The bridge remembers the
+newest title it has seen for each application and pairs a later switch to that
+application with it, so returning to a document whose title did not change is
+still described. Window titles are reported against the single last title
+event, whichever application it described.
+
+Visible text, typed text, control labels and full URLs never cross the bridge.
+The bridge reads the URL only to recognise a sensitive page. When a window or
+page observation is withheld as sensitive (the journal redacted it, or an
+available title, host or URL matches a marker for sign-in, payment,
+verification codes or private browsing), nothing of that observation is
+mirrored and the application stays sensitive for the bridge: its text changes
+are withheld too, until a title of it is mirrored again. Input buckets carry no
+application and cannot be tied to a page, so they are not withheld.
+
+Each event uses the deduplication key `observer-mirror:<observation id>`, so a
+replayed frame appends nothing twice. A failed append sets
+`observer_legacy_mirror_failed` in the monitoring status only when no more
+specific observer error is already reported, and leaves the observation itself
+untouched; the next Observer heartbeat resets the status line, so the marker
+shows a failure only briefly. `tests/fixtures/legacy-event-mirror.json` is the
+contract both the Rust mapping and the TypeScript desktop-event validator are
+tested against.
+
+Mirrored titles are stored in plaintext in `events.sqlite3`, which is readable
+by the operating-system account only. The journal's retention deletes events
+older than 30 days only up to the sequence every named consumer has committed,
+so a consumer that stops advancing also keeps later titles.
 
 ## Verification
 
