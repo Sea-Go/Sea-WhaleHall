@@ -1026,7 +1026,7 @@ mod tests {
             "../../../../tests/fixtures/legacy-event-mirror.json"
         ))
         .expect("the mirror contract is valid JSON");
-        assert!(contract.cases.len() >= 13);
+        assert!(contract.cases.len() >= 15);
 
         for case in &contract.cases {
             let input = &case.projection;
@@ -1041,7 +1041,10 @@ mod tests {
                 observed_at_ms: input.observed_at_ms,
                 observation_id: &input.observation_id,
             };
-            match (&case.expected, legacy_mirror_draft(&projection)) {
+            match (
+                &case.expected,
+                project_legacy_mirror(&projection).and_then(|mirror| mirror.draft),
+            ) {
                 (None, None) => {}
                 (Some(expected), Some(draft)) => {
                     assert_eq!(draft.kind, expected.kind, "{}", case.name);
