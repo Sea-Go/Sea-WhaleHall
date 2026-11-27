@@ -22,22 +22,25 @@ export type AgentRunTerminalState = Extract<
 	"completed" | "failed" | "cancelled"
 >;
 
+export const AGENT_HOST_ERROR_CODES = [
+	"INVALID_REQUEST",
+	"NOT_INITIALIZED",
+	"ALREADY_INITIALIZED",
+	"RUN_CONFLICT",
+	"RUN_NOT_FOUND",
+	"RUN_NOT_RESUMABLE",
+	"SESSION_NOT_FOUND",
+	"MODEL_RELAY_ERROR",
+	"MODEL_RELAY_UNAVAILABLE",
+	"PLANNING_OUTPUT_INVALID",
+	"ACTIVITY_OUTPUT_INVALID",
+	"CANCELLED",
+	"UNSUPPORTED_METHOD",
+	"INTERNAL_ERROR",
+] as const;
+
 export interface AgentHostErrorPayload {
-	code:
-		| "INVALID_REQUEST"
-		| "NOT_INITIALIZED"
-		| "ALREADY_INITIALIZED"
-		| "RUN_CONFLICT"
-		| "RUN_NOT_FOUND"
-		| "RUN_NOT_RESUMABLE"
-		| "SESSION_NOT_FOUND"
-		| "MODEL_RELAY_ERROR"
-		| "MODEL_RELAY_UNAVAILABLE"
-		| "PLANNING_OUTPUT_INVALID"
-		| "ACTIVITY_OUTPUT_INVALID"
-		| "CANCELLED"
-		| "UNSUPPORTED_METHOD"
-		| "INTERNAL_ERROR";
+	code: (typeof AGENT_HOST_ERROR_CODES)[number];
 	message: string;
 	retryable: boolean;
 	details?: Record<string, unknown>;

@@ -119,11 +119,12 @@ import {
 } from "./tools";
 import {
 	AgentHostRuntimeError,
+	HostCallError,
 	type HostRequestOptions,
 	type HostRequestPeer,
 	type ProtocolWriter,
 	protocolError,
-	relayedHostCallMessage,
+	relayedProtocolError,
 } from "./transport";
 
 const defaultRelayBaseUrl = "https://model-relay.whalehall.invalid/v1";
@@ -1427,7 +1428,7 @@ export class AgentHostRuntime {
 				await this.complete(record, completion);
 				return;
 			}
-			if (result.status === "failed") throw result.error;
+			if (result.status === "failed") throw asError(result.error, "planning");
 			throw runtimeError(
 				"INTERNAL_ERROR",
 				`Planning Workflow stopped with unsupported status ${result.status}.`,
@@ -2523,7 +2524,7 @@ function appendSidecarDiag(message: string): void {
 	}
 }
 
-function asError(error: unknown): Error {
+export function asError(error: unknown, scope = "analyze"): Error {
 	// Only locally constructed protocol errors can cross the private-stdio
 	// boundary verbatim. Model/provider objects can contain arbitrary prompts,
 	// outputs or huge serialized payloads, so they deliberately become generic.
@@ -2557,7 +2558,7 @@ function asError(error: unknown): Error {
 					home,
 					"Library/Application Support/com.seago.whalehall/dev/local/sidecar-diag.log",
 				),
-				`${new Date().toISOString()} analyze-error ${detail}\n`,
+				`${new Date().toISOString()} ${scope}-error ${detail}\n`,
 			);
 		} else {
 			process.stderr.write("[sidecar-diag] fs unavailable\n");
@@ -2565,10 +2566,13 @@ function asError(error: unknown): Error {
 	} catch {
 		// 诊断失败不干扰主流程
 	}
-	if (error instanceof AgentHostRuntimeError) return error;
+	if (error instanceof AgentHostRuntimeError || error instanceof HostCallError) {
+		return error;
+	}
 	// A relayed host-call failure keeps its own text; all else stays generic.
-	const diagnostic =
-		isRecord(error) ? error.diagnostic : relayedHostCallMessage(error);
+	const relayed = relayedProtocolError(error);
+	if (relayed !== null) return relayed;
+	const diagnostic = isRecord(error) ? error.diagnostic : undefined;
 	if (typeof diagnostic === "string") {
 		return new Error(diagnostic.replace(/[\r\n]+/g, " ").slice(0, 1_000));
 	}
