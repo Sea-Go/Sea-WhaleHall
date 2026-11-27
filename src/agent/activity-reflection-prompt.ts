@@ -860,6 +860,7 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 	const segments: MutableActivityReflectionSignalSegment[] = [];
 	let current: MutableActivityReflectionSignalSegment | null = null;
 	let pendingBoundary: ActivityReflectionSignalObservation | null = null;
+	const deferred: ActivityReflectionSignalObservation[] = [];
 	const prelude: ActivityReflectionSignalObservation[] = [];
 
 	for (const observation of observations) {
@@ -868,40 +869,53 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 			else prelude.push(observation);
 			continue;
 		}
-		if (observation.family === "auxiliary") {
-			if (current) addActivityReflectionSignal(current, observation);
-			else prelude.push(observation);
+		if (observation.family === "auxiliary" || observation.family === "other") {
+			// Supporting observations never open a band: a process batch landing
+			// right after a boundary must not claim the evidence that follows.
+			if (current === null) prelude.push(observation);
+			else if (pendingBoundary) deferred.push(observation);
+			else addActivityReflectionSignal(current, observation);
 			continue;
 		}
 
-		const startsDistinctBand =
-			current !== null &&
-			pendingBoundary !== null &&
-			current.family !== observation.family;
-		if (!current || startsDistinctBand) {
-			if (current) segments.push(current);
-			const firstTimestamp = Math.min(
-				observation.timestamp,
-				pendingBoundary?.timestamp ?? observation.timestamp,
-				...prelude.map((entry) => entry.timestamp),
-			);
+		if (current === null) {
 			current = createActivityReflectionSignalSegment(
 				observation.family,
-				firstTimestamp,
+				Math.min(
+					observation.timestamp,
+					...prelude.map((entry) => entry.timestamp),
+				),
 			);
 			for (const entry of prelude.splice(0)) {
 				addActivityReflectionSignal(current, entry);
 			}
-			if (pendingBoundary) {
-				addActivityReflectionSignal(current, pendingBoundary);
-				pendingBoundary = null;
+		} else if (pendingBoundary) {
+			// Everything observed since the boundary belongs to the band that
+			// the boundary decides, so two bands never overlap in time.
+			if (current.family !== observation.family) {
+				segments.push(current);
+				current = createActivityReflectionSignalSegment(
+					observation.family,
+					pendingBoundary.timestamp,
+				);
 			}
+			addActivityReflectionSignal(current, pendingBoundary);
+			for (const entry of deferred.splice(0)) {
+				addActivityReflectionSignal(current, entry);
+			}
+			pendingBoundary = null;
 		}
+		current.families.add(observation.family);
 		addActivityReflectionSignal(current, observation);
 	}
 
 	if (current) {
-		if (pendingBoundary) addActivityReflectionSignal(current, pendingBoundary);
+		if (pendingBoundary) {
+			addActivityReflectionSignal(current, pendingBoundary);
+			for (const entry of deferred.splice(0)) {
+				addActivityReflectionSignal(current, entry);
+			}
+		}
 		segments.push(current);
 	} else if (prelude.length > 0) {
 		const startedAtMs = prelude[0]?.timestamp; // 缺时间戳不伪造 1970 起点
@@ -910,6 +924,7 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 				"other",
 				startedAtMs,
 			);
+			fallback.families.add("other");
 			for (const entry of prelude) addActivityReflectionSignal(fallback, entry);
 			segments.push(fallback);
 		}
@@ -926,7 +941,14 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 			observed_signals: [...segment.signals.entries()]
 				.map(([kind, count]) => ({ kind, count }))
 				.sort((left, right) => left.kind.localeCompare(right.kind, "zh-CN")),
-			...activityReflectionCandidatesFor(segment.family),
+			candidate_activities: [...segment.families]
+				.flatMap(
+					(family) =>
+						activityReflectionCandidatesFor(family).candidate_activities,
+				)
+				.filter((activity, index, all) => all.indexOf(activity) === index),
+			recommended_action: activityReflectionCandidatesFor(segment.family)
+				.recommended_action,
 		})),
 	};
 }
@@ -938,7 +960,10 @@ type ActivityReflectionSignalObservation = {
 };
 
 type MutableActivityReflectionSignalSegment = {
+	/** The family that opened the segment. */
 	family: ActivityReflectionSegmentFamily;
+	/** Every segment-opening family seen inside it, in order of first appearance. */
+	families: Set<ActivityReflectionSegmentFamily>;
 	startedAtMs: number;
 	endedAtMs: number;
 	observationCount: number;
@@ -1035,6 +1060,7 @@ function createActivityReflectionSignalSegment(
 ): MutableActivityReflectionSignalSegment {
 	return {
 		family,
+		families: new Set<ActivityReflectionSegmentFamily>(),
 		startedAtMs: timestamp,
 		endedAtMs: timestamp,
 		observationCount: 0,
@@ -1324,7 +1350,10 @@ function lowLevelActionReplacement(
 	) {
 		return "不确定：正在使用桌面应用，具体活动无法判断";
 	}
-	if (/(?:编辑器.*(?:文档|操作)|文档.*(?:修改|操作))/u.test(value)) {
+	if (
+		activity === "development" &&
+		/(?:编辑器.*(?:文档|操作)|文档.*(?:修改|操作))/u.test(value)
+	) {
 		return "推测：正在进行编程";
 	}
 	return null;

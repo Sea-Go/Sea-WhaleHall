@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { ActivityEventWorkerRequest } from "../src/agent/activity-event-worker";
-import { createActivityReflectionPrompt } from "../src/agent/activity-reflection-prompt";
+import {
+	activityReflectionOutputToWorkerResponse,
+	createActivityReflectionPrompt,
+} from "../src/agent/activity-reflection-prompt";
 
 type SignalIndex = {
 	schema_version: string;
@@ -188,5 +191,204 @@ describe("activity reflection signal index", () => {
 		);
 
 		expect(prompt.candidateActivities).toEqual(["research", "other_unknown"]);
+	});
+
+	const navigation = (offsetMs: number) => ({
+		kind: "browser.tabNavigated",
+		occurredAtMs: WINDOW.startedAtMs + offsetMs,
+		payload: { browserId: "com.example.browser", tabId: "tab-1" },
+	});
+	const processBatch = (offsetMs: number) => ({
+		kind: "application.processObservedBatch",
+		occurredAtMs: WINDOW.startedAtMs + offsetMs,
+		payload: { started: [], exited: [] },
+	});
+	// Text changes and input buckets every half second from `offsetMs`.
+	function denseEvidence(offsetMs: number, count: number) {
+		return Array.from({ length: count }, (_, index) => [
+			...textChanges(1, offsetMs + index * 1_000),
+			{
+				kind: "input.activityAggregated",
+				occurredAtMs: WINDOW.startedAtMs + offsetMs + index * 1_000 + 500,
+				payload: {
+					bucketStartedAtMs: WINDOW.startedAtMs + offsetMs + index * 1_000,
+					bucketEndedAtMs: WINDOW.startedAtMs + offsetMs + index * 1_000 + 500,
+					keyCount: 6,
+					clickCount: 0,
+					scrollDelta: 0,
+					mouseDistance: 40,
+				},
+			},
+		]).flat();
+	}
+
+	const switchAt = (offsetMs: number) => ({
+		kind: "application.foregroundChanged",
+		occurredAtMs: WINDOW.startedAtMs + offsetMs,
+	});
+
+	test("does not let a process batch claim the evidence that follows a switch", () => {
+		// The same work continues after the switch: one editable band.
+		const continued = signalIndex([
+			foregroundSwitch,
+			...textChanges(3, 1_000),
+			switchAt(20_000),
+			processBatch(20_500),
+			...denseEvidence(21_000, 30),
+		]);
+		// Different work follows the switch: the batch rides with the new band.
+		const changed = signalIndex([
+			navigation(1_000),
+			switchAt(20_000),
+			processBatch(20_500),
+			...denseEvidence(21_000, 30),
+		]);
+		const band = changed.segments[1];
+
+		expect(continued.segments).toHaveLength(1);
+		expect(continued.segments[0]?.candidate_activities).toEqual([
+			"writing",
+			"development",
+			"data_work",
+			"communication",
+			"other_unknown",
+		]);
+		expect(continued.segments[0]?.observed_signals).toContainEqual({
+			kind: "文本内容变更观察",
+			count: 33,
+		});
+		expect(changed.segments).toHaveLength(2);
+		expect(band?.started_at_ms).toBe(WINDOW.startedAtMs + 20_000);
+		expect(band?.candidate_activities).toEqual([
+			"writing",
+			"development",
+			"data_work",
+			"communication",
+			"other_unknown",
+		]);
+		expect(band?.observed_signals).toEqual(
+			expect.arrayContaining([
+				{ kind: "前台上下文切换", count: 1 },
+				{ kind: "其他脱敏观察", count: 1 },
+				{ kind: "文本内容变更观察", count: 30 },
+			]),
+		);
+	});
+
+	test("keeps a window of process batches alone unscorable", () => {
+		const index = signalIndex([
+			foregroundSwitch,
+			processBatch(1_000),
+			processBatch(4_000),
+		]);
+
+		expect(index.segments).toHaveLength(1);
+		expect(index.segments[0]?.candidate_activities).toEqual(["other_unknown"]);
+	});
+
+	test("offers the activities of every family that shaped a segment", () => {
+		const afterNavigation = signalIndex([
+			navigation(0),
+			...textChanges(4, 5_000),
+		]);
+		const afterEditing = signalIndex([
+			navigation(40_000),
+			...textChanges(4, 0),
+		]);
+
+		expect(afterNavigation.segments[0]?.candidate_activities).toEqual([
+			"research",
+			"other_unknown",
+			"writing",
+			"development",
+			"data_work",
+			"communication",
+		]);
+		expect(afterEditing.segments[0]?.candidate_activities).toEqual([
+			"writing",
+			"development",
+			"data_work",
+			"communication",
+			"other_unknown",
+			"research",
+		]);
+	});
+
+	test("starts the next band at the boundary without overlapping the previous one", () => {
+		const index = signalIndex([
+			navigation(0),
+			{
+				kind: "application.foregroundChanged",
+				occurredAtMs: WINDOW.startedAtMs + 20_000,
+			},
+			...inputBuckets(4, 21_000),
+			...textChanges(4, 30_000),
+		]);
+		const [reading, editing] = index.segments;
+
+		expect(index.segments).toHaveLength(2);
+		expect(reading?.ended_at_ms).toBeLessThanOrEqual(
+			editing?.started_at_ms ?? 0,
+		);
+		expect(editing?.started_at_ms).toBe(WINDOW.startedAtMs + 20_000);
+		expect(editing?.observed_signals).toContainEqual({
+			kind: "连续键鼠交互观察",
+			count: 4,
+		});
+	});
+
+	test("keeps one band when the same family continues after a switch", () => {
+		const index = signalIndex([
+			navigation(0),
+			switchAt(10_000),
+			navigation(15_000),
+		]);
+		const band = index.segments[0];
+
+		expect(index.segments).toHaveLength(1);
+		expect(band?.candidate_activities).toEqual(["research", "other_unknown"]);
+		expect(band?.ended_at_ms).toBe(WINDOW.startedAtMs + 15_000);
+		expect(band?.observed_signals).toEqual(
+			expect.arrayContaining([
+				{ kind: "前台上下文切换", count: 1 },
+				{ kind: "浏览器资料观察", count: 2 },
+			]),
+		);
+	});
+
+	test("keeps a writing action that mentions a document", () => {
+		const modelOutput = (activity: string) => ({
+			events: [
+				{
+					action: "推测：正在对文档进行修改",
+					activity,
+					goal_relevance: "supporting",
+					confidence: 0.75,
+					reason_codes: ["文档变更", "持续输入"],
+					evidence: ["文本变更伴随持续输入"],
+					signal_segment_ids: ["segment-1"],
+					started_at_ms: null,
+					ended_at_ms: null,
+				},
+			],
+			score: 0.5,
+			score_reason: "目标直接相关，强交叉证据，持续约 3 分钟，计 0.5 分。",
+		});
+		const events = [
+			foregroundSwitch,
+			...textChanges(3, 1_000),
+			...inputBuckets(4, 1_000),
+		];
+		const writing = activityReflectionOutputToWorkerResponse(
+			modelOutput("writing"),
+			request(events),
+		);
+		const development = activityReflectionOutputToWorkerResponse(
+			modelOutput("development"),
+			request(events),
+		);
+
+		expect(writing.events[0]?.action).toBe("推测：正在对文档进行修改");
+		expect(development.events[0]?.action).toBe("推测：正在进行编程");
 	});
 });
