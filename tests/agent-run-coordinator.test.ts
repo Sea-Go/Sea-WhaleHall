@@ -378,6 +378,32 @@ describe("AgentRunCoordinator", () => {
 			}),
 		]);
 	});
+
+	test("reports an activity run interrupted by a protocol gap as retryable", async () => {
+		const harness = createHarness();
+		const runId = await startArchivedActivity(harness, "sequence-gap");
+
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(runId, 1, { kind: "run.started", runKind: "activity" }, null),
+		);
+		// A frame was lost: the sidecar resumes with a later sequence number.
+		harness.coordinator.acceptSidecarEvent(
+			runEvent(
+				runId,
+				3,
+				{ kind: "run.completed", result: { summary: "不应接受的结果。" } },
+				"completed",
+			),
+		);
+
+		await waitFor(() => harness.activityTerminals.length === 1);
+		expect(harness.activityTerminals[0]).toMatchObject({
+			jobId: "activity-job-sequence-gap",
+			runId,
+			status: "interrupted",
+			failureClass: "transient",
+		});
+	});
 });
 
 class RecordingSidecar implements AgentSidecar {
