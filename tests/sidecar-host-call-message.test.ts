@@ -55,6 +55,8 @@ describe("relayedHostCallMessage", () => {
 			"a".repeat(201),
 			"line one\nline two",
 			"tab\there",
+			"del\u007fete",
+			"nul\u0000byte",
 		]) {
 			expect(
 				relayedHostCallMessage({ name: "HostCallError", message }),

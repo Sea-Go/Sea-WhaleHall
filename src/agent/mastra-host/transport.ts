@@ -233,11 +233,12 @@ export function relayedHostCallMessage(error: unknown): string | null {
 	if (candidate.name !== "HostCallError") return null;
 	const message = candidate.message;
 	if (typeof message !== "string") return null;
-	return message.length > 0 &&
-		message.length <= 200 &&
-		!/[\u0000-\u001f\u007f]/u.test(message)
-		? message
-		: null;
+	if (message.length === 0 || message.length > 200) return null;
+	for (const character of message) {
+		const code = character.codePointAt(0) ?? 0;
+		if (code < 0x20 || code === 0x7f) return null;
+	}
+	return message;
 }
 
 export class AgentHostRuntimeError extends Error {
