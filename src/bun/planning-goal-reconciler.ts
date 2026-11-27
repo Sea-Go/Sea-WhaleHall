@@ -36,10 +36,14 @@ export type PlanningGoalResolution =
 export type PlanningGoalReconcileResult =
 	| PlanningGoalResolution
 	| { tier: "unavailable"; goal: null; stage: "lookup" | "apply" }
-	| { tier: "signed-out"; goal: null };
+	| { tier: "signed-out"; goal: null }
+	/** The session ended or changed while the plans were read. */
+	| { tier: "superseded"; goal: null };
 
 export const PENDING_TASKS_GOAL_PREFIX = "待办任务：";
 export const DEFAULT_PLAN_CACHE_TTL_MS = 10 * 60_000;
+/** Plan loads one reconciliation repeats when writes keep landing during them. */
+export const MAX_SUPERSEDED_PLAN_LOADS = 2;
 
 /**
  * Resolves the reflection goal in priority order: the task whose committed
@@ -64,8 +68,13 @@ export type PlanningGoalReconcilerOptions = {
 	currentGoal: () => CurrentPlanningGoal | null;
 	applyGoal: (goal: ActiveGoalWrite) => Promise<CurrentPlanningGoal | null>;
 	afterChange?: () => Promise<void> | void;
-	/** While it reports false no goal is set and a leftover goal is cleared. */
-	hasSession?: () => boolean;
+	/**
+	 * Identifies the active session, or returns null while signed out. While it
+	 * is supplied no goal is set for a signed-out client, a reconciliation does
+	 * not outlive the session it started in, and plans read for one session are
+	 * never used for another.
+	 */
+	sessionToken?: () => unknown;
 	diag?: (line: string) => void;
 	nowMs?: () => number;
 	planCacheTtlMs?: number;
@@ -82,8 +91,11 @@ export class PlanningGoalReconciler {
 	private cachedPlans: {
 		plans: readonly PlanningPlan[];
 		fetchedAtMs: number;
+		/** The session the plans were read for. */
+		session: unknown;
 	} | null = null;
 	private planGeneration = 0;
+	private reconcileQueued = false;
 	private lastReportedState: string | null = null;
 	private readonly nowMs: () => number;
 	private readonly planCacheTtlMs: number;
@@ -98,8 +110,23 @@ export class PlanningGoalReconciler {
 		this.planGeneration += 1;
 	}
 
+	/**
+	 * Reconciles once for the plan changes notified in one turn of the outbox,
+	 * after the writes that caused them have settled. The goal then follows a
+	 * chat edit or a landed adjustment at once instead of at the next tick.
+	 */
+	schedule(): void {
+		if (this.reconcileQueued) return;
+		this.reconcileQueued = true;
+		queueMicrotask(() => {
+			this.reconcileQueued = false;
+			void this.reconcile().catch(() => undefined);
+		});
+	}
+
 	async reconcile(): Promise<PlanningGoalReconcileResult> {
-		if (this.options.hasSession?.() === false) {
+		const session = this.options.sessionToken?.() ?? null;
+		if (session === null && this.options.sessionToken !== undefined) {
 			// The logout barrier clears the goal; nothing may set it again
 			// before a session is active.
 			await this.clearForSignedOut();
@@ -109,10 +136,20 @@ export class PlanningGoalReconciler {
 		let plans: readonly PlanningPlan[];
 		try {
 			calendar = await this.options.loadCalendar();
-			plans = await this.loadPlans();
+			plans = await this.loadPlans(session);
 		} catch (error) {
 			this.report(`tier=unavailable stage=lookup ${describeError(error)}`);
 			return { tier: "unavailable", goal: null, stage: "lookup" };
+		}
+		if ((this.options.sessionToken?.() ?? null) !== session) {
+			// The rows belong to a session that ended or was replaced while they
+			// were read. Writing them would undo the logout barrier; the new
+			// session's own activation resolves its goal.
+			this.cachedPlans = null;
+			if (this.options.sessionToken?.() === null) {
+				await this.clearForSignedOut();
+			}
+			return { tier: "superseded", goal: null };
 		}
 		const resolution = resolvePlanningGoal({
 			nowMs: this.nowMs(),
@@ -142,23 +179,28 @@ export class PlanningGoalReconciler {
 		this.report("tier=signed-out");
 	}
 
-	private async loadPlans(): Promise<readonly PlanningPlan[]> {
-		const cached = this.cachedPlans;
-		if (
-			cached !== null &&
-			this.nowMs() - cached.fetchedAtMs < this.planCacheTtlMs
-		) {
-			return cached.plans;
+	private async loadPlans(session: unknown): Promise<readonly PlanningPlan[]> {
+		for (let attempt = 0; ; attempt += 1) {
+			const cached = this.cachedPlans;
+			if (
+				cached !== null &&
+				cached.session === session &&
+				this.nowMs() - cached.fetchedAtMs < this.planCacheTtlMs
+			) {
+				return cached.plans;
+			}
+			// Rows read before a plan write must not be applied after it: they
+			// would put the goal back for a minute and cost two goal changes.
+			// They are read again instead. Under a burst of writes the last rows
+			// read are applied and the write's own reconciliation follows.
+			const generation = this.planGeneration;
+			const plans = await this.options.loadPlans();
+			if (generation === this.planGeneration) {
+				this.cachedPlans = { plans, fetchedAtMs: this.nowMs(), session };
+				return plans;
+			}
+			if (attempt >= MAX_SUPERSEDED_PLAN_LOADS) return plans;
 		}
-		// A plan written while this load is in flight must not be hidden by
-		// the stale result it captured.
-		const generation = this.planGeneration;
-		const plans = await this.options.loadPlans();
-		this.cachedPlans =
-			generation === this.planGeneration
-				? { plans, fetchedAtMs: this.nowMs() }
-				: null;
-		return plans;
 	}
 
 	private async apply(resolution: PlanningGoalResolution): Promise<void> {
@@ -250,12 +292,16 @@ function resolveExecutingTaskGoal(input: {
 	if (plan?.status !== "active" || !task || task.status !== "pending") {
 		return null;
 	}
+	const title = truncateGoalText(normalizeGoalText(task.title));
+	// The reflection service would reject the goal, and a title that leaves
+	// nothing printable cannot name the block's task.
+	if (title.length === 0) return null;
 	return {
 		tier: "executing-task",
 		goal: {
 			goalId: task.id,
 			planId: plan.id,
-			text: task.title,
+			text: title,
 			activatedAtMs: block.startMs,
 		},
 		planId: plan.id,

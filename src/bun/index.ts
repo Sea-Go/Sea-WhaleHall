@@ -3377,6 +3377,7 @@ startupPromise = (async () => {
 				{
 					planChanged(change) {
 						planningGoalReconciler?.invalidate();
+						planningGoalReconciler?.schedule();
 						if (clientWindow !== null) clientRPC.send.planChanged(change);
 					},
 					calendarChanged(version) {
@@ -3404,7 +3405,8 @@ startupPromise = (async () => {
 					return setRuntimeGoal(reflection, goal);
 				},
 				afterChange: () => timelineLifecycle.current?.service.pullNow(),
-				hasSession: () => authSession.captureCurrentSession() !== null,
+				sessionToken: () =>
+					authSession.captureCurrentSession()?.generation ?? null,
 				diag,
 			});
 			await reconcilePlanningGoal();

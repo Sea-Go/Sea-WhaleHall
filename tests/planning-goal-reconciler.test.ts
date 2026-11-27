@@ -10,6 +10,7 @@ import type {
 import {
 	type CurrentPlanningGoal,
 	composePendingTasksGoalText,
+	MAX_SUPERSEDED_PLAN_LOADS,
 	PlanningGoalReconciler,
 	resolvePlanningGoal,
 } from "../src/bun/planning-goal-reconciler";
@@ -368,6 +369,29 @@ describe("resolvePlanningGoal", () => {
 		expect(text.startsWith("待办任务：1. 很")).toBeTrue();
 		expect(text.endsWith("…")).toBeTrue();
 	});
+
+	test("normalizes and caps the executing task's title like the pending ones", () => {
+		const resolve = (title: string) =>
+			resolvePlanningGoal({
+				nowMs: NOW_MS,
+				calendar: [block()],
+				plans: [
+					plan({ tasks: [task("task-1", title), task("task-2", "网络层")] }),
+				],
+			});
+
+		const long = resolve("很".repeat(1_200));
+		expect(long.tier).toBe("executing-task");
+		expect(Array.from(long.goal?.text ?? "")).toHaveLength(
+			MAX_ACTIVE_GOAL_TEXT_LENGTH,
+		);
+		expect(resolve("网络\u0007层\u001f\t\r\n基础").goal?.text).toBe("网络层 基础");
+
+		// A title that leaves nothing printable cannot name the block's task.
+		const blank = resolve("\u0007\u001f \t");
+		expect(blank.tier).toBe("pending-tasks");
+		expect(blank.goal?.text).toBe("待办任务：1. 网络层");
+	});
 });
 
 function harness(input: { current?: CurrentPlanningGoal | null } = {}) {
@@ -610,6 +634,11 @@ describe("PlanningGoalReconciler", () => {
 		let title = "旧标题";
 		const started = deferred<void>();
 		const vault = deferred<void>();
+		const applied: string[] = [];
+		// The reflection service appends nothing for an unchanged goal.
+		const record = (text: string) => {
+			if (text !== applied.at(-1)) applied.push(text);
+		};
 		const reconciler = new PlanningGoalReconciler({
 			loadCalendar: async () => [],
 			loadPlans: () => {
@@ -620,8 +649,10 @@ describe("PlanningGoalReconciler", () => {
 				return vault.promise.then(() => rows);
 			},
 			currentGoal: () => null,
-			applyGoal: async (goal) =>
-				goal && { ...goal, activatedAtMs: goal.activatedAtMs },
+			applyGoal: async (goal) => {
+				if (goal) record(goal.text);
+				return goal && { ...goal, activatedAtMs: goal.activatedAtMs };
+			},
 			nowMs: () => NOW_MS,
 			planCacheTtlMs: 60_000,
 		});
@@ -631,11 +662,94 @@ describe("PlanningGoalReconciler", () => {
 		title = "新标题";
 		reconciler.invalidate();
 		vault.resolve();
-		await inFlight;
+		const superseded = await inFlight;
 		const next = await reconciler.reconcile();
 
+		// Rows read before the write are never applied: that would put the
+		// goal back for a minute and cost two goal changes.
 		expect(planLoads).toBe(2);
+		expect(applied).toEqual(["待办任务：1. 新标题"]);
+		expect(superseded.goal?.text).toBe("待办任务：1. 新标题");
 		expect(next.goal?.text).toBe("待办任务：1. 新标题");
+	});
+
+	test("applies the last rows it read when writes outlast its repeated loads", async () => {
+		function deferred() {
+			let resolve!: () => void;
+			const promise = new Promise<void>((done) => {
+				resolve = done;
+			});
+			return { promise, resolve };
+		}
+		let planLoads = 0;
+		const started: Array<{ promise: Promise<void>; resolve: () => void }> = [];
+		const applied: string[] = [];
+		const reconciler = new PlanningGoalReconciler({
+			loadCalendar: async () => [],
+			loadPlans: () => {
+				planLoads += 1;
+				// Every load is read before the next write lands.
+				const rows = [
+					plan({ tasks: [task("task-1", `第 ${planLoads} 次读到的标题`)] }),
+				];
+				const gate = deferred();
+				started.push(gate);
+				return gate.promise.then(() => rows);
+			},
+			currentGoal: () => null,
+			applyGoal: async (goal) => {
+				if (goal) applied.push(goal.text);
+				return goal && { ...goal, activatedAtMs: goal.activatedAtMs };
+			},
+			nowMs: () => NOW_MS,
+			planCacheTtlMs: 60_000,
+		});
+
+		const inFlight = reconciler.reconcile();
+		for (let write = 0; write <= MAX_SUPERSEDED_PLAN_LOADS; write += 1) {
+			// The load released by the previous iteration reaches its own gate.
+			while (started.length <= write) {
+				await new Promise<void>((done) => setTimeout(done, 0));
+			}
+			reconciler.invalidate();
+			started[write]?.resolve();
+		}
+		const result = await inFlight;
+
+		expect(planLoads).toBe(MAX_SUPERSEDED_PLAN_LOADS + 1);
+		expect(applied).toEqual([
+			`待办任务：1. 第 ${MAX_SUPERSEDED_PLAN_LOADS + 1} 次读到的标题`,
+		]);
+		expect(result.tier).toBe("pending-tasks");
+	});
+
+	test("reconciles once for the plan changes notified in one turn", async () => {
+		let planLoads = 0;
+		const applied: string[] = [];
+		const reconciler = new PlanningGoalReconciler({
+			loadCalendar: async () => [],
+			loadPlans: async () => {
+				planLoads += 1;
+				return [plan({ tasks: [task("task-1", "写周报")] })];
+			},
+			currentGoal: () => null,
+			applyGoal: async (goal) => {
+				if (goal) applied.push(goal.text);
+				return goal && { ...goal, activatedAtMs: goal.activatedAtMs };
+			},
+			nowMs: () => NOW_MS,
+		});
+
+		// One outbox turn reports three changes.
+		for (let change = 0; change < 3; change += 1) {
+			reconciler.invalidate();
+			reconciler.schedule();
+		}
+		expect(planLoads).toBe(0);
+		await new Promise<void>((done) => setTimeout(done, 0));
+
+		expect(planLoads).toBe(1);
+		expect(applied).toEqual(["待办任务：1. 写周报"]);
 	});
 
 	test("sets no goal and clears a leftover one while signed out", async () => {
@@ -661,7 +775,7 @@ describe("PlanningGoalReconciler", () => {
 				current = goal && { ...goal, activatedAtMs: goal.activatedAtMs };
 				return current && { ...current };
 			},
-			hasSession: () => signedIn,
+			sessionToken: () => (signedIn ? 1 : null),
 			diag: (line) => diag.push(line),
 			nowMs: () => NOW_MS,
 		});
@@ -687,6 +801,81 @@ describe("PlanningGoalReconciler", () => {
 			"[planning-goal] tier=signed-out",
 			"[planning-goal] tier=pending-tasks plans=1 tasks=1",
 		]);
+	});
+
+	test("sets no goal when the session ends while the plans load", async () => {
+		function deferred() {
+			let resolve!: () => void;
+			const promise = new Promise<void>((done) => {
+				resolve = done;
+			});
+			return { promise, resolve };
+		}
+		let session: number | null = 1;
+		const started = deferred();
+		const vault = deferred();
+		const applied: Array<Record<string, unknown> | null> = [];
+		let current: CurrentPlanningGoal | null = null;
+		const reconciler = new PlanningGoalReconciler({
+			loadCalendar: async () => [],
+			loadPlans: () => {
+				started.resolve();
+				return vault.promise.then(() => [
+					plan({ tasks: [task("task-1", "已退出账号的任务")] }),
+				]);
+			},
+			sessionToken: () => session,
+			currentGoal: () => current,
+			applyGoal: async (goal) => {
+				applied.push(goal && { ...goal });
+				current = goal && { ...goal, activatedAtMs: goal.activatedAtMs };
+				return current && { ...current };
+			},
+			nowMs: () => NOW_MS,
+		});
+
+		const inFlight = reconciler.reconcile();
+		await started.promise;
+		// The logout barrier ends the session while the plans are still read.
+		session = null;
+		vault.resolve();
+
+		expect(await inFlight).toEqual({ tier: "superseded", goal: null });
+		expect(applied).toEqual([]);
+	});
+
+	test("never uses plans that were read for another session", async () => {
+		let session: number | null = 1;
+		let title = "账号一的任务";
+		let planLoads = 0;
+		const applied: string[] = [];
+		let current: CurrentPlanningGoal | null = null;
+		const reconciler = new PlanningGoalReconciler({
+			loadCalendar: async () => [],
+			loadPlans: async () => {
+				planLoads += 1;
+				return [plan({ tasks: [task("task-1", title)] })];
+			},
+			sessionToken: () => session,
+			currentGoal: () => current && { ...current },
+			applyGoal: async (goal) => {
+				if (goal) applied.push(goal.text);
+				current = goal && { ...goal, activatedAtMs: goal.activatedAtMs };
+				return current && { ...current };
+			},
+			nowMs: () => NOW_MS,
+			planCacheTtlMs: 60_000,
+		});
+
+		await reconciler.reconcile();
+		// The user switches accounts inside the cache's lifetime.
+		title = "账号二的任务";
+		session = 2;
+		current = null;
+		await reconciler.reconcile();
+
+		expect(planLoads).toBe(2);
+		expect(applied).toEqual(["待办任务：1. 账号一的任务", "待办任务：1. 账号二的任务"]);
 	});
 
 	test("reuses the cached plan list until it is invalidated or expires", async () => {
