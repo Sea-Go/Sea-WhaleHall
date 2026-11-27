@@ -171,17 +171,16 @@ function interactionDensity(
 	kinds: readonly string[],
 ): ActivityReflectionStateHints["interaction_density"] {
 	if (kinds.length === 0) return "无可用交互";
-	if (
-		kinds.some((kind) =>
-			[
-				"editor.documentChanged",
-				"accessibility.documentChanged",
-				"accessibility.valueChanged",
-			].includes(kind),
-		)
-	) {
-		return "连续创建或编辑";
-	}
+	// One stray keystroke is not sustained editing; the mirrored accessibility
+	// evidence makes a single text change a common sight.
+	const changes = kinds.filter((kind) =>
+		[
+			"editor.documentChanged",
+			"accessibility.documentChanged",
+			"accessibility.valueChanged",
+		].includes(kind),
+	).length;
+	if (changes >= 3) return "连续创建或编辑";
 	if (kinds.includes("input.activityAggregated")) return "连续操作";
 	if (
 		kinds.some((kind) =>

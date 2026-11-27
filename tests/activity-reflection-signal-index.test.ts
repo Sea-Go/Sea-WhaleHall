@@ -4,6 +4,7 @@ import {
 	activityReflectionOutputToWorkerResponse,
 	createActivityReflectionPrompt,
 } from "../src/agent/activity-reflection-prompt";
+import { deriveActivityReflectionStateHints } from "../src/agent/activity-reflection-state-hints";
 
 type SignalIndex = {
 	schema_version: string;
@@ -390,5 +391,23 @@ describe("activity reflection signal index", () => {
 
 		expect(writing.events[0]?.action).toBe("推测：正在对文档进行修改");
 		expect(development.events[0]?.action).toBe("推测：正在进行编程");
+	});
+});
+
+describe("activity reflection interaction density", () => {
+	const density = (events: Array<Record<string, unknown>>) =>
+		deriveActivityReflectionStateHints({ events }).interaction_density;
+
+	test("does not call a single text change sustained editing", () => {
+		expect(
+			density([
+				foregroundSwitch,
+				...textChanges(1, 1_000),
+				...inputBuckets(1, 6_000),
+			]),
+		).toBe("连续操作");
+		expect(density([foregroundSwitch, ...textChanges(3, 1_000)])).toBe(
+			"连续创建或编辑",
+		);
 	});
 });
