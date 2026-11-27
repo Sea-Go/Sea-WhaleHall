@@ -238,10 +238,36 @@ describe("activity support context privacy boundary", () => {
 		"contains SCORE metadata",
 		"contains consumedScore metadata",
 	]) {
+		test(`keeps scoring language out of the support context: ${message}`, () => {
+			expect(containsScoringLanguage(message)).toBeTrue();
+		});
 	}
+
+	test("lets plain feedback through", () => {
+		expect(containsScoringLanguage("今天写得很顺，明天接着来。")).toBeFalse();
+	});
 });
 
-describe("activity support context exact validation", () => {});
+describe("activity support context exact validation", () => {
+	test("accepts a projected context and nothing with another shape", () => {
+		const context = validContext();
+
+		expect(context.schemaVersion).toBe(ACTIVITY_SUPPORT_CONTEXT_SCHEMA_VERSION);
+		expect(isActivitySupportContext(context)).toBeTrue();
+		expect(isActivitySupportContext({ ...context, score: 0.72 })).toBeFalse();
+		expect(
+			isActivitySupportContext({ ...context, observations: [] }),
+		).toBeFalse();
+		expect(
+			isActivitySupportContext({
+				...context,
+				observations: [
+					{ ...context.observations[0], action: "推测：正在编写" },
+				],
+			}),
+		).toBeFalse();
+	});
+});
 
 describe("activity support output firewall", () => {
 	for (const [label, message] of [
@@ -279,7 +305,35 @@ describe("activity support output firewall", () => {
 		["prescriptive rest claim", "你应该马上休息。"],
 		["emoji", "继续加油🙂"],
 	] as const) {
+		test(`rejects ${label}`, () => {
+			expect(isSafeActivitySupportMessage(message)).toBeFalse();
+		});
 	}
+
+	test("lets every fallback the team can speak pass its own firewall", () => {
+		const routes: readonly ActivitySupportRoute[] = [
+			"momentum",
+			"possible_blocker",
+			"attention_drift",
+			"recovery",
+			"gentle_check_in",
+		];
+		const specialists = new Set(
+			routes.map((route) => specialistKeyForRoute(route)),
+		);
+
+		expect(specialists.size).toBe(routes.length);
+		for (const route of routes) {
+			expect(
+				isSafeActivitySupportBrief(fallbackActivitySupportBrief(route)),
+				route,
+			).toBeTrue();
+			expect(
+				isSafeActivitySupportMessage(fallbackActivitySupportMessage(route)),
+				route,
+			).toBeTrue();
+		}
+	});
 });
 
 describe("activity support deterministic routing", () => {
