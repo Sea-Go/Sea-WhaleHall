@@ -1134,7 +1134,7 @@ const timelineLifecycle = new TimelineRuntimeLifecycle<TimelineV2Runtime>({
 	onError(error) {
 		console.error(
 			"WhaleHall Timeline v2 start attempt failed:",
-			error instanceof Error ? error.name : "UNKNOWN",
+			error instanceof Error ? `${error.name}: ${error.message}` : "UNKNOWN",
 		);
 	},
 });
