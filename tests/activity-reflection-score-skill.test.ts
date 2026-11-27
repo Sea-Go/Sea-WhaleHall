@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { activityReflectionAnalysisDimensions } from "../src/agent/activity-reflection-analysis-skill";
 import {
 	type ActivityReflectionScoreCalibrationCase,
 	activityReflectionScoreCalibrationCases,
@@ -93,5 +94,33 @@ describe("activity reflection scoring Skill", () => {
 			expect(text, relative).not.toContain("无当前目标为 `0`");
 			expect(text, relative).not.toContain("无当前目标时一律为 `0`");
 		}
+	});
+
+	test("keeps the two Skill bodies self-contained for a model without tools", () => {
+		const skillRoot = resolve(import.meta.dir, "../src/agent/skills");
+		const scoring = readFileSync(
+			resolve(skillRoot, "activity-reflection-scoring/SKILL.md"),
+			"utf8",
+		);
+		const analysis = readFileSync(
+			resolve(skillRoot, "activity-reflection-analysis/SKILL.md"),
+			"utf8",
+		);
+
+		// The reflection agent has no tools: a pointer to a file it cannot
+		// open only misleads it.
+		expect(scoring).not.toContain("references/");
+		expect(analysis).not.toContain("references/");
+
+		// The evidence tier is the one factor a no-goal score still leaves open.
+		expect(scoring).toContain("强交叉 `1.00`");
+		expect(scoring).toContain("受支持 `0.70`");
+		expect(scoring).toContain("单一弱观察 `0`");
+		expect(scoring).toContain("至少两类独立且相互支持的信号");
+
+		const dimensions = activityReflectionAnalysisDimensions.join("\n");
+		expect(analysis).toContain("没有当前目标时不判断相关性");
+		expect(dimensions).toContain("没有当前目标时不判断目标相关性");
+		expect(dimensions).not.toContain("只由当前目标相关");
 	});
 });

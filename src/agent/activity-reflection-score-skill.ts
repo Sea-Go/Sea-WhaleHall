@@ -289,6 +289,6 @@ export const activityReflectionScoreExamples = [
 export const activityReflectionScoreSelfChecks = [
 	"提交 JSON 前自检一：score 必须是 0 到 1 的两位小数；events 为空时 score 必须为 0。",
 	"提交 JSON 前自检二：有当前目标时先判断目标相关性，没有当前目标时判断是否属于持续、可核对的有效活动；再判断证据强度、时长和置信度；其中任一零分条件成立时，该事件贡献为 0。",
-	"提交 JSON 前自检三：score_reason 必须是简短中文，说明目标相关性、证据强度、持续时长和最终分数；不得包含应用名、文档内容、URL、联系人、账号或原始字段。",
+	"提交 JSON 前自检三：score_reason 必须是简短中文，说明相关性、证据强度、持续时长和最终分数；不得包含应用名、文档内容、URL、联系人、账号或原始字段。",
 	"提交 JSON 前自检四：不得给状态事件、未知活动、低交互、敏感交易或不确定事件分数，也不得为了达到阈值而抬高 confidence 或拆分连续活动。",
 ] as const;

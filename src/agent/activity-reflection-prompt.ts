@@ -47,7 +47,7 @@ const activityReflectionFinalOutputContract = [
 	"根级只能有 events、score、score_reason 三个字段；绝不能输出 analysis_summary、context_details、事件计数、原始字段或其他根级键。",
 	"events 是 0 至 8 个聚合事件；每个事件必须同时包含 action、activity、goal_relevance、confidence、reason_codes、evidence、signal_segment_ids、started_at_ms、ended_at_ms。其中 reason_codes 必须是 1 到 4 项的字符串数组，evidence 必须是最多 8 项的字符串数组，绝不能写成单个字符串。signal_segment_ids 只能选择 LOCAL_SIGNAL_INDEX_JSON 中实际存在的 segment-N，可选多个连续段来合并活动；同一个 segment-N 在单个事件或整个 events 数组中都最多出现一次。",
 	"每个 action 必须以“确定：”“推测：”或“不确定：”开头，后面是具体简体中文活动描述；不得把 development、writing、research、communication 等英文枚举写进 action，也不得写应用状态更改、标签页切换、页面导航、输入活动或用户交互活动等观察名称。",
-	"score 必须是 0 至 1 的本窗口贡献；先聚合再按已加载评分 Skill 的公式计算。score_reason 必须是简短、无敏感信息的中文，并说明目标相关性或零分原因与证据强度；不得只写窗口贡献度。started_at_ms 与 ended_at_ms 必须都写为 null；客户端会用所选 segment-N 从完整原始窗口还原真实时间。",
+	"score 必须是 0 至 1 的本窗口贡献；先聚合再按已加载评分 Skill 的公式计算。score_reason 必须是简短、无敏感信息的中文，并说明相关性或零分原因与证据强度；不得只写窗口贡献度。started_at_ms 与 ended_at_ms 必须都写为 null；客户端会用所选 segment-N 从完整原始窗口还原真实时间。",
 	'格式对照（仅示意字段形状，不是本窗口数据）：{"action":"推测：正在编写代码并查阅技术资料","activity":"development","goal_relevance":"supporting","confidence":0.75,"reason_codes":["文档变更","持续输入"],"evidence":["编辑器文档修改伴随持续输入"],"signal_segment_ids":["segment-1"],"started_at_ms":null,"ended_at_ms":null}。注意 reason_codes 和 evidence 是字符串数组。',
 ].join("\n");
 
@@ -1187,7 +1187,7 @@ function sanitizeScoreReason(value: string, score: number): string {
 	}
 	return score === 0
 		? "未满足有效投入计分条件，计 0.00 分"
-		: `已按目标相关性、证据和持续时间计 ${score.toFixed(2)} 分`;
+		: `已按活动相关性、证据和持续时间计 ${score.toFixed(2)} 分`;
 }
 
 function containsSensitiveEvidence(value: string): boolean {
