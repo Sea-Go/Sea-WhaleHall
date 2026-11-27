@@ -170,13 +170,14 @@ pub trait ApplicationInventoryProvider: Send + Sync + 'static {
 }
 
 pub struct SystemApplicationInventoryProvider {
-    system: Mutex<System>,
+    /// sysinfo 0.40 起构造可能失败；None = 构造降级，进程枚举返回空集。
+    system: Mutex<Option<System>>,
 }
 
 impl Default for SystemApplicationInventoryProvider {
     fn default() -> Self {
         Self {
-            system: Mutex::new(System::new()),
+            system: Mutex::new(System::new().ok()),
         }
     }
 }
@@ -189,10 +190,14 @@ impl ApplicationInventoryProvider for SystemApplicationInventoryProvider {
     }
 
     fn running_processes(&self) -> Result<Vec<ObservedProcess>, ApplicationInventoryError> {
-        let mut system = self
+        let mut system_guard = self
             .system
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let Some(system) = system_guard.as_mut() else {
+            // 构造降级路径：本机进程枚举不可用，返回空集。
+            return Ok(Vec::new());
+        };
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,

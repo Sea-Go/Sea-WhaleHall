@@ -193,6 +193,38 @@ describe("activity support context privacy boundary", () => {
 		expect(JSON.stringify(context)).not.toMatch(/(?:张三|ABC123|联系|报错)/u);
 	});
 
+	test("does not read a resumed session as the user resting", () => {
+		const baseEvent = workerResult().events[0];
+		if (!baseEvent) {
+			throw new Error("Expected one Worker event fixture.");
+		}
+		const stateMarker = (action: string) =>
+			workerResult({
+				events: [
+					{
+						...baseEvent,
+						action,
+						activity: "idle_transition",
+						goal_relevance: "uncertain",
+						confidence: 1,
+					},
+				],
+			});
+		const context = createActivitySupportContext({
+			activeGoal: null,
+			recentFeedback: [],
+			analyses: [
+				stateMarker("确定：检测到用户恢复使用电脑"),
+				stateMarker("推测：打算先休息一会儿"),
+			],
+		});
+
+		expect(context.observations.map((item) => item.signals)).toEqual([
+			["uncertain"],
+			["recovery"],
+		]);
+	});
+
 	for (const message of [
 		"包含分数的历史消息",
 		"包含评分的历史消息",
@@ -206,10 +238,36 @@ describe("activity support context privacy boundary", () => {
 		"contains SCORE metadata",
 		"contains consumedScore metadata",
 	]) {
+		test(`keeps scoring language out of the support context: ${message}`, () => {
+			expect(containsScoringLanguage(message)).toBeTrue();
+		});
 	}
+
+	test("lets plain feedback through", () => {
+		expect(containsScoringLanguage("今天写得很顺，明天接着来。")).toBeFalse();
+	});
 });
 
-describe("activity support context exact validation", () => {});
+describe("activity support context exact validation", () => {
+	test("accepts a projected context and nothing with another shape", () => {
+		const context = validContext();
+
+		expect(context.schemaVersion).toBe(ACTIVITY_SUPPORT_CONTEXT_SCHEMA_VERSION);
+		expect(isActivitySupportContext(context)).toBeTrue();
+		expect(isActivitySupportContext({ ...context, score: 0.72 })).toBeFalse();
+		expect(
+			isActivitySupportContext({ ...context, observations: [] }),
+		).toBeFalse();
+		expect(
+			isActivitySupportContext({
+				...context,
+				observations: [
+					{ ...context.observations[0], action: "推测：正在编写" },
+				],
+			}),
+		).toBeFalse();
+	});
+});
 
 describe("activity support output firewall", () => {
 	for (const [label, message] of [
@@ -247,7 +305,217 @@ describe("activity support output firewall", () => {
 		["prescriptive rest claim", "你应该马上休息。"],
 		["emoji", "继续加油🙂"],
 	] as const) {
+		test(`rejects ${label}`, () => {
+			expect(isSafeActivitySupportMessage(message)).toBeFalse();
+		});
 	}
+
+	test("lets every fallback the team can speak pass its own firewall", () => {
+		const routes: readonly ActivitySupportRoute[] = [
+			"momentum",
+			"possible_blocker",
+			"attention_drift",
+			"recovery",
+			"gentle_check_in",
+		];
+		const specialists = new Set(
+			routes.map((route) => specialistKeyForRoute(route)),
+		);
+
+		expect(specialists.size).toBe(routes.length);
+		for (const route of routes) {
+			expect(
+				isSafeActivitySupportBrief(fallbackActivitySupportBrief(route)),
+				route,
+			).toBeTrue();
+			expect(
+				isSafeActivitySupportMessage(fallbackActivitySupportMessage(route)),
+				route,
+			).toBeTrue();
+		}
+	});
 });
 
-describe("activity support deterministic routing", () => {});
+describe("activity support deterministic routing", () => {
+	function contextWithoutGoal(goalRelevance: "supporting" | "unrelated") {
+		return createActivitySupportContext({
+			activeGoal: null,
+			recentFeedback: [],
+			analyses: [
+				workerResult({
+					events: [
+						{
+							source_event_ids: ["source-window-no-goal"],
+							time: "10:00–10:05",
+							action: "推测：正在撰写或修改文本",
+							activity: "writing",
+							goal_relevance: goalRelevance,
+							confidence: 0.75,
+							reason_codes: ["文档变更", "持续输入"],
+							evidence: ["文本控件内容持续变化并伴随连续输入"],
+							started_at_ms: 1_700_000_000_000,
+							ended_at_ms: 1_700_000_300_000,
+						},
+					],
+				}),
+			],
+		});
+	}
+
+	const proposed = {
+		route: "momentum" as const,
+		certainty: "medium" as const,
+		situation: "模型给出的情境判断",
+		userNeed: "模型给出的帮助需求",
+	};
+
+	const observed = (
+		action: string,
+		activity: string,
+		goal_relevance: string,
+		confidence: number,
+	) => ({
+		source_event_ids: [`source-window-${action.length}-${activity}`],
+		time: "10:00–10:05",
+		action,
+		activity,
+		goal_relevance,
+		confidence,
+		reason_codes: ["内部原因"],
+		evidence: ["内部证据"],
+		started_at_ms: 1_700_000_000_000,
+		ended_at_ms: 1_700_000_300_000,
+	});
+
+	function contextWithGoal(events: ReturnType<typeof observed>[]) {
+		const pendingTasksGoal = {
+			schemaVersion: "active-goal.v1",
+			goalId: "pending-tasks:plan-current",
+			planId: "plan-current",
+			version: 1,
+			text: "待办任务：1. 应用层第一遍",
+			activatedAtMs: 1_700_000_000_000,
+		};
+		return createActivitySupportContext({
+			activeGoal: pendingTasksGoal,
+			recentFeedback: [],
+			analyses: [workerResult({ events })],
+		});
+	}
+
+	test("describes sustained focus rather than goal progress without an active goal", () => {
+		const guarded = guardActivitySupportAssessment(
+			contextWithoutGoal("supporting"),
+			proposed,
+		);
+
+		expect(guarded.route).toBe("momentum");
+		expect(guarded.situation).toBe("现有线索显示用户正在持续专注手头的事情");
+		expect(guarded.situation).not.toContain("目标");
+		expect(isSafeActivitySupportMessage(guarded.situation)).toBeTrue();
+	});
+
+	test("keeps goal progress wording while an active goal exists", () => {
+		const guarded = guardActivitySupportAssessment(validContext(), proposed);
+
+		expect(guarded.situation).toBe("现有线索显示用户正在推进目标相关的事情");
+	});
+
+	test("never routes to attention drift without an active goal", () => {
+		const guarded = guardActivitySupportAssessment(
+			contextWithoutGoal("unrelated"),
+			{ ...proposed, route: "attention_drift" },
+		);
+
+		expect(guarded).toEqual({
+			route: "gentle_check_in",
+			certainty: "low",
+			situation: "现有线索不足以判断用户此刻的具体状态",
+			userNeed: "用不打扰的方式让用户自己选择需要的帮助",
+		});
+	});
+
+	// Work that counts towards a check-in although its relation to the goal is
+	// uncertain: the pet may speak about it, but never as progress on the goal.
+	const codingOfUncertainRelation = observed(
+		"推测：正在编写代码并运行脚本",
+		"development",
+		"uncertain",
+		0.7,
+	);
+
+	test("speaks of sustained focus for work whose relation to the goal is uncertain", () => {
+		const context = contextWithGoal([codingOfUncertainRelation]);
+		const guarded = guardActivitySupportAssessment(context, proposed);
+
+		expect(context.observations).toEqual([
+			{
+				activity: "development",
+				goalRelation: "uncertain",
+				evidenceStrength: "moderate",
+				signals: ["sustained_focus"],
+			},
+		]);
+		expect(guarded.route).toBe("momentum");
+		expect(guarded.situation).toBe("现有线索显示用户正在持续专注手头的事情");
+		expect(guarded.situation).not.toContain("目标");
+		expect(isSafeActivitySupportMessage(guarded.situation)).toBeTrue();
+	});
+
+	test("keeps goal progress wording when goal-related work is observed as well", () => {
+		const guarded = guardActivitySupportAssessment(
+			contextWithGoal([
+				codingOfUncertainRelation,
+				observed("推测：正在阅读教材", "research", "supporting", 0.8),
+			]),
+			proposed,
+		);
+
+		expect(guarded.situation).toBe("现有线索显示用户正在推进目标相关的事情");
+	});
+
+	test("does not call focused work of uncertain relation a drift from the goal", () => {
+		const drift = { ...proposed, route: "attention_drift" as const };
+		const unrelated = observed("推测：正在观看视频", "media", "unrelated", 0.8);
+
+		expect(
+			guardActivitySupportAssessment(contextWithGoal([unrelated]), drift)
+				.situation,
+		).toBe("现有线索显示目标无关活动较多，但无法判断是否有意休息");
+		expect(
+			guardActivitySupportAssessment(
+				contextWithGoal([
+					unrelated,
+					{ ...codingOfUncertainRelation, confidence: 0.9 },
+				]),
+				drift,
+			),
+		).toEqual({
+			route: "gentle_check_in",
+			certainty: "low",
+			situation: "现有线索不足以判断用户此刻的具体状态",
+			userNeed: "用不打扰的方式让用户自己选择需要的帮助",
+		});
+	});
+
+	test("keeps work the reflection cannot name on a gentle check-in", () => {
+		const context = contextWithGoal([
+			observed("不确定：当前活动无法判断", "other_unknown", "uncertain", 0.6),
+			observed(
+				"确定：检测到用户恢复使用电脑",
+				"idle_transition",
+				"uncertain",
+				1,
+			),
+			observed("不确定：正在查阅资料", "research", "uncertain", 0.6),
+		]);
+		const guarded = guardActivitySupportAssessment(context, proposed);
+
+		expect(context.observations.map((item) => item.signals)).toEqual([
+			["uncertain"],
+			["uncertain"],
+			["uncertain"],
+		]);
+		expect(guarded.route).toBe("gentle_check_in");
+	});
+});

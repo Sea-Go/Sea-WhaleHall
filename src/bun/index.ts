@@ -147,7 +147,7 @@ import {
 	loadPetModelPreference,
 	savePetModelPreference,
 } from "./pet-model-preference";
-import { isPetModelChoiceId } from "../shared/pet-actions";
+import { PetPackageManager, StickerPackManager, type PetPackage } from "./pet";
 import { RTWCloudToolsClient } from "./clients/product/rtw-cloud-tools-client";
 import { RTWProductSearchError } from "./clients/product/rtw-product-search-client";
 import {
@@ -200,6 +200,7 @@ import { PetActivityFeedbackDelivery } from "./pet-activity-feedback-delivery";
 import { PetStateArbiter } from "./pet-state";
 import { PetWindowController } from "./pet-window-controller";
 import { PlanningAuthorityService } from "./planning-authority-service";
+import { PlanningGoalReconciler } from "./planning-goal-reconciler";
 import { WhaleHallPlanningRuntime } from "./planning-runtime";
 import { PrivateTrainingWindowExportCoordinator } from "./private-training-window-export";
 import { ProactiveFeedbackRuntime } from "./proactive-feedback-runtime";
@@ -262,6 +263,85 @@ const clientConfiguration = loadOrCreateClientConfiguration({
 });
 // 桌宠形象（皮肤）：Bun 侧持久化，PetState 下发链路统一盖章 modelId。
 let petModelId = loadPetModelPreference(Utils.paths.userData).modelId;
+
+// 桌宠包管理(《桌宠包标准 v1》):dev 扫仓库 pets/,生产另有用户数据
+// pets/;存储的形象 id 不在清单时按资源清单默认解析——代码零形象回退。
+const petPackageManager = new PetPackageManager({
+	scanDirs: [
+		// dev 构建从 app 包内运行,import.meta.dir 指向 build 产物;
+		// 仓库根的 pets/ 用环境变量兜底(electrobun dev 从仓库根启动)。
+		join(import.meta.dir, "../../pets"),
+		process.env.SEA_WHALEHALL_REPO_ROOT !== undefined
+			? join(process.env.SEA_WHALEHALL_REPO_ROOT, "pets")
+			: join(process.cwd(), "pets"),
+		join(Utils.paths.userData, "pets"),
+	],
+	assetBasePrefix: "petpacks/",
+	log: (message) => diag(`[pet-package] ${message}`),
+});
+await petPackageManager.scan().catch((error: unknown) => {
+	diag(`[pet-package] 扫描失败: ${String(error)}`);
+});
+
+// 表情包管理(标准 §8):与形象解耦的第二类资源;命名空间动作
+// `@<packId>/<stickerId>` 经 playAction 下发,任何桌宠包可引用。
+const stickerPackManager = new StickerPackManager({
+	scanDirs: [
+		join(import.meta.dir, "../../stickers"),
+		process.env.SEA_WHALEHALL_REPO_ROOT !== undefined
+			? join(process.env.SEA_WHALEHALL_REPO_ROOT, "stickers")
+			: join(process.cwd(), "stickers"),
+		join(Utils.paths.userData, "stickers"),
+	],
+	assetBasePrefix: "petpacks/",
+	log: (message) => diag(`[sticker-pack] ${message}`),
+});
+await stickerPackManager.scan().catch((error: unknown) => {
+	diag(`[sticker-pack] 扫描失败: ${String(error)}`);
+});
+if (petPackageManager.get(petModelId) === undefined) {
+	const resolvedDefault = petPackageManager.defaultPack()?.manifest.id;
+	if (resolvedDefault !== undefined && resolvedDefault !== petModelId) {
+		diag(
+			`[pet-package] 存储形象 ${petModelId} 不在清单,按资源默认切换为 ${resolvedDefault}`,
+		);
+		petModelId = resolvedDefault;
+		savePetModelPreference(Utils.paths.userData, petModelId);
+	}
+}
+
+/** 当前形象的包描述符(经 setPetState 下发,渲染器据此建适配器)。 */
+function currentPetPackDescriptor() {
+	const pack = petPackageManager.get(petModelId);
+	if (pack === undefined) return undefined;
+	return {
+		id: pack.manifest.id,
+		label: pack.manifest.label,
+		renderer: pack.manifest.renderer,
+		tier: pack.tier,
+		assetBase: pack.assetBase,
+		canvas: pack.manifest.canvas,
+		sprite: pack.manifest.sprite,
+		fallbackAction: pack.manifest.fallbackAction,
+		hitZones: pack.manifest.hitZones,
+		summary: pack.manifest.summary,
+		actions: pack.actions.actions,
+	};
+}
+
+function petPackSummaries(): readonly {
+	id: string;
+	label: string;
+	tier: "full" | "core";
+}[] {
+	return petPackageManager
+		.list()
+		.map((pack: PetPackage) => ({
+			id: pack.manifest.id,
+			label: pack.manifest.label,
+			tier: pack.tier as "full" | "core",
+		}));
+}
 if (clientConfiguration.status === "invalid") {
 	console.warn(
 		"WhaleHall client config.yaml is invalid; safe defaults remain active.",
@@ -407,7 +487,13 @@ const authSession = new RemoteAuthSessionManager(credentialStore, {
 	},
 	onSessionActivated: (identity) => {
 		diag(`auth onSessionActivated account=${identity.accountId}`);
-		return proactiveFeedbackRuntime.sessionReadyForAuth(identity);
+		const ready = proactiveFeedbackRuntime.sessionReadyForAuth(identity);
+		// The goal is only resolved for a signed-in session, so a restore or a
+		// re-login aligns it now instead of at the next maintenance tick.
+		void ready
+			.then(() => reconcilePlanningGoal())
+			.catch(() => undefined);
+		return ready;
 	},
 	onSessionExpired: () => {
 		try {
@@ -895,7 +981,7 @@ const rawOnlyAuditExporter = new TimelineFiveMinuteAuditExporter(
 );
 // The renderer publishes the persisted preference after it has loaded. Until
 // then both the native window and sensitive feedback delivery stay fail closed.
-let petVisible = false;
+let petVisible = true;
 let shutdownRequested = false;
 let shutdownPromise: Promise<void> | null = null;
 const completedShutdownSteps = new Set<string>();
@@ -962,6 +1048,7 @@ let startupPromise: Promise<void> | null = null;
 let cancelStartupRetryWait: (() => void) | null = null;
 let planningRuntime: WhaleHallPlanningRuntime | null = null;
 let planningMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
+let planningGoalReconciler: PlanningGoalReconciler | null = null;
 let activityWindowDelivery: ActivityWindowDeliveryService | null = null;
 let activityWindowDeliveryStore: ActivityWindowDeliveryStore | null = null;
 interface ActivityWindowDeliveryLifecycleKey {
@@ -1053,7 +1140,7 @@ const timelineLifecycle = new TimelineRuntimeLifecycle<TimelineV2Runtime>({
 	onError(error) {
 		console.error(
 			"WhaleHall Timeline v2 start attempt failed:",
-			error instanceof Error ? error.name : "UNKNOWN",
+			error instanceof Error ? `${error.name}: ${error.message}` : "UNKNOWN",
 		);
 	},
 });
@@ -1344,14 +1431,14 @@ const clientRequestHandlers: ClientRequestHandlers = {
 	confirmPlanRevision: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.confirmPlanRevision(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	setPlanningTaskStatus: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.setTaskStatus(command);
 		throwIfPlanningAnalysisUnavailable(plan);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	setPlanningTaskRelevance: async (command) => {
@@ -1368,32 +1455,32 @@ const clientRequestHandlers: ClientRequestHandlers = {
 	pausePlan: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.pausePlan(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	resumePlan: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.resumePlan(command);
 		throwIfPlanningAnalysisUnavailable(plan);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	completePlan: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.completePlan(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	archivePlan: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.archivePlan(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	undoPlanAdjustment: async (command) => {
 		const runtime = await requirePlanningRuntime();
 		const plan = await runtime.undoPlanAdjustment(command);
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		return { plan: await runtime.getPlan(plan.id) };
 	},
 	retryPendingPlanAnalysis: async (command) => {
@@ -1800,6 +1887,7 @@ const clientRequestHandlers: ClientRequestHandlers = {
 		return { visible };
 	},
 	setPetModel: async ({ modelId }) => applyPetModelChoice(modelId),
+	listPetPacks: async () => ({ packs: petPackSummaries() }),
 	presentPetEvent: (event): { accepted: boolean } => {
 		petStateArbiter.showPresentationEvent(event);
 		return { accepted: true };
@@ -2261,7 +2349,7 @@ if (process.env.WHALEHALL_PLANNING_E2E_TRIGGER === "1") {
 				if (parsed.restore === true) {
 					// 无 UI 场景代行客户端启动时的会话恢复 RPC。
 					diag("[planning][e2e] restore session");
-					const result = await clientRequestHandlers.restoreAuthSession();
+					const result = await clientRequestHandlers.restoreAuthSession({});
 					diag(
 						`[planning][e2e] restore result kind=${result.kind} ok=${result.kind === "success"}`,
 					);
@@ -2510,6 +2598,18 @@ async function provePetRenderer(
 		if (petActivityFeedbackDelivery?.markRendererReady(response)) {
 			console.log("[pet] React renderer ready");
 			petActivityFeedbackRendererQuarantined = false;
+			// 从客户端偏好恢复桌宠可见性(petVisible 是内存变量,启动恒 false)。
+			void clientRPC.request
+				.getPreferences({})
+				.then((prefs: { values?: { pet?: { visible?: boolean } } }) => {
+					const preferred = prefs.values?.pet?.visible === true;
+					if (preferred && !petVisible) {
+						petVisible = true;
+					petWindowController?.setVisible(true);
+					console.log("[pet] visibility restored from preferences: true");
+					}
+				})
+				.catch(() => undefined);
 			petWindowController?.setVisible(petVisible);
 			petStateArbiter.resetToRuntime(agent.getLocalStatus());
 			return;
@@ -2554,6 +2654,7 @@ petStateArbiter = new PetStateArbiter((state) =>
 	petRPC.send.setPetState({
 		...state,
 		modelId: petModelId,
+		pack: currentPetPackDescriptor(),
 		// dev 通道专属：生产构建恒 false，桌宠窗口据此决定是否叠加
 		// "活动区/对话区"调试框（接触范围可视化）。
 		debugOverlays: runtimeChannel === "dev",
@@ -2563,17 +2664,20 @@ petStateArbiter = new PetStateArbiter((state) =>
 /** 应用一次桌宠形象选择：持久化 + 盖章 + 立即重发运行时状态。 */
 async function applyPetModelChoice(
 	modelId: string,
-): Promise<{ modelId: string }> {
-	if (!isPetModelChoiceId(modelId) || !petModelId) {
+): Promise<{
+	modelId: string;
+	packs: readonly { id: string; label: string; tier: "full" | "core" }[];
+}> {
+	if (petPackageManager.get(modelId) === undefined) {
 		throw new Error("未知的桌宠形象。");
 	}
 	if (modelId !== petModelId) {
 		petModelId = modelId;
 		savePetModelPreference(Utils.paths.userData, modelId);
 	}
-	// 立即以当前运行时状态重发，渲染器读到 modelId 后热切换形象。
+	// 立即以当前运行时状态重发，渲染器读到 pack 后热切换形象。
 	petStateArbiter.resetToRuntime(agent.getLocalStatus());
-	return { modelId };
+	return { modelId, packs: petPackSummaries() };
 }
 
 // 桌宠链路协议级 E2E 触发器：WHALEHALL_PET_E2E_TRIGGER=1 时消费
@@ -2610,7 +2714,29 @@ if (
 					modelId?: unknown;
 					email?: unknown;
 					password?: unknown;
+					playAction?: unknown;
 				};
+				if (typeof parsed.playAction === "string") {
+					// 动作/表情直派:命名空间引用由 StickerPackManager 解析,
+					// 命中则附带表情播放信息(标准 §7/§8 的同一播放通道)。
+					const sticker =
+						stickerPackManager.resolveReference(parsed.playAction);
+					petRPC.send.playAction({
+						actionId: parsed.playAction,
+						sticker:
+							sticker === undefined
+								? undefined
+								: {
+										packId: sticker.packId,
+										stickerId: sticker.entry.id,
+										durationMs: sticker.entry.durationMs,
+									},
+					});
+					diag(
+						`[pet][e2e] playAction ${parsed.playAction}${sticker === undefined ? "" : " (sticker)"}`,
+					);
+					return;
+				}
 				if (
 					typeof parsed.email === "string" &&
 					typeof parsed.password === "string"
@@ -2664,11 +2790,17 @@ async function viewUrl(view: "client" | "pet"): Promise<string> {
 	return bundled;
 }
 
-const petWidth = 320;
-// 窗口是透明但整框吃鼠标事件的：高度必须紧贴实际内容（鲸鱼 139 + 顶部
-// 气泡余量 + 底部聊天面板），多余的顶部空带会挡住用户对桌面/其他应用的
-// 点击。聊天面板 max-height 232（8 底边距）= 240 < 250，流式回答仍完整。
-const petHeight = 250;
+// 桌宠窗口尺寸自适应(《桌宠包标准 v1》):画布来自默认包声明,装饰带
+// 与形象无关——头顶消息气泡带、立足线以下聊天面板带、左右触边余量。
+// 切换默认包=窗口随包变,代码零形象知识。窗口透明但整框吃鼠标事件,
+// 高度必须紧贴实际内容,多余的空带会挡住用户对桌面/其他应用的点击。
+const PET_SIDE_MARGIN = 32;
+const PET_TOP_BAND = 33;
+const PET_BOTTOM_BAND = 78;
+const defaultPetPackCanvas = petPackageManager.defaultPack()?.manifest.canvas;
+const petWidth = (defaultPetPackCanvas?.width ?? 192) + PET_SIDE_MARGIN * 2;
+const petHeight =
+	(defaultPetPackCanvas?.height ?? 139) + PET_TOP_BAND + PET_BOTTOM_BAND;
 const display = Screen.getPrimaryDisplay();
 const clientWidth = Math.min(1280, Math.max(1000, display.workArea.width - 80));
 const clientHeight = Math.min(800, Math.max(720, display.workArea.height - 80));
@@ -2788,6 +2920,9 @@ petWindow = new BrowserWindow({
 	// Electrobun 1.18 applies passthrough to the whole WebView, so interactive pets
 	// must keep it disabled in order to receive hover and click pointer events.
 	passthrough: false,
+		// 桌宠窗口尺寸由默认包画布推导(自适应),不允许手动拖拽——
+		// 无边框透明窗被拖动边缘会塌缩(实测塌到 25px),框/精灵/面板全错位。
+		styleMask: { Resizable: false },
 	renderer: process.platform === "linux" ? "cef" : "native",
 	activate: false,
 	frame: {
@@ -3241,6 +3376,8 @@ startupPromise = (async () => {
 				agent,
 				{
 					planChanged(change) {
+						planningGoalReconciler?.invalidate();
+						planningGoalReconciler?.schedule();
 						if (clientWindow !== null) clientRPC.send.planChanged(change);
 					},
 					calendarChanged(version) {
@@ -3254,7 +3391,25 @@ startupPromise = (async () => {
 				// 结算钟点锚点：未配置=现行"午夜后首 tick"行为；坏值按未配置处理。
 				{ settlementLocalTime: readPlanningSettlementLocalTime() },
 			);
-			await reconcileExecutingPlanningGoal();
+			planningGoalReconciler = new PlanningGoalReconciler({
+				loadCalendar: () => agent.listAllPlanningCalendar(),
+				loadPlans: async () =>
+					(await requirePlanningRuntime()).runtime.listPlans(),
+				currentGoal: () =>
+					reflectionRuntime?.service.getActiveGoalContext() ?? null,
+				applyGoal: async (goal) => {
+					const reflection = reflectionRuntime;
+					if (!reflection) {
+						throw new Error("Reflection runtime is not ready.");
+					}
+					return setRuntimeGoal(reflection, goal);
+				},
+				afterChange: () => timelineLifecycle.current?.service.pullNow(),
+				sessionToken: () =>
+					authSession.captureCurrentSession()?.generation ?? null,
+				diag,
+			});
+			await reconcilePlanningGoal();
 			startPlanningMaintenance();
 			try {
 				await timelineLifecycle.ensureStarted({
@@ -3574,6 +3729,11 @@ async function startActivityWindowDelivery(
 				if (!acknowledged) {
 					throw new Error("Activity source belongs to another account.");
 				}
+			},
+			onAcceptedAnalysis: ({ response, status }) => {
+				diag(
+					`[heartbeat] receipt score=${response.score} accumulated=${status.accumulatedScore.toFixed(2)} triggerPending=${status.agentTriggerPending}`,
+				);
 			},
 			onAgentTriggerRequired: () => dispatcher.wake(),
 			currentSession: () => {
@@ -3902,7 +4062,7 @@ async function mutateRendererCalendar(
 			},
 			{
 				stage: "execution-reconciliation",
-				run: reconcileExecutingPlanningGoal,
+				run: reconcilePlanningGoal,
 			},
 		],
 		onDeferredFailure: reportCommittedCalendarFailure,
@@ -3998,7 +4158,7 @@ async function runPlanningMaintenance(): Promise<void> {
 				if (batch.inputs.length < 32) break;
 			}
 		}
-		await reconcileExecutingPlanningGoal();
+		await reconcilePlanningGoal();
 		await planning.collectVaultGarbageIfDue();
 	} catch (error) {
 		console.warn(
@@ -4010,50 +4170,7 @@ async function runPlanningMaintenance(): Promise<void> {
 	}
 }
 
-async function reconcileExecutingPlanningGoal(): Promise<void> {
-	const planning = planningRuntime;
-	const reflection = reflectionRuntime;
-	if (!planning || !reflection) return;
-	const now = Date.now();
-	const events = (await agent.listAllPlanningCalendar())
-		.filter(
-			(event) =>
-				event.kind === "plan" &&
-				event.state === "committed" &&
-				!event.schedule.allDay &&
-				event.sourcePlanId !== null &&
-				event.sourceTaskId !== null &&
-				Date.parse(event.schedule.start) <= now &&
-				Date.parse(event.schedule.end) > now,
-		)
-		.sort((left, right) =>
-			left.schedule.allDay || right.schedule.allDay
-				? 0
-				: left.schedule.start.localeCompare(right.schedule.start),
-		);
-	const event = events[0];
-	if (
-		!event ||
-		event.schedule.allDay ||
-		!event.sourcePlanId ||
-		!event.sourceTaskId
-	) {
-		await setRuntimeGoal(reflection, null);
-		return;
-	}
-	const plan = await planning.runtime
-		.getPlan(event.sourcePlanId)
-		.catch(() => null);
-	const task = plan?.tasks.find((item) => item.id === event.sourceTaskId);
-	if (!plan || !task || plan.status !== "active" || task.status !== "pending") {
-		await setRuntimeGoal(reflection, null);
-		return;
-	}
-	await setRuntimeGoal(reflection, {
-		goalId: task.id,
-		planId: plan.id,
-		text: task.title,
-		activatedAtMs: Date.parse(event.schedule.start),
-	});
-	await timelineLifecycle.current?.service.pullNow();
+async function reconcilePlanningGoal(): Promise<void> {
+	if (!planningRuntime || !reflectionRuntime || !planningGoalReconciler) return;
+	await planningGoalReconciler.reconcile();
 }

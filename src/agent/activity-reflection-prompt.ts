@@ -5,6 +5,11 @@ import {
 	type ActivityEventWorkerRequest,
 	type ActivityEventWorkerResponse,
 } from "./activity-event-worker";
+import {
+	type ActivityReflectionSegmentFamily,
+	type ActivityReflectionSignalFamily,
+	activityReflectionCandidatesFor,
+} from "./activity-reflection-candidates";
 import { ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES } from "./activity-reflection-skill-names";
 import {
 	type ActivityReflectionStateMarker,
@@ -42,7 +47,7 @@ const activityReflectionFinalOutputContract = [
 	"根级只能有 events、score、score_reason 三个字段；绝不能输出 analysis_summary、context_details、事件计数、原始字段或其他根级键。",
 	"events 是 0 至 8 个聚合事件；每个事件必须同时包含 action、activity、goal_relevance、confidence、reason_codes、evidence、signal_segment_ids、started_at_ms、ended_at_ms。其中 reason_codes 必须是 1 到 4 项的字符串数组，evidence 必须是最多 8 项的字符串数组，绝不能写成单个字符串。signal_segment_ids 只能选择 LOCAL_SIGNAL_INDEX_JSON 中实际存在的 segment-N，可选多个连续段来合并活动；同一个 segment-N 在单个事件或整个 events 数组中都最多出现一次。",
 	"每个 action 必须以“确定：”“推测：”或“不确定：”开头，后面是具体简体中文活动描述；不得把 development、writing、research、communication 等英文枚举写进 action，也不得写应用状态更改、标签页切换、页面导航、输入活动或用户交互活动等观察名称。",
-	"score 必须是 0 至 1 的本窗口贡献；先聚合再按已加载评分 Skill 的公式计算。score_reason 必须是简短、无敏感信息的中文，并说明目标相关性或零分原因与证据强度；不得只写窗口贡献度。started_at_ms 与 ended_at_ms 必须都写为 null；客户端会用所选 segment-N 从完整原始窗口还原真实时间。",
+	"score 必须是 0 至 1 的本窗口贡献；先聚合再按已加载评分 Skill 的公式计算。score_reason 必须是简短、无敏感信息的中文，并说明相关性或零分原因与证据强度；不得只写窗口贡献度。started_at_ms 与 ended_at_ms 必须都写为 null；客户端会用所选 segment-N 从完整原始窗口还原真实时间。",
 	'格式对照（仅示意字段形状，不是本窗口数据）：{"action":"推测：正在编写代码并查阅技术资料","activity":"development","goal_relevance":"supporting","confidence":0.75,"reason_codes":["文档变更","持续输入"],"evidence":["编辑器文档修改伴随持续输入"],"signal_segment_ids":["segment-1"],"started_at_ms":null,"ended_at_ms":null}。注意 reason_codes 和 evidence 是字符串数组。',
 ].join("\n");
 
@@ -854,49 +859,67 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 		.sort((left, right) => left.timestamp - right.timestamp);
 	const segments: MutableActivityReflectionSignalSegment[] = [];
 	let current: MutableActivityReflectionSignalSegment | null = null;
-	let pendingBoundary: ActivityReflectionSignalObservation | null = null;
+	// Boundaries wait for the evidence that decides their band. A foreground
+	// switch reports two of them in a row, and AFK ends on a pair.
+	const pendingBoundaries: ActivityReflectionSignalObservation[] = [];
+	const deferred: ActivityReflectionSignalObservation[] = [];
 	const prelude: ActivityReflectionSignalObservation[] = [];
 
 	for (const observation of observations) {
 		if (observation.family === "boundary") {
-			if (current) pendingBoundary = observation;
+			if (current) pendingBoundaries.push(observation);
 			else prelude.push(observation);
 			continue;
 		}
-		if (observation.family === "auxiliary") {
-			if (current) addActivityReflectionSignal(current, observation);
-			else prelude.push(observation);
+		if (observation.family === "auxiliary" || observation.family === "other") {
+			// Supporting observations never open a band: a process batch landing
+			// right after a boundary must not claim the evidence that follows.
+			if (current === null) prelude.push(observation);
+			else if (pendingBoundaries.length > 0) deferred.push(observation);
+			else addActivityReflectionSignal(current, observation);
 			continue;
 		}
 
-		const startsDistinctBand =
-			current !== null &&
-			pendingBoundary !== null &&
-			current.family !== observation.family;
-		if (!current || startsDistinctBand) {
-			if (current) segments.push(current);
-			const firstTimestamp = Math.min(
-				observation.timestamp,
-				pendingBoundary?.timestamp ?? observation.timestamp,
-				...prelude.map((entry) => entry.timestamp),
-			);
+		if (current === null) {
 			current = createActivityReflectionSignalSegment(
 				observation.family,
-				firstTimestamp,
+				Math.min(
+					observation.timestamp,
+					...prelude.map((entry) => entry.timestamp),
+				),
 			);
 			for (const entry of prelude.splice(0)) {
 				addActivityReflectionSignal(current, entry);
 			}
-			if (pendingBoundary) {
-				addActivityReflectionSignal(current, pendingBoundary);
-				pendingBoundary = null;
+		} else if (pendingBoundaries.length > 0) {
+			// Everything observed since the first boundary belongs to the band
+			// that the next evidence decides, so two bands never overlap.
+			const boundary = pendingBoundaries[0];
+			if (current.family !== observation.family && boundary !== undefined) {
+				segments.push(current);
+				current = createActivityReflectionSignalSegment(
+					observation.family,
+					boundary.timestamp,
+				);
+			}
+			for (const entry of pendingBoundaries.splice(0)) {
+				addActivityReflectionSignal(current, entry);
+			}
+			for (const entry of deferred.splice(0)) {
+				addActivityReflectionSignal(current, entry);
 			}
 		}
+		current.families.add(observation.family);
 		addActivityReflectionSignal(current, observation);
 	}
 
 	if (current) {
-		if (pendingBoundary) addActivityReflectionSignal(current, pendingBoundary);
+		for (const entry of pendingBoundaries) {
+			addActivityReflectionSignal(current, entry);
+		}
+		for (const entry of deferred) {
+			addActivityReflectionSignal(current, entry);
+		}
 		segments.push(current);
 	} else if (prelude.length > 0) {
 		const startedAtMs = prelude[0]?.timestamp; // 缺时间戳不伪造 1970 起点
@@ -905,6 +928,7 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 				"other",
 				startedAtMs,
 			);
+			fallback.families.add("other");
 			for (const entry of prelude) addActivityReflectionSignal(fallback, entry);
 			segments.push(fallback);
 		}
@@ -921,25 +945,17 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 			observed_signals: [...segment.signals.entries()]
 				.map(([kind, count]) => ({ kind, count }))
 				.sort((left, right) => left.kind.localeCompare(right.kind, "zh-CN")),
-			...activityReflectionCandidatesFor(segment.family),
+			candidate_activities: [...segment.families]
+				.flatMap(
+					(family) =>
+						activityReflectionCandidatesFor(family).candidate_activities,
+				)
+				.filter((activity, index, all) => all.indexOf(activity) === index),
+			recommended_action: activityReflectionCandidatesFor(segment.family)
+				.recommended_action,
 		})),
 	};
 }
-
-type ActivityReflectionSignalFamily =
-	| "development"
-	| "writing"
-	| "research"
-	| "gaming"
-	| "media"
-	| "commerce"
-	| "system_file_ops"
-	| "communication"
-	| "planning"
-	| "data"
-	| "other"
-	| "auxiliary"
-	| "boundary";
 
 type ActivityReflectionSignalObservation = {
 	timestamp: number;
@@ -948,7 +964,10 @@ type ActivityReflectionSignalObservation = {
 };
 
 type MutableActivityReflectionSignalSegment = {
-	family: Exclude<ActivityReflectionSignalFamily, "auxiliary" | "boundary">;
+	/** The family that opened the segment. */
+	family: ActivityReflectionSegmentFamily;
+	/** Every segment-opening family seen inside it, in order of first appearance. */
+	families: Set<ActivityReflectionSegmentFamily>;
 	startedAtMs: number;
 	endedAtMs: number;
 	observationCount: number;
@@ -977,6 +996,17 @@ function toActivityReflectionSignalObservation(
 		return isCodeLanguage(language)
 			? { timestamp, family: "development", label: "代码文档变更观察" }
 			: { timestamp, family: "writing", label: "文档变更观察" };
+	}
+	if (
+		kind === "accessibility.documentChanged" ||
+		kind === "accessibility.valueChanged"
+	) {
+		// The accessibility monitor cannot tell code from prose, so the model
+		// picks the activity from the raw observation instead of the index.
+		return { timestamp, family: "editing", label: "文本内容变更观察" };
+	}
+	if (kind === "accessibility.focusChanged") {
+		return { timestamp, family: "auxiliary", label: "界面焦点变化观察" };
 	}
 	if (kind.startsWith("terminal.")) {
 		return { timestamp, family: "development", label: "终端操作观察" };
@@ -1022,71 +1052,6 @@ function toActivityReflectionSignalObservation(
 	return { timestamp, family: "other", label: "其他脱敏观察" };
 }
 
-function activityReflectionCandidatesFor(
-	family: Exclude<ActivityReflectionSignalFamily, "auxiliary" | "boundary">,
-): {
-	candidate_activities: ActivityReflectionActivity[];
-	recommended_action: string;
-} {
-	switch (family) {
-		case "development":
-			return {
-				candidate_activities: ["development"],
-				recommended_action: "推测：正在编写代码",
-			};
-		case "writing":
-			return {
-				candidate_activities: ["writing"],
-				recommended_action: "推测：正在撰写或修改文本",
-			};
-		case "research":
-			return {
-				candidate_activities: ["research", "other_unknown"],
-				recommended_action: "推测：正在查阅技术资料",
-			};
-		case "communication":
-			return {
-				candidate_activities: ["communication", "other_unknown"],
-				recommended_action: "推测：正在进行沟通",
-			};
-		case "planning":
-			return {
-				candidate_activities: ["planning", "other_unknown"],
-				recommended_action: "推测：正在规划安排",
-			};
-		case "data":
-			return {
-				candidate_activities: ["data_work", "other_unknown"],
-				recommended_action: "推测：正在处理数据",
-			};
-		case "gaming":
-			return {
-				candidate_activities: ["gaming", "other_unknown"],
-				recommended_action: "推测：正在进行游戏",
-			};
-		case "media":
-			return {
-				candidate_activities: ["media", "other_unknown"],
-				recommended_action: "推测：正在观看或收听媒体内容",
-			};
-		case "commerce":
-			return {
-				candidate_activities: ["commerce", "other_unknown"],
-				recommended_action: "不确定：正在处理敏感页面，具体活动无法判断",
-			};
-		case "system_file_ops":
-			return {
-				candidate_activities: ["system_file_ops", "other_unknown"],
-				recommended_action: "推测：正在整理文件或调整系统设置",
-			};
-		case "other":
-			return {
-				candidate_activities: ["other_unknown"],
-				recommended_action: "不确定：当前活动无法判断",
-			};
-	}
-}
-
 function isCodeLanguage(value: string): boolean {
 	return /^(?:bash|c|cpp|csharp|css|dart|go|java|javascript|jsx|kotlin|lua|php|python|r|ruby|rust|scala|sql|swift|tsx|typescript|vue)$/iu.test(
 		value.trim(),
@@ -1094,11 +1059,12 @@ function isCodeLanguage(value: string): boolean {
 }
 
 function createActivityReflectionSignalSegment(
-	family: Exclude<ActivityReflectionSignalFamily, "auxiliary" | "boundary">,
+	family: ActivityReflectionSegmentFamily,
 	timestamp: number,
 ): MutableActivityReflectionSignalSegment {
 	return {
 		family,
+		families: new Set<ActivityReflectionSegmentFamily>(),
 		startedAtMs: timestamp,
 		endedAtMs: timestamp,
 		observationCount: 0,
@@ -1225,7 +1191,7 @@ function sanitizeScoreReason(value: string, score: number): string {
 	}
 	return score === 0
 		? "未满足有效投入计分条件，计 0.00 分"
-		: `已按目标相关性、证据和持续时间计 ${score.toFixed(2)} 分`;
+		: `已按活动相关性、证据和持续时间计 ${score.toFixed(2)} 分`;
 }
 
 function containsSensitiveEvidence(value: string): boolean {
@@ -1388,7 +1354,10 @@ function lowLevelActionReplacement(
 	) {
 		return "不确定：正在使用桌面应用，具体活动无法判断";
 	}
-	if (/(?:编辑器.*(?:文档|操作)|文档.*(?:修改|操作))/u.test(value)) {
+	if (
+		activity === "development" &&
+		/(?:编辑器.*(?:文档|操作)|文档.*(?:修改|操作))/u.test(value)
+	) {
 		return "推测：正在进行编程";
 	}
 	return null;

@@ -4,6 +4,7 @@ import packageMetadata from "../../../package.json";
 import { AppShell } from "./app/AppShell";
 import { applyAppearancePreferences } from "./app/appearance";
 import { subscribePetVisibilityPreference } from "./app/pet-visibility-preference";
+import { subscribePetModelPreference } from "./app/pet-model-preference";
 import {
 	AppUpdateController,
 	UpdateStatusControl,
@@ -90,6 +91,10 @@ export function App() {
 			preferencesController,
 			petBridge,
 		);
+		const unsubscribePetModel = subscribePetModelPreference(
+			preferencesController,
+			petBridge,
+		);
 		syncAppearanceFromPreferences();
 		if (preferencesController.getSnapshot().status === "idle") {
 			void preferencesController.load();
@@ -97,6 +102,7 @@ export function App() {
 		return () => {
 			unsubscribe();
 			unsubscribePetVisibility();
+			unsubscribePetModel();
 		};
 	}, []);
 

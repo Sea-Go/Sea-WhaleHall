@@ -28,6 +28,7 @@ export const ACTIVITY_SUPPORT_GOAL_RELATIONS = [
 ] as const;
 export const ACTIVITY_SUPPORT_SIGNALS = [
 	"goal_progress",
+	"sustained_focus",
 	"possible_blocker",
 	"goal_unrelated",
 	"recovery",
@@ -228,18 +229,24 @@ function projectSupportObservation(
 		activity,
 		goalRelation,
 		evidenceStrength: evidenceStrength(event.confidence),
-		signals: supportSignals(event.action, goalRelation),
+		signals: supportSignals(event.action, goalRelation, activity),
 	};
 }
 
 function supportSignals(
 	action: string | undefined,
 	goalRelation: ActivitySupportGoalRelation,
+	activity: ActivitySupportActivity,
 ): readonly ActivitySupportSignal[] {
 	if (!action || action.startsWith("不确定：")) return ["uncertain"];
 	const signals: ActivitySupportSignal[] = [];
 	const aligned = goalRelation === "direct" || goalRelation === "supporting";
 	if (aligned) signals.push("goal_progress");
+	else if (goalRelation === "uncertain" && isSustainedActivity(activity)) {
+		// The activity is clear but its relation to the goal is not. It counts
+		// towards a check-in as sustained work, never as progress on the goal.
+		signals.push("sustained_focus");
+	}
 	if (goalRelation === "unrelated") signals.push("goal_unrelated");
 	if (
 		aligned &&
@@ -250,7 +257,9 @@ function supportSignals(
 	) {
 		signals.push("possible_blocker");
 	}
-	if (/(?:休息|放松|恢复|暂停|缓一缓|降低负荷)/u.test(action)) {
+	// "恢复使用电脑" is the client's marker for a session that resumes; it
+	// says the user came back, not that they are resting.
+	if (/(?:休息|放松|恢复(?!使用|活动)|暂停|缓一缓|降低负荷)/u.test(action)) {
 		signals.push("recovery");
 	}
 	return signals.length > 0 ? signals : ["uncertain"];
@@ -307,11 +316,20 @@ function isActivitySupportApproach(
 	return ACTIVITY_SUPPORT_APPROACHES.some((candidate) => candidate === value);
 }
 
+// A state boundary or an activity the reflection could not name says nothing
+// about sustained work.
+function isSustainedActivity(activity: ActivitySupportActivity): boolean {
+	return activity !== "idle_transition" && activity !== "other_unknown";
+}
+
 function isConsistentSignalSet(
 	goalRelation: ActivitySupportGoalRelation,
 	signals: readonly ActivitySupportSignal[],
 ): boolean {
 	if (signals.includes("uncertain")) return signals.length === 1;
+	if (signals.includes("sustained_focus") && goalRelation !== "uncertain") {
+		return false;
+	}
 	if (
 		signals.includes("goal_progress") &&
 		goalRelation !== "direct" &&

@@ -7,6 +7,7 @@ import type {
 export interface PetBridgeTransport {
 	present(event: PetPresentationEvent): Promise<void>;
 	setVisible(visible: boolean): Promise<void>;
+	setModel(modelId: string): Promise<void>;
 }
 
 export interface ElectrobunPetPresentationBridgeOptions {
@@ -60,6 +61,19 @@ export class ElectrobunPetPresentationBridge
 			});
 		}
 	}
+
+	async setModel(modelId: string): Promise<void> {
+		if (!this.runtimeAvailable()) return;
+		try {
+			const transport = await this.loadTransport();
+			await transport.setModel(modelId);
+		} catch {
+			this.logger.warn("[pet-bridge] model delivery failed", {
+				operation: "set-model",
+				category: "transport",
+			});
+		}
+	}
 }
 
 async function loadClientTransport(): Promise<PetBridgeTransport> {
@@ -70,6 +84,9 @@ async function loadClientTransport(): Promise<PetBridgeTransport> {
 		},
 		async setVisible(visible) {
 			await clientApi.setPetVisible(visible);
+		},
+		async setModel(modelId) {
+			await clientApi.setPetModel(modelId);
 		},
 	};
 }

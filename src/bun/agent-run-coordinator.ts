@@ -2718,9 +2718,11 @@ export class AgentRunCoordinator
 									? "transient"
 									: terminalFailure?.retryable
 										? "transient"
-										: run.snapshot.status === "completed"
-											? null
-											: "terminal",
+										: run.snapshot.status === "interrupted"
+											? "transient"
+											: run.snapshot.status === "completed"
+												? null
+												: "terminal",
 						feedback,
 					});
 				}

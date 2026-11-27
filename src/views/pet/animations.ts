@@ -1198,6 +1198,13 @@ export class PetAnimator {
 
 	private setAction(id: PetActionId, now: number, clearQueue = true): void {
 		if (clearQueue) this.queue = [];
+		// 未注册动作兜底:任何来源(数据驱动包/外部直派)都可能带来词表外
+		// 的 id;直接采用会让 update() 的查表每帧抛错、渲染永久冻结。
+		// 回退 idle 并告警一次,渲染循环永不死锁。
+		if (PET_ANIMATION_CONFIG[id] === undefined) {
+			console.warn(`[pet] 未注册动作 ${id},回退 idle`);
+			id = "idle";
+		}
 		if (id === "turnLeft" || id === "walkLeft" || id === "runLeft")
 			this.facing = -1;
 		if (id === "turnRight" || id === "walkRight" || id === "runRight")

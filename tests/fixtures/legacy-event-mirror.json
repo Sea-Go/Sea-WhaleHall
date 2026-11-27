@@ -1,0 +1,525 @@
+{
+	"description": "Contract between the Rust legacy event mirror and the TypeScript desktop-event validator. Each case is a semantic projection and the legacy desktop event it must mirror to (null when it must not mirror at all). The Rust test asserts the output; the TypeScript test asserts the validator accepts it.",
+	"cases": [
+		{
+			"name": "typed input bucket",
+			"projection": {
+				"kind": "input.activityBucket",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.editor",
+					"appName": "Editor",
+					"opaqueWindowId": "ow1_window",
+					"bucketStartedAtMs": 1700000000000,
+					"bucketEndedAtMs": 1700000005000,
+					"keyCount": 6,
+					"clickCount": 0,
+					"scrollDelta": 12.5,
+					"mouseDistance": 128.5
+				},
+				"content": null,
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000005000,
+				"observationId": "ro2_input"
+			},
+			"expected": {
+				"kind": "input.activityAggregated",
+				"source": "observer.bridge.input",
+				"sensitivity": "metadata",
+				"payload": {
+					"bucketStartedAtMs": 1700000000000,
+					"bucketEndedAtMs": 1700000005000,
+					"keyCount": 6,
+					"clickCount": 0,
+					"scrollDelta": 12.5,
+					"mouseDistance": 128.5
+				},
+				"deduplicationKey": "observer-mirror:ro2_input"
+			}
+		},
+		{
+			"name": "coalesced input buckets",
+			"projection": {
+				"kind": "input.activityBucket",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"bucketStartedAtMs": 1700000000000,
+					"bucketEndedAtMs": 1700000015000,
+					"keyCount": 0,
+					"clickCount": 4,
+					"scrollDelta": -36,
+					"mouseDistance": 900.25,
+					"coalescedBucketCount": 3
+				},
+				"content": null,
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000015000,
+				"observationId": "ro2_input_coalesced"
+			},
+			"expected": {
+				"kind": "input.activityAggregated",
+				"source": "observer.bridge.input",
+				"sensitivity": "metadata",
+				"payload": {
+					"bucketStartedAtMs": 1700000000000,
+					"bucketEndedAtMs": 1700000015000,
+					"keyCount": 0,
+					"clickCount": 4,
+					"scrollDelta": -36,
+					"mouseDistance": 900.25,
+					"coalescedBucketCount": 3
+				},
+				"deduplicationKey": "observer-mirror:ro2_input_coalesced"
+			}
+		},
+		{
+			"name": "mouse-only bucket",
+			"projection": {
+				"kind": "input.activityBucket",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"bucketStartedAtMs": 1700000000000,
+					"bucketEndedAtMs": 1700000005000,
+					"keyCount": 0,
+					"clickCount": 0,
+					"scrollDelta": 0,
+					"mouseDistance": 420
+				},
+				"content": null,
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000005000,
+				"observationId": "ro2_mouse_only"
+			},
+			"expected": null
+		},
+		{
+			"name": "coalesced count that contradicts the duration",
+			"projection": {
+				"kind": "input.activityBucket",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"bucketStartedAtMs": 1700000000000,
+					"bucketEndedAtMs": 1700000015000,
+					"keyCount": 3,
+					"clickCount": 0,
+					"scrollDelta": 0,
+					"mouseDistance": 10,
+					"coalescedBucketCount": 2
+				},
+				"content": null,
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000015000,
+				"observationId": "ro2_bad_coalesced"
+			},
+			"expected": null
+		},
+		{
+			"name": "text change with a real delta",
+			"projection": {
+				"kind": "application.textValueChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.editor",
+					"appName": "Editor",
+					"role": "AXTextArea",
+					"opaqueControlId": "oc1_area",
+					"insertedChars": 14,
+					"deletedChars": 2,
+					"deltaAvailable": true,
+					"inputMethod": "unknown"
+				},
+				"content": {
+					"label": "Body",
+					"addedText": "private",
+					"finalValue": "private"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000002000,
+				"observationId": "ro2_text_delta"
+			},
+			"expected": {
+				"kind": "accessibility.documentChanged",
+				"source": "observer.bridge.accessibility",
+				"sensitivity": "metadata",
+				"payload": {
+					"appId": "com.example.editor",
+					"insertedChars": 14,
+					"deletedChars": 2
+				},
+				"deduplicationKey": "observer-mirror:ro2_text_delta"
+			}
+		},
+		{
+			"name": "text change without a prior value",
+			"projection": {
+				"kind": "application.textValueChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.editor",
+					"appName": "Editor",
+					"role": "AXTextArea",
+					"insertedChars": 0,
+					"deletedChars": 0,
+					"deltaAvailable": false,
+					"inputMethod": "unknown"
+				},
+				"content": {
+					"finalValue": "private"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000002000,
+				"observationId": "ro2_text_baseline"
+			},
+			"expected": null
+		},
+		{
+			"name": "window title changed",
+			"projection": {
+				"kind": "application.visibleContentChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.reader",
+					"appName": "Reader",
+					"opaqueWindowId": "ow1_reader",
+					"contentHash": "deadbeef"
+				},
+				"content": {
+					"windowTitle": " 第 2 章 网络层 - 笔记.app ",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000003000,
+				"observationId": "ro2_title"
+			},
+			"expected": {
+				"kind": "application.foregroundChanged",
+				"source": "observer.bridge.workspace",
+				"sensitivity": "content",
+				"payload": {
+					"appId": "com.example.reader",
+					"appName": "Reader",
+					"windowTitle": "第 2 章 网络层 - 笔记.app"
+				},
+				"deduplicationKey": "observer-mirror:ro2_title"
+			}
+		},
+		{
+			"name": "window title whose coverage is redacted",
+			"projection": {
+				"kind": "application.visibleContentChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content", "redacted"],
+				"metadata": {
+					"appId": "com.example.reader",
+					"appName": "Reader",
+					"contentHash": "deadbeef"
+				},
+				"content": {
+					"windowTitle": "Chapter 2",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000003000,
+				"observationId": "ro2_title_redacted"
+			},
+			"expected": null
+		},
+		{
+			"name": "window title of a sensitive page",
+			"projection": {
+				"kind": "application.visibleContentChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "deadbeef"
+				},
+				"content": {
+					"windowTitle": "网上银行 - 转账",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000003000,
+				"observationId": "ro2_title_sensitive"
+			},
+			"expected": null
+		},
+		{
+			"name": "browser navigation with sealed content",
+			"projection": {
+				"kind": "browser.visiblePageChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "cafebabe",
+					"changeKind": "navigated"
+				},
+				"content": {
+					"domain": "developer.mozilla.org",
+					"url": "https://developer.mozilla.org/docs?lang=zh#fragment",
+					"title": "HTTP 概述 - MDN",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000001000,
+				"observationId": "ro2_browser_sealed"
+			},
+			"expected": {
+				"kind": "browser.tabNavigated",
+				"source": "observer.bridge.browser",
+				"sensitivity": "content",
+				"payload": {
+					"browserId": "com.example.browser",
+					"tabId": "ow1_browser",
+					"url": "developer.mozilla.org",
+					"title": "HTTP 概述 - MDN"
+				},
+				"deduplicationKey": "observer-mirror:ro2_browser_sealed"
+			}
+		},
+		{
+			"name": "browser navigation without sealed content",
+			"projection": {
+				"kind": "browser.visiblePageChanged",
+				"countClass": "effective",
+				"contentState": "unavailable",
+				"coverage": ["unavailable"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "cafebabe",
+					"changeKind": "opened"
+				},
+				"content": null,
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000001000,
+				"observationId": "ro2_browser_metadata"
+			},
+			"expected": {
+				"kind": "browser.tabNavigated",
+				"source": "observer.bridge.browser",
+				"sensitivity": "metadata",
+				"payload": {
+					"browserId": "com.example.browser",
+					"tabId": "ow1_browser"
+				},
+				"deduplicationKey": "observer-mirror:ro2_browser_metadata"
+			}
+		},
+		{
+			"name": "the same browser page observed again",
+			"projection": {
+				"kind": "browser.visiblePageChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "cafebabe",
+					"changeKind": "content_changed"
+				},
+				"content": {
+					"domain": "example.com",
+					"title": "Example"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000001000,
+				"observationId": "ro2_browser_same"
+			},
+			"expected": null
+		},
+		{
+			"name": "presence boundary",
+			"projection": {
+				"kind": "presence.changed",
+				"countClass": "boundary",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"state": "afk_started",
+					"idleForMs": 300000
+				},
+				"content": null,
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000000000,
+				"observationId": "ro2_presence"
+			},
+			"expected": null
+		},
+		{
+			"name": "foreground switch has no content of its own",
+			"projection": {
+				"kind": "application.foregroundChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["metadata"],
+				"metadata": {
+					"appId": "com.example.reader",
+					"appName": "Reader"
+				},
+				"content": null,
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000000000,
+				"observationId": "ro2_foreground"
+			},
+			"expected": null
+		},
+		{
+			"name": "browser navigation to a sensitive host mirrors nothing",
+			"projection": {
+				"kind": "browser.visiblePageChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "cafebabe",
+					"changeKind": "navigated"
+				},
+				"content": {
+					"domain": "bank.example.com",
+					"title": "Overview",
+					"url": "https://bank.example.com/overview",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000001000,
+				"observationId": "ro2_browser_sensitive"
+			},
+			"expected": null
+		},
+		{
+			"name": "search results page mirrors the host only",
+			"projection": {
+				"kind": "browser.visiblePageChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "cafebabe",
+					"changeKind": "navigated"
+				},
+				"content": {
+					"domain": "www.google.com",
+					"url": "https://www.google.com/search?q=rust+borrow+checker",
+					"title": "rust borrow checker - Google 搜索",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000001000,
+				"observationId": "ro2_browser_search"
+			},
+			"expected": {
+				"kind": "browser.tabNavigated",
+				"source": "observer.bridge.browser",
+				"sensitivity": "content",
+				"payload": {
+					"browserId": "com.example.browser",
+					"tabId": "ow1_browser",
+					"url": "www.google.com"
+				},
+				"deduplicationKey": "observer-mirror:ro2_browser_search"
+			}
+		},
+		{
+			"name": "window title that is the page address",
+			"projection": {
+				"kind": "application.visibleContentChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "cafebabe"
+				},
+				"content": {
+					"windowTitle": "example.com/untitled-document?download=1",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000003000,
+				"observationId": "ro2_title_address"
+			},
+			"expected": null
+		}
+	],
+	"rejectedShapes": [
+		{
+			"name": "a document change may not carry the control role",
+			"kind": "accessibility.documentChanged",
+			"sensitivity": "metadata",
+			"payload": {
+				"appId": "com.example.editor",
+				"role": "AXTextArea",
+				"insertedChars": 1,
+				"deletedChars": 0
+			}
+		},
+		{
+			"name": "a single bucket has no coalesced count",
+			"kind": "input.activityAggregated",
+			"sensitivity": "metadata",
+			"payload": {
+				"bucketStartedAtMs": 1700000000000,
+				"bucketEndedAtMs": 1700000005000,
+				"keyCount": 1,
+				"clickCount": 0,
+				"scrollDelta": 0,
+				"mouseDistance": 1,
+				"coalescedBucketCount": 1
+			}
+		},
+		{
+			"name": "a page title requires content sensitivity",
+			"kind": "browser.tabNavigated",
+			"sensitivity": "metadata",
+			"payload": {
+				"browserId": "com.example.browser",
+				"tabId": "ow1_browser",
+				"title": "Overview"
+			}
+		},
+		{
+			"name": "a window title requires content sensitivity",
+			"kind": "application.foregroundChanged",
+			"sensitivity": "metadata",
+			"payload": {
+				"appId": "com.example.reader",
+				"appName": "Reader",
+				"windowTitle": "Chapter 2"
+			}
+		}
+	]
+}

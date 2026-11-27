@@ -1,5 +1,6 @@
 mod activity;
 pub mod events;
+pub mod legacy_event_mirror;
 pub mod legacy_migration;
 pub mod observations;
 pub mod planning;

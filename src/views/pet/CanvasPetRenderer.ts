@@ -1,5 +1,6 @@
 import type { PetMood, PetState } from "../../shared/contracts";
 import type { PetActionId } from "../../shared/pet-actions";
+import { petRenderObserver } from "./renderers/pet-render-observer";
 import { type AnimationContext, PetAnimator } from "./animations";
 import type {
 	PetAnchorId,
@@ -10,14 +11,15 @@ import type {
 	PetProp,
 	PetVector2,
 } from "./core/types";
-import { CAT_MODEL, getPetModel, WHALE_MODEL } from "./models/registry";
 import {
 	canvasPointToLocal,
 	clamp,
 	damp,
+	facingFootprint,
 	type Point,
 	truncate,
 } from "./pet-math";
+import { spriteScreenRect } from "./debug-zone";
 
 export type PetInteractionKind =
 	| "hover"
@@ -50,8 +52,27 @@ export interface PetRenderSnapshot {
 	modelId: string;
 }
 
+const EMPTY_MODEL: PetModel = {
+	id: "__unset__",
+	label: "",
+	skeleton: {
+		visualBounds: { x: 0, y: 0, width: 0, height: 0 },
+		groundAnchor: { x: 0, y: 0 },
+		anchors: [],
+		hitZones: [],
+	},
+	theme: { colors: {} },
+	draw() {},
+	hitTest() {
+		return null;
+	},
+	resolveAnchor() {
+		return { x: 0, y: 0 };
+	},
+};
+
 export interface CanvasPetRendererOptions {
-	model?: PetModel | string;
+	model?: PetModel;
 	onInteract?: (event: PetInteractionEvent) => void;
 	onFrame?: (snapshot: PetRenderSnapshot) => void;
 }
@@ -69,15 +90,12 @@ interface ExtendedPetState extends PetState {
 	modelId?: string;
 }
 
-const BASE_X_RATIO = 0.56;
-// 锚定鲸鱼身体中心。窗口 320×250（见 bun/index.ts petWidth/petHeight 注释）：
-// y：0.41*250≈102.5，鲸鱼(视觉高139)占 y≈33..172，顶部余量只够消息气泡
-// 与 ≤26px 的跳跃峰值（jumpArc 上限同步压到 26）；x：267 宽鲸鱼在 320 内
-// 近似水平居中。底部避开聊天面板——不与面板重叠。
-const BASE_Y_RATIO = 0.41;
 const PETTING_DISTANCE = 42;
 const RAPID_CLICK_WINDOW_MS = 2_400;
 const DOUBLE_CLICK_WINDOW_MS = 330;
+// 场景原点自适应常数(与形象无关的窗口装饰带):
+// 立足线固定在窗底以上 78px(聊天面板带),头顶余量自然留给消息气泡。
+const BOTTOM_BAND_PX = 78;
 
 function createNeutralFrame(): PetFrame {
 	return {
@@ -192,10 +210,9 @@ export class CanvasPetRenderer implements PetRenderer {
 	private readonly onFrame?: (snapshot: PetRenderSnapshot) => void;
 
 	constructor(options: CanvasPetRendererOptions = {}) {
-		this.model =
-			typeof options.model === "string"
-				? getPetModel(options.model)
-				: (options.model ?? WHALE_MODEL);
+		// 形象由 PetState.pack 经 PetPackModelBridge 注入(标准 v1);
+		// 构造期未提供时使用占位空模型,首帧 setModel 前不绘制形象。
+		this.model = options.model ?? EMPTY_MODEL;
 		this.onInteract = options.onInteract;
 		this.onFrame = options.onFrame;
 	}
@@ -207,6 +224,8 @@ export class CanvasPetRenderer implements PetRenderer {
 		if (!this.context) throw new Error("Canvas 2D context is unavailable.");
 		this.startedAt = performance.now();
 		this.lastFrameAt = this.startedAt;
+		this.lastTickAt = this.startedAt;
+		this.frameDebt = CanvasPetRenderer.MIN_FRAME_INTERVAL_MS;
 		this.reducedMotion =
 			window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 		this.animator = new PetAnimator(this.reducedMotion);
@@ -224,13 +243,14 @@ export class CanvasPetRenderer implements PetRenderer {
 			this.handleLostPointerCapture,
 		);
 		this.resize();
-		this.render(this.startedAt);
+		this.applyChatBubbleAnchor();
+		this.scheduleFrame();
 	}
 
 	setState(state: PetState): void {
 		this.state = state;
-		const extended = state as ExtendedPetState;
-		if (extended.modelId) this.setModel(extended.modelId);
+		// 模型注入唯一入口是 setModel(PetModel):PetApp 依据 state.pack
+		// 经 PetPackModelBridge 注入(标准 v1),此处不消费 modelId 字符串。
 		this.applyStateAnimation(state);
 	}
 
@@ -264,21 +284,55 @@ export class CanvasPetRenderer implements PetRenderer {
 		);
 	}
 
-	setModel(model: PetModel | string): void {
-		const nextModel = typeof model === "string" ? getPetModel(model) : model;
+	setModel(model: PetModel): void {
+		const nextModel = model;
 		if (nextModel === this.model) return;
 		this.model = nextModel;
 		this.hoverZone = null;
 		void nextModel.preload?.();
 		this.refreshPointerHit();
+		this.applyChatBubbleAnchor();
+	}
+
+	/** 外部触发一帧渲染(桥接模型图片加载就绪后调用)。 */
+	requestRender(): void {
+		this.scheduleFrame();
 	}
 
 	getModel(): PetModel {
 		return this.model;
 	}
 
+	/**
+	 * 对话气泡锚点（产品级，dev/生产一致）：把 .pet-chat 面板定位到当前
+	 * 模型静息足迹的正下方——顶缘 = 立足线 + 5px，尾巴指向精灵水平中心，
+	 * 经 CSS 变量写入舞台。面板高度 = 窗底距(8) 到顶缘的固定带，增长由
+	 * 内部滚动消化；模型热切换时锚点随之迁移，模型间互不影响。
+	 */
+	private applyChatBubbleAnchor(): void {
+		const stage = this.canvas?.parentElement;
+		if (!stage) return;
+		const width = this.canvas?.clientWidth ?? 0;
+		const height = this.canvas?.clientHeight ?? 0;
+		const origin = this.sceneOrigin(width, height);
+		const bounds = this.model.skeleton.visualBounds;
+		const floorY = origin.y + bounds.y + bounds.height;
+		const centerX = origin.x + bounds.x + bounds.width / 2;
+		stage.style.setProperty(
+			"--pet-chat-top",
+			`${Math.max(0, Math.round(floorY + 5))}px`,
+		);
+		stage.style.setProperty(
+			"--pet-chat-tail-x",
+			`${Math.max(0, Math.round(centerX))}px`,
+		);
+	}
+
 	dispose(): void {
 		if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
+		this.framePending = false;
+		this.lastTickAt = 0;
+		this.frameDebt = 0;
 		window.removeEventListener("resize", this.resize);
 		this.canvas?.removeEventListener("pointermove", this.handlePointerMove);
 		this.canvas?.removeEventListener("pointerleave", this.handlePointerLeave);
@@ -330,6 +384,8 @@ export class CanvasPetRenderer implements PetRenderer {
 		this.canvas.width = Math.max(1, Math.round(rect.width * dpr));
 		this.canvas.height = Math.max(1, Math.round(rect.height * dpr));
 		this.context.setTransform(dpr, 0, 0, dpr, 0, 0);
+		// 尺寸变化后气泡锚点同步重推导（跨屏拖动会改变 DPR/几何）。
+		this.applyChatBubbleAnchor();
 	};
 
 	private readonly handlePointerMove = (event: PointerEvent) => {
@@ -603,11 +659,23 @@ export class CanvasPetRenderer implements PetRenderer {
 		return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 	}
 
+	/**
+	 * 场景原点由模型视觉包围盒自适应推导(替代为鲸鱼非对称足迹调死的
+	 * 固定比例):水平方向包围盒居中;垂直方向立足线(包围盒底)固定在
+	 * 窗底装饰带之上。空模型(0 尺寸)退化为窗口中心,不绘制任何形象。
+	 */
 	private sceneOrigin(
 		width = this.canvas?.clientWidth ?? 0,
 		height = this.canvas?.clientHeight ?? 0,
 	): Point {
-		return { x: width * BASE_X_RATIO, y: height * BASE_Y_RATIO };
+		const bounds = this.model.skeleton.visualBounds;
+		return {
+			x: width / 2 - (bounds.x + bounds.width / 2),
+			y:
+				height -
+				BOTTOM_BAND_PX -
+				(bounds.y + bounds.height),
+		};
 	}
 
 	private toLocalPoint(point: Point): Point {
@@ -657,14 +725,55 @@ export class CanvasPetRenderer implements PetRenderer {
 		else delete this.canvas.dataset.hitZone;
 	}
 
+	private lastTickAt = 0;
+	private frameDebt = 0;
+	private framePending = false;
+	private static readonly MIN_FRAME_INTERVAL_MS = 1000 / 60; // 60fps 上限
+
+	/**
+	 * 合并所有渲染触发源为单一待决帧。直接 render() 调用(图片就绪回调等)
+	 * 与 rAF 回调若各自再排 rAF,会繁殖出无法取消的并行链(animationFrame
+	 * 只保存最后一个句柄)——多条空转链让帧间隔抖动、图片查询计数暴涨。
+	 * 任何时刻至多一个待决 rAF;dispose 取消它即彻底停机。
+	 */
+	private scheduleFrame(): void {
+		if (this.framePending || !this.canvas) return;
+		this.framePending = true;
+		this.animationFrame = requestAnimationFrame(this.render);
+	}
+
 	private readonly render = (now: number) => {
+		this.framePending = false;
+		if (!this.canvas) return;
+		petRenderObserver.onTick(now);
+		// 帧率上限 60fps(素材与动画计时都不超过 60,更高刷新只是重复绘制):
+		// 按自上次渲染以来累计的时间判定,到点即渲染并扣掉一个间隔,欠账至多
+		// 保留一个间隔(卡顿后不连发补帧)。不能用"距上一帧 ≥ 间隔"的硬门槛
+		// ——rAF 节拍与目标间隔同量级(60Hz)时,时间戳抖动会把约 1/3 的刷新
+		// 误判为太早而丢弃(实测 raf=60Hz 只渲染出 40fps)。
+		this.frameDebt += Math.min(100, Math.max(0, now - this.lastTickAt));
+		this.lastTickAt = now;
+		if (this.frameDebt + 1 < CanvasPetRenderer.MIN_FRAME_INTERVAL_MS) {
+			this.scheduleFrame();
+			return;
+		}
+		this.frameDebt = Math.min(
+			this.frameDebt - CanvasPetRenderer.MIN_FRAME_INTERVAL_MS,
+			CanvasPetRenderer.MIN_FRAME_INTERVAL_MS,
+		);
+		petRenderObserver.onFrameStart(now);
+		const renderStart = performance.now();
 		try {
 			this.drawFrame(now);
 		} catch (error) {
 			// 单帧异常不能杀死 rAF 循环：clearRect 之后抛错会让桌宠永久空白。
-			console.error("[pet] render frame failed", error);
+			console.error(
+				"[pet] render frame failed",
+				error instanceof Error ? `${error.message} @ ${error.stack?.split("\n")[1]?.trim() ?? ""}` : String(error),
+			);
 		}
-		this.animationFrame = requestAnimationFrame(this.render);
+		petRenderObserver.onFrameEnd(performance.now(), renderStart);
+		this.scheduleFrame();
 	};
 
 	private drawFrame(now: number): void {
@@ -672,6 +781,17 @@ export class CanvasPetRenderer implements PetRenderer {
 		const context = this.context;
 		const width = this.canvas.clientWidth;
 		const height = this.canvas.clientHeight;
+		// 跨显示器拖动改变 devicePixelRatio 但不触发 window resize：canvas
+		// backing 停在旧 DPR 尺寸 → 每帧精灵按旧尺寸绘制被新屏压缩（鲸鱼
+		// "变小"）、clearRect 清不完超配区域（旧帧残影竖条）。每帧核对
+		// backing 与当前 DPR 的匹配，失配即重建。
+		const dpr = Math.min(window.devicePixelRatio || 1, 2);
+		if (
+			this.canvas.width !== Math.max(1, Math.round(width * dpr)) ||
+			this.canvas.height !== Math.max(1, Math.round(height * dpr))
+		) {
+			this.resize();
+		}
 		const time = (now - this.startedAt) / 1000;
 		const deltaSeconds = Math.min(
 			0.05,
@@ -694,9 +814,11 @@ export class CanvasPetRenderer implements PetRenderer {
 			deltaSeconds,
 		);
 
+		const origin = this.sceneOrigin(width, height);
 		const animationContext = this.buildAnimationContext(
 			width,
 			height,
+			origin,
 			time,
 			deltaSeconds,
 		);
@@ -712,7 +834,10 @@ export class CanvasPetRenderer implements PetRenderer {
 		this.currentFrame = frame;
 		this.refreshPointerHit();
 
-		const origin = this.sceneOrigin(width, height);
+		// dev 调试框画在桌宠之下：精灵压过下缘线，读作"站在框的立足线上"。
+		if (this.state.debugOverlays) {
+			this.drawDebugActivityZone(context, origin, frame);
+		}
 		this.drawShadow(context, origin, frame);
 		context.save();
 		context.globalAlpha = clamp(frame.root.opacity, 0, 1);
@@ -723,9 +848,11 @@ export class CanvasPetRenderer implements PetRenderer {
 		context.restore();
 
 		const visualTime = this.reducedMotion ? 0 : time;
-		for (const effect of frame.effects)
-			this.drawEffect(context, origin, frame, effect, visualTime);
-		for (const prop of frame.props) this.drawProp(context, origin, frame, prop);
+		if (!this.model.selfContainedOverlays) {
+			for (const effect of frame.effects)
+				this.drawEffect(context, origin, frame, effect, visualTime);
+			for (const prop of frame.props) this.drawProp(context, origin, frame, prop);
+		}
 		if (
 			this.hoverAmount > 0.04 &&
 			!frame.effects.some(({ kind }) => kind === "sparkle")
@@ -746,6 +873,7 @@ export class CanvasPetRenderer implements PetRenderer {
 	private buildAnimationContext(
 		width: number,
 		height: number,
+		origin: Point,
 		time: number,
 		deltaSeconds: number,
 	): AnimationContext {
@@ -769,12 +897,17 @@ export class CanvasPetRenderer implements PetRenderer {
 						y: this.pointerCanvas.y - this.pressStart.y,
 					}
 				: { x: 0, y: 0 };
+		// 行走夹紧按当前朝向取有效足迹：非对称包围盒翻面后左右互换,
+		// 按原始包络夹紧会让朝左贴右边界时镜像尾巴越出窗外。活动范围
+		// 覆盖整个窗口宽度(原点自适应推导,不再用固定比例)。
+		const facing = this.currentFrame?.root.facingX ?? 1;
+		const footprint = facingFootprint(visualBounds, facing);
 		return {
 			width,
 			height,
 			travelBounds: {
-				minX: -width * BASE_X_RATIO - visualBounds.x,
-				maxX: width * (1 - BASE_X_RATIO) - visualBounds.x - visualBounds.width,
+				minX: -origin.x - footprint.x,
+				maxX: width - origin.x - footprint.x - footprint.width,
 			},
 			time,
 			deltaSeconds,
@@ -786,6 +919,53 @@ export class CanvasPetRenderer implements PetRenderer {
 			hoverAmount: this.hoverAmount,
 			pressAmount: this.pressAmount,
 		};
+	}
+
+	/**
+	 * dev 专属（PetState.debugOverlays）：把"活动区接触范围"画成紧贴精灵
+	 * 的虚线框——由模型声明的 visualBounds + 当前帧 root 变换推导屏幕
+	 * AABB（spriteScreenRect），模型无关：鲸鱼/橘子猫/DeepSeek 各自贴各自
+	 * 的精灵，互不影响。画在桌宠之下：精灵压过边线，边框读作"贴着"。
+	 */
+	private drawDebugActivityZone(
+		context: CanvasRenderingContext2D,
+		origin: Point,
+		frame: PetFrame,
+	): void {
+		const rect = spriteScreenRect(
+			this.model.skeleton.visualBounds,
+			frame.root,
+			origin,
+		);
+		context.save();
+		context.setLineDash([6, 4]);
+		context.lineWidth = 1.5;
+		context.strokeStyle = "rgba(83, 200, 216, 0.85)";
+		context.fillStyle = "rgba(83, 200, 216, 0.05)";
+		context.fillRect(rect.x, rect.y, rect.width, rect.height);
+		context.strokeRect(rect.x, rect.y, rect.width, rect.height);
+		context.setLineDash([]);
+		context.font = "700 9px ui-sans-serif, system-ui, sans-serif";
+		// 标签不截断:pill 宽度按实测文本自适应,"活动区 192×208" 必须完整可读。
+		const label = `活动区 ${Math.round(rect.width)}×${Math.round(rect.height)}`;
+		const textWidth = context.measureText(label).width;
+		const pillX = rect.x + 4;
+		// 标签放框外上方:框内左上角会被角色发丝遮挡("208" 被盖读作截断)。
+		const pillY = Math.max(2, rect.y - 18);
+		const pillW = textWidth + 12;
+		const pillH = 15;
+		context.fillStyle = "rgba(83, 200, 216, 0.78)";
+		if (typeof context.roundRect === "function") {
+			context.beginPath();
+			context.roundRect(pillX, pillY, pillW, pillH, 999);
+			context.fill();
+		} else {
+			context.fillRect(pillX, pillY, pillW, pillH);
+		}
+		context.fillStyle = "rgba(6, 32, 40, 0.95)";
+		context.textBaseline = "middle";
+		context.fillText(label, pillX + 6, pillY + pillH / 2 + 0.5);
+		context.restore();
 	}
 
 	private drawShadow(
@@ -804,9 +984,11 @@ export class CanvasPetRenderer implements PetRenderer {
 		const centerY =
 			origin.y + ground.y * frame.root.scaleY + frame.shadow.offsetY;
 		const radiusX = Math.max(45, width * 0.36) * frame.shadow.scaleX;
-		const radiusY = 14 * frame.shadow.scaleY;
+		// 阴影主体收在活动区内:立足线即框底,半径 9 + 上移 3 让下缘
+		// 只越线 ~6px(此前 ry14 满越 14px,读作"框没框住脚下")。
+		const radiusY = 9 * frame.shadow.scaleY;
 		context.save();
-		context.translate(centerX, centerY);
+		context.translate(centerX, centerY - 3);
 		const gradient = context.createRadialGradient(0, 0, 4, 0, 0, radiusX);
 		gradient.addColorStop(
 			0,
@@ -1294,16 +1476,4 @@ export class CanvasPetRenderer implements PetRenderer {
 	}
 }
 
-/** Production-compatible default while callers migrate to model selection. */
-export class CanvasWhaleRenderer extends CanvasPetRenderer {
-	constructor(onInteract: () => void) {
-		super({
-			model: WHALE_MODEL,
-			onInteract: (event) => {
-				if (event.kind === "click") onInteract();
-			},
-		});
-	}
-}
 
-export { CAT_MODEL, WHALE_MODEL };

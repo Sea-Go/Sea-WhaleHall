@@ -1,0 +1,149 @@
+{
+  "schema": "whalehall.pet-behaviors.v1",
+  "movement": {
+    "locomotion": "ground",
+    "speedPxPerSec": {
+      "walk": 48,
+      "run": 96
+    },
+    "gravity": true,
+    "edges": "turn",
+    "windowEdges": "hold"
+  },
+  "stateMachine": {
+    "initial": "idle",
+    "states": {
+      "idle": {
+        "action": "idle",
+        "transitions": [
+          {
+            "on": "timer",
+            "afterMs": [
+              8000,
+              20000
+            ],
+            "to": "walk",
+            "weight": 3
+          },
+          {
+            "on": "timer",
+            "afterMs": [
+              25000,
+              50000
+            ],
+            "to": "idleVariation",
+            "weight": 2
+          },
+          {
+            "on": "schedule",
+            "hours": [
+              [
+                23,
+                6
+              ]
+            ],
+            "to": "sleep"
+          },
+          {
+            "on": "pointer:hover",
+            "to": "notice"
+          },
+          {
+            "on": "pointer:click",
+            "to": "react"
+          }
+        ]
+      },
+      "walk": {
+        "action": "walkLeft",
+        "duration": [
+          3000,
+          8000
+        ],
+        "transitions": [
+          {
+            "on": "expire",
+            "to": "idle"
+          }
+        ]
+      },
+      "notice": {
+        "action": "hoverLookAtPointer",
+        "duration": [
+          900,
+          1400
+        ],
+        "transitions": [
+          {
+            "on": "expire",
+            "to": "idle"
+          }
+        ]
+      },
+      "react": {
+        "action": "clickFeedback",
+        "duration": [
+          700,
+          1100
+        ],
+        "transitions": [
+          {
+            "on": "expire",
+            "to": "idle"
+          }
+        ]
+      },
+      "idleVariation": {
+        "action": "lookAround",
+        "duration": [
+          1800,
+          2600
+        ],
+        "transitions": [
+          {
+            "on": "expire",
+            "to": "idle"
+          }
+        ]
+      },
+      "sleep": {
+        "action": "sleepLoop",
+        "transitions": [
+          {
+            "on": "pointer:click",
+            "to": "waking"
+          }
+        ]
+      },
+      "waking": {
+        "action": "wake",
+        "duration": [
+          900,
+          1200
+        ],
+        "transitions": [
+          {
+            "on": "expire",
+            "to": "idle"
+          }
+        ]
+      }
+    }
+  },
+  "routines": [
+    {
+      "id": "stretch-yawn",
+      "steps": [
+        {
+          "action": "stretch",
+          "holdMs": 1800
+        },
+        {
+          "action": "yawn",
+          "holdMs": 2100
+        }
+      ]
+    }
+  ],
+  "emotionMap": {}
+}

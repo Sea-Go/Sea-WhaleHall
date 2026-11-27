@@ -6,15 +6,16 @@ import { ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES } from "../activity-reflection-s
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
 /**
- * The source tree uses the repository Skill directory. The packaged and
- * bundled Sidecar instead receives an identical `agent/skills` directory next
- * to this module. Do not resolve relative to process.cwd(): a desktop app has
- * no stable working directory.
+ * The source tree keeps the Skill directory beside the agent code
+ * (`src/agent/skills`); the dev fallback resolves it relative to this module.
+ * The packaged and bundled Sidecar instead receives an identical `agent/skills`
+ * directory next to this module. Do not resolve relative to process.cwd(): a
+ * desktop app has no stable working directory.
  */
 function resolveActivityReflectionSkillDirectory(): string {
 	const candidates = [
 		resolve(moduleDirectory, "skills"),
-		resolve(moduleDirectory, "../../../skills"),
+		resolve(moduleDirectory, "../skills"),
 	];
 	const directory = candidates.find((candidate) =>
 		ACTIVITY_REFLECTION_NATIVE_SKILL_NAMES.every((name) =>

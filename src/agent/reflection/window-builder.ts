@@ -160,22 +160,50 @@ export function renderModelInput(
 	const tokenLimit = options.tokenLimit ?? DEFAULT_MODEL_INPUT_TOKEN_LIMIT;
 	const byteLimit = options.byteLimit ?? DEFAULT_MODEL_INPUT_BYTE_LIMIT;
 	const estimateTokens = options.estimateTokens ?? conservativeTokenEstimate;
+	const fits = (value: string): boolean =>
+		modelInputFits(value, tokenLimit, byteLimit, estimateTokens);
 	const richContextLines = contextOnly.map(renderEvent);
 	const richEventLines = events.map(renderEvent);
 	const rich = composeModelInput(goalSection, richContextLines, richEventLines);
-	if (modelInputFits(rich, tokenLimit, byteLimit, estimateTokens)) return rich;
+	if (fits(rich)) return rich;
 
 	// Keep every semantic event visible to the model even for adversarially
 	// large URLs, process batches, or inserted-text bursts. Start from a compact
 	// chronological skeleton, then spend the remaining budget on the newest
 	// primary evidence before older/context detail.
 	const contextLines = contextOnly.map(renderEventSkeleton);
-	const eventLines = events.map(renderEventSkeleton);
-	let bounded = composeModelInput(goalSection, contextLines, eventLines);
-	if (!modelInputFits(bounded, tokenLimit, byteLimit, estimateTokens)) {
-		throw new Error(
-			"Goal and semantic event skeleton exceed the deterministic model input budget.",
-		);
+	let layout = layoutEventSkeleton(events, "one-line-each", 0);
+	let bounded = composeModelInput(goalSection, contextLines, layout.lines);
+	if (!fits(bounded)) {
+		// Non-counted events are unbounded context: five minutes of process
+		// batches alone outweigh the counted evidence. List their timestamps
+		// per run instead, then drop the oldest runs with an explicit count.
+		layout = layoutEventSkeleton(events, "one-line-per-run", 0);
+		bounded = composeModelInput(goalSection, contextLines, layout.lines);
+		if (!fits(bounded)) {
+			let omittedBefore = 0;
+			let fitted = false;
+			while (!fitted) {
+				omittedBefore = nextNonCountedRunEnd(events, omittedBefore);
+				if (omittedBefore < 0) break;
+				const trial = layoutEventSkeleton(
+					events,
+					"one-line-per-run",
+					omittedBefore,
+				);
+				const value = composeModelInput(goalSection, contextLines, trial.lines);
+				if (fits(value)) {
+					layout = trial;
+					bounded = value;
+					fitted = true;
+				}
+			}
+			if (!fitted) {
+				throw new Error(
+					"Goal and semantic event skeleton exceed the deterministic model input budget.",
+				);
+			}
+		}
 	}
 
 	const upgrades: Array<{
@@ -184,8 +212,10 @@ export function renderModelInput(
 		value: string;
 	}> = [];
 	for (let index = events.length - 1; index >= 0; index -= 1) {
+		const line = layout.lineOfEvent[index];
 		const event = events[index];
-		if (event) upgrades.push({ lines: eventLines, index, value: renderCompactEvent(event) });
+		if (line === undefined || line < 0 || !event) continue;
+		upgrades.push({ lines: layout.lines, index: line, value: renderCompactEvent(event) });
 	}
 	for (let index = contextOnly.length - 1; index >= 0; index -= 1) {
 		const event = contextOnly[index];
@@ -196,14 +226,95 @@ export function renderModelInput(
 	for (const upgrade of upgrades) {
 		const previous = upgrade.lines[upgrade.index];
 		upgrade.lines[upgrade.index] = upgrade.value;
-		const candidate = composeModelInput(goalSection, contextLines, eventLines);
-		if (modelInputFits(candidate, tokenLimit, byteLimit, estimateTokens)) {
+		const candidate = composeModelInput(goalSection, contextLines, layout.lines);
+		if (fits(candidate)) {
 			bounded = candidate;
 		} else {
 			upgrade.lines[upgrade.index] = previous ?? "";
 		}
 	}
 	return bounded;
+}
+
+type EventSkeletonLayout = {
+	lines: string[];
+	/** Line that renders the event; negative when it shares a run line or is omitted. */
+	lineOfEvent: number[];
+};
+
+/**
+ * Non-counted events share one line per run only on request, so a window that
+ * already fits keeps one line per event.
+ */
+function layoutEventSkeleton(
+	events: DesktopEventV1[],
+	runs: "one-line-each" | "one-line-per-run",
+	omitNonCountedBefore: number,
+): EventSkeletonLayout {
+	const lines: string[] = [];
+	const lineOfEvent: number[] = new Array<number>(events.length).fill(-1);
+	let omitted = 0;
+	let index = 0;
+	while (index < events.length) {
+		const event = events[index];
+		if (!event) {
+			index += 1;
+			continue;
+		}
+		if (isCountedSemanticEvent(event) || runs === "one-line-each") {
+			lineOfEvent[index] = lines.length;
+			lines.push(renderEventSkeleton(event));
+			index += 1;
+			continue;
+		}
+		if (index < omitNonCountedBefore) {
+			omitted += 1;
+			index += 1;
+			continue;
+		}
+		let end = index + 1;
+		while (end < events.length) {
+			const next = events[end];
+			if (!next || isCountedSemanticEvent(next) || next.kind !== event.kind) break;
+			end += 1;
+		}
+		lines.push(renderEventRunSkeleton(events.slice(index, end)));
+		index = end;
+	}
+	if (omitted > 0) {
+		lines.push(canonicalJson({ omittedNonCountedEvents: omitted }));
+	}
+	return { lines, lineOfEvent };
+}
+
+/** Exclusive end of the first non-counted run at or after `from`; -1 when none is left. */
+function nextNonCountedRunEnd(events: DesktopEventV1[], from: number): number {
+	let start = from;
+	while (start < events.length) {
+		const event = events[start];
+		if (event && !isCountedSemanticEvent(event)) break;
+		start += 1;
+	}
+	if (start >= events.length) return -1;
+	let end = start + 1;
+	while (end < events.length) {
+		const event = events[end];
+		if (!event || isCountedSemanticEvent(event) || event.kind !== events[start]?.kind) {
+			break;
+		}
+		end += 1;
+	}
+	return end;
+}
+
+function renderEventRunSkeleton(run: DesktopEventV1[]): string {
+	const first = run[0];
+	if (!first) return "";
+	if (run.length === 1) return renderEventSkeleton(first);
+	return canonicalJson({
+		kind: first.kind,
+		occurredAtMs: run.map((event) => event.occurredAtMs),
+	});
 }
 
 export function renderEvent(event: DesktopEventV1): string {

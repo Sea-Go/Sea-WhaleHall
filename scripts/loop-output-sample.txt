@@ -1,0 +1,55 @@
+HTTP 200
+== finish: stop
+== 模型输出(前 4000 字):
+```json
+{
+  "outcome": "proposal",
+  "recommendedType": "learning",
+  "rationaleSummary": "目标为学习计算机网络,已从已发布课程知识模块《计算机网络》取得当前发布版结构作为骨架:五阶段路线(应用层-核心、传输层、网络层数据平面-重要、网络层控制平面-通识、链路层-通识),教材为《计算机网络:自顶向下方法(原书第8版)》。用户已明确每周约 5 小时、单次 90 分钟、工作日晚间,故本周窗口(2026-11-11~2026-11-17)按 3×90 分钟 + 1×30 分钟复习 = 恰好 5 小时排程,覆盖第 1 阶段应用层并开篇传输层,预计完成日期 2026-11-17;后续周按模块阶段顺序继续。",
+  "assumptions": [
+    "用户确认的容量为每周约 5 小时、单次 90 分钟、工作日晚间;本周窗口内可用工作日为 11-11(三)、11-12(四)、11-13(五)、11-16(一)、11-17(二),为不超过每周 5 小时,排 3 次 90 分钟 + 1 次 30 分钟复习。",
+        },
+        "relevance": "strong",
+        "relevanceReason": "直接对应目标课程骨架中的第 1 阶段应用层(面试权重:核心),是系统学习的起点。"
+      },
+      {
+        "taskKey": "cn-w1-s2",
+        "title": "应用层专题:DNS 解析与 CDN + 应用层阶段小结",
+        "scheduledDate": "2026-11-12",
+        "durationMinutes": 90,
+        "purpose": {
+          "stage": "第 1 阶段 应用层(面试权重:核心)",
+          "objective": "掌握 DNS 解析机制与 CDN 原理,完成应用层阶段小结与概念自查",
+          "keyConcepts": ["DNS 解析", "CDN"],
+          "steps": ["45 分钟:学习 DNS 解析(递归/迭代)与 CDN 加速原理", "30 分钟:对照教材章节做例题与概念自查", "15 分钟:写应用层阶段小结,标注薄弱点"],
+          "resources": "《计算机网络:自顶向下方法(原书第8版)》Kurose & Ross(机械工业出版社)",
+          "evidence": ["引用: paragraph:6@release_85a0b059-ad05-4309-ac58-913ef74332d9", "引用: paragraph:21@release_85a0b059-ad05-4309-ac58-913ef74332d9"]
+        },
+        "relevance": "strong",
+        "relevanceReason": "DNS 解析与 CDN 是模块标注的应用层核心概念,是完成第 1 阶段闭环的必要任务。"
+      },
+      {
+        "taskKey": "cn-w1-s3",
+        "title": "传输层开篇:UDP 数据报、端口与多路复用",
+        "scheduledDate": "2026-11-13",
+        "durationMinutes": 90,
+        "purpose": {
+          "stage": "第 2 阶段 传输层(开篇)",
+          "objective": "理解 UDP 数据报格式、端口号作用与多路复用/分用机制,为下周 TCP 可靠传输(模块建议 2×90 分钟)打底",
+          "keyConcepts": ["UDP 数据报", "端口与多路复用"],
+          "steps": ["40 分钟:学习 UDP 数据报结构与校验和", "35 分钟:学习端口与多路复用/分用,画一张端口分用示意图", "15 分钟:预读 TCP 可靠传输章节开头,列出下周学习入口"],
+          "resources": "《计算机网络:自顶向下方法(原书第8版)》Kurose & Ross(机械工业出版社)",
+          "evidence": ["引用: paragraph:10@release_85a0b059-ad05-4309-ac58-913ef74332d9", "引用: paragraph:12@release_85a0b059-ad05-4309-ac58-913ef74332d9"]
+        },
+        "relevance": "strong",
+        "relevanceReason": "UDP/端口/多路复用是模块传输层阶段的第一组概念,并为模块规划的 TCP 可靠传输(2×90 分钟)做直接铺垫。"
+      },
+      {
+        "taskKey": "cn-w1-s4",
+        "title": "第 1 周复习:应用层自测与错题整理",
+        "scheduledDate": "2026-11-17",
+        "durationMinutes": 30,
+        "purpose": {
+          "st
+
+== envelope: outcome = proposal  tasks = 0

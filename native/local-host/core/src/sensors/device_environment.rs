@@ -126,7 +126,15 @@ impl DeviceEnvironmentSensor {
     pub fn collect(&self) -> DeviceEnvironmentSnapshot {
         let collected_at = Utc::now();
         let mut warnings = Vec::new();
-        let system = System::new_all();
+        // sysinfo 0.40 起构造可能失败（系统信息读取受限）；失败时降级为
+        // 无系统上下文：CPU/内存字段按空值产出，快照照常生成。
+        let system = match System::new_all() {
+            Ok(system) => Some(system),
+            Err(error) => {
+                warnings.push(warning("system", error));
+                None
+            }
+        };
 
         let (mut languages, language_error) = match whoami::lang_prefs() {
             Ok(preferences) => (
@@ -157,18 +165,20 @@ impl DeviceEnvironmentSensor {
         let screens = collect_screens(&mut warnings);
         let batteries = collect_batteries(&mut warnings);
         let network_interfaces = collect_network_interfaces(&mut warnings);
-        let cpu = collect_cpu(&system);
-        let total_memory = system.total_memory();
-        let available_memory = system.available_memory();
+        let cpu = collect_cpu(system.as_ref());
+        let (total_memory, available_memory) = match system.as_ref() {
+            Some(system) => (system.total_memory(), system.available_memory()),
+            None => (0, 0),
+        };
 
         DeviceEnvironmentSnapshot {
             collected_at_ms: collected_at.timestamp_millis(),
             collected_at: collected_at.to_rfc3339_opts(SecondsFormat::Millis, true),
             operating_system: OperatingSystemInfo {
-                name: System::name().unwrap_or_else(|| std::env::consts::OS.to_owned()),
-                version: System::os_version(),
-                long_version: System::long_os_version(),
-                kernel_version: System::kernel_version(),
+                name: System::name().unwrap_or_else(|_| std::env::consts::OS.to_owned()),
+                version: System::os_version().ok(),
+                long_version: System::long_os_version().ok(),
+                kernel_version: System::kernel_version().ok(),
                 architecture: System::cpu_arch(),
             },
             device_name: collect_device_name(&mut warnings),
@@ -197,20 +207,22 @@ impl DeviceEnvironmentSensor {
     }
 }
 
-fn collect_cpu(system: &System) -> CpuInfo {
-    let first = system.cpus().first();
+fn collect_cpu(system: Option<&System>) -> CpuInfo {
+    let first = system.and_then(|system| system.cpus().first());
     CpuInfo {
         brand: first.and_then(|cpu| non_empty(cpu.brand())),
         vendor: first.and_then(|cpu| non_empty(cpu.vendor_id())),
         architecture: System::cpu_arch(),
-        logical_cores: system.cpus().len(),
-        physical_cores: System::physical_core_count(),
-        frequency_mhz: system
-            .cpus()
-            .iter()
-            .map(|cpu| cpu.frequency())
-            .max()
-            .filter(|frequency| *frequency > 0),
+        logical_cores: system.map(|system| system.cpus().len()).unwrap_or(0),
+        physical_cores: System::physical_core_count().ok(),
+        frequency_mhz: system.and_then(|system| {
+            system
+                .cpus()
+                .iter()
+                .map(|cpu| cpu.frequency())
+                .max()
+                .filter(|frequency| *frequency > 0)
+        }),
     }
 }
 
@@ -318,7 +330,7 @@ fn collect_network_interfaces(warnings: &mut Vec<SensorWarning>) -> Vec<NetworkI
 fn collect_device_name(warnings: &mut Vec<SensorWarning>) -> Option<String> {
     let pretty_name = whoami::devicename().ok();
     let hostname = whoami::hostname().ok();
-    let system_hostname = System::host_name();
+    let system_hostname = System::host_name().ok();
     let device_name = select_device_name([pretty_name, hostname, system_hostname]);
 
     if device_name.is_none() {

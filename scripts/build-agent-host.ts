@@ -53,7 +53,7 @@ export async function buildAgentHost(): Promise<string> {
 		targetDirectory,
 		"whalehall-agent-host.mjs",
 	);
-	const skillsSource = resolve(projectRoot, "skills");
+	const skillsSource = resolve(projectRoot, "src/agent/skills");
 	const stagedSkillsDirectory = resolve(targetDirectory, "skills");
 	mkdirSync(dirname(output), { recursive: true });
 	const result = await Bun.build({

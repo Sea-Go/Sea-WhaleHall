@@ -27,6 +27,8 @@ use whalehall_local_protocol::{
 };
 use zeroize::Zeroizing;
 
+use crate::legacy_event_mirror::{LegacyMirror, LegacyMirrorProjection, project_legacy_mirror};
+
 const SCHEMA_VERSION: i64 = 3;
 const RAW_CURSOR_PREFIX: &str = "sc2_";
 const SEMANTIC_CURSOR_PREFIX: &str = "sec2_";
@@ -586,6 +588,9 @@ pub struct ObservationAppendResult {
     pub observation: RawObservationV2,
     pub semantic_event: SemanticEventV2,
     pub inserted: bool,
+    /// What this projection contributes to the legacy activity reflection
+    /// journal. It is only set for a newly inserted observation.
+    pub legacy_mirror: Option<LegacyMirror>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1171,6 +1176,7 @@ impl ObservationJournal {
                 observation,
                 semantic_event: semantic,
                 inserted: false,
+                legacy_mirror: None,
             });
         }
 
@@ -1236,6 +1242,18 @@ impl ObservationJournal {
             effective_coverage,
             current_goal_version,
         )?;
+        let legacy_mirror = project_legacy_mirror(&LegacyMirrorProjection {
+            kind: projected.kind,
+            count_class: projected.count_class,
+            content_state: projected.content_state,
+            coverage: &projected.coverage,
+            redactions: &effective_redactions,
+            metadata: &projected.metadata_payload,
+            content: projected.content_payload.as_ref(),
+            occurred_at_ms: projected.occurred_at_ms,
+            observed_at_ms: projected.observed_at_ms,
+            observation_id: &observation_id,
+        });
         let semantic_event =
             insert_semantic_projection(&transaction, &self.inner, projected, &observation_id)?;
         if sanitized.kind == "goal.changed" {
@@ -1251,6 +1269,7 @@ impl ObservationJournal {
             observation,
             semantic_event,
             inserted: true,
+            legacy_mirror,
         })
     }
 

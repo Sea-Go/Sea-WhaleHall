@@ -44,8 +44,15 @@ function makeCanvas(): HTMLCanvasElement {
 function makeHarness(hitZone: PetHitZone | null = "head") {
 	const events: PetInteractionEvent[] = [];
 	const played: PetActionId[] = [];
+	// 桩模型须满足 PetModel 契约:指针处理按模型视觉包围盒推导场景原点。
 	const model = {
 		id: "test-model",
+		skeleton: {
+			visualBounds: { x: -50, y: -50, width: 100, height: 100 },
+			groundAnchor: { x: 50, y: 50 },
+			anchors: [],
+			hitZones: ["head"],
+		},
 		hitTest: () => hitZone,
 	} as unknown as PetModel;
 	const renderer = new CanvasPetRenderer({

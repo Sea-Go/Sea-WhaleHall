@@ -15,7 +15,8 @@ export function petStateForRuntime(status: LocalRuntimeStatus): PetState {
 		};
 	}
 	if (status.state === "ready") {
-		return { mood: "idle", message: "Rust agent ready", action: "idle" };
+		// 空消息 = 气泡不渲染：就绪是常态，不值得常驻一块提示牌。
+		return { mood: "idle", message: "", action: "idle" };
 	}
 	if (status.state === "starting") {
 		return { mood: "busy", message: "Starting local tools…", action: "searching" };

@@ -1,3 +1,4 @@
+mod legacy_mirror;
 mod observer;
 #[cfg(windows)]
 mod windows_process_tree;
@@ -552,7 +553,11 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let observer_config = ObserverSupervisorConfig::from_environment().map_err(io::Error::other)?;
-    let observer = ObserverSupervisor::start(observer_config, observation_journal.clone());
+    let observer = ObserverSupervisor::start(
+        observer_config,
+        observation_journal.clone(),
+        Some(event_journal.clone()),
+    );
     serve_session_with_observer(
         reader,
         writer,
@@ -2584,6 +2589,7 @@ mod tests {
                 helper_path: None,
             },
             observation_journal.clone(),
+            Some(event_journal.clone()),
         );
         let observer_status = observer.clone();
         let host = Arc::new(ToolHost::with_activity(activity.clone()));

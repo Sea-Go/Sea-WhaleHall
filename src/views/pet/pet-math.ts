@@ -124,6 +124,35 @@ export function clamp(value: number, minimum: number, maximum: number): number {
 	return Math.min(maximum, Math.max(minimum, value));
 }
 
+export type VisualBoundsRect = {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+};
+
+/** 水平镜像包围盒：facingX=-1 时精灵足迹左右互换。 */
+export function mirroredBounds(bounds: VisualBoundsRect): VisualBoundsRect {
+	return {
+		x: -bounds.x - bounds.width,
+		y: bounds.y,
+		width: bounds.width,
+		height: bounds.height,
+	};
+}
+
+/**
+ * 当前朝向下的有效足迹：面向右（facingX≥1）用原始包络，面向左取镜像。
+ * 行走夹紧必须用它计算，否则非对称模型（鲸鱼左伸 153/右伸 114）朝左贴
+ * 右边界时镜像尾巴会越出窗外被裁。
+ */
+export function facingFootprint(
+	bounds: VisualBoundsRect,
+	facing: number,
+): VisualBoundsRect {
+	return facing >= 1 ? bounds : mirroredBounds(bounds);
+}
+
 export function damp(
 	current: number,
 	target: number,

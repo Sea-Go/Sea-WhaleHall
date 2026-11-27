@@ -2,6 +2,7 @@ import type { Writable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { encodeContentLengthFrame } from "./framing";
 import {
+	AGENT_HOST_ERROR_CODES,
 	AGENT_HOST_PROTOCOL_VERSION,
 	errorResponse,
 	isAgentHostRequest,
@@ -15,6 +16,8 @@ import {
 	type ProtocolMessage,
 	type SidecarHostMethod,
 } from "./protocol";
+
+const HOST_ERROR_CODES: readonly string[] = AGENT_HOST_ERROR_CODES;
 
 export interface ProtocolWriter {
 	write(message: ProtocolMessage): Promise<void>;
@@ -217,6 +220,90 @@ export class HostCallError extends Error {
 		super(payload.message);
 		this.name = "HostCallError";
 	}
+}
+
+/**
+ * A Workflow that re-throws a HostCallError or an AgentHostRuntimeError hands
+ * back a plain copy of it. Both classes are constructed in this host, and the
+ * host-call text is written by the Bun side (relay, auth, tool host), so they
+ * are the only failures that may leave the sidecar verbatim. Model and
+ * provider failures keep their opaque generic text and yield null.
+ */
+export function relayedProtocolError(
+	error: unknown,
+): HostCallError | AgentHostRuntimeError | null {
+	if (typeof error !== "object" || error === null || Array.isArray(error)) {
+		return null;
+	}
+	const candidate = error as {
+		name?: unknown;
+		message?: unknown;
+		payload?: unknown;
+	};
+	const payload = candidate.payload;
+	if (
+		(candidate.name !== "HostCallError" &&
+			candidate.name !== "AgentHostRuntimeError") ||
+		typeof payload !== "object" ||
+		payload === null ||
+		Array.isArray(payload)
+	) {
+		return null;
+	}
+	const { code, retryable } = payload as {
+		code?: unknown;
+		retryable?: unknown;
+	};
+	const message = candidate.message;
+	if (
+		typeof code !== "string" ||
+		!HOST_ERROR_CODES.includes(code) ||
+		typeof retryable !== "boolean" ||
+		typeof message !== "string" ||
+		message.length === 0 ||
+		message.length > 200
+	) {
+		return null;
+	}
+	for (const character of message) {
+		const codePoint = character.codePointAt(0) ?? 0;
+		if (codePoint < 0x20 || codePoint === 0x7f) return null;
+	}
+	const rebuilt = { code, message, retryable } as AgentHostErrorPayload;
+	return candidate.name === "HostCallError"
+		? new HostCallError(rebuilt)
+		: new AgentHostRuntimeError(rebuilt);
+}
+
+/**
+ * The class and HTTP status of a model or provider failure, which reaches this
+ * host as the plain copy a Workflow hands back. Its message may echo a private
+ * prompt and stays in the sidecar log; the class and the status are enough to
+ * tell a quota, an authentication failure and a timeout apart.
+ */
+export function failureOrigin(error: unknown): string | null {
+	if (typeof error !== "object" || error === null || Array.isArray(error)) {
+		return null;
+	}
+	const { name, statusCode } = error as {
+		name?: unknown;
+		statusCode?: unknown;
+	};
+	const kind =
+		typeof name === "string" &&
+		name !== "Error" &&
+		/^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(name)
+			? name
+			: null;
+	const status =
+		typeof statusCode === "number" &&
+		Number.isInteger(statusCode) &&
+		statusCode >= 100 &&
+		statusCode <= 599
+			? ` status=${statusCode}`
+			: "";
+	if (kind === null && status === "") return null;
+	return `${kind ?? "Error"}${status}`;
 }
 
 export class AgentHostRuntimeError extends Error {
