@@ -405,6 +405,45 @@ describe("AgentRunCoordinator", () => {
 			harness.repository.getRun("account-a", runId),
 		).resolves.toBeNull();
 	});
+
+	test("reports an interrupted activity run as retryable, never as a terminal verdict", async () => {
+		const harness = createHarness();
+		const analysis = activityAnalysisResult(
+			"worker-request-interrupted",
+			"sealed-interrupted",
+		);
+		await harness.repository.archiveProactiveFeedbackEventStream({
+			accountId: "account-a",
+			id: analysis.request_id,
+			sourceWindowId: "sealed-interrupted",
+			windowStartedAtMs: 1,
+			windowEndedAtMs: 2,
+			analysis,
+			archivedAtMs: harness.clock(),
+			consumedAtMs: null,
+			consumedRunId: null,
+		});
+		const runId = "activity-run-interrupted";
+		await harness.coordinator.startActivityAnalysis({
+			jobId: "activity-job-interrupted",
+			runId,
+			requestId: "activity-request-interrupted",
+			consumedScore: 1,
+			analyses: [analysis],
+		});
+
+		// The sidecar process exits while the support run is in flight.
+		await harness.coordinator.interruptRuns([runId], "本地 Agent 进程已中断。");
+
+		expect(harness.activityTerminals).toEqual([
+			expect.objectContaining({
+				jobId: "activity-job-interrupted",
+				runId,
+				status: "interrupted",
+				failureClass: "transient",
+			}),
+		]);
+	});
 });
 
 class RecordingSidecar implements AgentSidecar {
