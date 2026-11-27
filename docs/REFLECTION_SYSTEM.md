@@ -52,8 +52,13 @@ Reflection collector 从本地事件流形成不可变窗口。正常窗口最�
 
 EventJournal 的内容级证据来自 Observer 语义事件的有界镜像（本地宿主内完成，映射与
 隐私边界见 `native/local-host/ACTIVITY_SENSOR.md` 的 “Observer bridge” 一节）：键鼠计数桶、
-带真实增删量的文本变更、带窗口标题的可见内容变化，以及仅含主机名与标题的浏览器导航。
-可见文本、输入的文字、控件标签与完整 URL 不进 EventJournal。
+带真实增删量的文本变更、带窗口标题的可见内容变化、与已知窗口标题配对的前台切换，以及仅含
+主机名与标题的浏览器导航。可见文本、输入的文字、控件标签与完整 URL 不进 EventJournal；
+被判定为敏感页面的窗口或页面整体不镜像，其应用的文本变更也一并扣留。
+
+反思窗口最多 64 条有效事件，但非计数的进程批次也会随窗口保存。窗口的确定性模型输入有
+固定预算；进程批次等非计数事件按连续同种合并为一行（仍列出每个时间戳），装不下时从最旧的
+开始省略并写明省略数量，有效事件永不省略。
 
 ### Durable job 状态
 
@@ -132,8 +137,10 @@ outbox 保留窗口以便账号内重试。
 - 未登录窗口不会进入云 activity outbox。
 - pending delivery、receipt 与 score ledger 都绑定 account/session generation。账号 A 的
   数据不能由账号 B 接管；登出和 session cutover 会先中止 relay，再完成 owner barrier。
-- 原始内容留在本地加密 repository/Vault，除非用户明确触发受合同约束的 activity reflection
-  或显式导出。
+- Observer 的原始内容留在本地加密 repository/Vault，除非用户明确触发受合同约束的 activity
+  reflection 或显式导出。经桥接镜像进 EventJournal 的窗口标题、页面标题与主机名是例外：它们以
+  明文写入仅属主可读的 `events.sqlite3`，并随封存的窗口进入 `reflections.sqlite3` 与活动窗口
+  账本，按各库自己的保留策略留存。
 - Renderer 只收到 content-free invalidation/状态，不接收 bearer、relay credential、prompt、
   raw event 或模型响应。
 
@@ -183,12 +190,16 @@ metadata 模式只产生焦点角色等不含 value/document text 的事件；�
 
 当前目标由 `src/bun/planning-goal-reconciler.ts` 按三级解析：覆盖当前时刻的已提交
 任务块对应任务；否则全部 active 计划的 pending 任务（目标文本为
-“待办任务：1. …；2. …”，按排期先后排列）；否则无目标。对账每分钟及每次计划写入后
-执行，计划读取失败时保持现有目标不变；目标层级变化写入 `[planning-goal]` 诊断行。
+“待办任务：1. …；2. …”，计划之间按创建时间与 id 稳定排序，计划内按排期先后排列）；
+否则无目标。对账每分钟、每次计划写入后以及登录会话激活时执行。未登录时对账只清空现有
+目标，不读取计划也不设置目标，所以退出账号时的清空不会被下一次对账撤销。计划读取或目标
+写入失败时保持现有目标不变，失败原因（名称与有界消息）写入 `[planning-goal]` 诊断行，
+同一失败只写一次；目标层级变化也写入同一前缀。任务标题里的控制字符会被剥离。
 
 没有当前目标时评分不按目标过滤：持续、可核对的活动按 `supporting` 计，其
 `goal_relevance` 填 `supporting`（不填 `direct` 或 `unrelated`）；敏感支付、账户、
-结算页面、状态事件、未知或不确定活动仍为 `0`。
+结算页面、状态事件、未知或不确定活动仍为 `0`。这条规则写在预载给模型的评分 Skill 正文里；
+客户端只校验输出契约（格式、取值范围、空事件为零），不重算也不改写模型给出的相关性与分数。
 
 ## 模型运行配置
 
@@ -233,11 +244,13 @@ DataCenter 私有 YAML 路由。旧文件中的 `baseurl` 和
 Reflection 原语义：64 条有效语义事件、第一条有效事件后的 5 分钟，或目标切换、AFK/锁屏/睡眠等
 存在状态边界提前封闭一个非空窗口；进程扫描、心跳、工具和反思自身事件不计入 64 条。
 
-每个封闭窗口只产生一次投递任务；一次模型反思可有有限的本地 Mastra Skill 加载轮次。完整且未裁剪的
+每个封闭窗口只产生一次投递任务。完整且未裁剪的
 `EventWindowV1`（包含原始 `events` 数组、目标快照、时间范围和封窗原因）由 Bun 构造成中文反思 prompt。
 Sidecar 把随应用打包的 `agent/skills/activity-reflection-analysis/` 和
-`agent/skills/activity-reflection-scoring/`（源码位于 `src/agent/skills/`）作为 Mastra Agent 的原生文件型 Skills：模型必须通过框架的本地
-`skill` 元工具分别加载它们，必要时通过 `skill_read` 读取参考资料。前者负责六维状态判断、活动聚合、中文
+`agent/skills/activity-reflection-scoring/`（源码位于 `src/agent/skills/`）登记为 Mastra Agent 的原生文件型 Skills，
+并在唯一一次模型调用之前通过 Mastra 的 Skill API 取出两份 `SKILL.md` 正文，放入该次请求的 system 消息。
+反思 Agent 没有 Tool 且只跑一步，所以模型读不到 `references/` 下的参考资料；那些文件是维护者文档，
+改动它们不影响评分。前者负责六维状态判断、活动聚合、中文
 action、短时间片与隐私边界，后者负责目标相关有效投入的评分公式、零分条件、累计语义和校准示例。已确认的
 暂离、恢复、锁屏、解锁、睡眠、唤醒由客户端从原始窗口确定性追加为零分 `idle_transition`，模型不猜测或生成它。
 两个 Skill 的文件和执行结果只存在于本地 Sidecar，不属于远端 relay，也不会成为产品 Tool。`context.response_contract` 锚定 request ID、
