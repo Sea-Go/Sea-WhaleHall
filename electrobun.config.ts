@@ -176,7 +176,6 @@ export default {
 			"config.template.yaml",
 			"src/views",
 			"src/agent",
-			"src/agent/skills",
 			"native",
 			"scripts",
 		],
