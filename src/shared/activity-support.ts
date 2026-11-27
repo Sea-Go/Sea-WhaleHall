@@ -250,7 +250,9 @@ function supportSignals(
 	) {
 		signals.push("possible_blocker");
 	}
-	if (/(?:休息|放松|恢复|暂停|缓一缓|降低负荷)/u.test(action)) {
+	// "恢复使用电脑" is the client's marker for a session that resumes; it
+	// says the user came back, not that they are resting.
+	if (/(?:休息|放松|恢复(?!使用|活动)|暂停|缓一缓|降低负荷)/u.test(action)) {
 		signals.push("recovery");
 	}
 	return signals.length > 0 ? signals : ["uncertain"];

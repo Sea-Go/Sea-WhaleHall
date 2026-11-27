@@ -193,6 +193,38 @@ describe("activity support context privacy boundary", () => {
 		expect(JSON.stringify(context)).not.toMatch(/(?:张三|ABC123|联系|报错)/u);
 	});
 
+	test("does not read a resumed session as the user resting", () => {
+		const baseEvent = workerResult().events[0];
+		if (!baseEvent) {
+			throw new Error("Expected one Worker event fixture.");
+		}
+		const stateMarker = (action: string) =>
+			workerResult({
+				events: [
+					{
+						...baseEvent,
+						action,
+						activity: "idle_transition",
+						goal_relevance: "uncertain",
+						confidence: 1,
+					},
+				],
+			});
+		const context = createActivitySupportContext({
+			activeGoal: null,
+			recentFeedback: [],
+			analyses: [
+				stateMarker("确定：检测到用户恢复使用电脑"),
+				stateMarker("推测：打算先休息一会儿"),
+			],
+		});
+
+		expect(context.observations.map((item) => item.signals)).toEqual([
+			["uncertain"],
+			["recovery"],
+		]);
+	});
+
 	for (const message of [
 		"包含分数的历史消息",
 		"包含评分的历史消息",
