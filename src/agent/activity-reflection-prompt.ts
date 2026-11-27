@@ -859,13 +859,15 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 		.sort((left, right) => left.timestamp - right.timestamp);
 	const segments: MutableActivityReflectionSignalSegment[] = [];
 	let current: MutableActivityReflectionSignalSegment | null = null;
-	let pendingBoundary: ActivityReflectionSignalObservation | null = null;
+	// Boundaries wait for the evidence that decides their band. A foreground
+	// switch reports two of them in a row, and AFK ends on a pair.
+	const pendingBoundaries: ActivityReflectionSignalObservation[] = [];
 	const deferred: ActivityReflectionSignalObservation[] = [];
 	const prelude: ActivityReflectionSignalObservation[] = [];
 
 	for (const observation of observations) {
 		if (observation.family === "boundary") {
-			if (current) pendingBoundary = observation;
+			if (current) pendingBoundaries.push(observation);
 			else prelude.push(observation);
 			continue;
 		}
@@ -873,7 +875,7 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 			// Supporting observations never open a band: a process batch landing
 			// right after a boundary must not claim the evidence that follows.
 			if (current === null) prelude.push(observation);
-			else if (pendingBoundary) deferred.push(observation);
+			else if (pendingBoundaries.length > 0) deferred.push(observation);
 			else addActivityReflectionSignal(current, observation);
 			continue;
 		}
@@ -889,32 +891,34 @@ function deriveActivityReflectionSignalIndex(rawEvent: unknown): {
 			for (const entry of prelude.splice(0)) {
 				addActivityReflectionSignal(current, entry);
 			}
-		} else if (pendingBoundary) {
-			// Everything observed since the boundary belongs to the band that
-			// the boundary decides, so two bands never overlap in time.
-			if (current.family !== observation.family) {
+		} else if (pendingBoundaries.length > 0) {
+			// Everything observed since the first boundary belongs to the band
+			// that the next evidence decides, so two bands never overlap.
+			const boundary = pendingBoundaries[0];
+			if (current.family !== observation.family && boundary !== undefined) {
 				segments.push(current);
 				current = createActivityReflectionSignalSegment(
 					observation.family,
-					pendingBoundary.timestamp,
+					boundary.timestamp,
 				);
 			}
-			addActivityReflectionSignal(current, pendingBoundary);
+			for (const entry of pendingBoundaries.splice(0)) {
+				addActivityReflectionSignal(current, entry);
+			}
 			for (const entry of deferred.splice(0)) {
 				addActivityReflectionSignal(current, entry);
 			}
-			pendingBoundary = null;
 		}
 		current.families.add(observation.family);
 		addActivityReflectionSignal(current, observation);
 	}
 
 	if (current) {
-		if (pendingBoundary) {
-			addActivityReflectionSignal(current, pendingBoundary);
-			for (const entry of deferred.splice(0)) {
-				addActivityReflectionSignal(current, entry);
-			}
+		for (const entry of pendingBoundaries) {
+			addActivityReflectionSignal(current, entry);
+		}
+		for (const entry of deferred) {
+			addActivityReflectionSignal(current, entry);
 		}
 		segments.push(current);
 	} else if (prelude.length > 0) {

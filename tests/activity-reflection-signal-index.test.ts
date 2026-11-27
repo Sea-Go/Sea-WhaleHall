@@ -357,6 +357,46 @@ describe("activity reflection signal index", () => {
 		);
 	});
 
+	test("counts every boundary that waits for the same evidence", () => {
+		// The bridge reports one switch twice, and an AFK period closes on a pair.
+		const switchPair = signalIndex([
+			...textChanges(1, 1_000),
+			switchAt(20_000),
+			switchAt(20_500),
+			...textChanges(1, 21_000),
+		]);
+		const afkPair = signalIndex([
+			...textChanges(1, 1_000),
+			{
+				kind: "presence.afkStarted",
+				occurredAtMs: WINDOW.startedAtMs + 20_000,
+			},
+			processBatch(20_500),
+			{
+				kind: "presence.afkEnded",
+				occurredAtMs: WINDOW.startedAtMs + 25_000,
+			},
+			...textChanges(1, 26_000),
+		]);
+
+		for (const index of [switchPair, afkPair]) {
+			expect(index.segments).toHaveLength(1);
+			expect(index.segments[0]?.observation_count).toBe(
+				index.observation_count,
+			);
+		}
+		expect(switchPair.observation_count).toBe(4);
+		expect(switchPair.segments[0]?.observed_signals).toContainEqual({
+			kind: "前台上下文切换",
+			count: 2,
+		});
+		expect(afkPair.observation_count).toBe(5);
+		expect(afkPair.segments[0]?.observed_signals).toContainEqual({
+			kind: "设备状态边界",
+			count: 2,
+		});
+	});
+
 	test("keeps a writing action that mentions a document", () => {
 		const modelOutput = (activity: string) => ({
 			events: [
