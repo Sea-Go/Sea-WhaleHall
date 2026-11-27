@@ -2566,7 +2566,10 @@ export function asError(error: unknown, scope = "analyze"): Error {
 	} catch {
 		// 诊断失败不干扰主流程
 	}
-	if (error instanceof AgentHostRuntimeError || error instanceof HostCallError) {
+	if (
+		error instanceof AgentHostRuntimeError ||
+		error instanceof HostCallError
+	) {
 		return error;
 	}
 	// A relayed host-call failure keeps its own text; all else stays generic.
