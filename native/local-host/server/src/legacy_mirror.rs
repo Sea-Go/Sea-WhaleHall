@@ -79,12 +79,13 @@ impl<'a> LegacyMirrorSink<'a> {
             self.sensitive_apps.insert(app_id.clone());
         }
         // Nothing of an observation that was withheld as sensitive is mirrored.
-        let draft = if mirror.sensitive_app_id.is_some() {
+        let own_draft = if mirror.sensitive_app_id.is_some() {
             None
         } else {
             mirror.draft
         };
-        let draft = match (draft, mirror.foreground) {
+        let paired = own_draft.is_none();
+        let draft = match (own_draft, mirror.foreground) {
             (Some(draft), _) => Some(draft),
             (None, Some(switch)) => self.pair_foreground(&switch),
             (None, None) => None,
@@ -92,7 +93,12 @@ impl<'a> LegacyMirrorSink<'a> {
         let Some(draft) = draft else {
             return;
         };
-        if !self.admit(&draft) {
+        let admitted = if paired {
+            self.admit_paired_title(&draft)
+        } else {
+            self.admit(&draft)
+        };
+        if !admitted {
             return;
         }
         let failed = append(draft.clone()).is_err();
@@ -104,11 +110,30 @@ impl<'a> LegacyMirrorSink<'a> {
     }
 
     /// A foreground switch carries no content. It is reported together with
-    /// the newest title the bridge has already seen for that application, so
-    /// returning to a document whose title did not change is still described.
+    /// the newest title the bridge has already mirrored for that application,
+    /// so returning to a document whose title did not change is still
+    /// described. A title older than the current window must not describe a
+    /// window that is being withheld.
     fn pair_foreground(&self, switch: &LegacyForegroundSwitch) -> Option<DesktopEventDraft> {
+        if self.sensitive_apps.contains(&switch.app_id) {
+            return None;
+        }
         let title = self.known_titles.get(&switch.app_id)?;
         Some(legacy_mirror_foreground_draft(switch, title))
+    }
+
+    /// A paired title repeats what the bridge already mirrored, so it neither
+    /// shows anything new nor ends a sensitive period.
+    fn admit_paired_title(&self, draft: &DesktopEventDraft) -> bool {
+        let Some(payload) = draft.payload.as_object() else {
+            return false;
+        };
+        match (text(payload, "appId"), text(payload, "windowTitle")) {
+            (Some(app_id), Some(title)) => {
+                self.last_admitted_title != Some((app_id.to_owned(), title.to_owned()))
+            }
+            _ => false,
+        }
     }
 
     /// Decides whether an event adds anything, and records what it shows.
@@ -116,12 +141,11 @@ impl<'a> LegacyMirrorSink<'a> {
         let Some(payload) = draft.payload.as_object() else {
             return false;
         };
-        let app_id = text(payload, "appId");
         match draft.kind.as_str() {
             "accessibility.documentChanged" => {
                 // While an application's window was withheld as sensitive its
                 // typing counts would still tell that the user is active there.
-                !app_id.is_some_and(|app_id| self.sensitive_apps.contains(app_id))
+                !text(payload, "appId").is_some_and(|app_id| self.sensitive_apps.contains(app_id))
             }
             "browser.tabNavigated" => {
                 let (Some(browser_id), Some(tab_id)) =
@@ -129,42 +153,47 @@ impl<'a> LegacyMirrorSink<'a> {
                 else {
                     return false;
                 };
+                // The page was not withheld, so the browser is no longer
+                // sensitive, and the page title describes it at the next switch.
+                self.note_window_title(browser_id, text(payload, "title"));
                 // The journal reports a navigation whenever a page's visible
                 // text changes, which says nothing about where the user is.
                 let page = (
                     text(payload, "url").map(ToOwned::to_owned),
                     text(payload, "title").map(ToOwned::to_owned),
                 );
-                let tab = (browser_id.to_owned(), tab_id.to_owned());
-                if self.last_navigations.get(&tab) == Some(&page) {
-                    return false;
-                }
-                if self.last_navigations.len() >= MAX_REMEMBERED_TABS
-                    && !self.last_navigations.contains_key(&tab)
-                {
-                    self.last_navigations.clear();
-                }
-                self.last_navigations.insert(tab, page);
-                true
+                self.last_navigations
+                    .get(&(browser_id.to_owned(), tab_id.to_owned()))
+                    != Some(&page)
             }
             "application.foregroundChanged" => {
-                let (Some(app_id), Some(title)) = (app_id, text(payload, "windowTitle")) else {
+                let (Some(app_id), Some(title)) =
+                    (text(payload, "appId"), text(payload, "windowTitle"))
+                else {
                     return false;
                 };
                 // A title that reached the bridge was not withheld, so the
                 // application is no longer treated as sensitive.
-                self.sensitive_apps.remove(app_id);
-                if self.known_titles.len() >= MAX_REMEMBERED_APPS
-                    && !self.known_titles.contains_key(app_id)
-                {
-                    self.known_titles.clear();
-                }
-                self.known_titles
-                    .insert(app_id.to_owned(), title.to_owned());
+                self.note_window_title(app_id, Some(title));
                 self.last_admitted_title != Some((app_id.to_owned(), title.to_owned()))
             }
             _ => true,
         }
+    }
+
+    /// Ends a sensitive period of an application and records the title that
+    /// ended it, when the event carries one.
+    fn note_window_title(&mut self, app_id: &str, title: Option<&str>) {
+        self.sensitive_apps.remove(app_id);
+        let Some(title) = title else {
+            return;
+        };
+        if self.known_titles.len() >= MAX_REMEMBERED_APPS && !self.known_titles.contains_key(app_id)
+        {
+            self.known_titles.clear();
+        }
+        self.known_titles
+            .insert(app_id.to_owned(), title.to_owned());
     }
 
     /// Records an appended event so that a repeat of it is not appended again.
@@ -172,12 +201,34 @@ impl<'a> LegacyMirrorSink<'a> {
         let Some(payload) = draft.payload.as_object() else {
             return;
         };
-        if draft.kind != "application.foregroundChanged" {
-            return;
-        }
-        if let (Some(app_id), Some(title)) = (text(payload, "appId"), text(payload, "windowTitle"))
-        {
-            self.last_admitted_title = Some((app_id.to_owned(), title.to_owned()));
+        match draft.kind.as_str() {
+            "application.foregroundChanged" => {
+                if let (Some(app_id), Some(title)) =
+                    (text(payload, "appId"), text(payload, "windowTitle"))
+                {
+                    self.last_admitted_title = Some((app_id.to_owned(), title.to_owned()));
+                }
+            }
+            "browser.tabNavigated" => {
+                if let (Some(browser_id), Some(tab_id)) =
+                    (text(payload, "browserId"), text(payload, "tabId"))
+                {
+                    let tab = (browser_id.to_owned(), tab_id.to_owned());
+                    if self.last_navigations.len() >= MAX_REMEMBERED_TABS
+                        && !self.last_navigations.contains_key(&tab)
+                    {
+                        self.last_navigations.clear();
+                    }
+                    self.last_navigations.insert(
+                        tab,
+                        (
+                            text(payload, "url").map(ToOwned::to_owned),
+                            text(payload, "title").map(ToOwned::to_owned),
+                        ),
+                    );
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -353,11 +404,11 @@ mod tests {
             .events
             .into_iter()
             .map(|event| {
-                format!(
-                    "{}:{}",
-                    event.kind,
-                    event.payload["windowTitle"].as_str().unwrap_or_default()
-                )
+                let title = event.payload["windowTitle"]
+                    .as_str()
+                    .or_else(|| event.payload["title"].as_str())
+                    .unwrap_or_default();
+                format!("{}:{}", event.kind, title)
             })
             .collect()
     }
@@ -469,7 +520,14 @@ mod tests {
         sink.append(Some(mirrored(page("tab-1", "Chapter 2", "k3"))), &status);
         sink.append(Some(mirrored(page("tab-2", "Chapter 2", "k4"))), &status);
 
-        assert_eq!(appended(&journal), vec!["browser.tabNavigated:"; 3]);
+        assert_eq!(
+            appended(&journal),
+            vec![
+                "browser.tabNavigated:Welcome",
+                "browser.tabNavigated:Chapter 2",
+                "browser.tabNavigated:Chapter 2",
+            ]
+        );
         assert_eq!(last_error(&status), None);
     }
 
@@ -514,6 +572,93 @@ mod tests {
             ]
         );
         assert_eq!(last_error(&status), None);
+    }
+
+    #[test]
+    fn ends_a_browser_sensitive_period_with_the_next_page_that_is_mirrored() {
+        let (_directory, journal) = journal("browser-sensitive");
+        let status = status();
+        let mut sink = LegacyMirrorSink::new(Some(&journal));
+
+        sink.append(Some(sensitive("com.example.browser")), &status);
+        sink.append(
+            Some(mirrored(edit_event("com.example.browser", "k2"))),
+            &status,
+        );
+        sink.append(
+            Some(mirrored(navigation_event(
+                "tab-1",
+                Some("example.com"),
+                Some("HTTP overview"),
+                "k3",
+            ))),
+            &status,
+        );
+        sink.append(
+            Some(mirrored(edit_event("com.example.browser", "k4"))),
+            &status,
+        );
+        // The page title now also describes the browser at a later switch.
+        sink.append(Some(switch("com.example.browser", "k5")), &status);
+
+        assert_eq!(
+            appended(&journal),
+            vec![
+                "browser.tabNavigated:HTTP overview",
+                "accessibility.documentChanged:",
+                "application.foregroundChanged:HTTP overview",
+            ]
+        );
+        assert_eq!(last_error(&status), None);
+    }
+
+    #[test]
+    fn does_not_describe_a_sensitive_window_with_a_stale_title() {
+        let (_directory, journal) = journal("stale-title");
+        let status = status();
+        let mut sink = LegacyMirrorSink::new(Some(&journal));
+
+        sink.append(
+            Some(mirrored(title_event(
+                "com.example.notes",
+                "Meeting notes",
+                "k1",
+            ))),
+            &status,
+        );
+        // The document shows a sensitive page; the user switches away and back.
+        sink.append(Some(sensitive("com.example.notes")), &status);
+        sink.append(Some(switch("com.example.notes", "k3")), &status);
+        sink.append(
+            Some(mirrored(edit_event("com.example.notes", "k4"))),
+            &status,
+        );
+        assert_eq!(
+            appended(&journal),
+            vec!["application.foregroundChanged:Meeting notes"]
+        );
+
+        // A fresh title that was not withheld ends the sensitive period.
+        sink.append(
+            Some(mirrored(title_event(
+                "com.example.notes",
+                "Chapter 2",
+                "k5",
+            ))),
+            &status,
+        );
+        sink.append(
+            Some(mirrored(edit_event("com.example.notes", "k6"))),
+            &status,
+        );
+        assert_eq!(
+            appended(&journal),
+            vec![
+                "application.foregroundChanged:Meeting notes",
+                "application.foregroundChanged:Chapter 2",
+                "accessibility.documentChanged:",
+            ]
+        );
     }
 
     #[test]

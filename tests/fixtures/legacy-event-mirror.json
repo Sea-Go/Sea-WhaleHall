@@ -278,7 +278,7 @@
 				},
 				"content": {
 					"domain": "developer.mozilla.org",
-					"url": "https://developer.mozilla.org/docs?q=private#fragment",
+					"url": "https://developer.mozilla.org/docs?lang=zh#fragment",
 					"title": "HTTP 概述 - MDN",
 					"visibleText": "private body"
 				},
@@ -412,6 +412,65 @@
 				"occurredAtMs": 1700000000000,
 				"observedAtMs": 1700000001000,
 				"observationId": "ro2_browser_sensitive"
+			},
+			"expected": null
+		},
+		{
+			"name": "search results page mirrors the host only",
+			"projection": {
+				"kind": "browser.visiblePageChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "cafebabe",
+					"changeKind": "navigated"
+				},
+				"content": {
+					"domain": "www.google.com",
+					"url": "https://www.google.com/search?q=rust+borrow+checker",
+					"title": "rust borrow checker - Google 搜索",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000001000,
+				"observationId": "ro2_browser_search"
+			},
+			"expected": {
+				"kind": "browser.tabNavigated",
+				"source": "observer.bridge.browser",
+				"sensitivity": "content",
+				"payload": {
+					"browserId": "com.example.browser",
+					"tabId": "ow1_browser",
+					"url": "www.google.com"
+				},
+				"deduplicationKey": "observer-mirror:ro2_browser_search"
+			}
+		},
+		{
+			"name": "window title that is the page address",
+			"projection": {
+				"kind": "application.visibleContentChanged",
+				"countClass": "effective",
+				"contentState": "available",
+				"coverage": ["content"],
+				"metadata": {
+					"appId": "com.example.browser",
+					"appName": "Browser",
+					"opaqueWindowId": "ow1_browser",
+					"contentHash": "cafebabe"
+				},
+				"content": {
+					"windowTitle": "example.com/untitled-document?download=1",
+					"visibleText": "private body"
+				},
+				"occurredAtMs": 1700000000000,
+				"observedAtMs": 1700000003000,
+				"observationId": "ro2_title_address"
 			},
 			"expected": null
 		}

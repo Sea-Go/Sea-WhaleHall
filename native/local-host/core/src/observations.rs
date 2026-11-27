@@ -1247,6 +1247,7 @@ impl ObservationJournal {
             count_class: projected.count_class,
             content_state: projected.content_state,
             coverage: &projected.coverage,
+            redactions: &effective_redactions,
             metadata: &projected.metadata_payload,
             content: projected.content_payload.as_ref(),
             occurred_at_ms: projected.occurred_at_ms,

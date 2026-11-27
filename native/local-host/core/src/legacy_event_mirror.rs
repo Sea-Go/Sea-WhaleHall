@@ -73,6 +73,8 @@ pub struct LegacyMirrorProjection<'a> {
     pub count_class: SemanticCountClassV2,
     pub content_state: SemanticContentStateV2,
     pub coverage: &'a [CoverageLevelV2],
+    /// Why the journal withheld content of the observation.
+    pub redactions: &'a [String],
     pub metadata: &'a Value,
     pub content: Option<&'a Value>,
     pub occurred_at_ms: i64,
@@ -116,6 +118,10 @@ pub fn project_legacy_mirror(projection: &LegacyMirrorProjection<'_>) -> Option<
         return None;
     }
     if projection.kind == semantic_event_kinds::APPLICATION_FOREGROUND_CHANGED {
+        // A redacted switch belongs to an excluded or protected application.
+        if projection.coverage.contains(&CoverageLevelV2::Redacted) {
+            return None;
+        }
         let metadata = metadata_object(projection)?;
         let (Some(app_id), Some(app_name)) = (
             bounded_string(metadata.get("appId"), 512),
@@ -256,8 +262,7 @@ fn document_change(projection: &LegacyMirrorProjection<'_>) -> Option<Mirrored> 
         || projection.coverage.contains(&CoverageLevelV2::Redacted)
     {
         return None;
-    }
-    // Without a prior value the projector reports a zero baseline, and caret
+    } // Without a prior value the projector reports a zero baseline, and caret
     // moves report zero deltas. Neither is evidence of an edit.
     if metadata.get("deltaAvailable") != Some(&Value::Bool(true)) {
         return None;
@@ -314,7 +319,13 @@ fn browser_navigation(projection: &LegacyMirrorProjection<'_>) -> Option<Mirrore
         .filter(|value| !value.is_empty() && value.chars().count() <= 256)
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("app-{}", short_digest(app_id.as_bytes())));
-    let title = content_hint(projection, "title");
+    // A search results page puts the query, which the user typed, into its title.
+    let search_page = content_url(projection).is_some_and(is_search_request);
+    let title = if search_page {
+        None
+    } else {
+        content_hint(projection, "title")
+    };
     let domain = content_hint(projection, "domain").filter(|value| is_host(value));
     let sensitivity = if title.is_some() || domain.is_some() {
         DesktopEventSensitivity::Content
@@ -353,7 +364,11 @@ fn content_hint(projection: &LegacyMirrorProjection<'_>, key: &str) -> Option<St
     }
     let content = projection.content?.as_object()?;
     let value = content.get(key)?.as_str()?.trim();
-    if value.is_empty() || mentions_sensitive_page(value) {
+    let is_title = matches!(key, "windowTitle" | "title");
+    if value.is_empty()
+        || mentions_sensitive_page(value)
+        || (is_title && (looks_like_address(value) || is_search_result_title(value)))
+    {
         return None;
     }
     Some(
@@ -366,12 +381,123 @@ fn content_hint(projection: &LegacyMirrorProjection<'_>, key: &str) -> Option<St
     )
 }
 
+fn content_url<'a>(projection: &LegacyMirrorProjection<'a>) -> Option<&'a str> {
+    projection
+        .content
+        .and_then(Value::as_object)
+        .and_then(|content| content.get("url"))
+        .and_then(Value::as_str)
+}
+
 fn mentions_sensitive_page(value: &str) -> bool {
     let lowercase = value.to_lowercase();
     SENSITIVE_MARKERS
         .iter()
         .any(|marker| lowercase.contains(marker))
 }
+
+/// A browser shows the address as the title of a page that has none, so a
+/// title that is an address would carry its path and query across the bridge.
+fn looks_like_address(value: &str) -> bool {
+    let value = value.trim().to_lowercase();
+    if value.contains("://") || value.starts_with("www.") {
+        return true;
+    }
+    // The scheme-less form a browser displays: a host, then a path or a query.
+    let Some(separator) = value.find(['/', '?']) else {
+        return false;
+    };
+    let mut host = &value[..separator];
+    if let Some(port_start) = host.rfind(':') {
+        let port = &host[port_start + 1..];
+        if !port.is_empty() && port.chars().all(|character| character.is_ascii_digit()) {
+            host = &host[..port_start];
+        }
+    }
+    let host = host.trim_end_matches('.');
+    host == "localhost"
+        || (host.contains('.')
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            }))
+}
+
+/// Search engines and in-site searches echo the query, which the user typed,
+/// in a page title that ends with the engine or site name behind a separator.
+fn is_search_result_title(value: &str) -> bool {
+    let lowercase = value.trim().to_lowercase();
+    // DuckDuckGo names its results page "<query> at DuckDuckGo".
+    if lowercase.ends_with(" at duckduckgo") {
+        return true;
+    }
+    let Some(separator) = lowercase.rfind(['-', '–', '—', '_', '|']) else {
+        return false;
+    };
+    let tail = lowercase[separator + 1..].trim();
+    SEARCH_TITLE_TAILS.contains(&tail)
+}
+
+/// Whether a page address is a search request: a search path, or a query that
+/// carries one of the usual search parameters.
+fn is_search_request(url: &str) -> bool {
+    let lowercase = url.to_lowercase();
+    let Some(scheme_end) = lowercase.find("://") else {
+        return false;
+    };
+    let after_scheme = &lowercase[scheme_end + 3..];
+    let Some(path_start) = after_scheme.find('/') else {
+        return false;
+    };
+    let (path, query) = after_scheme[path_start..]
+        .split_once('?')
+        .unwrap_or((&after_scheme[path_start..], ""));
+    let search_path = ["/search", "/s", "/so", "/webhp", "/results", "/query"]
+        .iter()
+        .any(|prefix| {
+            path == *prefix
+                || path
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with(['/', '.', ';']))
+        });
+    let search_query = query.split('&').any(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        !value.is_empty() && SEARCH_QUERY_KEYS.contains(&key)
+    });
+    search_path || search_query
+}
+
+const SEARCH_QUERY_KEYS: &[&str] = &[
+    "q",
+    "query",
+    "wd",
+    "kw",
+    "keyword",
+    "search",
+    "search_query",
+];
+
+const SEARCH_TITLE_TAILS: &[&str] = &[
+    "google 搜索",
+    "google search",
+    "百度搜索",
+    "必应",
+    "bing",
+    "duckduckgo",
+    "at duckduckgo",
+    "yandex",
+    "brave search",
+    "搜狗搜索",
+    "360搜索",
+    "搜索",
+    "search",
+    "搜索结果",
+    "search results",
+    "站内搜索",
+    "results",
+];
 
 /// The application of a window or page observation whose content was withheld
 /// as sensitive: the journal redacted it, or an available title, host or URL
@@ -386,9 +512,16 @@ fn sensitive_app(projection: &LegacyMirrorProjection<'_>) -> Option<String> {
     if !describes_surface {
         return None;
     }
-    // Coverage that is only unavailable says nothing about the page: without
-    // the Automation permission every browser observation is redacted.
-    let redacted = projection.content_state == SemanticContentStateV2::Redacted;
+    // Without the Automation permission the observer cannot tell a private
+    // window from a normal one and withholds every page. That says nothing
+    // about the page itself, so it never marks the browser.
+    let privacy_unknown_only = !projection.redactions.is_empty()
+        && projection
+            .redactions
+            .iter()
+            .all(|reason| reason == "browser_privacy_state_unavailable");
+    let redacted =
+        projection.content_state == SemanticContentStateV2::Redacted && !privacy_unknown_only;
     let matches_marker = projection.content_state == SemanticContentStateV2::Available
         && projection
             .content
@@ -463,6 +596,7 @@ mod tests {
             count_class: SemanticCountClassV2::Effective,
             content_state: SemanticContentStateV2::Available,
             coverage: &CONTENT_COVERAGE,
+            redactions: &[],
             metadata,
             content,
             occurred_at_ms: STARTED_AT_MS,
@@ -718,7 +852,7 @@ mod tests {
         });
         let content = json!({
             "domain": "developer.mozilla.org",
-            "url": "https://developer.mozilla.org/docs?q=private#fragment",
+            "url": "https://developer.mozilla.org/docs?lang=zh#fragment",
             "title": "HTTP 概述 - MDN",
             "visibleText": "private body",
         });
@@ -947,8 +1081,10 @@ mod tests {
         redacted_edit.content_state = SemanticContentStateV2::Redacted;
         assert!(project_legacy_mirror(&redacted_edit).is_none());
 
-        // Without the Automation permission every browser observation carries a
-        // redacted coverage level; that alone does not make the browser sensitive.
+        // Without the Automation permission every browser page is redacted,
+        // because the observer cannot tell a private window from a normal one.
+        // That says nothing about the page and never marks the browser; a
+        // redaction for any other reason does.
         let navigation = json!({
             "appId": "com.example.browser",
             "appName": "Browser",
@@ -956,24 +1092,100 @@ mod tests {
             "opaqueWindowId": "ow1_tab",
             "contentHash": "deadbeef",
         });
-        let coverage = [CoverageLevelV2::Unavailable, CoverageLevelV2::Redacted];
-        let unknown_privacy = LegacyMirrorProjection {
-            kind: semantic_event_kinds::BROWSER_VISIBLE_PAGE_CHANGED,
-            count_class: SemanticCountClassV2::Effective,
-            content_state: SemanticContentStateV2::Unavailable,
-            coverage: &coverage,
-            metadata: &navigation,
-            content: None,
-            occurred_at_ms: STARTED_AT_MS,
-            observed_at_ms: ENDED_AT_MS,
-            observation_id: OBSERVATION_ID,
-        };
-        let tab = project_legacy_mirror(&unknown_privacy).expect("a navigation is mirrored");
-        assert!(tab.sensitive_app_id.is_none());
+        let coverage = [CoverageLevelV2::Redacted];
+        fn withheld<'a>(
+            redactions: &'a [String],
+            coverage: &'a [CoverageLevelV2],
+            navigation: &'a Value,
+        ) -> LegacyMirrorProjection<'a> {
+            LegacyMirrorProjection {
+                kind: semantic_event_kinds::BROWSER_VISIBLE_PAGE_CHANGED,
+                count_class: SemanticCountClassV2::Effective,
+                content_state: SemanticContentStateV2::Redacted,
+                coverage,
+                redactions,
+                metadata: navigation,
+                content: None,
+                occurred_at_ms: STARTED_AT_MS,
+                observed_at_ms: ENDED_AT_MS,
+                observation_id: OBSERVATION_ID,
+            }
+        }
+        let unknown_privacy = ["browser_privacy_state_unavailable".to_owned()];
+        let page = project_legacy_mirror(&withheld(&unknown_privacy, &coverage, &navigation))
+            .expect("a redacted page is reported");
+        assert!(page.sensitive_app_id.is_none());
+        // Only the fact that the page changed crosses, never where to.
+        let draft = page.draft.expect("the navigation itself mirrors");
+        assert_eq!(draft.sensitivity, DesktopEventSensitivity::Metadata);
+        assert_eq!(payload(&draft).len(), 2);
+
+        let private_window = ["private_window".to_owned()];
+        let page = project_legacy_mirror(&withheld(&private_window, &coverage, &navigation))
+            .expect("a private page is reported");
         assert_eq!(
-            tab.draft.expect("a metadata navigation").sensitivity,
-            DesktopEventSensitivity::Metadata
+            page.sensitive_app_id.as_deref(),
+            Some("com.example.browser")
         );
+        assert!(page.draft.is_none());
+    }
+
+    #[test]
+    fn withholds_a_title_that_is_an_address_or_a_search_query() {
+        let mirrored_title = |title: &str| {
+            let (metadata, content) = visible(Some(title));
+            legacy_mirror_draft(&projection(
+                semantic_event_kinds::APPLICATION_VISIBLE_CONTENT_CHANGED,
+                &metadata,
+                content.as_ref(),
+            ))
+            .and_then(|draft| {
+                payload(&draft)["windowTitle"]
+                    .as_str()
+                    .map(ToOwned::to_owned)
+            })
+        };
+        for title in [
+            "https://example.test/untitled?token=abc",
+            "www.example.test/untitled",
+            "example.test/untitled",
+            "localhost:3000/settings",
+            "rust borrow checker - Google 搜索",
+            "rust borrow checker - Google Search",
+            "rust 借用检查器_百度搜索",
+            "rust at DuckDuckGo",
+            "rust - 必应",
+        ] {
+            assert!(mirrored_title(title).is_none(), "{title}");
+        }
+        // An ordinary document title is untouched.
+        assert_eq!(
+            mirrored_title("第 2 章 网络层 - 笔记").as_deref(),
+            Some("第 2 章 网络层 - 笔记")
+        );
+
+        // A search request keeps the host and loses the title.
+        let navigation = json!({
+            "appId": "com.example.browser",
+            "appName": "Browser",
+            "changeKind": "navigated",
+            "opaqueWindowId": "ow1_tab",
+            "contentHash": "deadbeef",
+        });
+        let results = json!({
+            "domain": "www.google.com",
+            "title": "rust borrow checker",
+            "url": "https://www.google.com/search?q=rust+borrow+checker",
+            "visibleText": "private body",
+        });
+        let draft = legacy_mirror_draft(&projection(
+            semantic_event_kinds::BROWSER_VISIBLE_PAGE_CHANGED,
+            &navigation,
+            Some(&results),
+        ))
+        .expect("the host of a search mirrors");
+        assert_eq!(payload(&draft)["url"], "www.google.com");
+        assert!(payload(&draft).get("title").is_none());
     }
 
     #[test]
@@ -1003,6 +1215,8 @@ mod tests {
         count_class: SemanticCountClassV2,
         content_state: SemanticContentStateV2,
         coverage: Vec<CoverageLevelV2>,
+        #[serde(default)]
+        redactions: Vec<String>,
         metadata: Value,
         content: Option<Value>,
         occurred_at_ms: i64,
@@ -1035,6 +1249,7 @@ mod tests {
                 count_class: input.count_class,
                 content_state: input.content_state,
                 coverage: &input.coverage,
+                redactions: &input.redactions,
                 metadata: &input.metadata,
                 content: input.content.as_ref(),
                 occurred_at_ms: input.occurred_at_ms,
