@@ -315,6 +315,40 @@ describe("activity support deterministic routing", () => {
 		userNeed: "模型给出的帮助需求",
 	};
 
+	const observed = (
+		action: string,
+		activity: string,
+		goal_relevance: string,
+		confidence: number,
+	) => ({
+		source_event_ids: [`source-window-${action.length}-${activity}`],
+		time: "10:00–10:05",
+		action,
+		activity,
+		goal_relevance,
+		confidence,
+		reason_codes: ["内部原因"],
+		evidence: ["内部证据"],
+		started_at_ms: 1_700_000_000_000,
+		ended_at_ms: 1_700_000_300_000,
+	});
+
+	function contextWithGoal(events: ReturnType<typeof observed>[]) {
+		const pendingTasksGoal = {
+			schemaVersion: "active-goal.v1",
+			goalId: "pending-tasks:plan-current",
+			planId: "plan-current",
+			version: 1,
+			text: "待办任务：1. 应用层第一遍",
+			activatedAtMs: 1_700_000_000_000,
+		};
+		return createActivitySupportContext({
+			activeGoal: pendingTasksGoal,
+			recentFeedback: [],
+			analyses: [workerResult({ events })],
+		});
+	}
+
 	test("describes sustained focus rather than goal progress without an active goal", () => {
 		const guarded = guardActivitySupportAssessment(
 			contextWithoutGoal("supporting"),
@@ -345,5 +379,89 @@ describe("activity support deterministic routing", () => {
 			situation: "现有线索不足以判断用户此刻的具体状态",
 			userNeed: "用不打扰的方式让用户自己选择需要的帮助",
 		});
+	});
+
+	// Work that counts towards a check-in although its relation to the goal is
+	// uncertain: the pet may speak about it, but never as progress on the goal.
+	const codingOfUncertainRelation = observed(
+		"推测：正在编写代码并运行脚本",
+		"development",
+		"uncertain",
+		0.7,
+	);
+
+	test("speaks of sustained focus for work whose relation to the goal is uncertain", () => {
+		const context = contextWithGoal([codingOfUncertainRelation]);
+		const guarded = guardActivitySupportAssessment(context, proposed);
+
+		expect(context.observations).toEqual([
+			{
+				activity: "development",
+				goalRelation: "uncertain",
+				evidenceStrength: "moderate",
+				signals: ["sustained_focus"],
+			},
+		]);
+		expect(guarded.route).toBe("momentum");
+		expect(guarded.situation).toBe("现有线索显示用户正在持续专注手头的事情");
+		expect(guarded.situation).not.toContain("目标");
+		expect(isSafeActivitySupportMessage(guarded.situation)).toBeTrue();
+	});
+
+	test("keeps goal progress wording when goal-related work is observed as well", () => {
+		const guarded = guardActivitySupportAssessment(
+			contextWithGoal([
+				codingOfUncertainRelation,
+				observed("推测：正在阅读教材", "research", "supporting", 0.8),
+			]),
+			proposed,
+		);
+
+		expect(guarded.situation).toBe("现有线索显示用户正在推进目标相关的事情");
+	});
+
+	test("does not call focused work of uncertain relation a drift from the goal", () => {
+		const drift = { ...proposed, route: "attention_drift" as const };
+		const unrelated = observed("推测：正在观看视频", "media", "unrelated", 0.8);
+
+		expect(
+			guardActivitySupportAssessment(contextWithGoal([unrelated]), drift)
+				.situation,
+		).toBe("现有线索显示目标无关活动较多，但无法判断是否有意休息");
+		expect(
+			guardActivitySupportAssessment(
+				contextWithGoal([
+					unrelated,
+					{ ...codingOfUncertainRelation, confidence: 0.9 },
+				]),
+				drift,
+			),
+		).toEqual({
+			route: "gentle_check_in",
+			certainty: "low",
+			situation: "现有线索不足以判断用户此刻的具体状态",
+			userNeed: "用不打扰的方式让用户自己选择需要的帮助",
+		});
+	});
+
+	test("keeps work the reflection cannot name on a gentle check-in", () => {
+		const context = contextWithGoal([
+			observed("不确定：当前活动无法判断", "other_unknown", "uncertain", 0.6),
+			observed(
+				"确定：检测到用户恢复使用电脑",
+				"idle_transition",
+				"uncertain",
+				1,
+			),
+			observed("不确定：正在查阅资料", "research", "uncertain", 0.6),
+		]);
+		const guarded = guardActivitySupportAssessment(context, proposed);
+
+		expect(context.observations.map((item) => item.signals)).toEqual([
+			["uncertain"],
+			["uncertain"],
+			["uncertain"],
+		]);
+		expect(guarded.route).toBe("gentle_check_in");
 	});
 });

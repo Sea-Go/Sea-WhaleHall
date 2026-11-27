@@ -9,7 +9,9 @@ export const activityReflectionScoreRuleSet = {
 		direct: 1,
 		supporting: 0.6,
 		unrelated: 0,
-		uncertain: 0,
+		// The activity is clear but its relation to the goal is not: it counts
+		// as support, so a goal of pending tasks cannot silence all other work.
+		uncertain: 0.6,
 	},
 	evidence: {
 		strong_cross: 1,
@@ -119,7 +121,7 @@ export const activityReflectionScoreCalibrationCases: readonly ActivityReflectio
 		expectedScore: 0,
 	},
 	{
-		name: "相关性不确定固定为零",
+		name: "有目标但相关性不确定按支持目标计",
 		contributions: [
 			{
 				relevance: "uncertain",
@@ -127,6 +129,34 @@ export const activityReflectionScoreCalibrationCases: readonly ActivityReflectio
 				duration: "at_least_120_seconds",
 				certainty: "inferred",
 				confidence: 1,
+			},
+		],
+		expectedScore: 0.51,
+	},
+	{
+		name: "相关性不确定不放宽未知与不确定表述",
+		contributions: [
+			{
+				relevance: "uncertain",
+				evidence: "weak",
+				duration: "at_least_120_seconds",
+				certainty: "inferred",
+				confidence: 0.7,
+			},
+			{
+				relevance: "uncertain",
+				evidence: "strong_cross",
+				duration: "at_least_120_seconds",
+				certainty: "uncertain",
+				confidence: 1,
+			},
+			{
+				relevance: "uncertain",
+				evidence: "strong_cross",
+				duration: "at_least_120_seconds",
+				certainty: "confirmed",
+				confidence: 1,
+				zero_condition: "未知或不确定",
 			},
 		],
 		expectedScore: 0,
@@ -262,7 +292,7 @@ export const activityReflectionScoreCalibrationCases: readonly ActivityReflectio
 export const activityReflectionScoreFormula = [
 	"评分对象是一个封闭窗口内的语义活动事件。先分别计算每个可计分事件，再把贡献相加；不要按原始观察条数、应用数量或输入次数直接给分。",
 	"事件贡献 = 相关性系数 × 证据系数 × 时长系数 × 置信度系数。窗口 score = min(1, 所有事件贡献之和)，并四舍五入到两位小数。",
-	"相关性系数：direct 为 1.00；supporting 为 0.60；unrelated 与 uncertain 为 0。没有当前目标时不按目标过滤：持续、可核对的活动一律按 supporting 计。",
+	"相关性系数：direct 为 1.00；supporting 与 uncertain 为 0.60，其中 uncertain 表示活动明确但看不出它与当前目标的关系；unrelated 为 0。没有当前目标时不按目标过滤：持续、可核对的活动一律按 supporting 计。",
 	"证据系数：强交叉证据为 1.00；受支持证据为 0.70；只有单一弱观察为 0。强交叉证据必须有至少两类独立、相互支持的信号，且至少一类能说明具体活动。",
 	"时长系数：持续至少 120 秒为 1.00；30 到 119 秒为 0.75；少于 30 秒或无法确认时间为 0.50。",
 	"置信度系数：确定事件取 confidence；推测事件取 min(confidence, 0.85)；不确定事件固定为 0。",
@@ -284,11 +314,12 @@ export const activityReflectionScoreExamples = [
 	"示例四：锁屏、暂离、睡眠、未知活动或敏感结算 → 0。",
 	"示例五：两段有效活动的贡献相加后超过 1 时，窗口 score 只能返回 1.00。",
 	"示例六：没有当前目标、持续 3 分钟、强交叉证据、推测、confidence=0.85 → 0.60 × 1.00 × 1.00 × 0.85 = 0.51。",
+	"示例七：有当前目标但与目标的关系无法确认（uncertain）、持续 5 分钟、强交叉证据、推测、confidence=0.70 → 0.60 × 1.00 × 1.00 × 0.70 = 0.42。",
 ] as const;
 
 export const activityReflectionScoreSelfChecks = [
 	"提交 JSON 前自检一：score 必须是 0 到 1 的两位小数；events 为空时 score 必须为 0。",
 	"提交 JSON 前自检二：有当前目标时先判断目标相关性，没有当前目标时判断是否属于持续、可核对的有效活动；再判断证据强度、时长和置信度；其中任一零分条件成立时，该事件贡献为 0。",
 	"提交 JSON 前自检三：score_reason 必须是简短中文，说明相关性、证据强度、持续时长和最终分数；不得包含应用名、文档内容、URL、联系人、账号或原始字段。",
-	"提交 JSON 前自检四：不得给状态事件、未知活动、低交互、敏感交易或不确定事件分数，也不得为了达到阈值而抬高 confidence 或拆分连续活动。",
+	"提交 JSON 前自检四：不得给状态事件、未知活动、低交互、敏感交易或以“不确定：”开头的事件分数，也不得为了达到阈值而抬高 confidence 或拆分连续活动。",
 ] as const;

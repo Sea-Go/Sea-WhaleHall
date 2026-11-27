@@ -59,7 +59,8 @@ describe("activity reflection scoring Skill", () => {
 				"直接相关、受支持证据、二十秒、推测",
 				"确定事件使用原始置信度",
 				"无关活动固定为零",
-				"相关性不确定固定为零",
+				"有目标但相关性不确定按支持目标计",
+				"相关性不确定不放宽未知与不确定表述",
 				"不确定表述固定为零",
 				"弱证据固定为零",
 				"无目标有效活动按支持目标计",
@@ -96,6 +97,41 @@ describe("activity reflection scoring Skill", () => {
 		}
 	});
 
+	test("counts work whose relation to the goal is uncertain as support", () => {
+		// A goal of pending tasks must not silence every other kind of work.
+		expect(activityReflectionScoreRuleSet.relevance.uncertain).toBe(0.6);
+		expect(activityReflectionScoreRuleSet.relevance.unrelated).toBe(0);
+		const formula = activityReflectionScoreFormula.join("\n");
+		expect(formula).toContain("supporting 与 uncertain 为 0.60");
+		expect(formula).not.toContain("unrelated 与 uncertain 为 0");
+		expect(activityReflectionScoreExamples.join("\n")).toContain(
+			"0.60 × 1.00 × 1.00 × 0.70 = 0.42",
+		);
+		// Only the relevance factor gives way: an activity the reflection
+		// cannot name, weak evidence and state events still score zero.
+		expect(activityReflectionScoreSelfChecks.join("\n")).toContain(
+			"以“不确定：”开头的事件分数",
+		);
+
+		const skillRoot = resolve(import.meta.dir, "../src/agent/skills");
+		for (const relative of [
+			"activity-reflection-scoring/SKILL.md",
+			"activity-reflection-scoring/references/scoring-rules.md",
+			"activity-reflection-scoring/references/evaluation-matrix.md",
+		]) {
+			const text = readFileSync(resolve(skillRoot, relative), "utf8");
+			expect(text, relative).toContain("uncertain=0.60");
+			expect(text, relative).not.toContain("unrelated/uncertain=0");
+			expect(text, relative).not.toContain("`unrelated=0`；`uncertain=0`");
+			expect(text, relative).not.toContain("unrelated/uncertain`");
+		}
+		const scoring = readFileSync(
+			resolve(skillRoot, "activity-reflection-scoring/SKILL.md"),
+			"utf8",
+		);
+		expect(scoring).toContain("活动本身无法确定");
+	});
+
 	test("keeps the two Skill bodies self-contained for a model without tools", () => {
 		const skillRoot = resolve(import.meta.dir, "../src/agent/skills");
 		const scoring = readFileSync(
@@ -122,5 +158,10 @@ describe("activity reflection scoring Skill", () => {
 		expect(analysis).toContain("没有当前目标时不判断相关性");
 		expect(dimensions).toContain("没有当前目标时不判断目标相关性");
 		expect(dimensions).not.toContain("只由当前目标相关");
+
+		// The label stays honest; only the scoring decides what it is worth.
+		expect(analysis).toContain("`uncertain` 是活动明确");
+		expect(analysis).toContain("拿不准时如实填 `uncertain`");
+		expect(dimensions).toContain("与目标的关系无法确认也照常计分");
 	});
 });
